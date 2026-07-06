@@ -22,6 +22,7 @@ pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
 pub mod stripe_reconcile;
 pub mod workflow_engine;
+pub mod workflow_signal_fanout;
 pub mod workflow_schedules;
 
 use std::sync::Arc;
@@ -99,6 +100,16 @@ pub fn spawn_all_with_options(
         let schedule_state = Arc::clone(&state);
         compio::runtime::spawn(async move {
             workflow_schedules::run(schedule_state, workflow_schedules::DEFAULT_TICK_SECS).await;
+        })
+        .detach();
+
+        let signal_fanout_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_signal_fanout::run(
+                signal_fanout_state,
+                workflow_signal_fanout::DEFAULT_TICK_SECS,
+            )
+            .await;
         })
         .detach();
     }

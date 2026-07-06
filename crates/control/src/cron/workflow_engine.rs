@@ -116,6 +116,7 @@ pub struct StepCheckpoint {
     pub signal_type: Option<String>,
     pub max_signal_age_ms: Option<i64>,
     pub consumed_signal_id: Option<String>,
+    pub topic: Option<String>,
 }
 
 impl StepCheckpoint {
@@ -133,6 +134,7 @@ impl StepCheckpoint {
             signal_type: None,
             max_signal_age_ms: None,
             consumed_signal_id: None,
+            topic: None,
         }
     }
 }
@@ -196,6 +198,8 @@ pub enum StepOutcome {
         max_signal_age_ms: Option<i64>,
         #[serde(default, rename = "consumedSignalId")]
         consumed_signal_id: Option<String>,
+        #[serde(default)]
+        topic: Option<String>,
     },
 }
 
@@ -441,6 +445,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     signal_type: None,
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
+                    topic: None,
                 });
             }
             StepOutcome::StepFailed {
@@ -461,6 +466,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     signal_type: None,
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
+                    topic: None,
                 });
                 saw_step_failure = true;
                 run_update = RunUpdate::Queued;
@@ -490,6 +496,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                             signal_type: None,
                             max_signal_age_ms: None,
                             consumed_signal_id: None,
+                            topic: None,
                         });
                         saw_step_failure = true;
                         run_update = RunUpdate::Queued;
@@ -525,6 +532,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     signal_type: None,
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
+                    topic: None,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Sleeping {
@@ -540,6 +548,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 signal_type,
                 max_signal_age_ms,
                 consumed_signal_id,
+                topic,
             } => {
                 checkpoints.push(StepCheckpoint {
                     ordinal: *ordinal,
@@ -553,6 +562,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     signal_type: signal_type.clone().or_else(|| Some(name.clone())),
                     max_signal_age_ms: *max_signal_age_ms,
                     consumed_signal_id: consumed_signal_id.clone(),
+                    topic: topic.clone(),
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
@@ -626,6 +636,7 @@ fn outcomes_from_apply_parts(
                         signal_type: checkpoint.signal_type.clone(),
                         max_signal_age_ms: checkpoint.max_signal_age_ms,
                         consumed_signal_id: checkpoint.consumed_signal_id.clone(),
+                        topic: checkpoint.topic.clone(),
                     });
                 }
             }
@@ -1147,6 +1158,7 @@ where
                     signal_type: None,
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
+                    topic: None,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1244,6 +1256,7 @@ where
                             signal_type: Some(signal_type),
                             max_signal_age_ms,
                             consumed_signal_id: None,
+                            topic: None,
                         },
                         run_id,
                         dispatch_nonce,
@@ -1261,6 +1274,7 @@ where
                     )
                     .await
                     .map_err(RegistryError::from)?;
+                    delete_workflow_subscription(tx, run_id, ordinal).await?;
                     return Ok(true);
                 }
 
@@ -1297,13 +1311,14 @@ where
                         "receivedAt": created_at.to_rfc3339(),
                         "origin": origin,
                         "delivery": delivery,
-                        "topic": topic,
+                        "topic": topic.clone(),
                     })),
                     error: None,
                     wake_at: None,
                     signal_type: Some(signal_type),
                     max_signal_age_ms,
                     consumed_signal_id: Some(signal_id.clone()),
+                    topic,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1329,6 +1344,7 @@ where
             )
             .await
             .map_err(RegistryError::from)?;
+            delete_workflow_subscription(tx, run_id, ordinal).await?;
             Ok(true)
         }
     }
@@ -1525,7 +1541,7 @@ async fn apply_step_result_on_registry(
     // Row-lock-first: this is intentionally the first statement in the txn.
     let rows = tx
         .query(
-            "SELECT claimed_by, state, dispatch_nonce, stuck_strikes \
+            "SELECT app_id, claimed_by, state, dispatch_nonce, stuck_strikes \
                FROM zeroship.workflow_runs \
               WHERE id = $1 \
               FOR UPDATE",
@@ -1537,6 +1553,7 @@ async fn apply_step_result_on_registry(
         tx.commit().await.map_err(map_apply_error)?;
         return Ok(false);
     };
+    let app_id: Uuid = row.get("app_id");
     let claimed_by: Option<String> = row.get("claimed_by");
     let state: String = row.get("state");
     let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
@@ -1567,6 +1584,18 @@ async fn apply_step_result_on_registry(
             }
             StepWriteOutcome::Wrote => {
                 wrote_checkpoints += 1;
+                if checkpoint.kind == "wait_signal" && checkpoint.state == "running" {
+                    upsert_workflow_subscription(&tx, &app_id, &result.run_id, checkpoint)
+                        .await
+                        .map_err(ApplyError::Db)?;
+                }
+                if checkpoint.kind == "wait_signal"
+                    && matches!(checkpoint.state.as_str(), "completed" | "failed")
+                {
+                    delete_workflow_subscription(&tx, &result.run_id, checkpoint.ordinal)
+                        .await
+                        .map_err(ApplyError::Db)?;
+                }
                 if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
                     tx.execute(
                         "UPDATE zeroship.workflow_signals \
@@ -1579,6 +1608,18 @@ async fn apply_step_result_on_registry(
                 }
             }
             StepWriteOutcome::Noop => {
+                if checkpoint.kind == "wait_signal" && checkpoint.state == "running" {
+                    upsert_workflow_subscription(&tx, &app_id, &result.run_id, checkpoint)
+                        .await
+                        .map_err(ApplyError::Db)?;
+                }
+                if checkpoint.kind == "wait_signal"
+                    && matches!(checkpoint.state.as_str(), "completed" | "failed")
+                {
+                    delete_workflow_subscription(&tx, &result.run_id, checkpoint.ordinal)
+                        .await
+                        .map_err(ApplyError::Db)?;
+                }
                 if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
                     tx.execute(
                         "UPDATE zeroship.workflow_signals \
@@ -1695,6 +1736,65 @@ async fn apply_step_result_on_registry(
 
     tx.commit().await.map_err(map_apply_error)?;
     Ok(true)
+}
+
+async fn upsert_workflow_subscription<C>(
+    conn: &C,
+    app_id: &Uuid,
+    run_id: &str,
+    checkpoint: &StepCheckpoint,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let Some(topic) = checkpoint.topic.as_ref().filter(|topic| !topic.is_empty()) else {
+        return Ok(());
+    };
+    let id = typed_id::new_workflow_subscription_id();
+    conn.execute(
+        "INSERT INTO zeroship.workflow_subscriptions \
+            (id, app_id, topic, run_id, signal_name, type_filter, ordinal, max_age_ms, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (run_id, ordinal) DO UPDATE SET \
+            app_id = EXCLUDED.app_id, \
+            topic = EXCLUDED.topic, \
+            signal_name = EXCLUDED.signal_name, \
+            type_filter = EXCLUDED.type_filter, \
+            max_age_ms = EXCLUDED.max_age_ms, \
+            expires_at = EXCLUDED.expires_at",
+        &[
+            &id,
+            app_id,
+            topic,
+            &run_id,
+            &checkpoint.name,
+            &checkpoint.signal_type,
+            &checkpoint.ordinal,
+            &checkpoint.max_signal_age_ms,
+            &checkpoint.wake_at,
+        ],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    Ok(())
+}
+
+async fn delete_workflow_subscription<C>(
+    conn: &C,
+    run_id: &str,
+    ordinal: i32,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    conn.execute(
+        "DELETE FROM zeroship.workflow_subscriptions \
+          WHERE run_id = $1 AND ordinal = $2",
+        &[&run_id, &ordinal],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    Ok(())
 }
 
 async fn insert_resolved_step<C>(

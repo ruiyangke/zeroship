@@ -31,6 +31,7 @@ pub mod router;
 pub mod session_token;
 pub mod sessions;
 pub mod signing;
+pub mod signal_ingress;
 pub mod sync;
 
 use std::sync::Arc;

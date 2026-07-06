@@ -5,17 +5,22 @@
 //! scope is not request-body data: every handler derives it from the
 //! authenticated channel header and binds `app_id` in every journal query.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, TimeZone, Utc};
+use compio_postgres::error::SqlState;
 use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, Query, State};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
-use zeroship_core::typed_id;
+use zeroship_core::{crypto, typed_id};
 
 use crate::registry::RegistryError;
 use crate::{workflow_limits, AppState};
@@ -27,6 +32,13 @@ pub const SIGNAL_PAYLOAD_BYTES: usize = 64 * 1024;
 
 const SIGNAL_RATE_LIMIT_CAPACITY: f64 = 60.0;
 const SIGNAL_RATE_LIMIT_REFILL_PER_SEC: f64 = 60.0 / 60.0;
+const SIGNAL_TOKEN_MAX_TYPES: usize = 16;
+const SIGNAL_TOKEN_MAX_TTL_SECS: i64 = 24 * 60 * 60;
+const SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS: i64 = 1;
+const SIGNAL_TOPIC_BYTES: usize = 512;
+const SIGNAL_KEY_VERIFIER: &str = "bearer-signing";
+const SIGNAL_KEY_KEK: &str = "master:v1";
+const SIGNAL_TOKEN_REPLAY_PREFIX: &str = "wst-sha256:";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRunBody {
@@ -74,6 +86,31 @@ pub struct SignalBody {
     pub signal_type: String,
     #[serde(default)]
     pub payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSignalTokenBody {
+    pub types: Vec<String>,
+    pub ttl: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IngressSignalBody {
+    pub token: String,
+    #[serde(default, rename = "type")]
+    pub signal_type: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublishTopicBody {
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default, alias = "idempotencyKey")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +174,8 @@ struct ActiveDeploy {
 #[derive(Debug)]
 enum WorkflowApiError {
     BadRequest(String),
+    Unauthorized(String),
+    Forbidden(String),
     NotFound(String),
     Conflict(String),
     Restart(String),
@@ -152,6 +191,12 @@ impl WorkflowApiError {
         match self {
             Self::BadRequest(msg) => {
                 web::HttpResponse::BadRequest().json(&json!({ "error": msg }))
+            }
+            Self::Unauthorized(msg) => {
+                web::HttpResponse::Unauthorized().json(&json!({ "error": msg }))
+            }
+            Self::Forbidden(msg) => {
+                web::HttpResponse::Forbidden().json(&json!({ "error": msg }))
             }
             Self::NotFound(msg) => web::HttpResponse::NotFound().json(&json!({ "error": msg })),
             Self::Conflict(msg) => web::HttpResponse::Conflict().json(&json!({
@@ -243,6 +288,40 @@ fn check_app_scoped_auth(
     }
 }
 
+fn check_control_auth(
+    req: &web::HttpRequest,
+    state: &AppState,
+) -> Result<(), web::HttpResponse> {
+    if state.insecure_dev {
+        return Ok(());
+    }
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = zeroship_core::auth::extract_bearer(header);
+    match token {
+        Some(key)
+            if !state.control_key.is_empty()
+                && zeroship_core::auth::validate_control_key(
+                    key,
+                    state.control_key.expose_secret(),
+                ) =>
+        {
+            Ok(())
+        }
+        _ => {
+            tracing::warn!(
+                method = %req.method(),
+                path = %req.path(),
+                "workflow ingress API: auth rejected"
+            );
+            Err(web::HttpResponse::Unauthorized().json(&json!({ "error": "unauthorized" })))
+        }
+    }
+}
+
 fn app_id_from_channel(
     req: &web::HttpRequest,
     state: &AppState,
@@ -309,6 +388,141 @@ fn validate_signal_type(signal_type: &str) -> Result<(), WorkflowApiError> {
         ));
     }
     Ok(())
+}
+
+fn validate_ingress_signal_type(signal_type: &str) -> Result<(), WorkflowApiError> {
+    validate_signal_type(signal_type)?;
+    if signal_type.starts_with("__zs.") {
+        return Err(WorkflowApiError::Forbidden(
+            "signal type uses a reserved prefix".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_topic(topic: &str) -> Result<(), WorkflowApiError> {
+    if topic.is_empty() || topic.len() > SIGNAL_TOPIC_BYTES {
+        return Err(WorkflowApiError::BadRequest(format!(
+            "signal topic must be 1-{SIGNAL_TOPIC_BYTES} bytes"
+        )));
+    }
+    if topic.starts_with("__zs.") {
+        return Err(WorkflowApiError::Forbidden(
+            "signal topic uses a reserved prefix".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_token_types(types: &[String]) -> Result<Vec<String>, WorkflowApiError> {
+    if types.is_empty() {
+        return Err(WorkflowApiError::BadRequest(
+            "signal token must authorize at least one type".to_string(),
+        ));
+    }
+    if types.len() > SIGNAL_TOKEN_MAX_TYPES {
+        return Err(WorkflowApiError::BadRequest(format!(
+            "signal token authorizes too many types (max {SIGNAL_TOKEN_MAX_TYPES})"
+        )));
+    }
+    let mut deduped = BTreeSet::new();
+    for signal_type in types {
+        validate_ingress_signal_type(signal_type)?;
+        deduped.insert(signal_type.clone());
+    }
+    Ok(deduped.into_iter().collect())
+}
+
+fn parse_duration_secs(raw: &str) -> Result<i64, WorkflowApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkflowApiError::BadRequest(
+            "duration must not be empty".to_string(),
+        ));
+    }
+    if let Some(ms) = parse_iso_duration_ms(trimmed).or_else(|| parse_suffix_duration_ms(trimmed)) {
+        let secs = (ms + 999) / 1000;
+        if secs <= 0 {
+            return Err(WorkflowApiError::BadRequest(
+                "duration must be greater than zero".to_string(),
+            ));
+        }
+        return Ok(secs);
+    }
+    Err(WorkflowApiError::BadRequest(format!(
+        "invalid duration {trimmed:?}"
+    )))
+}
+
+fn parse_iso_duration_ms(raw: &str) -> Option<i64> {
+    let rest = raw.strip_prefix('P')?;
+    let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
+    let mut total_ms = 0f64;
+    if let Some(days) = date.strip_suffix('D') {
+        if days.is_empty() {
+            return None;
+        }
+        total_ms += days.parse::<f64>().ok()? * 86_400_000.0;
+    } else if !date.is_empty() {
+        return None;
+    }
+    let mut number = String::new();
+    for ch in time.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+        if number.is_empty() {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        number.clear();
+        match ch {
+            'H' => total_ms += value * 3_600_000.0,
+            'M' => total_ms += value * 60_000.0,
+            'S' => total_ms += value * 1_000.0,
+            _ => return None,
+        }
+    }
+    if !number.is_empty() || total_ms <= 0.0 || !total_ms.is_finite() {
+        return None;
+    }
+    Some(total_ms.ceil() as i64)
+}
+
+fn parse_suffix_duration_ms(raw: &str) -> Option<i64> {
+    let units = [
+        ("ms", 1.0),
+        ("s", 1_000.0),
+        ("m", 60_000.0),
+        ("h", 3_600_000.0),
+        ("d", 86_400_000.0),
+    ];
+    for (suffix, multiplier) in units {
+        let Some(number) = raw.strip_suffix(suffix) else {
+            continue;
+        };
+        if number.is_empty() {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        let ms = value * multiplier;
+        if ms <= 0.0 || !ms.is_finite() {
+            return None;
+        }
+        return Some(ms.ceil() as i64);
+    }
+    raw.parse::<i64>().ok().filter(|v| *v > 0).map(|secs| secs * 1000)
+}
+
+fn validate_token_ttl(raw: &str) -> Result<i64, WorkflowApiError> {
+    let secs = parse_duration_secs(raw)?;
+    if secs > SIGNAL_TOKEN_MAX_TTL_SECS {
+        return Err(WorkflowApiError::BadRequest(format!(
+            "signal token ttl exceeds {SIGNAL_TOKEN_MAX_TTL_SECS} seconds"
+        )));
+    }
+    Ok(secs)
 }
 
 fn validate_run_id(run_id: &str) -> Result<(), WorkflowApiError> {
@@ -410,6 +624,219 @@ where
             "active deploy manifest is invalid: {e}"
         ))),
     }
+}
+
+async fn active_deploy_id_for_app<C>(conn: &C, app_id: &Uuid) -> Result<String, WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT id \
+               FROM zeroship.app_deploys \
+              WHERE app_id = $1 \
+                AND activated_at IS NOT NULL \
+              ORDER BY activated_at DESC, created_at DESC, id DESC \
+              LIMIT 1",
+            &[app_id],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    rows.first()
+        .map(|row| row.get("id"))
+        .ok_or_else(|| WorkflowApiError::BadRequest("app has no active deploy".to_string()))
+}
+
+fn signal_key_aad(app_id: &Uuid, kid: &str) -> Vec<u8> {
+    format!("workflow-signal-key:{app_id}:{kid}").into_bytes()
+}
+
+fn signal_token_replay_key(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("{SIGNAL_TOKEN_REPLAY_PREFIX}{}", hex::encode(digest))
+}
+
+fn master_crypto_key(state: &AppState) -> [u8; 32] {
+    crypto::derive_key(state.master_key.expose_secret())
+}
+
+fn encrypt_signal_secret(state: &AppState, app_id: &Uuid, kid: &str, secret: &[u8]) -> Result<Vec<u8>, WorkflowApiError> {
+    let key = master_crypto_key(state);
+    crypto::encrypt(&key, &signal_key_aad(app_id, kid), secret)
+        .map_err(|e| WorkflowApiError::Database(format!("encrypt workflow signal key: {e}")))
+}
+
+fn decrypt_signal_secret(
+    state: &AppState,
+    app_id: &Uuid,
+    kid: &str,
+    secret_ct: &[u8],
+) -> Result<Vec<u8>, WorkflowApiError> {
+    let key = master_crypto_key(state);
+    crypto::decrypt(&key, &signal_key_aad(app_id, kid), secret_ct)
+        .map_err(|e| WorkflowApiError::Database(format!("decrypt workflow signal key: {e}")))
+}
+
+async fn active_or_create_signal_secret<C>(
+    conn: &C,
+    state: &AppState,
+    app_id: &Uuid,
+) -> Result<Vec<u8>, WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT kid, secret_ct \
+               FROM zeroship.workflow_signal_keys \
+              WHERE app_id = $1 \
+                AND verifier = $2 \
+                AND status IN ('active', 'next', 'retiring') \
+              ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'next' THEN 1 ELSE 2 END, \
+                       created_at DESC, id DESC \
+              LIMIT 1",
+            &[app_id, &SIGNAL_KEY_VERIFIER],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    if let Some(row) = rows.first() {
+        let kid: String = row.get("kid");
+        let secret_ct: Vec<u8> = row.get("secret_ct");
+        return decrypt_signal_secret(state, app_id, &kid, &secret_ct);
+    }
+
+    let id = typed_id::new_workflow_signal_key_id();
+    let kid = id.clone();
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let secret_ct = encrypt_signal_secret(state, app_id, &kid, &secret)?;
+    conn.execute(
+        "INSERT INTO zeroship.workflow_signal_keys \
+            (id, app_id, kid, verifier, secret_ct, secret_kek, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active')",
+        &[
+            &id,
+            app_id,
+            &kid,
+            &SIGNAL_KEY_VERIFIER,
+            &secret_ct,
+            &SIGNAL_KEY_KEK,
+        ],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    Ok(secret.to_vec())
+}
+
+async fn load_signal_verification_secrets(
+    state: &AppState,
+    app_id: &Uuid,
+) -> Result<Vec<Vec<u8>>, WorkflowApiError> {
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let rows = tx
+        .query(
+            "SELECT kid, secret_ct \
+               FROM zeroship.workflow_signal_keys \
+              WHERE app_id = $1 \
+                AND verifier = $2 \
+                AND status IN ('active', 'next', 'retiring') \
+              ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'next' THEN 1 ELSE 2 END, \
+                       created_at DESC, id DESC",
+            &[app_id, &SIGNAL_KEY_VERIFIER],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let mut secrets = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kid: String = row.get("kid");
+        let secret_ct: Vec<u8> = row.get("secret_ct");
+        secrets.push(decrypt_signal_secret(state, app_id, &kid, &secret_ct)?);
+    }
+    Ok(secrets)
+}
+
+fn unverified_signal_token_app_id(token: &str) -> Result<Uuid, WorkflowApiError> {
+    let body = token
+        .strip_prefix(typed_id::WORKFLOW_SIGNAL_TOKEN_PREFIX)
+        .and_then(|s| s.strip_prefix('_'))
+        .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    let (payload_b64, _) = body
+        .split_once('.')
+        .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    let value: Value = serde_json::from_slice(&payload)
+        .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    let app_id = value
+        .get("app_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    parse_app_id(app_id).map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))
+}
+
+async fn verify_signal_token(
+    state: &AppState,
+    token: &str,
+) -> Result<typed_id::WorkflowSignalTokenClaims, WorkflowApiError> {
+    let app_id = unverified_signal_token_app_id(token)?;
+    let secrets = load_signal_verification_secrets(state, &app_id).await?;
+    for secret in secrets {
+        match typed_id::verify_workflow_signal_token(token, &secret) {
+            Ok(claims) => return Ok(claims),
+            Err(_) => continue,
+        }
+    }
+    Err(WorkflowApiError::Unauthorized(
+        "invalid signal token".to_string(),
+    ))
+}
+
+fn validate_signal_token_time(
+    claims: &typed_id::WorkflowSignalTokenClaims,
+    now_unix: i64,
+) -> Result<(), WorkflowApiError> {
+    if claims.exp.saturating_add(SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS) < now_unix {
+        return Err(WorkflowApiError::Unauthorized(
+            "signal token expired".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn claims_expiry(claims: &typed_id::WorkflowSignalTokenClaims) -> Result<DateTime<Utc>, WorkflowApiError> {
+    Utc.timestamp_opt(claims.exp, 0)
+        .single()
+        .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token expiry".to_string()))
+}
+
+fn resolve_ingress_signal_type(
+    claims: &typed_id::WorkflowSignalTokenClaims,
+    requested: Option<String>,
+) -> Result<String, WorkflowApiError> {
+    let signal_type = match requested {
+        Some(signal_type) => signal_type,
+        None if claims.types.len() == 1 => claims.types[0].clone(),
+        None => {
+            return Err(WorkflowApiError::BadRequest(
+                "signal type is required when a token authorizes multiple types".to_string(),
+            ))
+        }
+    };
+    validate_ingress_signal_type(&signal_type)?;
+    if !claims.types.iter().any(|allowed| allowed == &signal_type) {
+        return Err(WorkflowApiError::Forbidden(
+            "signal token does not authorize this type".to_string(),
+        ));
+    }
+    Ok(signal_type)
 }
 
 fn manifest_declares_workflow(raw: &str, workflow_name: &str) -> Result<bool, String> {
@@ -680,6 +1107,9 @@ fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
         WorkflowApiError::RateLimited { retry_after_secs } => RegistryError::Conflict(format!(
             "scheduled workflow start rate limited; retry after {retry_after_secs:.0}s"
         )),
+        WorkflowApiError::Unauthorized(msg) | WorkflowApiError::Forbidden(msg) => {
+            RegistryError::InvalidInput(msg)
+        }
         WorkflowApiError::Database(msg) => RegistryError::Database(msg),
     }
 }
@@ -996,6 +1426,421 @@ pub async fn signal_run(
         return WorkflowApiError::Database(e.to_string()).response();
     }
     web::HttpResponse::Accepted().json(&json!({ "id": signal_id }))
+}
+
+pub async fn create_run_signal_token(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    run_id: Path<String>,
+    body: Json<CreateSignalTokenBody>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let run_id = run_id.into_inner();
+    if let Err(e) = validate_run_id(&run_id) {
+        return e.response();
+    }
+    match create_run_signal_token_inner(&state, app_id, &run_id, body.into_inner()).await {
+        Ok(value) => web::HttpResponse::Ok().json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+async fn create_run_signal_token_inner(
+    state: &AppState,
+    app_id: Uuid,
+    run_id: &str,
+    body: CreateSignalTokenBody,
+) -> Result<Value, WorkflowApiError> {
+    let types = validate_token_types(&body.types)?;
+    let ttl_secs = validate_token_ttl(&body.ttl)?;
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let rows = tx
+        .query(
+            "SELECT state, signal_epoch \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 AND app_id = $2",
+            &[&run_id, &app_id],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let Some(row) = rows.first() else {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::NotFound(
+            "workflow run not found".to_string(),
+        ));
+    };
+    let run_state: String = row.get("state");
+    if is_terminal_or_compensating(&run_state) {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::Conflict(format!(
+            "workflow run cannot receive external signals while {run_state}"
+        )));
+    }
+    let epoch: i32 = row.get("signal_epoch");
+    let secret = active_or_create_signal_secret(&tx, state, &app_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    let exp = Utc::now().timestamp().saturating_add(ttl_secs);
+    let claims = typed_id::WorkflowSignalTokenClaims {
+        app_id: app_id.to_string(),
+        run_id: Some(run_id.to_string()),
+        topic: None,
+        types,
+        exp,
+        epoch: i64::from(epoch),
+    };
+    let token = typed_id::sign_workflow_signal_token(&claims, &secret)
+        .map_err(WorkflowApiError::Database)?;
+    Ok(json!({
+        "token": token,
+        "expiresAt": claims_expiry(&claims)?.to_rfc3339(),
+    }))
+}
+
+pub async fn create_topic_signal_token(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    topic: Path<String>,
+    body: Json<CreateSignalTokenBody>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let topic = topic.into_inner();
+    if let Err(e) = validate_topic(&topic) {
+        return e.response();
+    }
+    match create_topic_signal_token_inner(&state, app_id, &topic, body.into_inner()).await {
+        Ok(value) => web::HttpResponse::Ok().json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+async fn create_topic_signal_token_inner(
+    state: &AppState,
+    app_id: Uuid,
+    topic: &str,
+    body: CreateSignalTokenBody,
+) -> Result<Value, WorkflowApiError> {
+    let types = validate_token_types(&body.types)?;
+    let ttl_secs = validate_token_ttl(&body.ttl)?;
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let _deploy_id = active_deploy_id_for_app(&tx, &app_id).await?;
+    let secret = active_or_create_signal_secret(&tx, state, &app_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    let exp = Utc::now().timestamp().saturating_add(ttl_secs);
+    let claims = typed_id::WorkflowSignalTokenClaims {
+        app_id: app_id.to_string(),
+        run_id: None,
+        topic: Some(topic.to_string()),
+        types,
+        exp,
+        epoch: 0,
+    };
+    let token = typed_id::sign_workflow_signal_token(&claims, &secret)
+        .map_err(WorkflowApiError::Database)?;
+    Ok(json!({
+        "token": token,
+        "expiresAt": claims_expiry(&claims)?.to_rfc3339(),
+    }))
+}
+
+pub async fn publish_topic_signal(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    topic: Path<String>,
+    body: Json<PublishTopicBody>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let topic = topic.into_inner();
+    if let Err(e) = validate_topic(&topic) {
+        return e.response();
+    }
+    match publish_topic_signal_inner(&state, app_id, &topic, body.into_inner(), "app").await {
+        Ok(value) => web::HttpResponse::Accepted().json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+async fn publish_topic_signal_inner(
+    state: &AppState,
+    app_id: Uuid,
+    topic: &str,
+    body: PublishTopicBody,
+    origin: &str,
+) -> Result<Value, WorkflowApiError> {
+    validate_ingress_signal_type(&body.signal_type)?;
+    signal_payload_size(&body.payload)?;
+    let idempotency_key = body
+        .idempotency_key
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or_else(typed_id::new_workflow_broadcast_id);
+    insert_topic_broadcast(
+        state,
+        app_id,
+        topic,
+        &body.signal_type,
+        &body.payload,
+        origin,
+        &idempotency_key,
+        Utc::now() + chrono::Duration::seconds(SIGNAL_TOKEN_MAX_TTL_SECS),
+    )
+    .await
+}
+
+pub async fn ingress_signal(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    body: Json<IngressSignalBody>,
+) -> web::HttpResponse {
+    if let Err(resp) = check_control_auth(&req, &state) {
+        return resp;
+    }
+    match ingress_signal_inner(&state, body.into_inner()).await {
+        Ok(value) => web::HttpResponse::Accepted().json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+pub async fn force_signal_fanout_tick(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = check_control_auth(&req, &state) {
+        return resp;
+    }
+    match crate::cron::workflow_signal_fanout::tick(&state).await {
+        Ok(stats) => web::HttpResponse::Ok().json(&json!({
+            "broadcasts": stats.broadcasts,
+            "deliveries": stats.deliveries,
+        })),
+        Err(e) => WorkflowApiError::from(e).response(),
+    }
+}
+
+async fn ingress_signal_inner(
+    state: &AppState,
+    body: IngressSignalBody,
+) -> Result<Value, WorkflowApiError> {
+    if body.token.trim().is_empty() {
+        return Err(WorkflowApiError::Unauthorized(
+            "signal token is required".to_string(),
+        ));
+    }
+    signal_payload_size(&body.payload)?;
+    let claims = verify_signal_token(state, &body.token).await?;
+    validate_signal_token_time(&claims, Utc::now().timestamp())?;
+    let signal_type = resolve_ingress_signal_type(&claims, body.signal_type)?;
+    let app_id = parse_app_id(&claims.app_id)
+        .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    let idempotency_key = signal_token_replay_key(&body.token);
+    match (claims.run_id.as_deref(), claims.topic.as_deref()) {
+        (Some(run_id), None) => {
+            deliver_ingress_run_signal(
+                state,
+                app_id,
+                run_id,
+                &signal_type,
+                &body.payload,
+                claims.epoch,
+                &idempotency_key,
+            )
+            .await
+        }
+        (None, Some(topic)) => {
+            validate_topic(topic)?;
+            insert_topic_broadcast(
+                state,
+                app_id,
+                topic,
+                &signal_type,
+                &body.payload,
+                "ingress",
+                &idempotency_key,
+                claims_expiry(&claims)?,
+            )
+            .await
+        }
+        _ => Err(WorkflowApiError::Unauthorized(
+            "invalid signal token".to_string(),
+        )),
+    }
+}
+
+fn is_terminal_or_compensating(state: &str) -> bool {
+    matches!(
+        state,
+        "completed" | "failed" | "cancelled" | "stalled" | "compensating"
+    )
+}
+
+async fn deliver_ingress_run_signal(
+    state: &AppState,
+    app_id: Uuid,
+    run_id: &str,
+    signal_type: &str,
+    payload: &Value,
+    token_epoch: i64,
+    idempotency_key: &str,
+) -> Result<Value, WorkflowApiError> {
+    validate_run_id(run_id)?;
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let payload_journal_bytes = workflow_limits::json_column_size(&tx, payload)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    workflow_limits::lock_app_journal_accounting(&tx, &app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    let rows = tx
+        .query(
+            "SELECT state, waiting_step_key, signal_epoch \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 AND app_id = $2 \
+              FOR UPDATE",
+            &[&run_id, &app_id],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let Some(row) = rows.first() else {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::NotFound(
+            "workflow run not found".to_string(),
+        ));
+    };
+    let run_state: String = row.get("state");
+    if is_terminal_or_compensating(&run_state) {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::Conflict(format!(
+            "workflow run cannot receive external signals while {run_state}"
+        )));
+    }
+    let current_epoch: i32 = row.get("signal_epoch");
+    if i64::from(current_epoch) != token_epoch {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::Forbidden(
+            "signal token is stale".to_string(),
+        ));
+    }
+    let waiting_step_key: Option<String> = row.get("waiting_step_key");
+    check_signal_journal_capacity(&tx, &app_id, payload_journal_bytes).await?;
+    let signal_id = typed_id::new_workflow_signal_id();
+    let inserted = tx
+        .execute(
+            "INSERT INTO zeroship.workflow_signals \
+                (id, run_id, type, payload, origin, delivery, idempotency_key) \
+             VALUES ($1, $2, $3, $4, 'ingress', 'direct', $5)",
+            &[&signal_id, &run_id, &signal_type, payload, &idempotency_key],
+        )
+        .await;
+    if let Err(e) = inserted {
+        if e.code() == Some(&SqlState::UNIQUE_VIOLATION) {
+            return Err(WorkflowApiError::Conflict(
+                "signal token replay rejected".to_string(),
+            ));
+        }
+        return Err(WorkflowApiError::Database(e.to_string()));
+    }
+    if run_state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type)
+    {
+        tx.execute(
+            "UPDATE zeroship.workflow_runs \
+                SET wake_at = now() \
+              WHERE id = $1 AND app_id = $2",
+            &[&run_id, &app_id],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    Ok(json!({ "id": signal_id, "runId": run_id }))
+}
+
+async fn insert_topic_broadcast(
+    state: &AppState,
+    app_id: Uuid,
+    topic: &str,
+    signal_type: &str,
+    payload: &Value,
+    origin: &str,
+    idempotency_key: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<Value, WorkflowApiError> {
+    validate_topic(topic)?;
+    validate_ingress_signal_type(signal_type)?;
+    signal_payload_size(payload)?;
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let deploy_id = active_deploy_id_for_app(&tx, &app_id).await?;
+    let broadcast_id = typed_id::new_workflow_broadcast_id();
+    let inserted = tx
+        .execute(
+            "INSERT INTO zeroship.workflow_broadcasts \
+                (id, app_id, topic, type, payload, origin, idempotency_key, deploy_id, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &broadcast_id,
+                &app_id,
+                &topic,
+                &signal_type,
+                payload,
+                &origin,
+                &idempotency_key,
+                &deploy_id,
+                &expires_at,
+            ],
+        )
+        .await;
+    if let Err(e) = inserted {
+        if e.code() == Some(&SqlState::UNIQUE_VIOLATION) {
+            return Err(WorkflowApiError::Conflict(
+                "signal token replay rejected".to_string(),
+            ));
+        }
+        return Err(WorkflowApiError::Database(e.to_string()));
+    }
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    Ok(json!({ "id": broadcast_id, "topic": topic }))
 }
 
 pub async fn pause_run(
@@ -1542,6 +2387,30 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(signal_run)),
     )
     .service(
+        web::resource("/internal/workflows/runs/{run_id}/signal-token")
+            .state(web::types::PayloadConfig::new(SIGNAL_REQUEST_BODY_BYTES))
+            .route(web::post().to(create_run_signal_token)),
+    )
+    .service(
+        web::resource("/internal/workflows/topics/{topic}/signal-token")
+            .state(web::types::PayloadConfig::new(SIGNAL_REQUEST_BODY_BYTES))
+            .route(web::post().to(create_topic_signal_token)),
+    )
+    .service(
+        web::resource("/internal/workflows/topics/{topic}/broadcast")
+            .state(web::types::PayloadConfig::new(SIGNAL_REQUEST_BODY_BYTES))
+            .route(web::post().to(publish_topic_signal)),
+    )
+    .service(
+        web::resource("/internal/workflows/signals/ingress")
+            .state(web::types::PayloadConfig::new(SIGNAL_REQUEST_BODY_BYTES))
+            .route(web::post().to(ingress_signal)),
+    )
+    .service(
+        web::resource("/internal/workflows/signals/fanout/tick")
+            .route(web::post().to(force_signal_fanout_tick)),
+    )
+    .service(
         web::resource("/internal/workflows/runs/{run_id}/pause")
             .route(web::post().to(pause_run)),
     )
@@ -1587,5 +2456,54 @@ mod tests {
             Some("wait:7:approved:payment.failed"),
             "payment.succeeded"
         ));
+    }
+
+    #[test]
+    fn token_duration_parser_accepts_iso_and_suffix_forms() {
+        assert_eq!(parse_duration_secs("PT5M").unwrap(), 300);
+        assert_eq!(parse_duration_secs("2.5s").unwrap(), 3);
+        assert_eq!(parse_duration_secs("1500ms").unwrap(), 2);
+        assert!(parse_duration_secs("PT0S").is_err());
+        assert!(validate_token_ttl("P2D").is_err());
+    }
+
+    #[test]
+    fn signal_token_time_enforces_expiry_with_tolerance() {
+        let claims = typed_id::WorkflowSignalTokenClaims {
+            app_id: Uuid::nil().to_string(),
+            run_id: Some("run_abc".to_string()),
+            topic: None,
+            types: vec!["go".to_string()],
+            exp: 100,
+            epoch: 0,
+        };
+        assert!(validate_signal_token_time(&claims, 101).is_ok());
+        assert!(validate_signal_token_time(&claims, 102).is_err());
+    }
+
+    #[test]
+    fn ingress_signal_type_must_be_authorized() {
+        let claims = typed_id::WorkflowSignalTokenClaims {
+            app_id: Uuid::nil().to_string(),
+            run_id: Some("run_abc".to_string()),
+            topic: None,
+            types: vec!["go".to_string()],
+            exp: 100,
+            epoch: 0,
+        };
+        assert_eq!(resolve_ingress_signal_type(&claims, None).unwrap(), "go");
+        assert!(resolve_ingress_signal_type(&claims, Some("stop".to_string())).is_err());
+        assert!(resolve_ingress_signal_type(&claims, Some("__zs.stop".to_string())).is_err());
+    }
+
+    #[test]
+    fn token_replay_key_is_stable_and_non_plaintext() {
+        let key_a = signal_token_replay_key("wst_a.b");
+        let key_b = signal_token_replay_key("wst_a.b");
+        let key_c = signal_token_replay_key("wst_a.c");
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_c);
+        assert!(key_a.starts_with(SIGNAL_TOKEN_REPLAY_PREFIX));
+        assert!(!key_a.contains("wst_a.b"));
     }
 }
