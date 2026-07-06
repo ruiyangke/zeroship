@@ -3521,18 +3521,18 @@
           ]
         },
         {
-          "description": "A **portable** text-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite\nand MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
+          "description": "A **portable** scalar-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY[...])` / `<> ALL (ARRAY[...])` shape; text elements keep an\nexplicit `::text` cast. SQLite and MySQL render `IN (...)` / `NOT IN (...)`.\nEmpty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
           "type": "object",
           "properties": {
             "expr": {
-              "description": "The expression tested against the literal text list.",
+              "description": "The expression tested against the literal scalar list.",
               "$ref": "#/$defs/Expr"
             },
             "elems": {
-              "description": "Text elements. PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
+              "description": "Homogeneous scalar elements. Text elements serialize as plain JSON\nstrings and PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
               "type": "array",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/IrScalar"
               }
             },
             "negated": {
