@@ -27,12 +27,39 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+#[derive(Debug, Clone, Copy)]
+pub struct SpawnOptions {
+    pub workflow_engine: bool,
+}
+
+impl Default for SpawnOptions {
+    fn default() -> Self {
+        Self {
+            workflow_engine: true,
+        }
+    }
+}
+
 /// Spawn every control-plane cron task onto the compio runtime.
 ///
 /// Detached: tasks live for the lifetime of the process. The caller keeps the
 /// `Arc<AppState>` alive for the lifetime of the server, so each cron's per-tick
 /// connections / blob-store handles stay live.
 pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_secs: u64) {
+    spawn_all_with_options(
+        state,
+        retention_months,
+        retention_check_secs,
+        SpawnOptions::default(),
+    );
+}
+
+pub fn spawn_all_with_options(
+    state: Arc<AppState>,
+    retention_months: u32,
+    retention_check_secs: u64,
+    options: SpawnOptions,
+) {
     // Audit-retention sweep — needs only the registry (cheap clone of the
     // db-url handle inside `AppState`).
     let registry = Arc::new(state.registry.clone());
@@ -61,11 +88,13 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     // Durable-workflow scheduler (DW-04) — multi-replica correctness is row
     // claiming with `FOR UPDATE SKIP LOCKED` + the claimed_by/nonce lease, not
     // a fleet-wide advisory-lock leader.
-    let workflow_state = Arc::clone(&state);
-    compio::runtime::spawn(async move {
-        workflow_engine::run(workflow_state, workflow_engine::DEFAULT_TICK_SECS).await;
-    })
-    .detach();
+    if options.workflow_engine {
+        let workflow_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_engine::run(workflow_state, workflow_engine::DEFAULT_TICK_SECS).await;
+        })
+        .detach();
+    }
 
     // Dunning sweep (billing G2) — suspends each `past_due` creator whose
     // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway

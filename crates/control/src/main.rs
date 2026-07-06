@@ -108,6 +108,12 @@ struct ControlCli {
     )]
     gateway_url: String,
 
+    /// Test harness only: do not spawn the background durable-workflow
+    /// scheduler. DW-07 drives the real engine explicitly from its test process
+    /// while this control process serves sync/deploy state.
+    #[arg(long = "disable-workflow-engine", hide = true, default_value_t = false)]
+    disable_workflow_engine: bool,
+
     /// Metering/billing provider backend (M6). `native` (default) runs the
     /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
     /// Billing Meters — CU → meter_events, Stripe self-invoices) and `openmeter`
@@ -1509,10 +1515,13 @@ fn main() -> std::io::Result<()> {
     //     platform console.
     // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
     // connections.
-    zeroship_control::cron::spawn_all(
+    zeroship_control::cron::spawn_all_with_options(
         Arc::clone(&state),
         audit_retention_months,
         audit_retention_check_secs,
+        zeroship_control::cron::SpawnOptions {
+            workflow_engine: !cli.disable_workflow_engine,
+        },
     );
     tracing::info!(
         retention_months = audit_retention_months,

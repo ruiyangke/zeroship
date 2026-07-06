@@ -135,8 +135,14 @@ impl StepCheckpoint {
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum RunUpdate {
     Queued,
-    Sleeping { wake_at: Option<DateTime<Utc>> },
-    Waiting { wake_at: Option<DateTime<Utc>> },
+    Sleeping {
+        #[serde(rename = "wakeAt")]
+        wake_at: Option<DateTime<Utc>>,
+    },
+    Waiting {
+        #[serde(rename = "wakeAt")]
+        wake_at: Option<DateTime<Utc>>,
+    },
     Completed { output: Option<Value> },
     Failed { error: Value },
     Cancelled,
@@ -172,6 +178,30 @@ impl RunUpdate {
     fn error(&self) -> Option<Value> {
         match self {
             Self::Failed { error } => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    fn waiting_step_key(&self, checkpoints: &[StepCheckpoint]) -> Option<String> {
+        match self {
+            Self::Sleeping { .. } => checkpoints
+                .iter()
+                .find(|s| s.kind == "sleep" && s.state == "running")
+                .map(|s| format!("sleep:{}:{}", s.ordinal, s.name)),
+            Self::Waiting { .. } => checkpoints
+                .iter()
+                .find(|s| s.kind == "wait_signal" && s.state == "running")
+                .map(|s| {
+                    format!(
+                        "wait:{}:{}:{}{}",
+                        s.ordinal,
+                        s.name,
+                        s.signal_type.as_deref().unwrap_or(s.name.as_str()),
+                        s.max_signal_age_ms
+                            .map(|age| format!(":{age}"))
+                            .unwrap_or_default()
+                    )
+                }),
             _ => None,
         }
     }
@@ -426,10 +456,10 @@ async fn claim_due_batch(
                  FROM zeroship.workflow_runs \
                 WHERE wake_at <= now() \
                   AND state IN ('queued','running','sleeping','waiting') \
-                  AND (claimed_by IS NULL OR claim_heartbeat_at < now() - (($1::bigint)::double precision * interval '1 millisecond')) \
+                  AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
                 GROUP BY app_id \
                 ORDER BY first_wake, app_id \
-                LIMIT $2 \
+                LIMIT $1 \
              ) \
              SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
                     r.input, r.started_at, r.waiting_step_key \
@@ -440,16 +470,15 @@ async fn claim_due_batch(
                   WHERE app_id = a.app_id \
                     AND wake_at <= now() \
                     AND state IN ('queued','running','sleeping','waiting') \
-                    AND (claimed_by IS NULL OR claim_heartbeat_at < now() - (($1::bigint)::double precision * interval '1 millisecond')) \
+                    AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
                   ORDER BY wake_at, id \
-                  LIMIT $3 \
+                  LIMIT $2 \
                   FOR UPDATE SKIP LOCKED \
                ) r \
                JOIN zeroship.app_deploys d ON d.id = r.deploy_id \
               ORDER BY r.app_id, r.wake_at, r.id \
-              LIMIT $4",
+              LIMIT $3",
             &[
-                &config.claim_ttl_ms,
                 &config.batch_apps,
                 &config.per_app_fair_limit,
                 &limit,
@@ -518,9 +547,9 @@ where
                 AND id <> $2 \
                 AND state = 'running' \
                 AND claimed_by IS NOT NULL \
-                AND claim_heartbeat_at IS NOT NULL \
-                AND claim_heartbeat_at >= now() - (($3::bigint)::double precision * interval '1 millisecond')",
-            &[&candidate.app_id, &candidate.run_id, &config.claim_ttl_ms],
+                AND lease_expires IS NOT NULL \
+                AND lease_expires > now()",
+            &[&candidate.app_id, &candidate.run_id],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -530,6 +559,7 @@ where
     }
 
     let dispatch_nonce = typed_id::new_workflow_dispatch_id();
+    let lease_expires = Utc::now() + chrono::Duration::milliseconds(config.claim_ttl_ms);
     if let Some(key) = candidate.waiting_step_key.as_deref() {
         resolve_due_waiting_step(tx, &candidate.run_id, key, &dispatch_nonce).await?;
     }
@@ -538,19 +568,19 @@ where
         .query(
             "UPDATE zeroship.workflow_runs \
                 SET claimed_by = $1, \
-                    claim_heartbeat_at = now(), \
-                    claim_ttl_ms = COALESCE(claim_ttl_ms, $2), \
+                    lease_expires = $2, \
                     dispatch_nonce = $3, \
+                    claim_epoch = claim_epoch + 1, \
                     state = 'running', \
                     last_dispatch_at = now() \
               WHERE id = $4 \
                 AND wake_at <= now() \
                 AND state IN ('queued','running','sleeping','waiting') \
-                AND (claimed_by IS NULL OR claim_heartbeat_at < now() - (($2::bigint)::double precision * interval '1 millisecond')) \
+                AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
               RETURNING id",
             &[
                 &config.owner_id,
-                &config.claim_ttl_ms,
+                &lease_expires,
                 &dispatch_nonce,
                 &candidate.run_id,
             ],
@@ -698,6 +728,8 @@ where
             signal_type,
             max_signal_age_ms,
         } => {
+            let min_created_at =
+                max_signal_age_ms.map(|age| Utc::now() - chrono::Duration::milliseconds(age));
             let signal = tx
                 .query(
                     "SELECT id, payload, created_at, origin, delivery, topic \
@@ -705,11 +737,11 @@ where
                       WHERE run_id = $1 \
                         AND type = $2 \
                         AND consumed_by IS NULL \
-                        AND ($3::bigint IS NULL OR created_at >= now() - (($3::bigint)::double precision * interval '1 millisecond')) \
+                        AND ($3::timestamptz IS NULL OR created_at >= $3) \
                       ORDER BY created_at, id \
                       LIMIT 1 \
                       FOR UPDATE SKIP LOCKED",
-                    &[&run_id, &signal_type, &max_signal_age_ms],
+                    &[&run_id, &signal_type, &min_created_at],
                 )
                 .await
                 .map_err(RegistryError::from)?;
@@ -788,6 +820,7 @@ fn spawn_dispatch<D>(
         config.owner_id.clone(),
         claim.request.run_id.clone(),
         claim.request.dispatch_nonce.clone(),
+        config.claim_ttl_ms,
         Duration::from_millis(config.heartbeat_ms),
     );
     compio::runtime::spawn(async move {
@@ -837,6 +870,7 @@ fn spawn_heartbeat(
     owner_id: String,
     run_id: String,
     dispatch_nonce: String,
+    claim_ttl_ms: i64,
     interval: Duration,
 ) -> Arc<AtomicBool> {
     let active = Arc::new(AtomicBool::new(true));
@@ -849,13 +883,14 @@ fn spawn_heartbeat(
             }
             let beat = async {
                 let conn = registry.conn().await?;
+                let lease_expires = Utc::now() + chrono::Duration::milliseconds(claim_ttl_ms);
                 conn.execute(
                     "UPDATE zeroship.workflow_runs \
-                        SET claim_heartbeat_at = now() \
-                      WHERE id = $1 \
-                        AND claimed_by = $2 \
-                        AND dispatch_nonce = $3",
-                    &[&run_id, &owner_id, &dispatch_nonce],
+                        SET lease_expires = $1 \
+                      WHERE id = $2 \
+                        AND claimed_by = $3 \
+                        AND dispatch_nonce = $4",
+                    &[&lease_expires, &run_id, &owner_id, &dispatch_nonce],
                 )
                 .await
                 .map_err(RegistryError::from)?;
@@ -983,6 +1018,7 @@ async fn apply_step_result_on_registry(
         .unwrap_or(0);
     let state = result.run_update.state();
     let wake_at = result.run_update.wake_at();
+    let waiting_step_key = result.run_update.waiting_step_key(&result.checkpoints);
     let output = result.run_update.output();
     let error = result.run_update.error();
     tx.execute(
@@ -992,18 +1028,20 @@ async fn apply_step_result_on_registry(
                 error = $3, \
                 wake_at = $4, \
                 next_ordinal = GREATEST(next_ordinal, $5), \
+                waiting_step_key = $6, \
                 claimed_by = NULL, \
-                claim_heartbeat_at = NULL, \
+                lease_expires = NULL, \
                 dispatch_nonce = NULL \
-          WHERE id = $6 \
-            AND claimed_by = $7 \
-            AND dispatch_nonce = $8",
+          WHERE id = $7 \
+            AND claimed_by = $8 \
+            AND dispatch_nonce = $9",
         &[
             &state,
             &output,
             &error,
             &wake_at,
             &next_ordinal,
+            &waiting_step_key,
             &result.run_id,
             &owner_id,
             &result.dispatch_nonce,
@@ -1032,7 +1070,19 @@ where
              batch_id, batch_width, finished_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
                  'inline', $9, $10, $11, $12, $13, 1, now()) \
-         ON CONFLICT (run_id, ordinal) DO NOTHING",
+         ON CONFLICT (run_id, ordinal) DO UPDATE SET \
+             state = EXCLUDED.state, \
+             output = EXCLUDED.output, \
+             error = EXCLUDED.error, \
+             wake_at = EXCLUDED.wake_at, \
+             signal_type = EXCLUDED.signal_type, \
+             max_signal_age_ms = EXCLUDED.max_signal_age_ms, \
+             consumed_signal_id = EXCLUDED.consumed_signal_id, \
+             finished_at = EXCLUDED.finished_at \
+           WHERE zeroship.workflow_steps.state = 'running' \
+             AND EXCLUDED.state = 'completed' \
+             AND zeroship.workflow_steps.name = EXCLUDED.name \
+             AND zeroship.workflow_steps.kind = EXCLUDED.kind",
         &[
             &run_id,
             &checkpoint.ordinal,
@@ -1066,7 +1116,7 @@ async fn requeue_claim(
             SET state = 'queued', \
                 wake_at = now(), \
                 claimed_by = NULL, \
-                claim_heartbeat_at = NULL, \
+                lease_expires = NULL, \
                 dispatch_nonce = NULL \
           WHERE id = $1 \
             AND claimed_by = $2 \
@@ -1091,7 +1141,7 @@ async fn park_backpressure_claim(
             SET state = 'queued', \
                 wake_at = $1, \
                 claimed_by = NULL, \
-                claim_heartbeat_at = NULL, \
+                lease_expires = NULL, \
                 dispatch_nonce = NULL \
           WHERE id = $2 \
             AND claimed_by = $3 \
@@ -1130,6 +1180,43 @@ mod tests {
                 signal_type: "approved".to_string(),
                 max_signal_age_ms: Some(60_000)
             }
+        );
+    }
+
+    #[test]
+    fn step_result_deserializes_sleeping_wake_at_contract() {
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [{
+                "ordinal": 1,
+                "name": "sleep",
+                "nameOccurrence": 0,
+                "kind": "sleep",
+                "state": "running",
+                "output": null,
+                "error": null,
+                "wakeAt": "2026-07-06T10:24:10Z",
+                "signalType": null,
+                "maxSignalAgeMs": null,
+                "consumedSignalId": null
+            }],
+            "runUpdate": {
+                "state": "sleeping",
+                "wakeAt": "2026-07-06T10:24:10Z"
+            }
+        }))
+        .expect("StepResult JSON");
+        assert_eq!(
+            result.run_update.wake_at().expect("run wake_at").to_rfc3339(),
+            "2026-07-06T10:24:10+00:00"
+        );
+        assert_eq!(
+            result.checkpoints[0]
+                .wake_at
+                .expect("checkpoint wake_at")
+                .to_rfc3339(),
+            "2026-07-06T10:24:10+00:00"
         );
     }
 

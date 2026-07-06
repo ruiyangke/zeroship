@@ -143,15 +143,8 @@ async fn spend_blocked_gateway() -> web::HttpResponse {
 }
 
 async fn ensure_engine_columns(pg: &compio_postgres::Client) {
-    // The source migration is intentionally off-limits for DW-04. These columns
-    // are the operator-steered scheduler contract; adding them here adapts only
-    // the disposable test DB used by this integration binary.
     pg.batch_execute(
         "ALTER TABLE zeroship.workflow_runs \
-           ADD COLUMN IF NOT EXISTS claim_heartbeat_at timestamptz; \
-         ALTER TABLE zeroship.workflow_runs \
-           ADD COLUMN IF NOT EXISTS claim_ttl_ms bigint; \
-         ALTER TABLE zeroship.workflow_runs \
            ADD COLUMN IF NOT EXISTS dispatch_nonce text; \
          ALTER TABLE zeroship.workflow_runs \
            ADD COLUMN IF NOT EXISTS waiting_step_key text; \
@@ -200,21 +193,21 @@ async fn seed_run(
     wake_delta_ms: i64,
     waiting_step_key: Option<&str>,
     claimed_by: Option<&str>,
-    heartbeat_delta_ms: Option<i64>,
+    lease_delta_ms: Option<i64>,
     dispatch_nonce: Option<&str>,
 ) -> String {
     let run_id = zeroship_core::typed_id::new_workflow_run_id();
     let wake_at = Utc::now() + ChronoDuration::milliseconds(wake_delta_ms);
-    let heartbeat = heartbeat_delta_ms.map(|ms| Utc::now() + ChronoDuration::milliseconds(ms));
+    let lease_expires = lease_delta_ms.map(|ms| Utc::now() + ChronoDuration::milliseconds(ms));
     let input = serde_json::json!({});
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_runs \
                 (id, workflow_name, app_id, deploy_id, state, input, wake_at, \
-                 claimed_by, claim_heartbeat_at, claim_ttl_ms, dispatch_nonce, \
+                 claimed_by, lease_expires, dispatch_nonce, \
                  waiting_step_key, started_at) \
              VALUES ($1, 'TestWorkflow', $2, $3, $4, $5, $6, \
-                     $7, $8, 1000, $9, $10, now())",
+                     $7, $8, $9, $10, now())",
             &[
                 &run_id,
                 &app_id,
@@ -223,7 +216,7 @@ async fn seed_run(
                 &input,
                 &wake_at,
                 &claimed_by,
-                &heartbeat,
+                &lease_expires,
                 &dispatch_nonce,
                 &waiting_step_key,
             ],
@@ -607,9 +600,14 @@ async fn apply_outcome_checkpoints_idempotently() {
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_runs \
-                SET state='running', claimed_by=$1, dispatch_nonce=$2, claim_heartbeat_at=now() \
-              WHERE id=$3",
-            &[&"owner-apply", &"wfd_apply", &run_id],
+                SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+              WHERE id=$4",
+            &[
+                &"owner-apply",
+                &"wfd_apply",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &run_id,
+            ],
         )
         .await
         .expect("reclaim for idempotent reapply");

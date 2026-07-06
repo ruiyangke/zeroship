@@ -120,6 +120,12 @@ struct WorkerCli {
     #[arg(long = "storage-url", env = "ZEROSHIP_STORAGE_URL", default_value = "")]
     storage_url: String,
 
+    /// Test-only unsigned durable-workflow replay ingress. Hidden because
+    /// signed workflow dispatch is the production transport; DW-07 uses this
+    /// flag to exercise the real replay path before that signing task lands.
+    #[arg(long = "workflow-dispatch-unsigned", hide = true, default_value_t = false)]
+    workflow_dispatch_unsigned: bool,
+
     /// HTTP bind host.
     #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
     bind: String,
@@ -174,6 +180,7 @@ impl std::fmt::Debug for WorkerCli {
             // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
             .field("storage_url", &self.storage_url)
+            .field("workflow_dispatch_unsigned", &self.workflow_dispatch_unsigned)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
             .field("config_path", &self.config_path)
@@ -506,7 +513,7 @@ fn main() -> std::io::Result<()> {
         worker_key,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
-        workflow_dispatch_unsigned: false,
+        workflow_dispatch_unsigned: cli.workflow_dispatch_unsigned,
     });
 
     let bind_addr = format!("{bind_host}:{port}");
