@@ -81,7 +81,8 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrate --bins
+    -p zeroship-migrate --bins \
+    --features zeroship-migrate/standalone-cli
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image.
