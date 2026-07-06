@@ -504,14 +504,14 @@ impl StepDispatcher for BlockingDispatcher {
             .pop_front()
             .expect("release receiver available");
         let _ = release.await;
-        DispatchOutcome::Completed(StepResult {
-            run_id: request.run_id,
-            dispatch_nonce: request.dispatch_nonce,
-            checkpoints: Vec::new(),
-            run_update: RunUpdate::Completed {
+        DispatchOutcome::Completed(StepResult::from_checkpoints(
+            request.run_id,
+            request.dispatch_nonce,
+            Vec::new(),
+            RunUpdate::Completed {
                 output: Some(serde_json::json!({"released": true})),
             },
-        })
+        ))
     }
 }
 
@@ -521,18 +521,18 @@ struct CompleteDispatcher;
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteDispatcher {
     async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
-        DispatchOutcome::Completed(StepResult {
-            run_id: request.run_id,
-            dispatch_nonce: request.dispatch_nonce,
-            checkpoints: vec![StepCheckpoint::completed_run(
+        DispatchOutcome::Completed(StepResult::from_checkpoints(
+            request.run_id,
+            request.dispatch_nonce,
+            vec![StepCheckpoint::completed_run(
                 0,
                 "done",
                 serde_json::json!({"ok": true}),
             )],
-            run_update: RunUpdate::Completed {
+            RunUpdate::Completed {
                 output: Some(serde_json::json!({"ok": true})),
             },
-        })
+        ))
     }
 }
 
@@ -580,12 +580,12 @@ impl StepDispatcher for GatedCheckpointDispatcher {
             .take()
             .expect("release receiver available");
         let _ = release.await;
-        DispatchOutcome::Completed(StepResult {
-            run_id: request.run_id,
-            dispatch_nonce: request.dispatch_nonce,
-            checkpoints: vec![self.checkpoint.clone()],
-            run_update: self.run_update.clone(),
-        })
+        DispatchOutcome::Completed(StepResult::from_checkpoints(
+            request.run_id,
+            request.dispatch_nonce,
+            vec![self.checkpoint.clone()],
+            self.run_update.clone(),
+        ))
     }
 }
 
@@ -603,18 +603,18 @@ impl StepDispatcher for CompleteAfterA {
             "resume dispatch should replay the landed a checkpoint: {:?}",
             request.journal
         );
-        DispatchOutcome::Completed(StepResult {
-            run_id: request.run_id,
-            dispatch_nonce: request.dispatch_nonce,
-            checkpoints: vec![StepCheckpoint::completed_run(
+        DispatchOutcome::Completed(StepResult::from_checkpoints(
+            request.run_id,
+            request.dispatch_nonce,
+            vec![StepCheckpoint::completed_run(
                 1,
                 "b",
                 serde_json::json!({"ok": true}),
             )],
-            run_update: RunUpdate::Completed {
+            RunUpdate::Completed {
                 output: Some(serde_json::json!({"ok": true})),
             },
-        })
+        ))
     }
 }
 
@@ -733,6 +733,226 @@ async fn wait_for_cancelled_without_steps(fx: &Fixture, run_id: &str) {
     }
 
     panic!("late outcome after cancel was not stably discarded: {last_state:?}");
+}
+
+fn batch_step_result(run_id: &str, dispatch_nonce: &str, outcomes: serde_json::Value) -> StepResult {
+    serde_json::from_value(serde_json::json!({
+        "runId": run_id,
+        "dispatchNonce": dispatch_nonce,
+        "outcomes": outcomes,
+    }))
+    .expect("batch StepResult JSON")
+}
+
+#[compio::test]
+async fn batch_step_result_applies_atomically_and_preserves_effn1() {
+    let Some(fx) = isolated_fixture("batch-apply").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "batch-apply").await;
+
+        let run_id = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "running",
+            -1_000,
+            None,
+            Some("owner-batch"),
+            Some(60_000),
+            Some("wfd_batch"),
+        )
+        .await;
+        let result = batch_step_result(
+            &run_id,
+            "wfd_batch",
+            serde_json::json!([
+                {"kind": "StepCompleted", "ordinal": 0, "name": "a", "nameOccurrence": 0, "output": "A"},
+                {"kind": "StepCompleted", "ordinal": 1, "name": "b", "nameOccurrence": 0, "output": "B"},
+                {"kind": "StepCompleted", "ordinal": 2, "name": "c", "nameOccurrence": 0, "output": "C"}
+            ]),
+        );
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-batch", result.clone())
+                .await
+                .expect("apply 3-wide batch")
+        );
+        let rows = fx
+            .pg
+            .query(
+                "SELECT ordinal, name, state, batch_id, batch_width \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 \
+                  ORDER BY ordinal",
+                &[&run_id],
+            )
+            .await
+            .expect("load 3-wide steps");
+        assert_eq!(rows.len(), 3);
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(row.get::<_, i32>("ordinal"), i32::try_from(idx).unwrap());
+            assert_eq!(row.get::<_, String>("state"), "completed");
+            assert_eq!(row.get::<_, String>("batch_id"), "wfd_batch");
+            assert_eq!(row.get::<_, i16>("batch_width"), 3);
+        }
+        assert_eq!(rows[0].get::<_, String>("name"), "a");
+        assert_eq!(rows[1].get::<_, String>("name"), "b");
+        assert_eq!(rows[2].get::<_, String>("name"), "c");
+        let run = fx
+            .pg
+            .query_one(
+                "SELECT state, next_ordinal FROM zeroship.workflow_runs WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("load 3-wide run");
+        assert_eq!(run.get::<_, String>("state"), "queued");
+        assert_eq!(run.get::<_, i32>("next_ordinal"), 3);
+
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+                  WHERE id=$4",
+                &[
+                    &"owner-batch",
+                    &"wfd_batch",
+                    &(Utc::now() + ChronoDuration::seconds(60)),
+                    &run_id,
+                ],
+            )
+            .await
+            .expect("reclaim 3-wide run");
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-batch", result)
+                .await
+                .expect("reapply 3-wide batch")
+        );
+        let count = fx
+            .pg
+            .query_one(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("count 3-wide steps");
+        assert_eq!(count.get::<_, i64>("n"), 3, "batch re-apply must be idempotent");
+
+        let sleep_run = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "running",
+            -1_000,
+            None,
+            Some("owner-batch-sleep"),
+            Some(60_000),
+            Some("wfd_batch_sleep"),
+        )
+        .await;
+        let wake_at = Utc::now() + ChronoDuration::seconds(60);
+        let sleep_result = batch_step_result(
+            &sleep_run,
+            "wfd_batch_sleep",
+            serde_json::json!([
+                {"kind": "StepCompleted", "ordinal": 0, "name": "a", "nameOccurrence": 0, "output": "A"},
+                {"kind": "StepCompleted", "ordinal": 1, "name": "b", "nameOccurrence": 0, "output": "B"},
+                {"kind": "Sleep", "ordinal": 2, "name": "cooldown", "nameOccurrence": 0, "wakeAt": wake_at.to_rfc3339()}
+            ]),
+        );
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-batch-sleep", sleep_result)
+                .await
+                .expect("apply sleep batch")
+        );
+        let sleep_rows = fx
+            .pg
+            .query(
+                "SELECT ordinal, name, kind, state, batch_width \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 \
+                  ORDER BY ordinal",
+                &[&sleep_run],
+            )
+            .await
+            .expect("load sleep batch steps");
+        assert_eq!(
+            sleep_rows
+                .iter()
+                .map(|row| (
+                    row.get::<_, i32>("ordinal"),
+                    row.get::<_, String>("name"),
+                    row.get::<_, String>("kind"),
+                    row.get::<_, String>("state"),
+                    row.get::<_, i16>("batch_width"),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "a".to_string(), "run".to_string(), "completed".to_string(), 3),
+                (1, "b".to_string(), "run".to_string(), "completed".to_string(), 3),
+                (2, "cooldown".to_string(), "sleep".to_string(), "running".to_string(), 3),
+            ]
+        );
+        let parked = fx
+            .pg
+            .query_one(
+                "SELECT state, next_ordinal, waiting_step_key FROM zeroship.workflow_runs WHERE id = $1",
+                &[&sleep_run],
+            )
+            .await
+            .expect("load parked run");
+        assert_eq!(parked.get::<_, String>("state"), "sleeping");
+        assert_eq!(parked.get::<_, i32>("next_ordinal"), 3);
+        assert_eq!(
+            parked
+                .get::<_, Option<String>>("waiting_step_key")
+                .as_deref(),
+            Some("sleep:2:cooldown")
+        );
+
+        let single_run = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "running",
+            -1_000,
+            None,
+            Some("owner-batch-one"),
+            Some(60_000),
+            Some("wfd_batch_one"),
+        )
+        .await;
+        let single = batch_step_result(
+            &single_run,
+            "wfd_batch_one",
+            serde_json::json!([
+                {"kind": "StepCompleted", "ordinal": 0, "name": "only", "nameOccurrence": 0, "output": {"ok": true}}
+            ]),
+        );
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-batch-one", single)
+                .await
+                .expect("apply effN=1 batch")
+        );
+        let single_row = fx
+            .pg
+            .query_one(
+                "SELECT r.state, r.next_ordinal, s.name, s.batch_width \
+                   FROM zeroship.workflow_runs r \
+                   JOIN zeroship.workflow_steps s ON s.run_id = r.id AND s.ordinal = 0 \
+                  WHERE r.id = $1",
+                &[&single_run],
+            )
+            .await
+            .expect("load effN=1 row");
+        assert_eq!(single_row.get::<_, String>("state"), "queued");
+        assert_eq!(single_row.get::<_, i32>("next_ordinal"), 1);
+        assert_eq!(single_row.get::<_, String>("name"), "only");
+        assert_eq!(single_row.get::<_, i16>("batch_width"), 1);
+    })
+    .await
+    .expect("batch apply regression timed out");
 }
 
 #[compio::test]
@@ -939,18 +1159,18 @@ async fn apply_outcome_checkpoints_idempotently() {
         Some("wfd_apply"),
     )
     .await;
-    let result = StepResult {
-        run_id: run_id.clone(),
-        dispatch_nonce: "wfd_apply".to_string(),
-        checkpoints: vec![StepCheckpoint::completed_run(
+    let result = StepResult::from_checkpoints(
+        run_id.clone(),
+        "wfd_apply".to_string(),
+        vec![StepCheckpoint::completed_run(
             0,
             "charge",
             serde_json::json!({"charged": true}),
         )],
-        run_update: RunUpdate::Completed {
+        RunUpdate::Completed {
             output: Some(serde_json::json!({"charged": true})),
         },
-    };
+    );
 
     assert!(
         workflow_engine::apply_step_result(&fx.state, "owner-apply", result.clone())
@@ -1016,12 +1236,12 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
     )
     .await;
 
-    let first = StepResult {
-        run_id: run_id.clone(),
-        dispatch_nonce: "wfd_journal_cap_1".to_string(),
-        checkpoints: vec![StepCheckpoint::completed_run(0, "first", first_output.clone())],
-        run_update: RunUpdate::Queued,
-    };
+    let first = StepResult::from_checkpoints(
+        run_id.clone(),
+        "wfd_journal_cap_1".to_string(),
+        vec![StepCheckpoint::completed_run(0, "first", first_output.clone())],
+        RunUpdate::Queued,
+    );
     assert!(
         workflow_engine::apply_step_result(&fx.state, "owner-journal-cap", first)
             .await
@@ -1051,14 +1271,14 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
         )
         .await
         .expect("reclaim for cap breach");
-    let second = StepResult {
-        run_id: run_id.clone(),
-        dispatch_nonce: "wfd_journal_cap_2".to_string(),
-        checkpoints: vec![StepCheckpoint::completed_run(1, "second", second_output)],
-        run_update: RunUpdate::Completed {
+    let second = StepResult::from_checkpoints(
+        run_id.clone(),
+        "wfd_journal_cap_2".to_string(),
+        vec![StepCheckpoint::completed_run(1, "second", second_output)],
+        RunUpdate::Completed {
             output: Some(serde_json::json!({"done": true})),
         },
-    };
+    );
     assert!(
         workflow_engine::apply_step_result(&fx.state, "owner-journal-cap", second)
             .await

@@ -132,6 +132,54 @@ impl StepCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum StepOutcome {
+    StepCompleted {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(default)]
+        output: Option<Value>,
+    },
+    RunCompleted {
+        #[serde(default)]
+        output: Option<Value>,
+    },
+    RunFailed {
+        #[serde(default)]
+        ordinal: Option<i32>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        error: Value,
+    },
+    Sleep {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(rename = "wakeAt")]
+        wake_at: DateTime<Utc>,
+    },
+    Wait {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(rename = "wakeAt")]
+        wake_at: DateTime<Utc>,
+        #[serde(default, rename = "signalType")]
+        signal_type: Option<String>,
+        #[serde(default, rename = "maxSignalAgeMs")]
+        max_signal_age_ms: Option<i64>,
+        #[serde(default, rename = "consumedSignalId")]
+        consumed_signal_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum RunUpdate {
     Queued,
@@ -207,11 +255,11 @@ impl RunUpdate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct StepResult {
     pub run_id: String,
     pub dispatch_nonce: String,
+    pub outcomes: Vec<StepOutcome>,
     pub checkpoints: Vec<StepCheckpoint>,
     pub run_update: RunUpdate,
 }
@@ -222,10 +270,295 @@ impl StepResult {
         Self {
             run_id,
             dispatch_nonce,
+            outcomes: Vec::new(),
             checkpoints: Vec::new(),
             run_update: RunUpdate::Queued,
         }
     }
+
+    #[must_use]
+    pub fn from_checkpoints(
+        run_id: String,
+        dispatch_nonce: String,
+        checkpoints: Vec<StepCheckpoint>,
+        run_update: RunUpdate,
+    ) -> Self {
+        let outcomes = outcomes_from_apply_parts(&checkpoints, &run_update);
+        Self {
+            run_id,
+            dispatch_nonce,
+            outcomes,
+            checkpoints,
+            run_update,
+        }
+    }
+
+    fn from_outcomes(
+        run_id: String,
+        dispatch_nonce: String,
+        outcomes: Vec<StepOutcome>,
+    ) -> Result<Self, String> {
+        let (checkpoints, run_update) = fold_outcomes(&outcomes)?;
+        Ok(Self {
+            run_id,
+            dispatch_nonce,
+            outcomes,
+            checkpoints,
+            run_update,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StepResultWire {
+    run_id: String,
+    dispatch_nonce: String,
+    #[serde(default)]
+    outcomes: Vec<StepOutcome>,
+    #[serde(default)]
+    checkpoints: Vec<StepCheckpoint>,
+    #[serde(default = "queued_run_update")]
+    run_update: RunUpdate,
+}
+
+fn queued_run_update() -> RunUpdate {
+    RunUpdate::Queued
+}
+
+impl<'de> Deserialize<'de> for StepResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = StepResultWire::deserialize(deserializer)?;
+        if !wire.outcomes.is_empty() {
+            return StepResult::from_outcomes(wire.run_id, wire.dispatch_nonce, wire.outcomes)
+                .map_err(serde::de::Error::custom);
+        }
+        Ok(StepResult::from_checkpoints(
+            wire.run_id,
+            wire.dispatch_nonce,
+            wire.checkpoints,
+            wire.run_update,
+        ))
+    }
+}
+
+impl Serialize for StepResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            run_id: &'a str,
+            dispatch_nonce: &'a str,
+            outcomes: &'a [StepOutcome],
+        }
+
+        Wire {
+            run_id: &self.run_id,
+            dispatch_nonce: &self.dispatch_nonce,
+            outcomes: &self.outcomes,
+        }
+        .serialize(serializer)
+    }
+}
+
+fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
+    let mut checkpoints = Vec::new();
+    let mut run_update = RunUpdate::Queued;
+    let mut trailing_seen = false;
+
+    for (idx, outcome) in outcomes.iter().enumerate() {
+        let is_step_completed = matches!(outcome, StepOutcome::StepCompleted { .. });
+        if trailing_seen {
+            return Err("workflow outcome batch has entries after a suspension or terminal outcome".to_string());
+        }
+        if !is_step_completed {
+            if idx + 1 != outcomes.len() {
+                return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
+            }
+            trailing_seen = true;
+        }
+
+        match outcome {
+            StepOutcome::StepCompleted {
+                ordinal,
+                name,
+                name_occurrence,
+                output,
+            } => {
+                checkpoints.push(StepCheckpoint {
+                    ordinal: *ordinal,
+                    name: name.clone(),
+                    name_occurrence: *name_occurrence,
+                    kind: "run".to_string(),
+                    state: "completed".to_string(),
+                    output: output.clone(),
+                    error: None,
+                    wake_at: None,
+                    signal_type: None,
+                    max_signal_age_ms: None,
+                    consumed_signal_id: None,
+                });
+            }
+            StepOutcome::RunCompleted { output } => {
+                run_update = RunUpdate::Completed {
+                    output: output.clone(),
+                };
+            }
+            StepOutcome::RunFailed {
+                ordinal,
+                name,
+                name_occurrence,
+                error,
+            } => {
+                if let (Some(ordinal), Some(name)) = (ordinal, name) {
+                    checkpoints.push(StepCheckpoint {
+                        ordinal: *ordinal,
+                        name: name.clone(),
+                        name_occurrence: *name_occurrence,
+                        kind: "run".to_string(),
+                        state: "failed".to_string(),
+                        output: None,
+                        error: Some(error.clone()),
+                        wake_at: None,
+                        signal_type: None,
+                        max_signal_age_ms: None,
+                        consumed_signal_id: None,
+                    });
+                }
+                run_update = RunUpdate::Failed {
+                    error: error.clone(),
+                };
+            }
+            StepOutcome::Sleep {
+                ordinal,
+                name,
+                name_occurrence,
+                wake_at,
+            } => {
+                checkpoints.push(StepCheckpoint {
+                    ordinal: *ordinal,
+                    name: name.clone(),
+                    name_occurrence: *name_occurrence,
+                    kind: "sleep".to_string(),
+                    state: "running".to_string(),
+                    output: None,
+                    error: None,
+                    wake_at: Some(*wake_at),
+                    signal_type: None,
+                    max_signal_age_ms: None,
+                    consumed_signal_id: None,
+                });
+                run_update = RunUpdate::Sleeping {
+                    wake_at: Some(*wake_at),
+                };
+            }
+            StepOutcome::Wait {
+                ordinal,
+                name,
+                name_occurrence,
+                wake_at,
+                signal_type,
+                max_signal_age_ms,
+                consumed_signal_id,
+            } => {
+                checkpoints.push(StepCheckpoint {
+                    ordinal: *ordinal,
+                    name: name.clone(),
+                    name_occurrence: *name_occurrence,
+                    kind: "wait_signal".to_string(),
+                    state: "running".to_string(),
+                    output: None,
+                    error: None,
+                    wake_at: Some(*wake_at),
+                    signal_type: signal_type.clone().or_else(|| Some(name.clone())),
+                    max_signal_age_ms: *max_signal_age_ms,
+                    consumed_signal_id: consumed_signal_id.clone(),
+                });
+                run_update = RunUpdate::Waiting {
+                    wake_at: Some(*wake_at),
+                };
+            }
+        }
+    }
+
+    Ok((checkpoints, run_update))
+}
+
+fn outcomes_from_apply_parts(
+    checkpoints: &[StepCheckpoint],
+    run_update: &RunUpdate,
+) -> Vec<StepOutcome> {
+    let mut outcomes = Vec::new();
+    let mut failed_checkpoint_encoded = false;
+
+    for checkpoint in checkpoints {
+        match (checkpoint.kind.as_str(), checkpoint.state.as_str()) {
+            ("run", "completed") => outcomes.push(StepOutcome::StepCompleted {
+                ordinal: checkpoint.ordinal,
+                name: checkpoint.name.clone(),
+                name_occurrence: checkpoint.name_occurrence,
+                output: checkpoint.output.clone(),
+            }),
+            ("run", "failed") => {
+                failed_checkpoint_encoded = true;
+                outcomes.push(StepOutcome::RunFailed {
+                    ordinal: Some(checkpoint.ordinal),
+                    name: Some(checkpoint.name.clone()),
+                    name_occurrence: checkpoint.name_occurrence,
+                    error: checkpoint.error.clone().unwrap_or_else(|| {
+                        serde_json::json!({"type": "Error", "message": "workflow step failed"})
+                    }),
+                });
+            }
+            ("sleep", "running") => {
+                if let Some(wake_at) = checkpoint.wake_at {
+                    outcomes.push(StepOutcome::Sleep {
+                        ordinal: checkpoint.ordinal,
+                        name: checkpoint.name.clone(),
+                        name_occurrence: checkpoint.name_occurrence,
+                        wake_at,
+                    });
+                }
+            }
+            ("wait_signal", "running") => {
+                if let Some(wake_at) = checkpoint.wake_at {
+                    outcomes.push(StepOutcome::Wait {
+                        ordinal: checkpoint.ordinal,
+                        name: checkpoint.name.clone(),
+                        name_occurrence: checkpoint.name_occurrence,
+                        wake_at,
+                        signal_type: checkpoint.signal_type.clone(),
+                        max_signal_age_ms: checkpoint.max_signal_age_ms,
+                        consumed_signal_id: checkpoint.consumed_signal_id.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match run_update {
+        RunUpdate::Completed { output } => outcomes.push(StepOutcome::RunCompleted {
+            output: output.clone(),
+        }),
+        RunUpdate::Failed { error } if !failed_checkpoint_encoded => {
+            outcomes.push(StepOutcome::RunFailed {
+                ordinal: None,
+                name: None,
+                name_occurrence: 0,
+                error: error.clone(),
+            });
+        }
+        _ => {}
+    }
+
+    outcomes
 }
 
 #[async_trait(?Send)]
@@ -721,6 +1054,7 @@ where
                 },
                 run_id,
                 dispatch_nonce,
+                1,
             )
             .await? == StepWriteOutcome::CapExceeded
             {
@@ -817,6 +1151,7 @@ where
                         },
                         run_id,
                         dispatch_nonce,
+                        1,
                     )
                     .await? == StepWriteOutcome::CapExceeded
                     {
@@ -876,6 +1211,7 @@ where
                 },
                 run_id,
                 dispatch_nonce,
+                1,
             )
             .await? == StepWriteOutcome::CapExceeded
             {
@@ -933,6 +1269,9 @@ fn spawn_dispatch<D>(
                         {
                             tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: deadlock requeue failed");
                         }
+                    }
+                    Err(ApplyError::Invalid(msg)) => {
+                        tracing::error!(error = %msg, run_id = %result.run_id, "workflow_engine: invalid StepResult");
                     }
                     Err(ApplyError::Db(e)) => {
                         tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: apply failed");
@@ -1004,6 +1343,7 @@ fn spawn_heartbeat(
 
 #[derive(Debug)]
 enum ApplyError {
+    Invalid(String),
     Deadlock(String),
     Db(RegistryError),
 }
@@ -1018,6 +1358,7 @@ enum StepWriteOutcome {
 impl fmt::Display for ApplyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Invalid(msg) => write!(f, "invalid workflow StepResult: {msg}"),
             Self::Deadlock(msg) => write!(f, "deadlock: {msg}"),
             Self::Db(e) => write!(f, "{e}"),
         }
@@ -1048,6 +1389,7 @@ pub async fn apply_step_result(
     apply_step_result_on_registry(&state.registry, owner_id, result)
         .await
         .map_err(|e| match e {
+            ApplyError::Invalid(msg) => RegistryError::InvalidInput(msg),
             ApplyError::Deadlock(msg) => RegistryError::Database(format!("retryable deadlock: {msg}")),
             ApplyError::Db(e) => e,
         })
@@ -1058,7 +1400,11 @@ async fn apply_step_result_on_registry(
     owner_id: &str,
     mut result: StepResult,
 ) -> Result<bool, ApplyError> {
+    let (checkpoints, run_update) = fold_outcomes(&result.outcomes).map_err(ApplyError::Invalid)?;
+    result.checkpoints = checkpoints;
+    result.run_update = run_update;
     result.checkpoints.sort_by_key(|s| s.ordinal);
+    let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
     let mut conn = registry.conn().await.map_err(ApplyError::Db)?;
     let tx = conn.transaction().await.map_err(map_apply_error)?;
 
@@ -1089,7 +1435,13 @@ async fn apply_step_result_on_registry(
     }
 
     for checkpoint in &result.checkpoints {
-        match insert_resolved_step(&tx, checkpoint, &result.run_id, &result.dispatch_nonce)
+        match insert_resolved_step(
+            &tx,
+            checkpoint,
+            &result.run_id,
+            &result.dispatch_nonce,
+            batch_width,
+        )
             .await
             .map_err(ApplyError::Db)?
         {
@@ -1200,6 +1552,7 @@ async fn insert_resolved_step<C>(
     checkpoint: &StepCheckpoint,
     run_id: &str,
     batch_id: &str,
+    batch_width: i16,
 ) -> Result<StepWriteOutcome, RegistryError>
 where
     C: GenericClient + Sync,
@@ -1214,7 +1567,7 @@ where
         )
         .await
         .map_err(RegistryError::from)?;
-    if let Some(row) = existing.first() {
+    let resolves_running = if let Some(row) = existing.first() {
         let state: String = row.get("state");
         let name: String = row.get("name");
         let kind: String = row.get("kind");
@@ -1225,7 +1578,10 @@ where
         if !resolves_running {
             return Ok(StepWriteOutcome::Noop);
         }
-    }
+        true
+    } else {
+        false
+    };
 
     let delta = checkpoint_journal_bytes(conn, checkpoint).await?;
     if delta > 0 {
@@ -1254,27 +1610,47 @@ where
         }
     }
 
-    let changed = conn
-        .execute(
-        "INSERT INTO zeroship.workflow_steps \
+    let changed = if resolves_running {
+        conn.execute(
+            "UPDATE zeroship.workflow_steps \
+                SET state = $4, \
+                    output = $5, \
+                    error = $6, \
+                    wake_at = $7, \
+                    signal_type = $8, \
+                    max_signal_age_ms = $9, \
+                    consumed_signal_id = $10, \
+                    finished_at = now() \
+              WHERE run_id = $1 \
+                AND ordinal = $2 \
+                AND name = $3 \
+                AND kind = $11 \
+                AND state = 'running'",
+            &[
+                &run_id,
+                &checkpoint.ordinal,
+                &checkpoint.name,
+                &checkpoint.state,
+                &checkpoint.output,
+                &checkpoint.error,
+                &checkpoint.wake_at,
+                &checkpoint.signal_type,
+                &checkpoint.max_signal_age_ms,
+                &checkpoint.consumed_signal_id,
+                &checkpoint.kind,
+            ],
+        )
+        .await
+        .map_err(RegistryError::from)?
+    } else {
+        conn.execute(
+            "INSERT INTO zeroship.workflow_steps \
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
              output_kind, wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
              batch_id, batch_width, finished_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 'inline', $9, $10, $11, $12, $13, 1, now()) \
-         ON CONFLICT (run_id, ordinal) DO UPDATE SET \
-             state = EXCLUDED.state, \
-             output = EXCLUDED.output, \
-             error = EXCLUDED.error, \
-             wake_at = EXCLUDED.wake_at, \
-             signal_type = EXCLUDED.signal_type, \
-             max_signal_age_ms = EXCLUDED.max_signal_age_ms, \
-             consumed_signal_id = EXCLUDED.consumed_signal_id, \
-             finished_at = EXCLUDED.finished_at \
-           WHERE zeroship.workflow_steps.state = 'running' \
-             AND EXCLUDED.state IN ('completed', 'failed') \
-             AND zeroship.workflow_steps.name = EXCLUDED.name \
-             AND zeroship.workflow_steps.kind = EXCLUDED.kind",
+                 'inline', $9, $10, $11, $12, $13, $14, now()) \
+         ON CONFLICT (run_id, ordinal) DO NOTHING",
             &[
                 &run_id,
                 &checkpoint.ordinal,
@@ -1289,10 +1665,12 @@ where
                 &checkpoint.max_signal_age_ms,
                 &checkpoint.consumed_signal_id,
                 &batch_id,
+                &batch_width,
             ],
         )
         .await
-        .map_err(RegistryError::from)?;
+        .map_err(RegistryError::from)?
+    };
     if changed > 0 && delta > 0 {
         conn.execute(
             "UPDATE zeroship.workflow_runs \

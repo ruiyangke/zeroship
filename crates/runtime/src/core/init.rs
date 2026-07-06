@@ -496,7 +496,12 @@ class ZsWorkflowSuspendSignal extends Error {
     constructor(outcome) {
         super("workflow dispatch frontier reached");
         this.name = "SuspendSignal";
-        this.outcome = outcome;
+        const outcomes = Array.isArray(outcome) ? outcome : [outcome];
+        if (outcomes.length === 0) {
+            throw wfErr("workflow frontier batch cannot be empty", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        this.outcome = outcomes[0];
+        this.outcomes = outcomes;
     }
 }
 
@@ -569,52 +574,33 @@ class ZsJournalBackedStep {
     #stepsByOrdinal = new Map();
     #nameOccurrences = new Map();
     #cursor = 0;
-    #inStepBody = false;
+    #frontier = undefined;
+    #activeStepCallbacks = 0;
+    #callbackSyncDepth = 0;
+    #parallelIssueWindow = false;
+    #parallelIssueWindowToken = 0;
 
     constructor(steps) {
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
-    async run(name, configOrFn, maybeFn) {
+    run(name, configOrFn, maybeFn) {
         this.#assertNotNested();
         const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
         if (typeof fn !== "function") {
-            throw wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR");
+            return Promise.reject(wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
         }
         const issued = this.#issue(name, "run");
-        if (issued.record) return this.#resolveRecord(issued.record);
-        try {
-            this.#inStepBody = true;
-            const output = await fn();
-            throw new ZsWorkflowSuspendSignal({
-                kind: "run",
-                ordinal: issued.ordinal,
-                name,
-                nameOccurrence: issued.nameOccurrence,
-                state: "completed",
-                output,
-            });
-        } catch (e) {
-            if (e instanceof ZsWorkflowSuspendSignal) throw e;
-            throw new ZsWorkflowSuspendSignal({
-                kind: "run",
-                ordinal: issued.ordinal,
-                name,
-                nameOccurrence: issued.nameOccurrence,
-                state: "failed",
-                error: wfSerializeError(e),
-            });
-        } finally {
-            this.#inStepBody = false;
-        }
+        if (issued.record) return this.#recordPromise(issued.record);
+        return this.#registerFrontier(this.#runFrontier(issued, name, fn));
     }
 
-    async sleep(name, duration) {
+    sleep(name, duration) {
         this.#assertNotNested();
         const issued = this.#issue(name, "sleep");
         if (issued.record) {
-            if (issued.record.state === "completed") return;
-            throw new ZsWorkflowSuspendSignal({
+            if (issued.record.state === "completed") return Promise.resolve();
+            return this.#recordPromise(issued.record, {
                 kind: "sleep",
                 ordinal: issued.ordinal,
                 name,
@@ -623,7 +609,7 @@ class ZsJournalBackedStep {
                 wakeAt: issued.record.wakeAt ?? duration,
             });
         }
-        throw new ZsWorkflowSuspendSignal({
+        return this.#suspendFrontier({
             kind: "sleep",
             ordinal: issued.ordinal,
             name,
@@ -633,21 +619,41 @@ class ZsJournalBackedStep {
         });
     }
 
-    async sleepUntil(name, when) {
+    sleepUntil(name, when) {
+        this.#assertNotNested();
         const target = typeof when === "number" ? new Date(when) : when;
-        return this.sleep(name, target.toISOString());
+        const issued = this.#issue(name, "sleep");
+        if (issued.record) {
+            if (issued.record.state === "completed") return Promise.resolve();
+            return this.#recordPromise(issued.record, {
+                kind: "sleep",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "running",
+                wakeAt: issued.record.wakeAt ?? target.toISOString(),
+            });
+        }
+        return this.#suspendFrontier({
+            kind: "sleep",
+            ordinal: issued.ordinal,
+            name,
+            nameOccurrence: issued.nameOccurrence,
+            state: "running",
+            wakeAt: target.toISOString(),
+        });
     }
 
-    async waitForSignal(name, opts = {}) {
+    waitForSignal(name, opts = {}) {
         this.#assertNotNested();
         const issued = this.#issue(name, "wait_signal");
         if (issued.record) {
             if (issued.record.state === "completed") {
-                if (issued.record.output !== undefined) return issued.record.output;
-                return issued.record.consumedSignal ?? null;
+                if (issued.record.output !== undefined) return Promise.resolve(issued.record.output);
+                return Promise.resolve(issued.record.consumedSignal ?? null);
             }
-            if (issued.record.state === "failed") return this.#resolveRecord(issued.record);
-            throw new ZsWorkflowSuspendSignal({
+            if (issued.record.state === "failed") return this.#recordPromise(issued.record);
+            return this.#recordPromise(issued.record, {
                 kind: "wait_signal",
                 ordinal: issued.ordinal,
                 name,
@@ -659,7 +665,7 @@ class ZsJournalBackedStep {
                 topic: typeof opts.topic === "string" ? opts.topic : undefined,
             });
         }
-        throw new ZsWorkflowSuspendSignal({
+        return this.#suspendFrontier({
             kind: "wait_signal",
             ordinal: issued.ordinal,
             name,
@@ -672,12 +678,12 @@ class ZsJournalBackedStep {
         });
     }
 
-    async call(WorkflowClass, input, options) {
+    call(WorkflowClass, input, options) {
         this.#assertNotNested();
         const name = WorkflowClass.name ?? "Workflow";
         const issued = this.#issue(name, "child");
-        if (issued.record) return this.#resolveRecord(issued.record);
-        throw new ZsWorkflowSuspendSignal({
+        if (issued.record) return this.#recordPromise(issued.record);
+        return this.#suspendFrontier({
             kind: "child",
             ordinal: issued.ordinal,
             name,
@@ -687,6 +693,80 @@ class ZsJournalBackedStep {
             input,
             options,
         });
+    }
+
+    async #runFrontier(issued, name, fn) {
+        const bodyPromise = this.#invokeStepBody(fn);
+        try {
+            const output = await bodyPromise;
+            return {
+                kind: "run",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "completed",
+                output,
+            };
+        } catch (e) {
+            if (e instanceof ZsWorkflowSuspendSignal) throw e;
+            return {
+                kind: "run",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "failed",
+                error: wfSerializeError(e),
+            };
+        } finally {
+            bodyPromise.catch(() => {});
+            this.#activeStepCallbacks--;
+            if (this.#activeStepCallbacks === 0) {
+                this.#parallelIssueWindow = false;
+            }
+        }
+    }
+
+    #invokeStepBody(fn) {
+        this.#activeStepCallbacks++;
+        this.#parallelIssueWindow = true;
+        const issueWindowToken = ++this.#parallelIssueWindowToken;
+        queueMicrotask(() => {
+            if (this.#parallelIssueWindowToken === issueWindowToken) {
+                this.#parallelIssueWindow = false;
+            }
+        });
+
+        this.#callbackSyncDepth++;
+        try {
+            return Promise.resolve(fn());
+        } catch (e) {
+            return Promise.reject(e);
+        } finally {
+            this.#callbackSyncDepth--;
+        }
+    }
+
+    #suspendFrontier(outcome) {
+        return this.#registerFrontier(Promise.resolve(outcome));
+    }
+
+    #recordPromise(record, pendingOutcome) {
+        try {
+            return Promise.resolve(this.#resolveRecord(record, pendingOutcome));
+        } catch (e) {
+            if (e instanceof ZsWorkflowSuspendSignal) {
+                return this.#registerFrontier(Promise.resolve(e.outcome));
+            }
+            return Promise.reject(e);
+        }
+    }
+
+    #registerFrontier(outcome) {
+        const frontier = this.#frontier ??= new ZsFrontierCoordinator();
+        if (!frontier.sealed) {
+            frontier.add(outcome);
+        }
+        return frontier.promise;
     }
 
     #issue(name, kind) {
@@ -706,10 +786,10 @@ class ZsJournalBackedStep {
         return { ordinal, nameOccurrence, record };
     }
 
-    #resolveRecord(record) {
+    #resolveRecord(record, pendingOutcome) {
         if (record.state === "completed") return record.output;
         if (record.state === "failed") throw wfDeserializeError(record.error);
-        throw new ZsWorkflowSuspendSignal({
+        throw new ZsWorkflowSuspendSignal(pendingOutcome ?? {
             kind: record.kind === "child" ? "child" : record.kind,
             ordinal: record.ordinal,
             name: record.name,
@@ -726,9 +806,65 @@ class ZsJournalBackedStep {
     }
 
     #assertNotNested() {
-        if (this.#inStepBody) {
+        if (
+            this.#activeStepCallbacks > 0 &&
+            (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
+        ) {
             throw wfErr("workflow step methods cannot be called from inside a step body", 500, "WORKFLOW_DEFINITION_ERROR");
         }
+    }
+}
+
+class ZsFrontierCoordinator {
+    promise;
+    #pending = 0;
+    #sealed = false;
+    #settled = false;
+    #fatal = undefined;
+    #outcomes = [];
+    #reject = () => {};
+
+    constructor() {
+        this.promise = new Promise((_, reject) => {
+            this.#reject = reject;
+        });
+        queueMicrotask(() => this.seal());
+    }
+
+    get sealed() {
+        return this.#sealed;
+    }
+
+    add(outcome) {
+        if (this.#sealed) return;
+        this.#pending++;
+        outcome.then(
+            (settled) => {
+                this.#outcomes.push(settled);
+            },
+            (error) => {
+                this.#fatal ??= error;
+            },
+        ).finally(() => {
+            this.#pending--;
+            this.#maybeFinish();
+        });
+    }
+
+    seal() {
+        this.#sealed = true;
+        this.#maybeFinish();
+    }
+
+    #maybeFinish() {
+        if (this.#settled || !this.#sealed || this.#pending > 0) return;
+        this.#settled = true;
+        if (this.#fatal !== undefined) {
+            this.#reject(this.#fatal);
+            return;
+        }
+        this.#outcomes.sort((a, b) => a.ordinal - b.ordinal);
+        this.#reject(new ZsWorkflowSuspendSignal(this.#outcomes));
     }
 }
 
@@ -783,6 +919,27 @@ function workflowFrontierResult(envelope, outcome) {
     };
 }
 
+function workflowBatchResult(envelope, outcomes) {
+    const mapped = outcomes.map((outcome) => workflowFrontierResult(envelope, outcome));
+    const base = {
+        runId: envelope.runId,
+        dispatchNonce: envelope.nonce,
+        workflowName: envelope.workflowName,
+        outcomes: mapped,
+    };
+    return mapped.length === 1 ? { ...mapped[0], ...base } : base;
+}
+
+function workflowTerminalResult(envelope, outcome) {
+    return {
+        ...outcome,
+        runId: envelope.runId,
+        dispatchNonce: envelope.nonce,
+        workflowName: envelope.workflowName,
+        outcomes: [outcome],
+    };
+}
+
 export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
     if (envelope == null || typeof envelope !== "object") {
         throw wfErr("workflow dispatch envelope must be an object", 400, "INVALID_ARGUMENT");
@@ -797,22 +954,22 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
         }
         const step = new ZsJournalBackedStep(wfJournal(envelope));
         const output = await workflow.run(wfTrigger(envelope), step);
-        return {
+        return workflowTerminalResult(envelope, {
             kind: "RunCompleted",
             runId: envelope.runId,
             nonce: envelope.nonce,
             workflowName,
             output,
-        };
+        });
     } catch (e) {
-        if (e instanceof ZsWorkflowSuspendSignal) return workflowFrontierResult(envelope, e.outcome);
-        return {
+        if (e instanceof ZsWorkflowSuspendSignal) return workflowBatchResult(envelope, e.outcomes);
+        return workflowTerminalResult(envelope, {
             kind: "RunFailed",
             runId: envelope.runId,
             nonce: envelope.nonce,
             workflowName,
             error: wfSerializeError(e),
-        };
+        });
     }
 }
 "##;

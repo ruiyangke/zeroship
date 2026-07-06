@@ -210,81 +210,229 @@ fn workflow_worker_result_to_step_result(
 ) -> Result<Value, String> {
     let result: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
     if result.get("runUpdate").is_some() && result.get("dispatchNonce").is_some() {
-        return normalize_workflow_step_result(result);
+        let normalized = normalize_workflow_step_result(result)?;
+        let outcomes = legacy_step_result_to_outcomes(&normalized)?;
+        return Ok(serde_json::json!({
+            "runId": normalized
+                .get("runId")
+                .and_then(Value::as_str)
+                .unwrap_or(request.run_id.as_str()),
+            "dispatchNonce": normalized
+                .get("dispatchNonce")
+                .and_then(Value::as_str)
+                .unwrap_or(request.dispatch_nonce.as_str()),
+            "outcomes": outcomes,
+        }));
     }
 
-    let kind = result
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing kind".to_string())?;
     let run_id = result
         .get("runId")
         .and_then(Value::as_str)
         .unwrap_or(request.run_id.as_str());
     let nonce = result
-        .get("nonce")
+        .get("dispatchNonce")
+        .or_else(|| result.get("nonce"))
         .and_then(Value::as_str)
         .unwrap_or(request.dispatch_nonce.as_str());
 
-    let mut checkpoints = Vec::new();
-    let run_update = match kind {
-        "StepCompleted" => {
-            checkpoints.push(checkpoint_from_worker(&result, "run", "completed")?);
-            serde_json::json!({"state": "queued"})
-        }
-        "RunCompleted" => serde_json::json!({
-            "state": "completed",
-            "output": result.get("output").cloned().unwrap_or(Value::Null),
-        }),
-        "RunFailed" => {
-            if result.get("ordinal").is_some() && result.get("name").is_some() {
-                checkpoints.push(checkpoint_from_worker(&result, "run", "failed")?);
-            }
-            serde_json::json!({
-                "state": "failed",
-                "error": result.get("error").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type": "Error", "message": "workflow run failed"})
-                }),
-            })
-        }
-        "Sleep" => {
-            let mut checkpoint = checkpoint_from_worker(&result, "sleep", "running")?;
-            let wake_at = normalize_workflow_wake_at(result.get("wakeAt"))
-                .ok_or_else(|| "invalid sleep wakeAt".to_string())?;
-            checkpoint["wakeAt"] = wake_at.clone();
-            checkpoints.push(checkpoint);
-            serde_json::json!({
-                "state": "sleeping",
-                "wakeAt": wake_at,
-            })
-        }
-        "Wait" => {
-            let mut checkpoint = checkpoint_from_worker(&result, "wait_signal", "running")?;
-            let wake_at = normalize_workflow_wake_at(result.get("timeout"))
-                .ok_or_else(|| "invalid wait timeout".to_string())?;
-            checkpoint["signalType"] = result
-                .get("signalType")
-                .cloned()
-                .unwrap_or_else(|| result.get("name").cloned().unwrap_or(Value::Null));
-            checkpoint["wakeAt"] = wake_at.clone();
-            checkpoint["maxSignalAgeMs"] =
-                normalize_workflow_duration_ms(result.get("maxSignalAge"))
-                    .ok_or_else(|| "invalid wait maxSignalAge".to_string())?;
-            checkpoints.push(checkpoint);
-            serde_json::json!({
-                "state": "waiting",
-                "wakeAt": wake_at,
-            })
-        }
-        other => return Err(format!("unknown worker workflow result kind {other:?}")),
+    let outcomes = if let Some(outcomes) = result.get("outcomes") {
+        let outcomes = outcomes
+            .as_array()
+            .ok_or_else(|| "outcomes must be an array".to_string())?
+            .clone();
+        normalize_workflow_outcomes(outcomes)?
+    } else {
+        normalize_workflow_outcomes(vec![single_worker_result_to_outcome(&result)?])?
     };
 
     Ok(serde_json::json!({
         "runId": run_id,
         "dispatchNonce": nonce,
-        "checkpoints": checkpoints,
-        "runUpdate": run_update,
+        "outcomes": outcomes,
     }))
+}
+
+fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
+    let kind = result
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing kind".to_string())?;
+    match kind {
+        "StepCompleted" => Ok(serde_json::json!({
+            "kind": "StepCompleted",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "output": result.get("output").cloned().unwrap_or(Value::Null),
+        })),
+        "RunCompleted" => Ok(serde_json::json!({
+            "kind": "RunCompleted",
+            "output": result.get("output").cloned().unwrap_or(Value::Null),
+        })),
+        "RunFailed" => {
+            let mut outcome = serde_json::json!({
+                "kind": "RunFailed",
+                "error": result.get("error").cloned().unwrap_or_else(|| {
+                    serde_json::json!({"type": "Error", "message": "workflow run failed"})
+                }),
+            });
+            if result.get("ordinal").is_some() && result.get("name").is_some() {
+                outcome["ordinal"] = serde_json::json!(required_i64(result, "ordinal")?);
+                outcome["name"] = serde_json::json!(required_str(result, "name")?);
+                outcome["nameOccurrence"] =
+                    serde_json::json!(result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+            }
+            Ok(outcome)
+        }
+        "Sleep" => Ok(serde_json::json!({
+            "kind": "Sleep",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+        })),
+        "Wait" => Ok(serde_json::json!({
+            "kind": "Wait",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "signalType": result.get("signalType")
+                .cloned()
+                .unwrap_or_else(|| result.get("name").cloned().unwrap_or(Value::Null)),
+            "timeout": result.get("timeout").cloned().unwrap_or(Value::Null),
+            "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+            "maxSignalAge": result.get("maxSignalAge").cloned().unwrap_or(Value::Null),
+            "maxSignalAgeMs": result.get("maxSignalAgeMs").cloned().unwrap_or(Value::Null),
+            "topic": result.get("topic").cloned().unwrap_or(Value::Null),
+        })),
+        other => Err(format!("unknown worker workflow result kind {other:?}")),
+    }
+}
+
+fn normalize_workflow_outcomes(mut outcomes: Vec<Value>) -> Result<Vec<Value>, String> {
+    if outcomes.is_empty() {
+        return Err("workflow outcome batch is empty".to_string());
+    }
+    let last = outcomes.len() - 1;
+    for (idx, outcome) in outcomes.iter_mut().enumerate() {
+        let kind = outcome
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "outcome missing kind".to_string())?;
+        if kind != "StepCompleted" && idx != last {
+            return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
+        }
+        match kind {
+            "StepCompleted" | "RunCompleted" | "RunFailed" => {}
+            "Sleep" => {
+                let wake_at = normalize_workflow_wake_at(outcome.get("wakeAt"))
+                    .ok_or_else(|| "invalid sleep wakeAt".to_string())?;
+                outcome["wakeAt"] = wake_at;
+            }
+            "Wait" => {
+                let wake_at = normalize_workflow_wake_at(
+                    outcome.get("wakeAt").filter(|value| !value.is_null()).or_else(|| outcome.get("timeout")),
+                )
+                .ok_or_else(|| "invalid wait timeout".to_string())?;
+                outcome["wakeAt"] = wake_at;
+                outcome["signalType"] = outcome
+                    .get("signalType")
+                    .cloned()
+                    .unwrap_or_else(|| outcome.get("name").cloned().unwrap_or(Value::Null));
+                outcome["maxSignalAgeMs"] = normalize_workflow_duration_ms(
+                    outcome
+                        .get("maxSignalAgeMs")
+                        .filter(|value| !value.is_null())
+                        .or_else(|| outcome.get("maxSignalAge")),
+                )
+                .ok_or_else(|| "invalid wait maxSignalAge".to_string())?;
+            }
+            other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
+        }
+    }
+    Ok(outcomes)
+}
+
+fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> {
+    let mut outcomes = Vec::new();
+    let mut failed_checkpoint_encoded = false;
+    for checkpoint in result
+        .get("checkpoints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "legacy StepResult missing checkpoints".to_string())?
+    {
+        let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
+        match (kind, state) {
+            ("run", "completed") => outcomes.push(serde_json::json!({
+                "kind": "StepCompleted",
+                "ordinal": required_i64(checkpoint, "ordinal")?,
+                "name": required_str(checkpoint, "name")?,
+                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "output": checkpoint.get("output").cloned().unwrap_or(Value::Null),
+            })),
+            ("run", "failed") => {
+                failed_checkpoint_encoded = true;
+                outcomes.push(serde_json::json!({
+                    "kind": "RunFailed",
+                    "ordinal": required_i64(checkpoint, "ordinal")?,
+                    "name": required_str(checkpoint, "name")?,
+                    "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                    "error": checkpoint.get("error").cloned().unwrap_or_else(|| {
+                        serde_json::json!({"type": "Error", "message": "workflow step failed"})
+                    }),
+                }));
+            }
+            ("sleep", "running") => outcomes.push(serde_json::json!({
+                "kind": "Sleep",
+                "ordinal": required_i64(checkpoint, "ordinal")?,
+                "name": required_str(checkpoint, "name")?,
+                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "wakeAt": checkpoint.get("wakeAt").cloned().unwrap_or(Value::Null),
+            })),
+            ("wait_signal", "running") => outcomes.push(serde_json::json!({
+                "kind": "Wait",
+                "ordinal": required_i64(checkpoint, "ordinal")?,
+                "name": required_str(checkpoint, "name")?,
+                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "wakeAt": checkpoint.get("wakeAt").cloned().unwrap_or(Value::Null),
+                "signalType": checkpoint.get("signalType").cloned().unwrap_or(Value::Null),
+                "maxSignalAgeMs": checkpoint.get("maxSignalAgeMs").cloned().unwrap_or(Value::Null),
+                "consumedSignalId": checkpoint.get("consumedSignalId").cloned().unwrap_or(Value::Null),
+            })),
+            _ => {}
+        }
+    }
+
+    match result.pointer("/runUpdate/state").and_then(Value::as_str) {
+        Some("completed") => outcomes.push(serde_json::json!({
+            "kind": "RunCompleted",
+            "output": result.pointer("/runUpdate/output").cloned().unwrap_or(Value::Null),
+        })),
+        Some("failed") if !failed_checkpoint_encoded => outcomes.push(serde_json::json!({
+            "kind": "RunFailed",
+            "error": result.pointer("/runUpdate/error").cloned().unwrap_or_else(|| {
+                serde_json::json!({"type": "Error", "message": "workflow run failed"})
+            }),
+        })),
+        _ => {}
+    }
+
+    normalize_workflow_outcomes(outcomes)
+}
+
+fn required_i64(value: &Value, key: &str) -> Result<i64, String> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("missing {key}"))
+}
+
+fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing {key}"))
 }
 
 fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
@@ -431,30 +579,6 @@ fn parse_duration_number(raw: &str) -> Option<f64> {
     }
     let value = raw.parse::<f64>().ok()?;
     value.is_finite().then_some(value)
-}
-
-fn checkpoint_from_worker(result: &Value, kind: &str, state: &str) -> Result<Value, String> {
-    let ordinal = result
-        .get("ordinal")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "missing ordinal".to_string())?;
-    let name = result
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing name".to_string())?;
-    Ok(serde_json::json!({
-        "ordinal": ordinal,
-        "name": name,
-        "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
-        "kind": kind,
-        "state": state,
-        "output": result.get("output").cloned().unwrap_or(Value::Null),
-        "error": result.get("error").cloned().unwrap_or(Value::Null),
-        "wakeAt": Value::Null,
-        "signalType": Value::Null,
-        "maxSignalAgeMs": Value::Null,
-        "consumedSignalId": Value::Null,
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2554,7 +2678,8 @@ mod tests {
         let result: Value = serde_json::from_slice(&body).expect("StepResult JSON");
         assert_eq!(result["runId"], "run_test");
         assert_eq!(result["dispatchNonce"], "wfd_test");
-        assert_eq!(result["runUpdate"]["state"], "queued");
+        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][0]["name"], "first");
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
@@ -2584,11 +2709,11 @@ mod tests {
         )
         .expect("sleep result");
 
-        let wake_at = result["runUpdate"]["wakeAt"]
+        let wake_at = result["outcomes"][0]["wakeAt"]
             .as_str()
-            .expect("runUpdate wakeAt");
+            .expect("sleep wakeAt");
         assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
-        assert_eq!(result["checkpoints"][0]["wakeAt"], result["runUpdate"]["wakeAt"]);
+        assert_eq!(result["outcomes"][0]["kind"], "Sleep");
     }
 
     #[test]
@@ -2613,13 +2738,59 @@ mod tests {
         )
         .expect("wait result");
 
-        let wake_at = result["runUpdate"]["wakeAt"]
+        let wake_at = result["outcomes"][0]["wakeAt"]
             .as_str()
-            .expect("runUpdate wakeAt");
+            .expect("wait wakeAt");
         assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
-        assert_eq!(result["checkpoints"][0]["wakeAt"], result["runUpdate"]["wakeAt"]);
-        assert_eq!(result["checkpoints"][0]["signalType"], "go");
-        assert_eq!(result["checkpoints"][0]["maxSignalAgeMs"], 5_000);
+        assert_eq!(result["outcomes"][0]["kind"], "Wait");
+        assert_eq!(result["outcomes"][0]["signalType"], "go");
+        assert_eq!(result["outcomes"][0]["maxSignalAgeMs"], 5_000);
+    }
+
+    #[test]
+    fn workflow_batch_normalizes_only_trailing_suspension() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "output": "A"
+                },
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "output": "B"
+                },
+                {
+                    "kind": "Sleep",
+                    "ordinal": 2,
+                    "name": "cooldown",
+                    "nameOccurrence": 0,
+                    "wakeAt": "PT1S"
+                }
+            ]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("batch result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][1]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][2]["kind"], "Sleep");
+        let wake_at = result["outcomes"][2]["wakeAt"]
+            .as_str()
+            .expect("sleep wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
     }
 
     #[test]

@@ -218,11 +218,23 @@ export class SignalWorkflow {
   }
 }
 
+export class ConcurrentWorkflow {
+  async run(trigger, step) {
+    const [a, b, c] = await Promise.all([
+      step.run("a", () => bump(trigger.runId, "a")),
+      step.run("b", () => bump(trigger.runId, "b")),
+      step.run("c", () => bump(trigger.runId, "c")),
+    ]);
+    const final = await step.run("final", () => bump(trigger.runId, "final"));
+    return { a, b, c, final };
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
   },
-  workflows: { KeystoneWorkflow, SignalWorkflow },
+  workflows: { KeystoneWorkflow, SignalWorkflow, ConcurrentWorkflow },
 };
 EOF
 build_zship "$WORK/workflow.js" "$WORK/workflow.zship"
