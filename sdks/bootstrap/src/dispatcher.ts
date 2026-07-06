@@ -326,9 +326,54 @@ declare const globalThis: {
       }));
   }
 
+  class DispatchMicrotaskQuiescenceBarrier {
+    #version = 0;
+    #stopped = false;
+
+    markProgress(): void {
+      this.#version++;
+    }
+
+    stop(): void {
+      this.#stopped = true;
+      this.markProgress();
+    }
+
+    waitUntilBlocked(isLegalPending: () => boolean): Promise<never> {
+      return new Promise<never>((_, reject) => {
+        let lastVersion = this.#version;
+        let stableProbes = 0;
+        const probe = () => {
+          if (this.#stopped) return;
+          if (isLegalPending()) {
+            this.stop();
+            return;
+          }
+          if (this.#version !== lastVersion) {
+            lastVersion = this.#version;
+            stableProbes = 0;
+            queueMicrotask(probe);
+            return;
+          }
+          stableProbes++;
+          if (stableProbes >= 3) {
+            this.#stopped = true;
+            reject(new NondeterministicError(
+              "workflow body awaited non-step work outside the microtask replay boundary",
+            ));
+            return;
+          }
+          queueMicrotask(probe);
+        };
+        queueMicrotask(probe);
+      });
+    }
+  }
+
   class JournalBackedStep {
     readonly #stepsByOrdinal = new Map<number, JournalStepRecord>();
     readonly #nameOccurrences = new Map<string, number>();
+    readonly #quiescence: DispatchMicrotaskQuiescenceBarrier;
     #cursor = 0;
     #frontier: FrontierCoordinator | undefined;
     #activeStepCallbacks = 0;
@@ -336,12 +381,21 @@ declare const globalThis: {
     #parallelIssueWindow = false;
     #parallelIssueWindowToken = 0;
 
-    constructor(steps: JournalStepRecord[]) {
+    constructor(steps: JournalStepRecord[], quiescence: DispatchMicrotaskQuiescenceBarrier) {
+      this.#quiescence = quiescence;
       for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
-    get frontierPromise(): Promise<never> | undefined {
-      return this.#frontier?.promise;
+    get frontierDrainPromise(): Promise<never> | undefined {
+      return this.#frontier?.drainPromise;
+    }
+
+    get frontierObserved(): boolean {
+      return this.#frontier?.observed ?? false;
+    }
+
+    get frontierPending(): boolean {
+      return this.#frontier?.settled === false;
     }
 
     run<T>(
@@ -521,20 +575,28 @@ declare const globalThis: {
 
     #recordPromise<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): Promise<T> {
       try {
-        return brandStepPromise(Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome)));
+        return brandStepPromise(
+          Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome)),
+          () => this.#quiescence.markProgress(),
+        );
       } catch (e) {
         if (e instanceof SuspendSignal) {
           return this.#registerFrontier(Promise.resolve(e.outcome));
         }
-        return brandStepPromise(Promise.reject(e));
+        return brandStepPromise(
+          Promise.reject(e),
+          () => this.#quiescence.markProgress(),
+        );
       }
     }
 
     #registerFrontier<T>(outcome: Promise<FrontierOutcome>): Promise<T> {
-      const frontier = this.#frontier ??= new FrontierCoordinator();
+      const frontier = this.#frontier ??= new FrontierCoordinator(this.#quiescence);
       if (!frontier.sealed) {
         frontier.add(outcome);
       }
+      frontier.drainPromise.catch(() => {});
+      suppressUnhandledRejection(frontier.promise);
       return frontier.promise as Promise<T>;
     }
 
@@ -544,6 +606,7 @@ declare const globalThis: {
       record?: JournalStepRecord;
     } {
       const ordinal = this.#cursor++;
+      this.#quiescence.markProgress();
       const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
       this.#nameOccurrences.set(name, nameOccurrence + 1);
       const record = this.#stepsByOrdinal.get(ordinal);
@@ -592,6 +655,8 @@ declare const globalThis: {
 
   class FrontierCoordinator {
     readonly promise: Promise<never>;
+    readonly drainPromise: Promise<never>;
+    readonly #quiescence: DispatchMicrotaskQuiescenceBarrier;
     #pending = 0;
     #observed = false;
     #sealed = false;
@@ -600,11 +665,14 @@ declare const globalThis: {
     #outcomes: FrontierOutcome[] = [];
     #reject: (reason?: unknown) => void = () => {};
 
-    constructor() {
-      this.promise = brandStepPromise(new Promise<never>((_, reject) => {
+    constructor(quiescence: DispatchMicrotaskQuiescenceBarrier) {
+      this.#quiescence = quiescence;
+      this.drainPromise = new Promise<never>((_, reject) => {
         this.#reject = reject;
-      }), () => {
+      });
+      this.promise = brandStepPromise(this.drainPromise, () => {
         this.#observed = true;
+        this.#quiescence.markProgress();
       });
       queueMicrotask(() => {
         queueMicrotask(() => this.seal());
@@ -615,23 +683,35 @@ declare const globalThis: {
       return this.#sealed;
     }
 
+    get observed(): boolean {
+      return this.#observed;
+    }
+
+    get settled(): boolean {
+      return this.#settled;
+    }
+
     add(outcome: Promise<FrontierOutcome>): void {
       if (this.#sealed) return;
       this.#pending++;
       outcome.then(
         (settled) => {
+          this.#quiescence.markProgress();
           this.#outcomes.push(settled);
         },
         (error) => {
+          this.#quiescence.markProgress();
           this.#fatal ??= error;
         },
       ).finally(() => {
+        this.#quiescence.markProgress();
         this.#pending--;
         this.#maybeFinish();
       });
     }
 
     seal(): void {
+      this.#quiescence.markProgress();
       if (!this.#observed) {
         this.#fatal ??= new NondeterministicError(
           "workflow body awaited non-step work while a frontier was pending",
@@ -714,6 +794,10 @@ declare const globalThis: {
       this.#observed = true;
       this.#onObserve?.();
     }
+
+    suppressUnhandledRejection(): void {
+      super.then(undefined, () => {});
+    }
   }
 
   function brandStepPromise<T>(promise: Promise<T>, onObserve?: () => void): Promise<T> {
@@ -721,6 +805,14 @@ declare const globalThis: {
     return new WorkflowStepPromise<T>((resolve, reject) => {
       promise.then(resolve, reject);
     }, onObserve);
+  }
+
+  function suppressUnhandledRejection<T>(promise: Promise<T>): void {
+    if (promise instanceof WorkflowStepPromise) {
+      promise.suppressUnhandledRejection();
+      return;
+    }
+    promise.catch(() => {});
   }
 
   function resolveWorkflow(userNamespace: unknown, workflowName: string): { new(): { run?: unknown } } {
@@ -825,19 +917,27 @@ declare const globalThis: {
       if (typeof workflow.run !== "function") {
         throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
       }
-      const step = new JournalBackedStep(normalizeJournal(env));
+      const quiescence = new DispatchMicrotaskQuiescenceBarrier();
+      const step = new JournalBackedStep(normalizeJournal(env), quiescence);
+      const blockedByNonStepWork = quiescence.waitUntilBlocked(() => step.frontierObserved);
       let outputPromise: Promise<unknown>;
       try {
         outputPromise = Promise.resolve(workflow.run(buildTrigger(env), step));
       } catch (error) {
-        step.frontierPromise?.catch(() => {});
+        quiescence.stop();
+        blockedByNonStepWork.catch(() => {});
+        step.frontierDrainPromise?.catch(() => {});
         throw error;
       }
-      const frontierPromise = step.frontierPromise;
-      if (frontierPromise) {
-        outputPromise.catch(() => {});
+      outputPromise.then(
+        () => quiescence.stop(),
+        () => quiescence.stop(),
+      );
+      outputPromise.catch(() => {});
+      const frontierDrainPromise = step.frontierDrainPromise;
+      if (frontierDrainPromise) {
         await Promise.race([
-          frontierPromise,
+          frontierDrainPromise,
           outputPromise.then(
             () => {
               throw new NondeterministicError("workflow completed while a frontier was pending");
@@ -846,9 +946,13 @@ declare const globalThis: {
               throw error;
             },
           ),
+          blockedByNonStepWork,
         ]);
       }
-      const output = await outputPromise;
+      const output = await Promise.race([outputPromise, blockedByNonStepWork]);
+      if (step.frontierPending) {
+        throw new NondeterministicError("workflow completed while a frontier was pending");
+      }
       return terminalBatch(env, {
         kind: "RunCompleted",
         runId: env.runId,

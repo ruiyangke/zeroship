@@ -4,9 +4,13 @@ import { test } from "node:test";
 import type { FrontierOutcome, JournalEnvelope } from "../src/journal.ts";
 import {
   createJournalStep,
+  getJournalFrontierDrainPromise,
   isWorkflowStepPromise,
+  isJournalFrontierObserved,
+  isJournalFrontierPending,
   SuspendSignal,
   withWorkflowPromiseGuards,
+  WorkflowMicrotaskQuiescenceBarrier,
 } from "../src/journal.ts";
 import {
   NondeterministicError,
@@ -46,6 +50,53 @@ function assertCompletedRun(
   assert.equal(outcome.ordinal, expected.ordinal);
   assert.equal(outcome.name, expected.name);
   assert.deepEqual(outcome.output, expected.output);
+}
+
+async function runWithDispatcherDrain(
+  fn: (step: ReturnType<typeof createJournalStep>) => unknown | Promise<unknown>,
+  steps: JournalEnvelope["steps"] = [],
+): Promise<unknown> {
+  const quiescence = new WorkflowMicrotaskQuiescenceBarrier();
+  const step = createJournalStep(envelope(steps), quiescence);
+  const blockedByNonStepWork = quiescence.waitUntilBlocked(() =>
+    isJournalFrontierObserved(step)
+  );
+  let outputPromise: Promise<unknown>;
+  try {
+    outputPromise = Promise.resolve(fn(step));
+  } catch (e) {
+    quiescence.stop();
+    blockedByNonStepWork.catch(() => {});
+    getJournalFrontierDrainPromise(step)?.catch(() => {});
+    throw e;
+  }
+  outputPromise.then(
+    () => quiescence.stop(),
+    () => quiescence.stop(),
+  );
+  outputPromise.catch(() => {});
+
+  const frontierDrainPromise = getJournalFrontierDrainPromise(step);
+  if (frontierDrainPromise) {
+    await Promise.race([
+      frontierDrainPromise,
+      outputPromise.then(
+        () => {
+          throw new NondeterministicError("workflow completed while a frontier was pending");
+        },
+        (error) => {
+          throw error;
+        },
+      ),
+      blockedByNonStepWork,
+    ]);
+  }
+
+  const output = await Promise.race([outputPromise, blockedByNonStepWork]);
+  if (isJournalFrontierPending(step)) {
+    throw new NondeterministicError("workflow completed while a frontier was pending");
+  }
+  return output;
 }
 
 test("step.run journal hit returns memoized output without running fn", { timeout: TEST_TIMEOUT_MS }, async () => {
@@ -208,6 +259,56 @@ test("bare workflow-body await while a frontier is pending throws Nondeterminist
       await frontier;
     },
     NondeterministicError,
+  );
+});
+
+test("dispatcher drain does not mask stored step promise then bare await", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async (step) => {
+      const pending = step.run("first", () => "ok");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await pending;
+      return { unreachable: true };
+    }),
+    NondeterministicError,
+  );
+});
+
+test("dispatcher drain catches bare macrotask replay before any frontier exists", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async (step) => {
+      await step.run("first", () => "wrong");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await step.run("second", () => "second");
+      return { unreachable: true };
+    }, [
+      {
+        ordinal: 0,
+        name: "first",
+        nameOccurrence: 0,
+        kind: "run",
+        state: "completed",
+        output: "first",
+      },
+    ]),
+    NondeterministicError,
+  );
+});
+
+test("stored step promise awaited later without bare await suspends cleanly", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async (step) => {
+      const pending = step.run("first", () => "ok");
+      const syncOnly = "still synchronous";
+      await pending;
+      return syncOnly;
+    }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "first", output: "ok" });
+      return true;
+    },
   );
 });
 
