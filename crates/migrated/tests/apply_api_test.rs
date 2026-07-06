@@ -124,9 +124,68 @@ async fn ensure_migrated_service_tables(conn: &Client) {
     conn.batch_execute("SELECT pg_advisory_lock(7330067);")
         .await
         .expect("lock migrated service table setup");
-    conn.batch_execute(include_str!(
-        "../../../db/migrations/V0067__migrated_service.sql"
-    ))
+    conn.batch_execute(
+        r#"
+        CREATE SCHEMA IF NOT EXISTS zeroship;
+        CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+        CREATE TABLE IF NOT EXISTS zeroship.migrated_app_policies (
+          app_id uuid NOT NULL,
+          version bigint NOT NULL CHECK (version > 0),
+          raw_toml text NOT NULL,
+          parsed_profile jsonb NOT NULL,
+          effective_profile jsonb NOT NULL,
+          ceiling_id text NOT NULL,
+          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
+          submitted_by uuid NOT NULL,
+          submitted_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (app_id, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS zeroship.migrated_migrations (
+          app_id uuid NOT NULL,
+          migration_id uuid NOT NULL,
+          status text NOT NULL CHECK (
+            status IN ('submitted', 'pending_approval', 'approved', 'applied', 'failed')
+          ),
+          request_body jsonb NOT NULL,
+          effective_profile jsonb NOT NULL,
+          ceiling_id text NOT NULL,
+          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
+          gated_versions jsonb NOT NULL DEFAULT '[]'::jsonb,
+          submitted_by uuid NOT NULL,
+          submitted_at timestamptz NOT NULL DEFAULT now(),
+          approved_by uuid,
+          approved_at timestamptz,
+          applied_at timestamptz,
+          last_error text,
+          PRIMARY KEY (app_id, migration_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS zeroship.migrated_migration_audit (
+          audit_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          app_id uuid NOT NULL,
+          migration_id uuid NOT NULL,
+          migration_versions jsonb NOT NULL DEFAULT '[]'::jsonb,
+          action text NOT NULL CHECK (action IN ('submit', 'reject_pending', 'approve', 'apply')),
+          outcome text NOT NULL,
+          principal_id uuid NOT NULL,
+          effective_profile jsonb NOT NULL,
+          sealed_profile jsonb,
+          ceiling_id text NOT NULL,
+          ceiling_version bigint NOT NULL CHECK (ceiling_version > 0),
+          detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+
+        CREATE INDEX IF NOT EXISTS migrated_app_policies_app_submitted_idx
+          ON zeroship.migrated_app_policies (app_id, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS migrated_migrations_app_status_idx
+          ON zeroship.migrated_migrations (app_id, status, submitted_at DESC);
+        CREATE INDEX IF NOT EXISTS migrated_migration_audit_app_idx
+          ON zeroship.migrated_migration_audit (app_id, migration_id, created_at);
+        "#,
+    )
     .await
     .expect("ensure migrated service tables");
     conn.batch_execute("SELECT pg_advisory_unlock(7330067);")

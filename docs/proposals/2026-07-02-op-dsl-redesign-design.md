@@ -5,7 +5,7 @@
 - **Decision:** REWRITE the authoring surface + IR wire shape (one clean pre-launch break, `ir_version: 2`); KEEP the engine spine (validate → lower → render → apply, capability gates, expand/contract machinery, multi-dialect backends) unchanged in kind.
 - **Resolves:** `OPS_DSL_CRITIQUE.md` (all 10 ranked findings + the verdict-level coverage demand)
 - **Supersedes as normative:** `docs/proposals/2026-06-23-js-op-dsl-migration-design-normative.md`, `docs/proposals/2026-06-25-op-dsl-fluent-redesign.md`, `docs/proposals/2026-06-26-sql-features-structured-dsl-design.md` (all become historical once this lands)
-- **Acceptance corpus:** this repo's Liquibase platform changelog (`db/changelog`) — the `control`, `auth`, and per-app schemas. **Sandbox `V0011`–`V0024` are explicitly OUT of scope** (see the corrected §8 note): per AGENTS.md the sandbox is extracted to the sibling `zeroship-sandbox` repo, owns its own `sandbox_*` roles/migrations, and is deferred — it adopts this DSL independently on its own timeline. Scoping to per `docs/proposals/2026-06-25-vendor-pg-primitives.md`'s rebaseline end state.
+- **Acceptance corpus:** this repo's committed platform JS DSL corpus in `db/migrations-ts/` — the `control`, `auth`, per-app, and platform role/grant schemas. The legacy Liquibase/SQL corpus is retired; this `.ts` corpus is the platform source of truth. Scoping follows `docs/proposals/2026-06-25-vendor-pg-primitives.md`'s rebaseline end state.
 <!-- Revised 2026-07-02: addressing critic MINOR #6 — sandbox is a sibling repo per AGENTS.md; removing it from this repo's port corpus resolves the scope-boundary ambiguity. -->
 
 > **Revision note (2026-07-02).** This draft was revised against a feasibility review that verified claims against `crates/zeroship-migrate/src/render/{step.rs,sql_preview.rs,lower.rs}` and `src/model/{ir.rs,validate.rs}`. The review's load-bearing finding is confirmed by the code: the SQLite 12-step rebuild is a **live-state-dependent** lowering (`LiveSchema.tables → TableSnapshot`, `sql_preview.rs:412`), rendered offline only as a `-- [runtime-resolved]` label. The prior draft's "validity == renderability, render must always succeed from IR alone" mechanism was therefore false for the entire SQLite ALTER-add-constraint / rename / online-type-change / enum-rewrite class. §2.4, §5.2, §8, §9, §10, §12 are rewritten around a **two-mode render model** (offline-deterministic vs live-resolved) that matches the engine. Every criticism is tracked to a section below.
@@ -51,10 +51,9 @@ platform schema. Ten findings, all verified against the repo:
 ### 1.2 The platform-rebaseline forcing function
 
 The vendor-pg-primitives track (`docs/proposals/2026-06-25-vendor-pg-primitives.md`) commits us
-to retiring the Liquibase changelog: this repo's platform schema — roles, grants, RLS, policies,
-functions, triggers, extensions — must be authorable in this DSL, with **catalog-level pg_dump
-equivalence** (§8) against the Liquibase-applied baseline as the exit gate. (The sandbox
-`V0011`–`V0024` role machinery is **excluded** — sibling `zeroship-sandbox` repo, §header/§8.)
+to the rebaselined platform JS DSL corpus: this repo's platform schema — roles, grants, RLS,
+policies, functions, triggers, extensions — must be authorable from `db/migrations-ts/`, with
+live Platform-profile apply and catalog-level drift gates (§8) as the exit criteria.
 
 Today that port is impossible without `pg.raw` becoming routine, exactly the smell the critique
 names: BRIN/covering indexes on event tables, composite FKs, rendered checks, partitioned usage
@@ -91,7 +90,7 @@ support declarations with an exhaustive **mode-aware** render-matrix test (valid
 *applicability*, two render modes — §5.2, not the earlier "validity == renderability"); a
 two-tier derived expression AST; boundary carried by API shape with the capability double-gate
 kept as defense-in-depth; binds deleted end-to-end; a single compiled recorder artifact; the
-Liquibase corpus + pg_dump-zero-diff + raw budget; the `@zeroship/backfill` rename. The
+platform JS DSL corpus + catalog-drift gate + raw budget; the `@zeroship/backfill` rename. The
 decision therefore reduces to the authoring surface, where the rewrite wins on structural
 grounds:
 
@@ -348,7 +347,7 @@ portable enum evolution stays in `op.enum`; PG type objects stay in `pg.*`.
 ### 4.5 Operator vendor: domains, sequences, partitioning, rich indexes, RLS/policy, function/trigger, grants
 
 ```ts
-// db/migrations/0300_audit_log.ts — Trusted/Platform profile only
+// db/migrations-ts/0300_audit_log.ts — Trusted/Platform profile only
 import { pg } from "@zeroship/migrate/pg";
 import { t } from "@zeroship/migrate";
 
@@ -877,14 +876,15 @@ No third state remains.
 
 ## 8. Coverage matrix (construct → structured?)
 
-Scoping instrument and acceptance corpus: **this repo's Liquibase changelog** (`db/changelog` —
-`control`/`auth`/per-app; sandbox `V0011`–`V0024` are **excluded**, owned by the sibling
-`zeroship-sandbox` repo per AGENTS.md, §header note).
+Scoping instrument and acceptance corpus: **this repo's platform JS DSL corpus** in
+`db/migrations-ts/` (`control`/`auth`/per-app plus platform roles/grants). The retired SQL and
+Liquibase corpora are not platform sources.
 
 <!-- Revised 2026-07-02: addressing critic MAJOR #1 — the "normalizer" was the load-bearing, unspecified component of the primary exit gate. Specified as a catalog-level comparator with an explicit semantic/cosmetic boundary. Grounded in Atlas/migra, which compare parsed catalog objects, not text. -->
-**Exit gate: catalog-level zero-diff, not text-diff.** Apply the ported `.ts` set and the Liquibase
-baseline to two fresh DBs; `pg_dump --schema-only` **both**; **parse each dump into a normalized
-catalog model** (the same object model `drift` uses, §10.3) and assert **structural equality**.
+**Exit gate: live Platform apply plus catalog-level drift, not text-diff.** Apply the
+`db/migrations-ts/` set to a fresh DB under `--profile platform`; `pg_dump --schema-only` the
+result; **parse the dump into a normalized catalog model** (the same object model `drift` uses,
+§10.3) and assert the committed platform schema state is structurally clean.
 This follows Atlas/migra, which compare *parsed schema objects*, not dump text — the only defensible
 way to get to zero without a normalizer so aggressive it hides real divergence. The boundary is
 **enumerated in the spec, not left to a hand-wave**:
@@ -909,11 +909,11 @@ This `pg_dump` comparator is the **Postgres corpus gate**. It is not reused for 
 uses a dialect-specific catalog introspector (§10.3, §12.1) that normalizes `information_schema` /
 `SHOW CREATE` output into the shared `SchemaState` object model for MySQL-supported constructs.
 
-**Debugging a non-zero diff (per-changeset bisection, Missing Concept #2).** With 100+ ported
-changesets a single non-zero cell is otherwise a needle in a haystack. The gate runs **incrementally**:
-it replays the Liquibase baseline and the `.ts` port **changeset-by-changeset in dependency order**,
-snapshotting the catalog model after each, and reports the **first changeset index** whose post-state
-diverges, with the specific object + field. Attribution is per-changeset, not per-corpus.
+**Debugging a non-zero diff (per-file bisection, Missing Concept #2).** With the full platform
+corpus a single non-zero cell is otherwise a needle in a haystack. The gate runs **incrementally**:
+it records/applies the `.ts` corpus file-by-file in dependency order, snapshotting the catalog model
+after each, and reports the **first migration file** whose post-state diverges, with the specific
+object + field. Attribution is per-file, not per-corpus.
 
 Legend: **Core** = creator-reachable structured (`op.*`) whose object roots have a portable base
 form; per-terminal/option support is shown by the dialect cells. **Vendor** = structured on
@@ -1410,10 +1410,10 @@ discipline: `cargo test -p zeroship-migrate` (all targets, live PG :5440 for DB 
   with journaled recovery, advisory-lock yielding (§9.4), + live-PG crash tests; the MySQL
   per-statement journaling + fail-mark/repair path + MySQL drift adapter (§10.3) +
   `MYSQL_MULTI_DDL_MIGRATION` lint (§12.1).
-- **P5 — corpus port + gates (large, long-tail).** Port this repo's Liquibase changelog
-  (`control`/`auth`/per-app; **sandbox `V0011`–`V0024` excluded** — sibling repo); the
+- **P5 — corpus gates (large, long-tail).** Keep this repo's `db/migrations-ts/` platform corpus
+  (`control`/`auth`/per-app plus platform roles/grants) structurally authored in the DSL; the
   **catalog-level pg_dump-equivalence comparator** (§8, parse-to-object-model, semantic/cosmetic
-  boundary, per-changeset bisection) + zero-diff gate; the object-dependency topo-sort (§8.1);
+  boundary, per-file bisection) + zero-diff gate; the object-dependency topo-sort (§8.1);
   `raw-budget.toml` + CI raw gate; the `xtask gen-migrate-docs` generator + CI export-diff gate
   (§10.6); `@zeroship/backfill` rename with all callers updated.
 - **P6 — expand/contract polish (small-medium).** Online setType phasing; NOT VALID/VALIDATE
@@ -1438,7 +1438,7 @@ Ranked, with mitigations:
    comparator specified in §8** — parse both dumps to a normalized object model (Atlas/migra
    approach), with an **enumerated semantic-vs-cosmetic boundary** (never normalizing type/
    nullability/default-value/predicate/columns), the raw `diff -u` retained as audit artifact, the
-   §8.1 dependency topo-sort as the principled basis for order-normalization, and **per-changeset
+   §8.1 dependency topo-sort as the principled basis for order-normalization, and **per-file
    bisection** for attribution; the ≤5 enumerated raw budget as the honest escape while coverage
    catches up. *Residual:* the comparator's normalization rules are themselves a surface that must
    be conservative-by-default (a rule ships only with a proof the two inputs are semantically
@@ -1479,10 +1479,11 @@ Ranked, with mitigations:
 
 ## 15. Success criteria (exit gates, adopted verbatim from the brief)
 
-1. Platform-schema port: this repo's Liquibase changelog (sandbox excluded, §8) authorable with
-   ≤5 `pg.raw` ops (target 0, each enumerated with a reason), **catalog-level** pg_dump diff of
-   ZERO vs the Liquibase baseline (parse-to-object-model comparator, §8; raw `diff -u` retained as
-   audit artifact; per-changeset bisection on any non-zero).
+1. Platform-schema corpus: this repo's `db/migrations-ts/` platform migrations remain authorable
+   with ≤5 `pg.raw` ops (target 0, each enumerated with a reason), apply cleanly under
+   `--profile platform`, and produce a **catalog-level** pg_dump drift result of ZERO
+   (parse-to-object-model comparator, §8; raw `diff -u` retained as audit artifact;
+   per-file bisection on any non-zero).
 2. Zero *unexpected* late-lowering failures: the mode-aware exhaustive matrix test (§5.2 —
    `Offline` ops golden-render, `LiveResolved` ops golden-lower over a fixture `LiveSchema` + emit
    the `-- [runtime-resolved]` plan line); `ExprRenderDeferred` and all accepted-then-refused arms

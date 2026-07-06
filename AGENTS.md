@@ -39,7 +39,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
-| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` |
+| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
@@ -52,7 +52,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
-| **Sandbox / preview backend** (controller, in-VM agent, Nomad+Cloud-Hypervisor driver) | **Moved to the standalone `zeroship-sandbox` project** (sibling repo) — not built by this repo. The control plane reaches it over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`); it uses this deployment's shared Postgres via the `sandbox_*` roles (`db/migrations/V0011`–`V0024`). |
+| **Sandbox / preview backend** (controller, in-VM agent, Nomad+Cloud-Hypervisor driver) | **Moved to the standalone `zeroship-sandbox` project** (sibling repo) — not built by this repo. The control plane reaches it over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`); it uses this deployment's shared Postgres via the `sandbox_*` roles defined in `db/migrations-ts/20260702000100_schema_roles_extensions.ts` and granted in `db/migrations-ts/20260702000900_grants.ts`. |
 | **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
 | **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
 | **AI-builder competitive landscape** | `docs/research/ai-builder-features.md` |

@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# zeroship platform image — builds all SIX binaries:
+# zeroship platform image — builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
 #   zeroship (CLI), zeroship-migrate (DB migration runner — the compose
-#   `migrate` service runs it under the Platform trust profile).
+#   `migrate` service runs it under the Platform trust profile), and
+#   zeroship-migrate-recorder-child (sandboxed JS DSL recorder for platform
+#   `.ts` migrations).
 #
 # NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
 # now lives in the standalone `zeroship-sandbox` project and is built/shipped
@@ -79,7 +81,7 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrate
+    -p zeroship-migrate --bins
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image.
@@ -93,8 +95,10 @@ COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
-# The DB migration runner the compose `migrate` service invokes.
+# The DB migration runner the compose `migrate` service invokes, plus the
+# recorder child it execs for platform JS DSL migrations.
 COPY --from=builder /build/target/release/zeroship-migrate /usr/local/bin/
+COPY --from=builder /build/target/release/zeroship-migrate-recorder-child /usr/local/bin/
 # The prebuilt console .zship (built in the `sdks` node stage). Control's
 # `--bootstrap-console --console-zship /opt/zeroship/console/app.zship` ingests
 # it at boot to seed the gateway-fronted console app.

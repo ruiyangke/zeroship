@@ -586,48 +586,11 @@ fn single_step_facade_yields_migration_for_sql_plan_and_fails_closed_otherwise()
 }
 
 // ---------------------------------------------------------------------------
-// (7a) single-step-shape precondition over the REAL platform changelog: every
-//      `.sql` in platform Flyway-mode lowers to a plan whose steps == [Ddl(_)],
-//      proving `single_step()`'s Err(NotSingleStep) arm is unreachable there.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn every_platform_changelog_sql_lowers_to_a_single_step_plan() {
-    // The concrete platform changelog dir is an UNTRACKED build artifact — not all
-    // checkouts have it. Gate on its existence (mirroring `loaded_platform_changelog`)
-    // so the suite is not brittle to its absence; the GENERATED-Flyway property test
-    // `generated_flyway_dirs_always_lower_to_single_step_plans` is the changelog-dir-
-    // independent proof that `single_step()`'s Err arm is unreachable on the .sql path.
-    let Ok(dir) = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../db/migrations")
-        .canonicalize()
-    else {
-        eprintln!("skipping: ../../db/migrations not present in this checkout");
-        return;
-    };
-    let plans = zeroship_migrate::load_dir(&dir).expect("platform changelog loads");
-    assert!(!plans.is_empty(), "the platform changelog is non-empty");
-    for plan in &plans {
-        assert!(
-            plan.is_single_step(),
-            "platform changelog version {} must lower to exactly one Ddl step \
-             (single_step()'s Err arm must be unreachable on the platform path); \
-             got {} steps",
-            plan.version.as_str(),
-            plan.steps.len()
-        );
-        // And the facade actually yields that one migration (never the Err arm).
-        plan.single_step_migration()
-            .expect("platform single-step facade yields its migration");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // (7a, spec test #7) PROPERTY TEST over GENERATED Flyway-mode `.sql` dirs:
 // every plan `load_dir` produces from a `.sql` path lowers to a single Ddl step,
 // so `AppliedPlan::single_step()`'s `Err(NotSingleStep)` arm is UNREACHABLE on the
-// `.sql` path — and the proof does NOT depend on the one untracked concrete
-// `db/migrations` dir. A small deterministic LCG generates random valid Flyway
+// `.sql` path — and the proof does NOT depend on any concrete platform migration
+// directory. A small deterministic LCG generates random valid Flyway
 // dirs (1..N versioned `V<NNNN>__<desc>.sql` files, some with `.down.sql`, some
 // `R__` repeatables) into a tempdir, loads them, and asserts `is_single_step()`
 // on every plan.
