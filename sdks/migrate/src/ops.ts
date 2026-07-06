@@ -29,7 +29,6 @@
 // throws a structured `OP_OUTSIDE_RECORDER`.
 
 import type {
-  AggNamespace,
   BackfillArgs,
   CheckBuilderWithPg,
   CheckDef,
@@ -1093,7 +1092,8 @@ function validateDefaultExpr(expr: Node): void {
       case "colRef":
         throw structuredError("OP_INVALID", "a column default cannot reference a column");
       case "agg":
-        throw structuredError("OP_INVALID", "a column default cannot use an aggregate");
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        return;
       case "literal":
         return;
       case "fnCall": {
@@ -1836,6 +1836,21 @@ class ExprChainImpl implements ExprChainType {
       args: [this.__node, { node: "literal", value: delim }, { node: "literal", value: n }],
     });
   }
+  count(opts?: { distinct?: boolean }) {
+    return aggNode("count", this.__node, opts);
+  }
+  sum(opts?: { distinct?: boolean }) {
+    return aggNode("sum", this.__node, opts);
+  }
+  avg(opts?: { distinct?: boolean }) {
+    return aggNode("avg", this.__node, opts);
+  }
+  min(opts?: { distinct?: boolean }) {
+    return aggNode("min", this.__node, opts);
+  }
+  max(opts?: { distinct?: boolean }) {
+    return aggNode("max", this.__node, opts);
+  }
 }
 
 export function check(name: string, expr: CheckExprFn): CheckDef {
@@ -1852,6 +1867,10 @@ export function lit(value: ScalarValue): ExprChainType {
 
 export function concatWs(sep: unknown, ...parts: unknown[]): ExprChainType {
   return chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] });
+}
+
+export function countStar(): ExprChainType {
+  return aggNode("count", undefined);
 }
 
 /**
@@ -1903,26 +1922,18 @@ export function dialect(legs: {
   return chain(node);
 }
 
-// The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
-// records `count(*)`; a present arg records `<func>(<arg>)`. The optional
+// PORTABLE aggregate nodes (§3.4/§3.6). Receiver chain methods record
+// `<func>(<receiver>)`; countStar() records `count(*)`. The optional
 // `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
 // count/sum/avg/min/max are byte-identical SQL on PG/SQLite/MySQL — no dialect
-// gate. The "aggregate only valid in a grouped/SELECT context" check is a
-// Phase-2 obligation; the recorder builds the node structurally here.
+// gate. Immutable/default scalar contexts reject them in Rust validate; grouped
+// SELECT/HAVING legality remains a Phase-2 obligation.
 function aggNode(func: "count" | "sum" | "avg" | "min" | "max", expr: unknown, opts?: { distinct?: boolean }): ExprChainType {
   const node: Node = { node: "agg", func };
   if (expr !== undefined) node.arg = exprArg(expr);
   if (opts && opts.distinct === true) node.distinct = true;
   return chain(node);
 }
-
-const agg: AggNamespace = {
-  count: (expr, opts) => aggNode("count", expr, opts),
-  sum: (expr, opts) => aggNode("sum", expr, opts),
-  avg: (expr, opts) => aggNode("avg", expr, opts),
-  min: (expr, opts) => aggNode("min", expr, opts),
-  max: (expr, opts) => aggNode("max", expr, opts),
-};
 
 type CaseExprArgs = {
   branches: Array<{ when: unknown; then: unknown }>;
@@ -1997,19 +2008,14 @@ function domainValueBuilder(): DomainValueBuilder {
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.case = caseExpr;
-  c.agg = agg;
   return c;
 }
 
-// The standalone `c.case` / `c.agg` builders surfaced at a value position
-// (`cCase(...)`, `cAgg.count(...)`) — the SAME objects installed on the
-// `(c) => Expr` builder above. These are exported for the engine-embedded
-// recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
-// which requires the full engine-consumed surface. Not re-exported through the
-// SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
-// surface decision.
+// The standalone `c.case` builder surfaced at a value position (`cCase(...)`) is
+// exported for the engine-embedded recorder bundle (`src/embedded-recorder.ts`,
+// the `include_str!`'d artifact), which requires the full engine-consumed
+// surface. Not re-exported through the SDK public `.` entry (`index.ts`).
 export const cCase = caseExpr;
-export const cAgg = agg;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
@@ -2128,7 +2134,8 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
       case "literal":
         return;
       case "agg":
-        rejectImmutableExpr(position, "aggregates are not allowed here");
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        return;
       case "fnCall": {
         if (n.fn === "currentSetting" || n.fn === "currentUser") {
           rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);

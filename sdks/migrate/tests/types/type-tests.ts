@@ -38,6 +38,7 @@ import {
   currentSetting,
   currentUser,
   interval,
+  countStar,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
@@ -330,14 +331,11 @@ export function immutableOnlyBuilderSlots(): void {
 
   pgTable("users").index("bad_partial_now").add({ on: ["email"], where: () => now() });
 
-  // @ts-expect-error — generated column expressions cannot use aggregates.
-  t.int().generated((c) => c.agg.count());
+  t.int().generated(() => countStar());
 
-  // @ts-expect-error — index expression elements cannot use aggregates.
-  table("users").index("bad_index_agg").add({ on: [{ expr: (c) => c.agg.count() }] });
+  table("users").index("bad_index_agg").add({ on: [{ expr: () => countStar() }] });
 
-  // @ts-expect-error — partial-index predicates cannot use aggregates.
-  pgTable("users").index("bad_partial_agg").add({ on: ["email"], where: (c) => c.agg.count() });
+  pgTable("users").index("bad_partial_agg").add({ on: ["email"], where: () => countStar() });
 }
 
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
@@ -492,8 +490,7 @@ export function checkExpressionSurfaceTypechecks(): void {
     ],
   });
 
-  // @ts-expect-error — core CHECK builders do not expose aggregates.
-  table("oauth_authorization_codes").check("no_agg").add({ expr: (c) => c.agg.count().gt(0) });
+  table("oauth_authorization_codes").check("no_agg").add({ expr: () => countStar().gt(0) });
 
   table("oauth_authorization_codes").check("no_now").add({ expr: () => now().isNotNull() });
 
@@ -582,8 +579,7 @@ export function domainValueCheckSurfaceTypechecks(): void {
 
   domain("bad_domain_agg").create({
     as: t.text(),
-    // @ts-expect-error — DomainValueBuilder has no aggregate namespace.
-    check: (v) => v.agg.count().gt(0),
+    check: (v) => v.count().gt(0),
   });
 }
 
@@ -633,8 +629,7 @@ export function insertValueShapes(): void {
   // @ts-expect-error — DefaultBuilder is not callable; defaults cannot reference columns.
   table("users").create({ columns: { name_copy: t.text().default((c) => c("name")) } });
 
-  // @ts-expect-error — DefaultBuilder has no aggregate namespace.
-  table("users").create({ columns: { n: t.int().default((c) => c.agg.count()) } });
+  table("users").create({ columns: { n: t.int().default(() => countStar()) } });
 
   // @ts-expect-error — a default callback must return an expression, not a scalar.
   table("users").create({ columns: { count: t.int().default(() => 1) } });

@@ -138,6 +138,7 @@ The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 | `t` | the immutable column-type lexicon |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
+| `countStar` | receiver-less aggregate helper for `COUNT(*)`; receiver aggregates are `ExprChain` methods |
 
 `table(name, { schema? })` returns a handle whose methods are the whole DDL+DML
 surface (see [The `table()` surface](#the-table-surface)). The handle's terminals
@@ -147,6 +148,8 @@ across statements ([Var-assign + reuse](#var-assign--reuse)).
 There is **no scalar-function namespace**: scalar functions with a natural receiver are
 chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
 The one receiver-less scalar helper is the top-level `concatWs(...)` import.
+Aggregates follow the same receiver-first shape (`c("x").sum()`, `c("x").count({ distinct: true })`);
+receiver-less `COUNT(*)` is the top-level `countStar()` import.
 
 ## Names are strings (and why)
 
