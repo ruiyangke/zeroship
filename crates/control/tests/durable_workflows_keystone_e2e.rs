@@ -1,0 +1,761 @@
+//! DW-07 durable-workflows M1 keystone e2e.
+//!
+//! This test is driven by `tests/e2e_durable_workflows.sh`. It expects that
+//! script to boot a migrated disposable Postgres on :5440, deploy a real
+//! workflow .zship, and keep real gateway + worker processes running.
+
+#![allow(clippy::await_holding_lock, clippy::future_not_send)]
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use compio_postgres::{connect, NoTls};
+use futures::channel::oneshot;
+use uuid::Uuid;
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::cron::workflow_engine::{
+    self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
+    WorkflowEngineConfig,
+};
+use zeroship_control::{
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+};
+
+const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+const WORKFLOW_NAME: &str = "KeystoneWorkflow";
+
+fn enabled() -> bool {
+    std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
+}
+
+fn required_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set by e2e harness"))
+}
+
+fn tmpdir(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "zs-dw07-{label}-{}",
+        Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&path).expect("mkdir tmp");
+    path
+}
+
+struct Fixture {
+    state: Arc<AppState>,
+    pg: Arc<compio_postgres::Client>,
+    blob_root: PathBuf,
+    deploy_tmp_dir: PathBuf,
+    app_id: Uuid,
+    deploy_id: String,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.blob_root);
+        let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
+    }
+}
+
+async fn pg(db_url: &str) -> compio_postgres::Client {
+    let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
+
+async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id: String) -> Fixture {
+    let blob_root = tmpdir("control-blob");
+    let deploy_tmp_dir = tmpdir("deploy");
+    let registry = Registry::new(db_url).await.expect("registry");
+    common::ensure_builtin_plans(&registry).await;
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, true).expect("env store");
+    let stripe_store = StripeStore::new(registry.clone());
+    let blob_store: Arc<dyn BlobStore> =
+        Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let control_pg = Arc::new(pg(db_url).await);
+
+    Fixture {
+        state: Arc::new(AppState {
+            registry,
+            env_store,
+            stripe_store,
+            blob_store,
+            control_key: SecretString::new("test-control-key".to_string()),
+            master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
+            stripe_webhook_secret: SecretString::new(String::new()),
+            stripe_secret_key: SecretString::new(String::new()),
+            stripe_base_url: "http://127.0.0.1:9".to_string(),
+            gateway_url: gateway_url.trim_end_matches('/').to_string(),
+            worker_urls: Vec::new(),
+            worker_key: SecretString::new(String::new()),
+            admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            insecure_dev: true,
+            trust_proxy: false,
+            deploy_tmp_dir: deploy_tmp_dir.clone(),
+            control_pg: Arc::clone(&control_pg),
+            app_base_domain: "zeroship.localhost".to_string(),
+            trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
+            expected_oauth_audience: "control.zeroship.ai".to_string(),
+            static_policies: zeroship_authz::load_platform_policies()
+                .expect("bundled authz policies parse"),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            auth_provider: zeroship_control::platform_auth_provider(
+                "https://auth.zeroship.test/oauth2",
+                Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string()),
+            ),
+            logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            metering_provider: zeroship_control::metering::provider::build_provider(
+                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
+            )
+            .expect("native provider builds"),
+            tax_provider: zeroship_control::tax::build_tax_provider(
+                &zeroship_control::tax::TaxProviderConfig::native(),
+            )
+            .expect("native tax provider builds"),
+            notifier: Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+            pairwise_salt: [0u8; 32],
+            projected_charge_cache: Arc::new(
+                zeroship_control::billing_read::ProjectedChargeCache::default(),
+            ),
+        }),
+        pg: control_pg,
+        blob_root,
+        deploy_tmp_dir,
+        app_id,
+        deploy_id,
+    }
+}
+
+#[derive(Clone)]
+struct CrashOnceDispatcher {
+    inner: GatewayStepDispatcher,
+    release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    dropped: Arc<Mutex<Option<oneshot::Sender<DispatchOutcome>>>>,
+}
+
+impl CrashOnceDispatcher {
+    fn new(
+        gateway_url: String,
+    ) -> (
+        Self,
+        oneshot::Receiver<DispatchOutcome>,
+        oneshot::Sender<()>,
+    ) {
+        let (drop_tx, drop_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        (
+            Self {
+                inner: GatewayStepDispatcher::new(gateway_url),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+                dropped: Arc::new(Mutex::new(Some(drop_tx))),
+            },
+            drop_rx,
+            release_tx,
+        )
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for CrashOnceDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        let release = self
+            .release
+            .lock()
+            .expect("release lock")
+            .take();
+        let Some(release) = release else {
+            return self.inner.dispatch(request).await;
+        };
+
+        let outcome = self.inner.dispatch(request).await;
+        if let Some(tx) = self.dropped.lock().expect("dropped lock").take() {
+            let _ = tx.send(outcome.clone());
+        }
+        let _ = release.await;
+        outcome
+    }
+}
+
+#[derive(Clone)]
+struct SideEffectConfig {
+    pg_container: String,
+    pg_user: String,
+    pg_db: String,
+}
+
+fn sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn decode_component(value: &str) -> Result<String, String> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut bytes = value.as_bytes().iter().copied();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = bytes.next().ok_or_else(|| "truncated percent escape".to_string())?;
+            let lo = bytes.next().ok_or_else(|| "truncated percent escape".to_string())?;
+            let hex = [hi, lo];
+            let hex = std::str::from_utf8(&hex).map_err(|e| e.to_string())?;
+            let decoded = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
+            out.push(decoded);
+        } else if b == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8(out).map_err(|e| e.to_string())
+}
+
+fn record_side_effect(cfg: &SideEffectConfig, run_id: &str, step: &str) -> Result<i64, String> {
+    let run_id = sql_literal(run_id);
+    let step = sql_literal(step);
+    let sql = format!(
+        "WITH inserted AS ( \
+             INSERT INTO zeroship.workflow_e2e_side_effects \
+                 (run_id, step_name, created_at) \
+             VALUES ('{run_id}', '{step}', now()) \
+             RETURNING 1 \
+         ) \
+         SELECT COUNT(*)::bigint \
+           FROM zeroship.workflow_e2e_side_effects \
+          WHERE run_id = '{run_id}' AND step_name = '{step}';"
+    );
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(&cfg.pg_container)
+        .arg("psql")
+        .arg("-U")
+        .arg(&cfg.pg_user)
+        .arg("-d")
+        .arg(&cfg.pg_db)
+        .arg("-tA")
+        .arg("-v")
+        .arg("ON_ERROR_STOP=1")
+        .arg("-c")
+        .arg(sql)
+        .output()
+        .map_err(|e| format!("spawn docker exec psql: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "psql failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i64>()
+        .map_err(|e| format!("parse psql count: {e}; stdout={:?}", output.stdout))
+}
+
+fn write_http(stream: &mut TcpStream, status: &str, body: serde_json::Value) {
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buf = [0u8; 4096];
+    let Ok(n) = stream.read(&mut buf) else {
+        return;
+    };
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let Some(line) = request.lines().next() else {
+        write_http(
+            &mut stream,
+            "400 Bad Request",
+            serde_json::json!({"error": "missing request line"}),
+        );
+        return;
+    };
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    if method != "POST" {
+        write_http(
+            &mut stream,
+            "405 Method Not Allowed",
+            serde_json::json!({"error": "POST required"}),
+        );
+        return;
+    }
+    let Some(query) = target.strip_prefix("/bump?") else {
+        write_http(
+            &mut stream,
+            "404 Not Found",
+            serde_json::json!({"error": "unknown endpoint"}),
+        );
+        return;
+    };
+    let mut run_id = None;
+    let mut step = None;
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = match decode_component(value) {
+            Ok(value) => value,
+            Err(e) => {
+                write_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    serde_json::json!({"error": e}),
+                );
+                return;
+            }
+        };
+        match key {
+            "run" => run_id = Some(value),
+            "step" => step = Some(value),
+            _ => {}
+        }
+    }
+    let Some(run_id) = run_id else {
+        write_http(
+            &mut stream,
+            "400 Bad Request",
+            serde_json::json!({"error": "missing run"}),
+        );
+        return;
+    };
+    let Some(step) = step else {
+        write_http(
+            &mut stream,
+            "400 Bad Request",
+            serde_json::json!({"error": "missing step"}),
+        );
+        return;
+    };
+    match record_side_effect(&cfg, &run_id, &step) {
+        Ok(count) => write_http(
+            &mut stream,
+            "200 OK",
+            serde_json::json!({"step": step, "count": count}),
+        ),
+        Err(e) => write_http(
+            &mut stream,
+            "500 Internal Server Error",
+            serde_json::json!({"error": e}),
+        ),
+    }
+}
+
+fn start_side_effect_server(cfg: SideEffectConfig, port: u16) {
+    let (started_tx, started_rx) = mpsc::channel();
+    let bind = format!("127.0.0.1:{port}");
+    thread::Builder::new()
+        .name("dw07-side-effect-server".to_string())
+        .spawn(move || {
+            let listener = match TcpListener::bind(&bind) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    let _ = started_tx.send(Err(format!("bind side-effect server {bind}: {e}")));
+                    return;
+                }
+            };
+            let _ = started_tx.send(Ok(()));
+            let cfg = Arc::new(cfg);
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let cfg = Arc::clone(&cfg);
+                        thread::spawn(move || handle_side_effect_request(stream, cfg));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .expect("spawn side-effect server thread");
+    started_rx
+        .recv()
+        .expect("side-effect server reports startup")
+        .expect("side-effect server starts");
+}
+
+async fn prepare_side_effect_table(pg: &compio_postgres::Client) {
+    pg.batch_execute(
+        "CREATE TABLE IF NOT EXISTS zeroship.workflow_e2e_side_effects ( \
+            run_id text NOT NULL, \
+            step_name text NOT NULL, \
+            created_at timestamptz NOT NULL DEFAULT now() \
+         ); \
+         TRUNCATE zeroship.workflow_e2e_side_effects;",
+    )
+    .await
+    .expect("prepare side-effect table");
+}
+
+fn config(owner: &str) -> WorkflowEngineConfig {
+    WorkflowEngineConfig {
+        batch_apps: 4,
+        per_app_fair_limit: 2,
+        max_inflight_per_app: 8,
+        max_inflight_dispatch: 8,
+        claim_ttl_ms: 1_500,
+        heartbeat_ms: 60_000,
+        owner_id: owner.to_string(),
+    }
+}
+
+async fn seed_run(fx: &Fixture, label: &str) -> String {
+    let run_id = zeroship_core::typed_id::new_workflow_run_id();
+    let input = serde_json::json!({ "case": label });
+    let wake_at = Utc::now();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_runs \
+                (id, workflow_name, app_id, deploy_id, state, input, wake_at, started_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, now())",
+            &[
+                &run_id,
+                &WORKFLOW_NAME,
+                &fx.app_id,
+                &fx.deploy_id,
+                &input,
+                &wake_at,
+            ],
+        )
+        .await
+        .expect("seed workflow run");
+    run_id
+}
+
+async fn run_state(
+    pg: &compio_postgres::Client,
+    run_id: &str,
+) -> (String, Option<DateTime<Utc>>, Option<String>, Option<String>) {
+    let rows = pg
+        .query(
+            "SELECT state, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load run state");
+    (
+        rows[0].get("state"),
+        rows[0].get("wake_at"),
+        rows[0].get("claimed_by"),
+        rows[0].get("dispatch_nonce"),
+    )
+}
+
+async fn wait_for_state(
+    fx: &Fixture,
+    run_id: &str,
+    expected: &str,
+) -> Option<DateTime<Utc>> {
+    for _ in 0..200 {
+        let (state, wake_at, _, _) = run_state(&fx.pg, run_id).await;
+        if state == expected {
+            return wake_at;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("run {run_id} did not reach state {expected}");
+}
+
+async fn drive_until_completed<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..260 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .expect("workflow tick");
+        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        if state == "completed" {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let rows = fx
+        .pg
+        .query(
+            "SELECT state, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load stuck run");
+    panic!(
+        "run {run_id} did not complete: state={:?} wake_at={:?} claimed_by={:?} nonce={:?}",
+        rows[0].get::<_, String>("state"),
+        rows[0].get::<_, Option<DateTime<Utc>>>("wake_at"),
+        rows[0].get::<_, Option<String>>("claimed_by"),
+        rows[0].get::<_, Option<String>>("dispatch_nonce")
+    );
+}
+
+async fn step_rows(fx: &Fixture, run_id: &str) -> Vec<(i32, String, String, String)> {
+    fx.pg
+        .query(
+            "SELECT ordinal, name, kind, state \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+              ORDER BY ordinal",
+            &[&run_id],
+        )
+        .await
+        .expect("load step rows")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("ordinal"),
+                row.get("name"),
+                row.get("kind"),
+                row.get("state"),
+            )
+        })
+        .collect()
+}
+
+async fn assert_expected_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "sleep".to_string(), "sleep".to_string(), "completed".to_string()),
+            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "workflow_steps must contain exactly a, sleep, b once"
+    );
+    let dupes = fx
+        .pg
+        .query(
+            "SELECT ordinal, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+              GROUP BY ordinal \
+             HAVING COUNT(*) > 1",
+            &[&run_id],
+        )
+        .await
+        .expect("check duplicate step rows");
+    assert!(dupes.is_empty(), "duplicate workflow step rows: {dupes:?}");
+}
+
+async fn side_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
+    fx.pg
+        .query(
+            "SELECT step_name, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_e2e_side_effects \
+              WHERE run_id = $1 \
+              GROUP BY step_name",
+            &[&run_id],
+        )
+        .await
+        .expect("load side counts")
+        .into_iter()
+        .map(|row| (row.get("step_name"), row.get("n")))
+        .collect()
+}
+
+async fn run_debug(fx: &Fixture, run_id: &str) -> String {
+    let run_rows = fx
+        .pg
+        .query(
+            "SELECT state, error, output, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("debug run");
+    let mut run_summary = "missing run".to_string();
+    if let Some(row) = run_rows.first() {
+        let state: String = row.get("state");
+        let error: Option<serde_json::Value> = row.get("error");
+        let output: Option<serde_json::Value> = row.get("output");
+        let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+        let claimed_by: Option<String> = row.get("claimed_by");
+        let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
+        run_summary = format!(
+            "state={state} error={error:?} output={output:?} wake_at={wake_at:?} \
+             claimed_by={claimed_by:?} dispatch_nonce={dispatch_nonce:?}"
+        );
+    }
+    format!(
+        "{run_summary}; steps={:?}; side_counts={:?}",
+        step_rows(fx, run_id).await,
+        side_counts(fx, run_id).await
+    )
+}
+
+#[compio::test]
+async fn durable_workflows_m1_keystone_real_spine() {
+    if !enabled() {
+        eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
+        return;
+    }
+
+    let db_url = required_env("CONTROL_TEST_DB");
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        .parse()
+        .expect("app id uuid");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+        .parse()
+        .expect("side port");
+    let side_cfg = SideEffectConfig {
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+    };
+
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    prepare_side_effect_table(&fx.pg).await;
+    start_side_effect_server(side_cfg, side_port);
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+
+    let happy_run = seed_run(&fx, "happy").await;
+    for _ in 0..120 {
+        workflow_engine::tick_with_dispatcher(
+            &fx.state,
+            Arc::clone(&real_dispatcher),
+            config("dw07-happy"),
+        )
+        .await
+        .expect("happy tick");
+        let (state, wake_at, _, _) = run_state(&fx.pg, &happy_run).await;
+        if state == "failed" {
+            panic!(
+                "happy run failed before sleeping: {}",
+                run_debug(&fx, &happy_run).await
+            );
+        }
+        if state == "sleeping" {
+            let Some(wake_at) = wake_at else {
+                panic!(
+                    "sleeping run has no wake_at: {}",
+                    run_debug(&fx, &happy_run).await
+                );
+            };
+            assert!(
+                wake_at > Utc::now() - ChronoDuration::milliseconds(25),
+                "sleep wake_at should not be in the past when first parked"
+            );
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        run_state(&fx.pg, &happy_run).await.0,
+        "sleeping",
+        "{}",
+        run_debug(&fx, &happy_run).await
+    );
+    drive_until_completed(&fx, Arc::clone(&real_dispatcher), config("dw07-happy"), &happy_run)
+        .await;
+    assert_expected_steps(&fx, &happy_run).await;
+    let happy_counts = side_counts(&fx, &happy_run).await;
+    assert_eq!(happy_counts.get("a").copied(), Some(1));
+    assert_eq!(happy_counts.get("b").copied(), Some(1));
+
+    let crash_run = seed_run(&fx, "crash").await;
+    let (crash_dispatcher, dropped_rx, release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let crash_dispatcher = Arc::new(crash_dispatcher);
+
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&crash_dispatcher),
+        config("dw07-crash-first"),
+    )
+    .await
+    .expect("crash first tick");
+    assert_eq!(claimed, 1);
+
+    let dropped = dropped_rx.await.expect("dropped real StepResult");
+    match &dropped {
+        DispatchOutcome::Completed(result) => {
+            assert_eq!(result.run_id, crash_run);
+            assert_eq!(result.checkpoints.len(), 1);
+            assert_eq!(result.checkpoints[0].name, "a");
+        }
+        other => panic!("first real dispatch did not produce StepResult: {other:?}"),
+    }
+    assert_eq!(
+        step_rows(&fx, &crash_run).await.len(),
+        0,
+        "crash barrier is before control checkpoints step a"
+    );
+    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
+
+    let pre_takeover = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw07-pre-ttl"),
+    )
+    .await
+    .expect("pre-ttl tick");
+    assert_eq!(
+        pre_takeover, 0,
+        "a second tick during the live lease must not dispatch/checkpoint"
+    );
+    assert_eq!(
+        step_rows(&fx, &crash_run).await.len(),
+        0,
+        "live-lease tick must not checkpoint"
+    );
+
+    compio::time::sleep(Duration::from_millis(1_650)).await;
+    let takeover = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw07-takeover"),
+    )
+    .await
+    .expect("takeover tick");
+    assert_eq!(takeover, 1, "expired lease should be reclaimed");
+    wait_for_state(&fx, &crash_run, "queued").await;
+    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(2));
+    assert_eq!(
+        step_rows(&fx, &crash_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "takeover should checkpoint exactly one a row"
+    );
+
+    let _ = release_tx.send(());
+    compio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        step_rows(&fx, &crash_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "late stale StepResult must not double-checkpoint a"
+    );
+
+    drive_until_completed(&fx, Arc::clone(&real_dispatcher), config("dw07-crash-drive"), &crash_run)
+        .await;
+    assert_expected_steps(&fx, &crash_run).await;
+    let crash_counts = side_counts(&fx, &crash_run).await;
+    assert!(
+        crash_counts.get("a").copied().unwrap_or_default() >= 2,
+        "step a body is at-least-once across the dropped-checkpoint crash"
+    );
+    assert_eq!(crash_counts.get("b").copied(), Some(1));
+}

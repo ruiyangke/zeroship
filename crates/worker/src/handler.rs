@@ -1983,6 +1983,9 @@ async fn load_pinned_workflow_on_demand(
     app_id: &Uuid,
     deploy_hash: &str,
 ) -> Result<(), String> {
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id)
+        .await
+        .ok();
     let manifest_bytes = config
         .blob_store
         .get_manifest(app_id, deploy_hash)
@@ -2011,18 +2014,37 @@ async fn load_pinned_workflow_on_demand(
         return Err("empty bundle".into());
     }
 
+    if crate::sync::get_env(envs, app_id).is_none()
+        || app_version
+            .as_ref()
+            .is_some_and(|info| crate::sync::cached_env_version(envs, app_id) != Some(info.env_version))
+    {
+        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+            .await
+            .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
+        let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
+        crate::sync::put_env_from_json(envs, *app_id, &env_json, env_version)
+            .map_err(|e| format!("env parse failed for pinned workflow load: {e}"))?;
+    }
+
     let env_entry = crate::sync::get_env(envs, app_id)
         .ok_or_else(|| "env unavailable for pinned workflow load".to_string())?;
     let descriptor_json = crate::sync::runtime_descriptor_json(&manifest, &config.blob_store, app_id)
         .await
         .map_err(|e| format!("descriptor load failed: {e}"))?;
+    let runtime_limits = app_version
+        .as_ref()
+        .map_or_else(AppRuntimeLimits::default, |info| info.runtime.clone());
+    let net_policy = app_version
+        .as_ref()
+        .map_or_else(AppNetPolicy::default, |info| info.net_policy.clone());
 
     cache::load_pinned_workflow_app(
         *app_id,
         deploy_hash,
         &bytes,
-        AppRuntimeLimits::default(),
-        AppNetPolicy::default(),
+        runtime_limits,
+        net_policy,
         descriptor_json.as_deref(),
         &env_entry.snapshot,
     )

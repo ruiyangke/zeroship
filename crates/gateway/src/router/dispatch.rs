@@ -210,7 +210,7 @@ fn workflow_worker_result_to_step_result(
 ) -> Result<Value, String> {
     let result: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
     if result.get("runUpdate").is_some() && result.get("dispatchNonce").is_some() {
-        return Ok(result);
+        return normalize_workflow_step_result(result);
     }
 
     let kind = result
@@ -249,11 +249,13 @@ fn workflow_worker_result_to_step_result(
         }
         "Sleep" => {
             let mut checkpoint = checkpoint_from_worker(&result, "sleep", "running")?;
-            checkpoint["wakeAt"] = result.get("wakeAt").cloned().unwrap_or(Value::Null);
+            let wake_at = normalize_workflow_wake_at(result.get("wakeAt"))
+                .ok_or_else(|| "invalid sleep wakeAt".to_string())?;
+            checkpoint["wakeAt"] = wake_at.clone();
             checkpoints.push(checkpoint);
             serde_json::json!({
                 "state": "sleeping",
-                "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+                "wakeAt": wake_at,
             })
         }
         "Wait" => {
@@ -278,6 +280,118 @@ fn workflow_worker_result_to_step_result(
         "checkpoints": checkpoints,
         "runUpdate": run_update,
     }))
+}
+
+fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
+    if result
+        .pointer("/runUpdate/state")
+        .and_then(Value::as_str)
+        != Some("sleeping")
+    {
+        return Ok(result);
+    }
+
+    let wake_at = normalize_workflow_wake_at(result.pointer("/runUpdate/wakeAt"))
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            result
+                .get("checkpoints")
+                .and_then(Value::as_array)
+                .and_then(|checkpoints| {
+                    checkpoints.iter().find_map(|checkpoint| {
+                        let is_sleep = checkpoint.get("kind").and_then(Value::as_str) == Some("sleep");
+                        let is_running =
+                            checkpoint.get("state").and_then(Value::as_str) == Some("running");
+                        (is_sleep && is_running)
+                            .then(|| normalize_workflow_wake_at(checkpoint.get("wakeAt")))
+                            .flatten()
+                            .filter(|value| !value.is_null())
+                    })
+                })
+        })
+        .ok_or_else(|| "sleeping workflow StepResult missing wakeAt".to_string())?;
+
+    if let Some(update) = result.get_mut("runUpdate").and_then(Value::as_object_mut) {
+        update.insert("wakeAt".to_string(), wake_at.clone());
+    }
+    if let Some(checkpoints) = result.get_mut("checkpoints").and_then(Value::as_array_mut) {
+        for checkpoint in checkpoints {
+            let is_sleep = checkpoint.get("kind").and_then(Value::as_str) == Some("sleep");
+            let is_running = checkpoint.get("state").and_then(Value::as_str) == Some("running");
+            if is_sleep && is_running {
+                checkpoint["wakeAt"] = wake_at.clone();
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn normalize_workflow_wake_at(raw: Option<&Value>) -> Option<Value> {
+    let value = raw?;
+    if value.is_null() {
+        return Some(Value::Null);
+    }
+    let Some(s) = value.as_str() else {
+        return Some(value.clone());
+    };
+    if DateTime::parse_from_rfc3339(s).is_ok() {
+        return Some(Value::String(s.to_string()));
+    }
+    let ms = parse_iso8601_duration_ms(s)?;
+    let wake_at = Utc::now() + chrono::Duration::milliseconds(ms);
+    Some(Value::String(wake_at.to_rfc3339()))
+}
+
+fn parse_iso8601_duration_ms(raw: &str) -> Option<i64> {
+    let s = raw.strip_prefix('P')?;
+    let (date_part, time_part) = match s.split_once('T') {
+        Some((date, time)) => (date, time),
+        None => (s, ""),
+    };
+    let mut total_ms = 0_i64;
+    let mut num = String::new();
+    for ch in date_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        let value = parse_duration_number(&num)?;
+        num.clear();
+        match ch {
+            'D' => total_ms = total_ms.checked_add((value * 86_400_000.0).round() as i64)?,
+            _ => return None,
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    for ch in time_part.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            num.push(ch);
+            continue;
+        }
+        let value = parse_duration_number(&num)?;
+        num.clear();
+        match ch {
+            'H' => total_ms = total_ms.checked_add((value * 3_600_000.0).round() as i64)?,
+            'M' => total_ms = total_ms.checked_add((value * 60_000.0).round() as i64)?,
+            'S' => total_ms = total_ms.checked_add((value * 1_000.0).round() as i64)?,
+            _ => return None,
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    Some(total_ms.max(0))
+}
+
+fn parse_duration_number(raw: &str) -> Option<f64> {
+    if raw.is_empty() {
+        return None;
+    }
+    let value = raw.parse::<f64>().ok()?;
+    value.is_finite().then_some(value)
 }
 
 fn checkpoint_from_worker(result: &Value, kind: &str, state: &str) -> Result<Value, String> {
@@ -2409,6 +2523,64 @@ mod tests {
         assert_eq!(seen[0]["nonce"], "wfd_test");
         assert_eq!(seen[0]["deployHash"], "hash_test");
         assert_eq!(seen[0]["trigger"]["input"]["orderId"], "ord_1");
+    }
+
+    #[test]
+    fn workflow_sleep_frontier_normalizes_duration_wake_at() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "Sleep",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "ordinal": 1,
+            "name": "sleep",
+            "nameOccurrence": 0,
+            "wakeAt": "PT1S"
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("sleep result");
+
+        let wake_at = result["runUpdate"]["wakeAt"]
+            .as_str()
+            .expect("runUpdate wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(result["checkpoints"][0]["wakeAt"], result["runUpdate"]["wakeAt"]);
+    }
+
+    #[test]
+    fn workflow_step_result_sleep_normalizes_duration_wake_at() {
+        let result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [{
+                "ordinal": 1,
+                "name": "sleep",
+                "nameOccurrence": 0,
+                "kind": "sleep",
+                "state": "running",
+                "output": null,
+                "error": null,
+                "wakeAt": "PT1S",
+                "signalType": null,
+                "maxSignalAgeMs": null,
+                "consumedSignalId": null
+            }],
+            "runUpdate": {"state": "sleeping", "wakeAt": null}
+        });
+        let normalized = normalize_workflow_step_result(result).expect("normalized StepResult");
+        let wake_at = normalized["runUpdate"]["wakeAt"]
+            .as_str()
+            .expect("runUpdate wakeAt");
+        assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+        assert_eq!(
+            normalized["checkpoints"][0]["wakeAt"],
+            normalized["runUpdate"]["wakeAt"]
+        );
     }
 
     #[ntex::test]
