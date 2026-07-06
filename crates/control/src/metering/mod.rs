@@ -220,6 +220,48 @@ impl Metering {
         self.ingest_at(report, current_period_start_unix()).await
     }
 
+    /// Apply trusted control-plane usage deltas directly into the current
+    /// billing period. Use only for control-owned work that is not reported by
+    /// a worker flush.
+    pub async fn record_direct(
+        &self,
+        app_id: &Uuid,
+        deltas: &[(String, i64)],
+    ) -> Result<(), RegistryError> {
+        self.record_direct_at(app_id, deltas, current_period_start_unix())
+            .await
+    }
+
+    /// Apply trusted control-plane usage deltas into an explicit billing
+    /// period.
+    pub async fn record_direct_at(
+        &self,
+        app_id: &Uuid,
+        deltas: &[(String, i64)],
+        period_start_unix_secs: i64,
+    ) -> Result<(), RegistryError> {
+        let mut conn = self.registry.conn().await?;
+        let tx = conn.transaction().await?;
+        let period = period_date(period_start_unix_secs);
+        let resolved = Self::register_custom_metrics(&tx, app_id, deltas).await?;
+        for (metric, delta) in deltas {
+            if *delta <= 0 || !resolved.contains(metric) {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO zeroship.usage_aggregates AS u \
+                   (app_id, period, metric, total, updated_at) \
+                 VALUES ($1, $2::date, $3, $4, NOW()) \
+                 ON CONFLICT (app_id, period, metric) \
+                 DO UPDATE SET total = u.total + EXCLUDED.total, updated_at = NOW()",
+                &[app_id, &period, metric, delta],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Ingest one report idempotently at an explicit `period_start` (unix
     /// seconds; the calendar-month boundary). One transaction:
     ///

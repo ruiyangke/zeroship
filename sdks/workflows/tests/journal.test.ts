@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
 import type { FrontierOutcome, JournalEnvelope } from "../src/journal.ts";
@@ -133,6 +135,65 @@ test("step.run journal hit returns memoized output without running fn", { timeou
   assert.deepEqual(result, { orderId: "ord_1", total: 42 });
 });
 
+test("step.run journal hit with outputRef lazily reads and memoizes JSON", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const body = Buffer.from(JSON.stringify({ orderId: "ord_1", total: 42 }));
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    assert.equal(
+      req.url,
+      "/internal/workflows/runs/run_0123456789ABCDEFGHIJKL/steps/load/output?occurrence=0",
+    );
+    assert.equal(req.headers.authorization, "Bearer read-token");
+    assert.equal(req.headers["x-zeroship-app-id"], "app_0123456789ABCDEFGHIJKL");
+    res.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": body.byteLength,
+    });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const step = createJournalStep({
+      ...envelope([
+        {
+          ordinal: 0,
+          name: "load",
+          nameOccurrence: 0,
+          kind: "run",
+          state: "completed",
+          outputRef: {
+            hash: "a".repeat(64),
+            size: body.byteLength,
+            contentType: "application/json",
+          },
+        },
+      ]),
+      outputRead: {
+        controlUrl: `http://127.0.0.1:${address.port}`,
+        token: "read-token",
+        appId: "app_0123456789ABCDEFGHIJKL",
+      },
+    });
+
+    const ref = await step.run("load", () => {
+      throw new Error("journal hit should not run callback");
+    }) as any;
+    assert.equal(ref.kind, "workflow-step-output-ref");
+    assert.equal(ref.ref, `wfblob:sha256:${"a".repeat(64)}`);
+    assert.equal(ref.hash, "a".repeat(64));
+    assert.equal(ref.size, body.byteLength);
+    assert.deepEqual(await ref.json(), { orderId: "ord_1", total: 42 });
+    assert.equal(await ref.text(), body.toString("utf8"));
+    assert.equal(requests, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
+  }
+});
+
 test("first step.run miss runs once, captures output, then suspends", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
   let calls = 0;
@@ -155,6 +216,26 @@ test("first step.run miss runs once, captures output, then suspends", { timeout:
     },
   );
   assert.equal(calls, 1);
+});
+
+test("first step.run miss carries blob output mode into the frontier outcome", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+
+  await assert.rejects(
+    async () => step.run("reserve", { output: "blob" }, () => ({ reserved: true })),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assert.equal(signal.outcomes[0]?.outputMode, "blob");
+      assert.equal(signal.outcomes[0]?.outputContentType, undefined);
+      assertCompletedRun(signal.outcomes[0]!, {
+        ordinal: 0,
+        name: "reserve",
+        output: { reserved: true },
+      });
+      return true;
+    },
+  );
 });
 
 test("first step.sideEffect miss runs once, captures output, then suspends", { timeout: TEST_TIMEOUT_MS }, async () => {

@@ -365,6 +365,10 @@ impl Fixture {
         let deploy_tmp_dir = tmpdir("deploy");
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+            zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                .expect("workflow blob store"),
+        );
         let legacy = LegacyAuthProvider::Supabase(SupabaseProvider::new(
             SupabaseConfig::new(
                 mock_supabase.base.clone(),
@@ -389,6 +393,7 @@ impl Fixture {
             env_store,
             stripe_store,
             blob_store,
+            workflow_blob_store,
             control_key: SecretString::new(TEST_CONTROL_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),

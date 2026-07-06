@@ -814,6 +814,10 @@ mod tests {
             let blob_root = tmpdir("blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let blob_hash = hex::encode(Sha256::digest(source));
             blob_store.put_blob(&blob_hash, source).await.expect("seed blob");
 
@@ -863,6 +867,8 @@ mod tests {
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 

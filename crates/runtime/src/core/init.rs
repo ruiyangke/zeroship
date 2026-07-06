@@ -406,6 +406,7 @@ const ZS_WORKFLOW_BODY_TIMER_ERROR =
     "workflow bodies may not use timers directly — use step.sleep(...) instead";
 const enterKind = globalThis.__zsEnterKind;
 const exitKind = globalThis.__zsExitKind;
+const zsWorkflowRealFetch = globalThis.fetch;
 
 try { delete globalThis.__zsEnterKind; } catch (_e) {}
 try { delete globalThis.__zsExitKind; } catch (_e) {}
@@ -618,12 +619,115 @@ function wfJournal(envelope) {
             kind: String(row.kind ?? "run"),
             state: String(row.state ?? "completed"),
             output: row.output,
+            outputRef: wfNormalizeOutputRef(row.outputRef),
             error: row.error,
             wakeAt: typeof row.wakeAt === "string" ? row.wakeAt : undefined,
             signalType: typeof row.signalType === "string" ? row.signalType : undefined,
             consumedSignal: row.consumedSignal,
             childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
         }));
+}
+
+function wfNormalizeOutputRef(value) {
+    if (!value || typeof value !== "object") return undefined;
+    const hash = typeof value.hash === "string" ? value.hash : "";
+    const size = typeof value.size === "number" ? value.size : Number(value.size);
+    if (!hash || !Number.isFinite(size)) return undefined;
+    return {
+        kind: typeof value.kind === "string" ? value.kind : undefined,
+        ref: typeof value.ref === "string" ? value.ref : undefined,
+        hash,
+        size,
+        contentType: typeof value.contentType === "string" ? value.contentType : undefined,
+    };
+}
+
+function wfOutputReadConfig(envelope) {
+    const raw = envelope.outputRead;
+    if (!raw || typeof raw !== "object") return undefined;
+    const controlUrl = typeof raw.controlUrl === "string" ? raw.controlUrl : "";
+    const token = typeof raw.token === "string" ? raw.token : "";
+    const appId = typeof raw.appId === "string" ? raw.appId : "";
+    if (!controlUrl || !token || !appId) return undefined;
+    return { controlUrl, token, appId };
+}
+
+function wfOutputConfig(config) {
+    if (!config || typeof config !== "object") return {};
+    const output = config.output;
+    if (typeof output === "string") return { outputMode: output };
+    if (output && typeof output === "object") {
+        return {
+            ...(typeof output.as === "string" ? { outputMode: output.as } : {}),
+            ...(typeof output.contentType === "string" && output.contentType
+                ? { outputContentType: output.contentType }
+                : {}),
+        };
+    }
+    return {};
+}
+
+function wfCreateStepOutputRef(descriptor, outputRead, runId, name, occurrence, memo) {
+    const ref = descriptor.ref ?? `wfblob:sha256:${descriptor.hash}`;
+    const memoKey = `${runId}:${name}:${occurrence}:${descriptor.hash}`;
+    const readBytes = () => {
+        let promise = memo.get(memoKey);
+        if (!promise) {
+            promise = wfFetchStepOutputBytes(outputRead, runId, name, occurrence);
+            memo.set(memoKey, promise);
+        }
+        return promise;
+    };
+    const readText = async () => new TextDecoder().decode(await readBytes());
+    return {
+        kind: "workflow-step-output-ref",
+        ref,
+        hash: descriptor.hash,
+        size: descriptor.size,
+        ...(descriptor.contentType ? { contentType: descriptor.contentType } : {}),
+        async json() {
+            return JSON.parse(await readText());
+        },
+        async text() {
+            return readText();
+        },
+        async arrayBuffer() {
+            const bytes = await readBytes();
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        },
+        bytes() {
+            return readBytes();
+        },
+        stream() {
+            return new ReadableStream({
+                async start(controller) {
+                    controller.enqueue(await readBytes());
+                    controller.close();
+                },
+            });
+        },
+    };
+}
+
+async function wfFetchStepOutputBytes(outputRead, runId, name, occurrence) {
+    if (!outputRead) {
+        throw wfErr("workflow output read endpoint is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    if (typeof zsWorkflowRealFetch !== "function") {
+        throw wfErr("fetch is unavailable for workflow output reads", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    const base = outputRead.controlUrl.replace(/\/+$/, "");
+    const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
+    const response = await zsWorkflowRealFetch(url, {
+        headers: {
+            authorization: `Bearer ${outputRead.token}`,
+            "x-zeroship-app-id": outputRead.appId,
+        },
+    });
+    if (!response.ok) {
+        throw wfErr(`workflow output read failed with HTTP ${response.status}`, 500, "WORKFLOW_OUTPUT_READ_FAILED");
+    }
+    return new Uint8Array(await response.arrayBuffer());
 }
 
 // Runtime dispatcher copy: keep behavior in lock-step with
@@ -637,20 +741,26 @@ class ZsJournalBackedStep {
     #callbackSyncDepth = 0;
     #parallelIssueWindow = false;
     #parallelIssueWindowToken = 0;
+    #runId = "";
+    #outputRead = undefined;
+    #outputReadMemo = new Map();
 
-    constructor(steps) {
+    constructor(steps, runId = "", outputRead = undefined) {
+        this.#runId = runId;
+        this.#outputRead = outputRead;
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
     run(name, configOrFn, maybeFn) {
         this.#assertNotNested();
+        const config = typeof configOrFn === "function" ? undefined : configOrFn;
         const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
         if (typeof fn !== "function") {
             return Promise.reject(wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
         }
         const issued = this.#issue(name, "run");
         if (issued.record) return this.#recordPromise(issued.record);
-        return this.#registerFrontier(this.#runFrontier(issued, name, fn));
+        return this.#registerFrontier(this.#runFrontier(issued, name, config, fn));
     }
 
     sideEffect(name, fn) {
@@ -763,10 +873,11 @@ class ZsJournalBackedStep {
         });
     }
 
-    async #runFrontier(issued, name, fn) {
+    async #runFrontier(issued, name, config, fn) {
         const bodyPromise = this.#invokeStepBody(fn);
         try {
             const output = await bodyPromise;
+            const outputConfig = wfOutputConfig(config);
             return {
                 kind: "run",
                 ordinal: issued.ordinal,
@@ -774,6 +885,7 @@ class ZsJournalBackedStep {
                 nameOccurrence: issued.nameOccurrence,
                 state: "completed",
                 output,
+                ...outputConfig,
             };
         } catch (e) {
             if (e instanceof ZsWorkflowSuspendSignal) throw e;
@@ -875,7 +987,19 @@ class ZsJournalBackedStep {
     }
 
     #resolveRecord(record, pendingOutcome) {
-        if (record.state === "completed") return record.output;
+        if (record.state === "completed") {
+            if (record.outputRef) {
+                return wfCreateStepOutputRef(
+                    record.outputRef,
+                    this.#outputRead,
+                    this.#runId,
+                    record.name,
+                    record.nameOccurrence ?? 0,
+                    this.#outputReadMemo,
+                );
+            }
+            return record.output;
+        }
         if (record.state === "failed") throw wfDeserializeError(record.error);
         throw new ZsWorkflowSuspendSignal(pendingOutcome ?? {
             kind: record.kind === "child" ? "child" : record.kind,
@@ -980,7 +1104,14 @@ function workflowFrontierResult(envelope, outcome) {
         nameOccurrence: outcome.nameOccurrence,
     };
     if ((outcome.kind === "run" || outcome.kind === "sideEffect") && outcome.state === "completed") {
-        return { ...base, kind: "StepCompleted", stepKind: outcome.kind, output: outcome.output };
+        return {
+            ...base,
+            kind: "StepCompleted",
+            stepKind: outcome.kind,
+            output: outcome.output,
+            ...(outcome.outputMode ? { outputMode: outcome.outputMode } : {}),
+            ...(outcome.outputContentType ? { outputContentType: outcome.outputContentType } : {}),
+        };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
         return { ...base, kind: "RunFailed", error: outcome.error };
@@ -1040,7 +1171,11 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
         }
-        const step = new ZsJournalBackedStep(wfJournal(envelope));
+        const step = new ZsJournalBackedStep(
+            wfJournal(envelope),
+            String(envelope.runId ?? ""),
+            wfOutputReadConfig(envelope),
+        );
         const output = await zsWorkflowDispatchAls.run(
             { mode: "body" },
             () => workflow.run(wfTrigger(envelope), step),

@@ -162,6 +162,14 @@ pub async fn workflow_dispatch_internal(
         "deployHash": &request.deploy_hash,
         "attempt": 0,
         "nonce": &request.dispatch_nonce,
+        "outputRead": {
+            "controlUrl": &state.config.control_url,
+            "token": zeroship_core::auth::derive_app_scoped_control_token(
+                &state.config.control_key,
+                &request.app_id.to_string(),
+            ),
+            "appId": request.app_id.to_string(),
+        },
     });
     let worker_body = match serde_json::to_vec(&worker_envelope) {
         Ok(body) => body,
@@ -258,18 +266,22 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "missing kind".to_string())?;
     match kind {
-        "StepCompleted" => Ok(serde_json::json!({
-            "kind": "StepCompleted",
-            "ordinal": required_i64(result, "ordinal")?,
-            "name": required_str(result, "name")?,
-            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
-            "stepKind": workflow_step_kind_or_run(result)?,
-            "output": result.get("output").cloned().unwrap_or(Value::Null),
-        })),
-        "RunCompleted" => Ok(serde_json::json!({
-            "kind": "RunCompleted",
-            "output": result.get("output").cloned().unwrap_or(Value::Null),
-        })),
+        "StepCompleted" => {
+            let mut outcome = serde_json::json!({
+                "kind": "StepCompleted",
+                "ordinal": required_i64(result, "ordinal")?,
+                "name": required_str(result, "name")?,
+                "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "stepKind": workflow_step_kind_or_run(result)?,
+            });
+            copy_workflow_output(result, &mut outcome);
+            Ok(outcome)
+        }
+        "RunCompleted" => {
+            let mut outcome = serde_json::json!({ "kind": "RunCompleted" });
+            copy_workflow_output(result, &mut outcome);
+            Ok(outcome)
+        }
         "RunFailed" => {
             let mut outcome = serde_json::json!({
                 "kind": "RunFailed",
@@ -320,6 +332,24 @@ fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
     }
 }
 
+fn copy_workflow_output(source: &Value, target: &mut Value) {
+    if let Some(output_ref) = source.get("outputRef").filter(|value| !value.is_null()) {
+        target["outputRef"] = output_ref.clone();
+    } else {
+        target["output"] = source.get("output").cloned().unwrap_or(Value::Null);
+    }
+}
+
+fn ensure_workflow_output(outcome: &mut Value) {
+    let has_ref = outcome
+        .get("outputRef")
+        .is_some_and(|value| !value.is_null());
+    let has_output = outcome.get("output").is_some();
+    if !has_ref && !has_output {
+        outcome["output"] = Value::Null;
+    }
+}
+
 fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
     error
         .filter(|value| !value.is_null())
@@ -348,8 +378,9 @@ fn normalize_workflow_outcomes(
             "StepCompleted" => {
                 let step_kind = workflow_step_kind_or_run(outcome)?;
                 outcome["stepKind"] = step_kind;
+                ensure_workflow_output(outcome);
             }
-            "RunCompleted" => {}
+            "RunCompleted" => ensure_workflow_output(outcome),
             "RunFailed" => {
                 if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
                     let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
@@ -400,14 +431,17 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
         let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
         match (kind, state) {
-            ("run" | "sideEffect", "completed") => outcomes.push(serde_json::json!({
-                "kind": "StepCompleted",
-                "ordinal": required_i64(checkpoint, "ordinal")?,
-                "name": required_str(checkpoint, "name")?,
-                "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
-                "stepKind": kind,
-                "output": checkpoint.get("output").cloned().unwrap_or(Value::Null),
-            })),
+            ("run" | "sideEffect", "completed") => {
+                let mut outcome = serde_json::json!({
+                    "kind": "StepCompleted",
+                    "ordinal": required_i64(checkpoint, "ordinal")?,
+                    "name": required_str(checkpoint, "name")?,
+                    "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                    "stepKind": kind,
+                });
+                copy_workflow_output(checkpoint, &mut outcome);
+                outcomes.push(outcome);
+            }
             ("run", "failed") => {
                 failed_checkpoint_encoded = true;
                 outcomes.push(serde_json::json!({

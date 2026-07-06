@@ -281,6 +281,23 @@ export class ScheduledWorkflow {
   }
 }
 
+export class BlobOutputWorkflow {
+  async run(trigger, step) {
+    const payload = "x".repeat(trigger.input.size);
+    const digest = payload.length + ":" + payload.charCodeAt(0);
+    const output = await step.run("big", { output: "blob" }, () => ({ payload, digest }));
+    const value = output && typeof output.json === "function" ? await output.json() : output;
+    return { digest: value.digest, len: value.payload.length };
+  }
+}
+
+export class StreamLimitWorkflow {
+  async run(trigger, step) {
+    await step.run("too-big", { output: "stream" }, () => "s".repeat(trigger.input.size));
+    return { unreachable: true };
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
@@ -294,6 +311,8 @@ export default {
     BareAwaitWorkflow,
     NameDivergenceWorkflow,
     ScheduledWorkflow,
+    BlobOutputWorkflow,
+    StreamLimitWorkflow,
   },
 };
 EOF
@@ -325,6 +344,7 @@ ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --db "$DBURL" \
   --blob-store "$WORK/blobs" \
   --poll-interval 1 \
+  --max-step-blob-bytes 2097152 \
   --dev-insecure \
   --workflow-dispatch-unsigned > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -379,6 +399,7 @@ ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
 ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
+ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
 ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
 ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
 ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \

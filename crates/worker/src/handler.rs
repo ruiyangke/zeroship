@@ -4,6 +4,7 @@ use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
 use serde::Deserialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::auth::{
@@ -11,6 +12,7 @@ use zeroship_core::auth::{
 };
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
+use zeroship_bundle::sha256_hex;
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -32,6 +34,8 @@ use crate::{cache, metrics, WorkerConfig};
 const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// ~1 MiB bounds the in-memory un-recorded egress between deltas.
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
+
+const WORKFLOW_INLINE_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 
 /// Cap on the decoded creator-app request body. Most apps don't need huge
 /// inbound bodies on this surface (file uploads typically go straight to object
@@ -477,6 +481,13 @@ pub async fn workflow_dispatch_unsigned(
     match outcome {
         WorkflowOutcome::Response { json, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
+            let json = match rewrite_workflow_output_blobs(&config, &app_id, json).await {
+                Ok(json) => json,
+                Err(resp) => {
+                    record(0);
+                    return resp;
+                }
+            };
             record(json.len() as u64);
             HttpResponse::Ok().content_type("application/json").body(json)
         }
@@ -484,6 +495,13 @@ pub async fn workflow_dispatch_unsigned(
             match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(SettledWorkflow { json, logs: request_logs })) => {
                     crate::logs::append(&logs, app_id, request_logs);
+                    let json = match rewrite_workflow_output_blobs(&config, &app_id, json).await {
+                        Ok(json) => json,
+                        Err(resp) => {
+                            record(0);
+                            return resp;
+                        }
+                    };
                     record(json.len() as u64);
                     HttpResponse::Ok().content_type("application/json").body(json)
                 }
@@ -498,6 +516,197 @@ pub async fn workflow_dispatch_unsigned(
             }
         }
     }
+}
+
+async fn rewrite_workflow_output_blobs(
+    config: &WorkerConfig,
+    app_id: &Uuid,
+    json: String,
+) -> Result<String, HttpResponse> {
+    let mut value: Value = serde_json::from_str(&json).map_err(|e| {
+        HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+            "error": format!("invalid workflow result json before spill rewrite: {e}")
+        }))
+    })?;
+
+    if let Some(outcomes) = value.get_mut("outcomes").and_then(Value::as_array_mut) {
+        for outcome in outcomes {
+            rewrite_workflow_outcome_blob(config, app_id, outcome).await?;
+        }
+    } else {
+        rewrite_workflow_outcome_blob(config, app_id, &mut value).await?;
+    }
+
+    serde_json::to_string(&value).map_err(|e| {
+        HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+            "error": format!("encode workflow result after spill rewrite: {e}")
+        }))
+    })
+}
+
+async fn rewrite_workflow_outcome_blob(
+    config: &WorkerConfig,
+    app_id: &Uuid,
+    outcome: &mut Value,
+) -> Result<(), HttpResponse> {
+    let kind = outcome.get("kind").and_then(Value::as_str).unwrap_or_default();
+    match kind {
+        "StepCompleted" => {
+            let step_kind = outcome
+                .get("stepKind")
+                .and_then(Value::as_str)
+                .unwrap_or("run");
+            if step_kind != "run" {
+                strip_output_mode_metadata(outcome);
+                return Ok(());
+            }
+            let mode = output_mode(outcome.get("outputMode"));
+            let content_type = output_content_type(outcome);
+            let output = outcome.get("output").cloned().unwrap_or(Value::Null);
+            let bytes = output_bytes(&output).map_err(spill_encode_response)?;
+            if mode == WorkflowOutputMode::Inline && bytes.len() > WORKFLOW_INLINE_OUTPUT_CAP_BYTES {
+                replace_with_step_output_limit_failure(outcome, WORKFLOW_INLINE_OUTPUT_CAP_BYTES);
+                return Ok(());
+            }
+            if should_spill_output(mode, bytes.len()) {
+                if bytes.len() as u64 > config.max_step_blob_bytes {
+                    replace_with_step_output_limit_failure(outcome, config.max_step_blob_bytes as usize);
+                    return Ok(());
+                }
+                let output_ref =
+                    write_workflow_output_blob(config, app_id, &bytes, &content_type).await?;
+                if let Some(obj) = outcome.as_object_mut() {
+                    obj.remove("output");
+                    obj.insert("outputRef".to_string(), output_ref);
+                }
+            }
+            strip_output_mode_metadata(outcome);
+            Ok(())
+        }
+        "RunCompleted" => {
+            let output = outcome.get("output").cloned().unwrap_or(Value::Null);
+            let bytes = output_bytes(&output).map_err(spill_encode_response)?;
+            if bytes.len() > WORKFLOW_INLINE_OUTPUT_CAP_BYTES {
+                if bytes.len() as u64 > config.max_step_blob_bytes {
+                    replace_with_run_output_limit_failure(outcome, config.max_step_blob_bytes as usize);
+                    return Ok(());
+                }
+                let output_ref =
+                    write_workflow_output_blob(config, app_id, &bytes, "application/json").await?;
+                if let Some(obj) = outcome.as_object_mut() {
+                    obj.remove("output");
+                    obj.insert("outputRef".to_string(), output_ref);
+                }
+            }
+            strip_output_mode_metadata(outcome);
+            Ok(())
+        }
+        _ => {
+            strip_output_mode_metadata(outcome);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowOutputMode {
+    Auto,
+    Inline,
+    Blob,
+    Stream,
+}
+
+fn output_mode(value: Option<&Value>) -> WorkflowOutputMode {
+    match value.and_then(Value::as_str).unwrap_or("auto") {
+        "inline" => WorkflowOutputMode::Inline,
+        "blob" | "ref" => WorkflowOutputMode::Blob,
+        "stream" => WorkflowOutputMode::Stream,
+        _ => WorkflowOutputMode::Auto,
+    }
+}
+
+fn output_content_type(outcome: &Value) -> String {
+    outcome
+        .get("outputContentType")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/json")
+        .to_string()
+}
+
+fn should_spill_output(mode: WorkflowOutputMode, byte_len: usize) -> bool {
+    matches!(mode, WorkflowOutputMode::Blob | WorkflowOutputMode::Stream)
+        || byte_len > WORKFLOW_INLINE_OUTPUT_CAP_BYTES
+}
+
+fn output_bytes(output: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(output)
+}
+
+async fn write_workflow_output_blob(
+    config: &WorkerConfig,
+    app_id: &Uuid,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<Value, HttpResponse> {
+    let hash = sha256_hex(bytes);
+    config
+        .workflow_blob_store
+        .put_blob(&hash, bytes)
+        .await
+        .map_err(|e| {
+            HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": format!("workflow output blob write failed: {e}")
+            }))
+        })?;
+    cache::record_workflow_blob_write(app_id, bytes.len() as u64);
+    Ok(serde_json::json!({
+        "kind": "ref",
+        "ref": format!("wfblob:sha256:{hash}"),
+        "hash": hash,
+        "size": bytes.len() as u64,
+        "contentType": content_type,
+    }))
+}
+
+fn strip_output_mode_metadata(outcome: &mut Value) {
+    if let Some(obj) = outcome.as_object_mut() {
+        obj.remove("outputMode");
+        obj.remove("outputContentType");
+    }
+}
+
+fn replace_with_step_output_limit_failure(outcome: &mut Value, limit: usize) {
+    // maxStepBlobBytes is a hard platform cap (§3.5/§17): fail the run CLOSED with
+    // LimitExceededError and journal NO step row. Emit a terminal RunFailed with
+    // neither ordinal nor name — the §9 fold treats None+None as a terminal run
+    // failure (Some(ordinal)+Some(name) would journal a retryable failed-step row,
+    // leaving a blob-backed step behind for an aborted partial write).
+    *outcome = serde_json::json!({
+        "kind": "RunFailed",
+        "error": workflow_output_limit_error(limit),
+    });
+}
+
+fn replace_with_run_output_limit_failure(outcome: &mut Value, limit: usize) {
+    *outcome = serde_json::json!({
+        "kind": "RunFailed",
+        "error": workflow_output_limit_error(limit),
+    });
+}
+
+fn workflow_output_limit_error(limit: usize) -> Value {
+    serde_json::json!({
+        "type": "LimitExceededError",
+        "message": format!("workflow output exceeds maxStepBlobBytes ({limit} bytes)"),
+        "retryable": false,
+    })
+}
+
+fn spill_encode_response(err: serde_json::Error) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+        "error": format!("encode workflow output before spill rewrite: {err}")
+    }))
 }
 
 /// Record the UNARY metering counters for a streaming response EXACTLY ONCE,
@@ -864,6 +1073,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         let blob_root = tmpdir("workflow-blob");
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+            zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                .expect("workflow blob store"),
+        );
         let config = Arc::new(crate::WorkerConfig {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
@@ -876,6 +1089,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             worker_key: String::new(),
             shutdown_timeout_secs: 0,
             blob_store: blob_store.clone(),
+            workflow_blob_store: workflow_blob_store.clone(),
+            max_step_blob_bytes: 64 * 1024 * 1024,
             workflow_dispatch_unsigned: true,
         });
         (app_id, blob_store, envs, logs, config, meter, blob_root)
@@ -1284,6 +1499,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let blob_root = tmpdir("blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let config = Arc::new(crate::WorkerConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
@@ -1296,6 +1515,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 
@@ -1392,6 +1613,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let blob_root = tmpdir("blob-binary-body");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let config = Arc::new(crate::WorkerConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
@@ -1404,6 +1629,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 
@@ -1493,6 +1720,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let blob_root = tmpdir("blob-binary-response");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let config = Arc::new(crate::WorkerConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
@@ -1505,6 +1736,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 
@@ -1609,6 +1842,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let blob_root = tmpdir("blob-meter");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let config = Arc::new(crate::WorkerConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
@@ -1621,6 +1858,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 
@@ -1798,6 +2037,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let blob_root = tmpdir("blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+                zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+                    .expect("workflow blob store"),
+            );
             let config = Arc::new(crate::WorkerConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
@@ -1810,6 +2053,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_blob_store,
+                max_step_blob_bytes: 64 * 1024 * 1024,
                 workflow_dispatch_unsigned: false,
             });
 

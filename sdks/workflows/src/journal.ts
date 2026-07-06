@@ -11,6 +11,7 @@ import {
   type ChildWorkflowOptions,
   type SignalEnvelope,
   type StepConfig,
+  type StepOutputRef,
   type WaitForSignalOptions,
   type Workflow,
   type WorkflowStep,
@@ -27,6 +28,7 @@ const WORKFLOW_BODY_TIMER_ERROR =
 const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
 const workflowRealSetTimeout = globalThis.setTimeout;
 const workflowRealClearTimeout = globalThis.clearTimeout;
+const workflowRealFetch = globalThis.fetch;
 
 installWorkflowIoGuards();
 
@@ -40,6 +42,7 @@ export interface JournalStepRecord {
   kind: JournalStepKind;
   state: JournalStepState;
   output?: unknown;
+  outputRef?: StepOutputRefDescriptor;
   error?: { type?: string; message?: string; stack?: string; retryable?: boolean };
   wakeAt?: string;
   signalType?: string;
@@ -52,6 +55,21 @@ export interface JournalEnvelope {
   workflowName: string;
   trigger: WorkflowTrigger<unknown>;
   steps: JournalStepRecord[];
+  outputRead?: WorkflowOutputReadConfig;
+}
+
+export interface WorkflowOutputReadConfig {
+  controlUrl: string;
+  token: string;
+  appId: string;
+}
+
+export interface StepOutputRefDescriptor {
+  kind?: string;
+  ref?: string;
+  hash: string;
+  size: number;
+  contentType?: string;
 }
 
 export type FrontierOutcome =
@@ -63,6 +81,8 @@ export type FrontierOutcome =
       state: "completed";
       output: unknown;
       config?: StepConfig<unknown>;
+      outputMode?: string;
+      outputContentType?: string;
     }
   | {
       kind: "run";
@@ -267,6 +287,7 @@ class JournalBackedStep implements WorkflowStep {
   #callbackSyncDepth = 0;
   #parallelIssueWindow = false;
   #parallelIssueWindowToken = 0;
+  readonly #outputReadMemo = new Map<string, Promise<Uint8Array>>();
 
   constructor(
     envelope: JournalEnvelope,
@@ -459,6 +480,7 @@ class JournalBackedStep implements WorkflowStep {
     const bodyPromise = this.#invokeStepBody(fn);
     try {
       const output = await this.#withTimeout(bodyPromise, config?.timeout);
+      const outputConfig = workflowOutputConfig(config);
       return {
         kind: "run",
         ordinal: issued.ordinal,
@@ -467,6 +489,7 @@ class JournalBackedStep implements WorkflowStep {
         state: "completed",
         output,
         config,
+        ...outputConfig,
       };
     } catch (e) {
       if (e instanceof WorkflowNestedStepError) throw e;
@@ -610,6 +633,16 @@ class JournalBackedStep implements WorkflowStep {
 
   #resolveRecord<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): T {
     if (record.state === "completed") {
+      if (record.outputRef) {
+        return createStepOutputRef(
+          record.outputRef,
+          this.#envelope.outputRead,
+          this.#envelope.runId,
+          record.name,
+          record.nameOccurrence ?? 0,
+          this.#outputReadMemo,
+        ) as T;
+      }
       return record.output as T;
     }
     if (record.state === "failed") {
@@ -838,6 +871,96 @@ function deserializeError(error: JournalStepRecord["error"]): Error {
   e.name = error?.type ?? e.name;
   if (error?.stack) e.stack = error.stack;
   return e;
+}
+
+function workflowOutputConfig(config: StepConfig<unknown> | undefined): {
+  outputMode?: string;
+  outputContentType?: string;
+} {
+  const raw = config?.output;
+  if (raw === undefined) return {};
+  if (typeof raw === "string") {
+    return { outputMode: raw };
+  }
+  return {
+    outputMode: raw.as,
+    ...(raw.contentType ? { outputContentType: raw.contentType } : {}),
+  };
+}
+
+function createStepOutputRef(
+  descriptor: StepOutputRefDescriptor,
+  outputRead: WorkflowOutputReadConfig | undefined,
+  runId: string,
+  name: string,
+  occurrence: number,
+  memo: Map<string, Promise<Uint8Array>>,
+): StepOutputRef {
+  const ref = descriptor.ref ?? `wfblob:sha256:${descriptor.hash}`;
+  const memoKey = `${runId}:${name}:${occurrence}:${descriptor.hash}`;
+  const readBytes = () => {
+    let promise = memo.get(memoKey);
+    if (!promise) {
+      promise = fetchStepOutputBytes(outputRead, runId, name, occurrence);
+      memo.set(memoKey, promise);
+    }
+    return promise;
+  };
+  const readText = async () => new TextDecoder().decode(await readBytes());
+  return {
+    kind: "workflow-step-output-ref",
+    ref,
+    hash: descriptor.hash,
+    size: descriptor.size,
+    ...(descriptor.contentType ? { contentType: descriptor.contentType } : {}),
+    async json<T = unknown>(): Promise<T> {
+      return JSON.parse(await readText()) as T;
+    },
+    async text(): Promise<string> {
+      return readText();
+    },
+    async arrayBuffer(): Promise<ArrayBuffer> {
+      const bytes = await readBytes();
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    },
+    bytes(): Promise<Uint8Array> {
+      return readBytes();
+    },
+    stream(): ReadableStream<Uint8Array> {
+      return new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(await readBytes());
+          controller.close();
+        },
+      });
+    },
+  };
+}
+
+async function fetchStepOutputBytes(
+  outputRead: WorkflowOutputReadConfig | undefined,
+  runId: string,
+  name: string,
+  occurrence: number,
+): Promise<Uint8Array> {
+  if (!outputRead) {
+    throw new WorkflowUnsupportedError("workflow output read endpoint is unavailable");
+  }
+  if (typeof workflowRealFetch !== "function") {
+    throw new WorkflowUnsupportedError("fetch is unavailable for workflow output reads");
+  }
+  const base = outputRead.controlUrl.replace(/\/+$/, "");
+  const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
+  const response = await workflowRealFetch(url, {
+    headers: {
+      authorization: `Bearer ${outputRead.token}`,
+      "x-zeroship-app-id": outputRead.appId,
+    },
+  });
+  if (!response.ok) {
+    throw new WorkflowUnsupportedError(`workflow output read failed with HTTP ${response.status}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 function parseDurationMs(raw: string): number {

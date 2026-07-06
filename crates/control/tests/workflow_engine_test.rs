@@ -13,7 +13,7 @@ mod common;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -22,7 +22,8 @@ use futures::channel::oneshot;
 use ntex::web::{self, test};
 use serial_test::serial;
 use uuid::Uuid;
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
+use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, RunUpdate, StepCheckpoint, StepDispatcher, StepRequest, StepResult,
     WorkflowEngineConfig,
@@ -49,6 +50,21 @@ fn tmpdir(label: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
+}
+
+fn local_workflow_blob_path(root: &std::path::Path, hash: &str) -> PathBuf {
+    let (shard, rest) = hash.split_at(2);
+    root.join("wfblob").join(shard).join(rest)
+}
+
+fn set_local_workflow_blob_mtime(root: &std::path::Path, hash: &str, modified: SystemTime) {
+    let path = local_workflow_blob_path(root, hash);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|err| panic!("open workflow blob {path:?}: {err}"));
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap_or_else(|err| panic!("set workflow blob mtime {path:?}: {err}"));
 }
 
 struct Fixture {
@@ -249,6 +265,10 @@ async fn scrub_cloned_fixture_data(pg: &compio_postgres::Client) {
              zeroship.workflow_runs, \
              zeroship.workflow_signals, \
              zeroship.workflow_subscriptions, \
+             zeroship.workflow_blobs, \
+             zeroship.workflow_schedules, \
+             zeroship.workflow_broadcasts, \
+             zeroship.workflow_signal_keys, \
              zeroship.app_deploys, \
              zeroship.apps \
          CASCADE;",
@@ -271,6 +291,10 @@ async fn build_fixture_with_gateway(
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+            .expect("workflow blob store"),
+    );
     let control_pg = Arc::new(pg(db_url).await);
 
     Fixture {
@@ -279,6 +303,7 @@ async fn build_fixture_with_gateway(
             env_store,
             stripe_store,
             blob_store,
+            workflow_blob_store,
             control_key: SecretString::new(TEST_CONTROL_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
@@ -512,6 +537,7 @@ impl StepDispatcher for BlockingDispatcher {
             Vec::new(),
             RunUpdate::Completed {
                 output: Some(serde_json::json!({"released": true})),
+                output_ref: None,
             },
         ))
     }
@@ -533,6 +559,7 @@ impl StepDispatcher for CompleteDispatcher {
             )],
             RunUpdate::Completed {
                 output: Some(serde_json::json!({"ok": true})),
+                output_ref: None,
             },
         ))
     }
@@ -615,6 +642,7 @@ impl StepDispatcher for CompleteAfterA {
             )],
             RunUpdate::Completed {
                 output: Some(serde_json::json!({"ok": true})),
+                output_ref: None,
             },
         ))
     }
@@ -935,6 +963,309 @@ fn batch_step_result(run_id: &str, dispatch_nonce: &str, outcomes: serde_json::V
         "outcomes": outcomes,
     }))
     .expect("batch StepResult JSON")
+}
+
+#[compio::test]
+async fn blob_output_step_refcount_co_commits_with_journal_row() {
+    let Some(fx) = isolated_fixture("blob-ref-commit").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-commit").await;
+        let run_id = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "running",
+            0,
+            None,
+            Some("owner-blob-ref"),
+            Some(60_000),
+            Some("nonce-blob-ref"),
+        )
+        .await;
+        let bytes = vec![b'x'; 1024 * 1024 + 7];
+        let hash = sha256_hex(&bytes);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&hash, &bytes)
+            .await
+            .expect("write workflow blob");
+
+        let result = batch_step_result(
+            &run_id,
+            "nonce-blob-ref",
+            serde_json::json!([
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "big",
+                    "stepKind": "run",
+                    "outputRef": {
+                        "kind": "ref",
+                        "ref": format!("wfblob:sha256:{hash}"),
+                        "hash": hash,
+                        "size": bytes.len(),
+                        "contentType": "application/json"
+                    }
+                },
+                { "kind": "RunCompleted", "output": { "ok": true } }
+            ]),
+        );
+
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-blob-ref", result)
+                .await
+                .expect("apply blob step result")
+        );
+
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT output_kind, output_hash, output, output_size \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 AND ordinal = 0",
+                &[&run_id],
+            )
+            .await
+            .expect("load blob step");
+        assert_eq!(row.get::<_, String>("output_kind"), "blob");
+        assert_eq!(row.get::<_, Option<String>>("output_hash").as_deref(), Some(hash.as_str()));
+        assert!(row.get::<_, Option<serde_json::Value>>("output").is_none());
+        assert_eq!(row.get::<_, Option<i64>>("output_size"), Some(bytes.len() as i64));
+
+        let blob = fx
+            .pg
+            .query_one(
+                "SELECT refcount, size FROM zeroship.workflow_blobs WHERE hash = $1",
+                &[&hash],
+            )
+            .await
+            .expect("load workflow blob ref");
+        assert_eq!(blob.get::<_, i32>("refcount"), 1);
+        assert_eq!(blob.get::<_, i64>("size"), bytes.len() as i64);
+
+        let run = fx
+            .pg
+            .query_one(
+                "SELECT journal_bytes, blob_bytes FROM zeroship.workflow_runs WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("load run accounting");
+        assert!(run.get::<_, i64>("journal_bytes") < bytes.len() as i64);
+        assert!(run.get::<_, i64>("blob_bytes") >= bytes.len() as i64);
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
+    let Some(fx) = isolated_fixture("blob-ref-gc").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-gc").await;
+        let run_id = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "running",
+            0,
+            None,
+            Some("owner-blob-gc"),
+            Some(60_000),
+            Some("nonce-blob-gc"),
+        )
+        .await;
+
+        let referenced = b"referenced-output".to_vec();
+        let referenced_hash = sha256_hex(&referenced);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&referenced_hash, &referenced)
+            .await
+            .expect("write referenced blob");
+        let result = batch_step_result(
+            &run_id,
+            "nonce-blob-gc",
+            serde_json::json!([
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "kept",
+                    "stepKind": "run",
+                    "outputRef": {
+                        "kind": "ref",
+                        "ref": format!("wfblob:sha256:{referenced_hash}"),
+                        "hash": referenced_hash.clone(),
+                        "size": referenced.len(),
+                        "contentType": "application/json"
+                    }
+                }
+            ]),
+        );
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, "owner-blob-gc", result)
+                .await
+                .expect("apply referenced blob")
+        );
+        let kept_step = fx
+            .pg
+            .query_one(
+                "SELECT output_kind, output_hash \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 AND ordinal = 0",
+                &[&run_id],
+            )
+            .await
+            .expect("load kept step output ref");
+        assert_eq!(kept_step.get::<_, String>("output_kind"), "blob");
+        assert_eq!(
+            kept_step.get::<_, Option<String>>("output_hash").as_deref(),
+            Some(referenced_hash.as_str())
+        );
+
+        let orphan = b"orphan-output".to_vec();
+        let orphan_hash = sha256_hex(&orphan);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&orphan_hash, &orphan)
+            .await
+            .expect("write orphan blob");
+        let old = Utc::now()
+            - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_blobs \
+                    (hash, size, content_type, refcount, last_referenced_at) \
+                 VALUES ($1, $2, 'application/json', 0, $3)",
+                &[&orphan_hash, &(orphan.len() as i64), &old],
+            )
+            .await
+            .expect("insert orphan ref row");
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_blobs \
+                    SET refcount = 0, last_referenced_at = $2 \
+                  WHERE hash = $1",
+                &[&referenced_hash, &old],
+            )
+            .await
+            .expect("age referenced ref row");
+
+        let deleted = workflow_blob_gc::tick_ref_sweep(&fx.state)
+            .await
+            .expect("run ref gc");
+        assert_eq!(deleted, 1);
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&referenced_hash)
+            .await
+            .is_ok());
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&orphan_hash)
+            .await
+            .is_err());
+        let kept_rows = fx
+            .pg
+            .query(
+                "SELECT hash FROM zeroship.workflow_blobs WHERE hash = $1",
+                &[&referenced_hash],
+            )
+            .await
+            .expect("load kept ref");
+        assert_eq!(kept_rows.len(), 1);
+        let orphan_rows = fx
+            .pg
+            .query(
+                "SELECT hash FROM zeroship.workflow_blobs WHERE hash = $1",
+                &[&orphan_hash],
+            )
+            .await
+            .expect("load deleted ref");
+        assert!(orphan_rows.is_empty());
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
+    let Some(fx) = isolated_fixture("blob-orphan-gc").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_secs(
+                workflow_blob_gc::ORPHAN_SWEEP_GRACE_SECS as u64 + 60,
+            ))
+            .expect("old mtime");
+
+        let orphan = b"old-orphan-output".to_vec();
+        let orphan_hash = sha256_hex(&orphan);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&orphan_hash, &orphan)
+            .await
+            .expect("write orphan blob");
+        set_local_workflow_blob_mtime(&fx.blob_root, &orphan_hash, old);
+
+        let referenced = b"old-referenced-output".to_vec();
+        let referenced_hash = sha256_hex(&referenced);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&referenced_hash, &referenced)
+            .await
+            .expect("write referenced blob");
+        set_local_workflow_blob_mtime(&fx.blob_root, &referenced_hash, old);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_blobs \
+                    (hash, size, content_type, refcount, last_referenced_at) \
+                 VALUES ($1, $2, 'application/json', 1, now())",
+                &[&referenced_hash, &(referenced.len() as i64)],
+            )
+            .await
+            .expect("insert referenced orphan guard");
+
+        let young = b"young-orphan-output".to_vec();
+        let young_hash = sha256_hex(&young);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&young_hash, &young)
+            .await
+            .expect("write young blob");
+
+        let deleted = workflow_blob_gc::tick_orphan_sweep(&fx.state)
+            .await
+            .expect("run orphan gc");
+        assert_eq!(deleted, 1);
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&orphan_hash)
+            .await
+            .is_err());
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&referenced_hash)
+            .await
+            .is_ok());
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&young_hash)
+            .await
+            .is_ok());
+    })
+    .await
+    .expect("test timeout");
 }
 
 #[compio::test]
@@ -1560,6 +1891,7 @@ async fn apply_outcome_checkpoints_idempotently() {
         )],
         RunUpdate::Completed {
             output: Some(serde_json::json!({"charged": true})),
+            output_ref: None,
         },
     );
 
@@ -1668,6 +2000,7 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
         vec![StepCheckpoint::completed_run(1, "second", second_output)],
         RunUpdate::Completed {
             output: Some(serde_json::json!({"done": true})),
+            output_ref: None,
         },
     );
     assert!(

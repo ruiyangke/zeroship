@@ -21,6 +21,7 @@ pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
 pub mod stripe_reconcile;
+pub mod workflow_blob_gc;
 pub mod workflow_engine;
 pub mod workflow_signal_fanout;
 pub mod workflow_schedules;
@@ -108,6 +109,26 @@ pub fn spawn_all_with_options(
             workflow_signal_fanout::run(
                 signal_fanout_state,
                 workflow_signal_fanout::DEFAULT_TICK_SECS,
+            )
+            .await;
+        })
+        .detach();
+
+        let blob_ref_gc_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_blob_gc::run_ref_sweep(
+                blob_ref_gc_state,
+                workflow_blob_gc::DEFAULT_REF_SWEEP_TICK_SECS,
+            )
+            .await;
+        })
+        .detach();
+
+        let blob_orphan_gc_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_blob_gc::run_orphan_sweep(
+                blob_orphan_gc_state,
+                workflow_blob_gc::DEFAULT_ORPHAN_SWEEP_TICK_SECS,
             )
             .await;
         })

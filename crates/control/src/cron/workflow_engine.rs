@@ -27,6 +27,7 @@ pub const DEFAULT_TICK_SECS: u64 = 1;
 const GATEWAY_WORKFLOW_DISPATCH_PATH: &str = "/__zeroship/internal/workflow-dispatch";
 const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKPRESSURE_PARK_MS: i64 = 1_000;
+const BLOB_REF_JOURNAL_BYTES: i64 = 160;
 
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 static OWNER_ID: OnceLock<String> = OnceLock::new();
@@ -84,7 +85,18 @@ pub struct JournalStep {
     pub kind: String,
     pub state: String,
     pub output: Option<Value>,
+    #[serde(default, rename = "outputRef")]
+    pub output_ref: Option<WorkflowOutputRef>,
     pub error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowOutputRef {
+    pub hash: String,
+    pub size: i64,
+    #[serde(default)]
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +123,8 @@ pub struct StepCheckpoint {
     pub kind: String,
     pub state: String,
     pub output: Option<Value>,
+    #[serde(default, rename = "outputRef")]
+    pub output_ref: Option<WorkflowOutputRef>,
     pub error: Option<Value>,
     pub wake_at: Option<DateTime<Utc>>,
     pub signal_type: Option<String>,
@@ -129,6 +143,7 @@ impl StepCheckpoint {
             kind: "run".to_string(),
             state: "completed".to_string(),
             output: Some(output),
+            output_ref: None,
             error: None,
             wake_at: None,
             signal_type: None,
@@ -155,6 +170,8 @@ pub enum StepOutcome {
         step_kind: String,
         #[serde(default)]
         output: Option<Value>,
+        #[serde(default, rename = "outputRef")]
+        output_ref: Option<WorkflowOutputRef>,
     },
     StepFailed {
         ordinal: i32,
@@ -167,6 +184,8 @@ pub enum StepOutcome {
     RunCompleted {
         #[serde(default)]
         output: Option<Value>,
+        #[serde(default, rename = "outputRef")]
+        output_ref: Option<WorkflowOutputRef>,
     },
     RunFailed {
         #[serde(default)]
@@ -215,7 +234,11 @@ pub enum RunUpdate {
         #[serde(rename = "wakeAt")]
         wake_at: Option<DateTime<Utc>>,
     },
-    Completed { output: Option<Value> },
+    Completed {
+        output: Option<Value>,
+        #[serde(default, rename = "outputRef")]
+        output_ref: Option<WorkflowOutputRef>,
+    },
     Failed { error: Value },
     Stalled { error: Value },
     Cancelled,
@@ -244,7 +267,14 @@ impl RunUpdate {
 
     fn output(&self) -> Option<Value> {
         match self {
-            Self::Completed { output } => output.clone(),
+            Self::Completed { output, .. } => output.clone(),
+            _ => None,
+        }
+    }
+
+    fn output_ref(&self) -> Option<WorkflowOutputRef> {
+        match self {
+            Self::Completed { output_ref, .. } => output_ref.clone(),
             _ => None,
         }
     }
@@ -427,6 +457,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 name_occurrence,
                 step_kind,
                 output,
+                output_ref,
             } => {
                 if !matches!(step_kind.as_str(), "run" | "sideEffect") {
                     return Err(format!(
@@ -440,6 +471,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     kind: step_kind.clone(),
                     state: "completed".to_string(),
                     output: output.clone(),
+                    output_ref: output_ref.clone(),
                     error: None,
                     wake_at: None,
                     signal_type: None,
@@ -461,6 +493,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     kind: "run".to_string(),
                     state: "failed".to_string(),
                     output: None,
+                    output_ref: None,
                     error: Some(error.clone()),
                     wake_at: None,
                     signal_type: None,
@@ -471,9 +504,10 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 saw_step_failure = true;
                 run_update = RunUpdate::Queued;
             }
-            StepOutcome::RunCompleted { output } => {
+            StepOutcome::RunCompleted { output, output_ref } => {
                 run_update = RunUpdate::Completed {
                     output: output.clone(),
+                    output_ref: output_ref.clone(),
                 };
             }
             StepOutcome::RunFailed {
@@ -491,6 +525,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                             kind: "run".to_string(),
                             state: "failed".to_string(),
                             output: None,
+                            output_ref: None,
                             error: Some(error.clone()),
                             wake_at: None,
                             signal_type: None,
@@ -527,6 +562,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     kind: "sleep".to_string(),
                     state: "running".to_string(),
                     output: None,
+                    output_ref: None,
                     error: None,
                     wake_at: Some(*wake_at),
                     signal_type: None,
@@ -557,6 +593,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     kind: "wait_signal".to_string(),
                     state: "running".to_string(),
                     output: None,
+                    output_ref: None,
                     error: None,
                     wake_at: Some(*wake_at),
                     signal_type: signal_type.clone().or_else(|| Some(name.clone())),
@@ -604,6 +641,7 @@ fn outcomes_from_apply_parts(
                 name_occurrence: checkpoint.name_occurrence,
                 step_kind: checkpoint.kind.clone(),
                 output: checkpoint.output.clone(),
+                output_ref: checkpoint.output_ref.clone(),
             }),
             ("run", "failed") => {
                 failed_checkpoint_encoded = true;
@@ -645,8 +683,9 @@ fn outcomes_from_apply_parts(
     }
 
     match run_update {
-        RunUpdate::Completed { output } => outcomes.push(StepOutcome::RunCompleted {
+        RunUpdate::Completed { output, output_ref } => outcomes.push(StepOutcome::RunCompleted {
             output: output.clone(),
+            output_ref: output_ref.clone(),
         }),
         RunUpdate::Failed { error } if !failed_checkpoint_encoded => {
             outcomes.push(StepOutcome::RunFailed {
@@ -1055,7 +1094,8 @@ where
 {
     let rows = conn
         .query(
-            "SELECT ordinal, name, kind, state, output, error \
+            "SELECT ordinal, name, kind, state, output, error, \
+                    output_kind, output_hash, output_size, output_content_type \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 \
               ORDER BY ordinal",
@@ -1066,6 +1106,12 @@ where
     Ok(rows
         .into_iter()
         .map(|row| JournalStep {
+            output_ref: workflow_output_ref_from_row(
+                row.get("output_kind"),
+                row.get("output_hash"),
+                row.get("output_size"),
+                row.get("output_content_type"),
+            ),
             ordinal: row.get("ordinal"),
             name: row.get("name"),
             kind: row.get("kind"),
@@ -1074,6 +1120,22 @@ where
             error: row.get("error"),
         })
         .collect())
+}
+
+fn workflow_output_ref_from_row(
+    output_kind: String,
+    output_hash: Option<String>,
+    output_size: Option<i64>,
+    output_content_type: Option<String>,
+) -> Option<WorkflowOutputRef> {
+    if output_kind != "blob" {
+        return None;
+    }
+    Some(WorkflowOutputRef {
+        hash: output_hash?,
+        size: output_size?,
+        content_type: output_content_type,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1153,6 +1215,7 @@ where
                     kind: "sleep".to_string(),
                     state: "completed".to_string(),
                     output: None,
+                    output_ref: None,
                     error: None,
                     wake_at: None,
                     signal_type: None,
@@ -1247,6 +1310,7 @@ where
                             kind: "wait_signal".to_string(),
                             state: "failed".to_string(),
                             output: None,
+                            output_ref: None,
                             error: Some(serde_json::json!({
                                 "type": "WorkflowTimeoutError",
                                 "message": format!("workflow signal wait timed out for {signal_type}"),
@@ -1313,6 +1377,7 @@ where
                         "delivery": delivery,
                         "topic": topic.clone(),
                     })),
+                    output_ref: None,
                     error: None,
                     wake_at: None,
                     signal_type: Some(signal_type),
@@ -1698,9 +1763,25 @@ async fn apply_step_result_on_registry(
         .map_err(map_apply_error)?;
     } else {
         let state = result.run_update.state();
-        let output = result.run_update.output();
+        let output_ref = result.run_update.output_ref();
+        let output = if output_ref.is_some() {
+            None
+        } else {
+            result.run_update.output()
+        };
+        let output_kind = if output_ref.is_some() { "blob" } else { "inline" };
+        let output_hash = output_ref.as_ref().map(|value| value.hash.clone());
+        let output_size = output_ref.as_ref().map(|value| value.size);
+        let output_content_type = output_ref
+            .as_ref()
+            .and_then(|value| value.content_type.clone())
+            .or_else(|| output_ref.as_ref().map(|_| "application/json".to_string()));
+        let run_journal_delta = run_output_journal_bytes(&tx, &output, output_ref.as_ref())
+            .await
+            .map_err(ApplyError::Db)?;
+        let blob_bytes_delta = output_ref.as_ref().map_or(0, |value| value.size.max(0));
         let error = result.run_update.error();
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE zeroship.workflow_runs \
                 SET state = $1, \
                     output = $2, \
@@ -1710,6 +1791,12 @@ async fn apply_step_result_on_registry(
                     waiting_step_key = $6, \
                     paused_from_status = NULL, \
                     stuck_strikes = $7, \
+                    output_kind = $11, \
+                    output_hash = $12, \
+                    output_size = $13, \
+                    output_content_type = $14, \
+                    journal_bytes = journal_bytes + $15, \
+                    blob_bytes = blob_bytes + $16, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
                     dispatch_nonce = NULL \
@@ -1728,10 +1815,23 @@ async fn apply_step_result_on_registry(
                 &result.run_id,
                 &config.owner_id,
                 &result.dispatch_nonce,
+                &output_kind,
+                &output_hash,
+                &output_size,
+                &output_content_type,
+                &run_journal_delta,
+                &blob_bytes_delta,
             ],
         )
         .await
         .map_err(map_apply_error)?;
+        if changed > 0 {
+            if let Some(output_ref) = output_ref.as_ref() {
+                upsert_workflow_blob_ref(&tx, output_ref)
+                    .await
+                    .map_err(ApplyError::Db)?;
+            }
+        }
     }
 
     tx.commit().await.map_err(map_apply_error)?;
@@ -1833,6 +1933,20 @@ where
         false
     };
 
+    let output_ref = checkpoint.output_ref.as_ref();
+    let output_kind = if output_ref.is_some() { "blob" } else { "inline" };
+    let output_value = if output_ref.is_some() {
+        None
+    } else {
+        checkpoint.output.clone()
+    };
+    let output_hash = output_ref.map(|value| value.hash.clone());
+    let output_size = output_ref.map(|value| value.size);
+    let output_content_type = output_ref
+        .and_then(|value| value.content_type.clone())
+        .or_else(|| output_ref.map(|_| "application/json".to_string()));
+    let blob_bytes_delta = output_ref.map_or(0, |value| value.size.max(0));
+
     let delta = checkpoint_journal_bytes(conn, checkpoint).await?;
     if delta > 0 {
         let rows = conn
@@ -1870,6 +1984,10 @@ where
                     signal_type = $8, \
                     max_signal_age_ms = $9, \
                     consumed_signal_id = $10, \
+                    output_kind = $12, \
+                    output_hash = $13, \
+                    output_size = $14, \
+                    output_content_type = $15, \
                     finished_at = now() \
               WHERE run_id = $1 \
                 AND ordinal = $2 \
@@ -1881,13 +1999,17 @@ where
                 &checkpoint.ordinal,
                 &checkpoint.name,
                 &checkpoint.state,
-                &checkpoint.output,
+                &output_value,
                 &checkpoint.error,
                 &checkpoint.wake_at,
                 &checkpoint.signal_type,
                 &checkpoint.max_signal_age_ms,
                 &checkpoint.consumed_signal_id,
                 &checkpoint.kind,
+                &output_kind,
+                &output_hash,
+                &output_size,
+                &output_content_type,
             ],
         )
         .await
@@ -1896,10 +2018,11 @@ where
         conn.execute(
             "INSERT INTO zeroship.workflow_steps \
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
-             output_kind, wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
+             output_kind, output_hash, output_size, output_content_type, \
+             wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
              batch_id, batch_width, finished_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 'inline', $9, $10, $11, $12, $13, $14, now()) \
+                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now()) \
          ON CONFLICT (run_id, ordinal) DO NOTHING",
             &[
                 &run_id,
@@ -1908,8 +2031,12 @@ where
                 &checkpoint.name_occurrence,
                 &checkpoint.kind,
                 &checkpoint.state,
-                &checkpoint.output,
+                &output_value,
                 &checkpoint.error,
+                &output_kind,
+                &output_hash,
+                &output_size,
+                &output_content_type,
                 &checkpoint.wake_at,
                 &checkpoint.signal_type,
                 &checkpoint.max_signal_age_ms,
@@ -1921,12 +2048,18 @@ where
         .await
         .map_err(RegistryError::from)?
     };
-    if changed > 0 && delta > 0 {
+    if changed > 0 {
+        if let Some(output_ref) = output_ref {
+            upsert_workflow_blob_ref(conn, output_ref).await?;
+        }
+    }
+    if changed > 0 && (delta > 0 || blob_bytes_delta > 0) {
         conn.execute(
             "UPDATE zeroship.workflow_runs \
-                SET journal_bytes = journal_bytes + $2 \
+                SET journal_bytes = journal_bytes + $2, \
+                    blob_bytes = blob_bytes + $3 \
               WHERE id = $1",
-            &[&run_id, &delta],
+            &[&run_id, &delta, &blob_bytes_delta],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -1946,6 +2079,17 @@ async fn checkpoint_journal_bytes<C>(
 where
     C: GenericClient + Sync,
 {
+    if checkpoint.output_ref.is_some() {
+        let rows = conn
+            .query(
+                "SELECT (COALESCE(pg_column_size($1::jsonb), 0))::bigint AS bytes",
+                &[&checkpoint.error],
+            )
+            .await
+            .map_err(RegistryError::from)?;
+        let error_bytes: i64 = rows[0].get("bytes");
+        return Ok(error_bytes + BLOB_REF_JOURNAL_BYTES);
+    }
     let rows = conn
         .query(
             "SELECT (COALESCE(pg_column_size($1::jsonb), 0) \
@@ -1955,6 +2099,54 @@ where
         .await
         .map_err(RegistryError::from)?;
     Ok(rows[0].get("bytes"))
+}
+
+async fn run_output_journal_bytes<C>(
+    conn: &C,
+    output: &Option<Value>,
+    output_ref: Option<&WorkflowOutputRef>,
+) -> Result<i64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    if output_ref.is_some() {
+        return Ok(BLOB_REF_JOURNAL_BYTES);
+    }
+    let rows = conn
+        .query(
+            "SELECT (COALESCE(pg_column_size($1::jsonb), 0))::bigint AS bytes",
+            &[output],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows[0].get("bytes"))
+}
+
+async fn upsert_workflow_blob_ref<C>(
+    conn: &C,
+    output_ref: &WorkflowOutputRef,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let content_type = output_ref
+        .content_type
+        .as_deref()
+        .unwrap_or("application/json");
+    conn.execute(
+        "INSERT INTO zeroship.workflow_blobs \
+            (hash, size, content_type, refcount, last_referenced_at) \
+         VALUES ($1, $2, $3, 1, now()) \
+         ON CONFLICT (hash) DO UPDATE SET \
+            size = EXCLUDED.size, \
+            content_type = EXCLUDED.content_type, \
+            refcount = zeroship.workflow_blobs.refcount + 1, \
+            last_referenced_at = now()",
+        &[&output_ref.hash, &output_ref.size, &content_type],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    Ok(())
 }
 
 async fn mark_run_state_cap_exceeded<C>(
