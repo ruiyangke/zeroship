@@ -818,13 +818,13 @@ export interface InsertArgs<R extends Row = Row> {
 
 export interface UpdateArgs {
   set: Record<string, DmlSetValue>;
-  where?: ExprFn;
+  where?: ExprFn | ExprChain | Expr;
   /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
 
 export interface DelArgs {
-  where: ExprFn;
+  where: ExprFn | ExprChain | Expr;
   limit?: number;
   /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
@@ -832,7 +832,7 @@ export interface DelArgs {
 
 export interface BackfillArgs {
   set: Record<string, DmlSetValue>;
-  where?: ExprFn;
+  where?: ExprFn | ExprChain | Expr;
   /** Defaults to the single-column PK (`"id"`). */
   cursorColumn?: string;
   /** Defaults to the engine's chosen batch size. */
@@ -861,13 +861,13 @@ export interface TriggerInsertArgs<R extends Row = Row> {
 export interface TriggerUpdateArgs {
   table: string;
   set: Record<string, DmlSetValue>;
-  where?: ExprFn;
+  where?: ExprFn | ExprChain | Expr;
   schema?: string;
 }
 
 export interface TriggerDeleteArgs {
   table: string;
-  where: ExprFn;
+  where: ExprFn | ExprChain | Expr;
   limit?: number;
   schema?: string;
 }
