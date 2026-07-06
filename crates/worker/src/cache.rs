@@ -68,6 +68,11 @@ thread_local! {
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
+    /// Control-plane endpoint and raw control key used only to derive
+    /// app-scoped workflow tokens in `WorkflowPlugin::build_instance`.
+    /// The raw key stays in Rust process memory and is never exposed to V8.
+    static CONTROL_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CONTROL_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
     /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
     /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
     /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
@@ -88,6 +93,8 @@ thread_local! {
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
+    pub control_url: String,
+    pub control_key: String,
     pub db_url: Option<String>,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
@@ -116,6 +123,8 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
+    CONTROL_URL.with(|u| *u.borrow_mut() = Some(kernel.control_url));
+    CONTROL_KEY.with(|k| *k.borrow_mut() = Some(kernel.control_key));
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
 }
 
@@ -178,6 +187,13 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
                 tracing::error!(error = %e, "env.storage backend init failed; namespace absent");
             }
         }
+    }
+    if let Some(control_url) = CONTROL_URL.with(|u| u.borrow().clone()) {
+        let control_key = CONTROL_KEY.with(|k| k.borrow().clone()).unwrap_or_default();
+        plugins.push(Arc::new(zeroship_plugin_workflow::WorkflowPlugin::new(
+            control_url,
+            control_key,
+        )));
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -827,6 +843,8 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: "test-control-key".to_string(),
                     db_url: Some("postgres://localhost/zs_unused".to_string()),
                     kv_url: Some("redis://127.0.0.1:6379".to_string()),
                     storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
@@ -840,8 +858,8 @@ mod tests {
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             // Metering is infrastructure now: there is NO `meter` namespace.
             // The meter is bound INTO the db/kv/storage producers, so the
-            // creator surface is exactly these four namespaces.
-            for expected in ["db", "kv", "storage", "auth"] {
+            // creator surface is exactly these five namespaces.
+            for expected in ["db", "kv", "storage", "workflows", "auth"] {
                 assert!(
                     namespaces.iter().any(|n| n == expected),
                     "create_plugins() must register the '{expected}' namespace when configured; got: {namespaces:?}"
@@ -867,6 +885,8 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -881,9 +901,10 @@ mod tests {
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             let has = |n: &str| namespaces.iter().any(|x| x == n);
-            // auth is unconditional; kv/storage/db must NOT appear; and there
-            // is NO `meter` namespace (metering is infrastructure).
+            // auth/workflows are unconditional; kv/storage/db must NOT appear;
+            // and there is NO `meter` namespace (metering is infrastructure).
             assert!(has("auth"));
+            assert!(has("workflows"));
             assert!(!has("meter"), "metering is infrastructure: no env.meter namespace");
             assert!(!has("kv"), "kv absent when unconfigured");
             assert!(!has("storage"), "storage absent when unconfigured");
@@ -1016,6 +1037,8 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
+                        control_url: "http://127.0.0.1:1".to_string(),
+                        control_key: String::new(),
                         db_url: None,
                         kv_url: None,
                         storage_backend: None,
@@ -1067,6 +1090,8 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
+                        control_url: "http://127.0.0.1:1".to_string(),
+                        control_key: String::new(),
                         db_url: None,
                         kv_url: None,
                         storage_backend: None,
@@ -1132,6 +1157,8 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
+                        control_url: "http://127.0.0.1:1".to_string(),
+                        control_key: String::new(),
                         db_url: None,
                         kv_url: None,
                         storage_backend: None,

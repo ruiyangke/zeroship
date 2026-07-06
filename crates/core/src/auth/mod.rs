@@ -154,6 +154,25 @@ pub fn hmac_sha256_hex(key: &[u8], payload: &[u8]) -> String {
     hex::encode(hmac_sha256(key, payload))
 }
 
+/// Derive the app-scoped internal workflow token accepted by the
+/// control-plane workflow instance API.
+///
+/// The raw `control_key` is process configuration and must never enter V8.
+/// Runtime-side plugins derive this bearer token in Rust from the app id
+/// stamped onto the isolate; control verifies the same derivation against
+/// the `x-zeroship-app-id` channel header.
+#[must_use]
+pub fn derive_app_scoped_control_token(control_key: &str, app_id: &str) -> String {
+    hmac_sha256_hex(control_key.as_bytes(), app_id.as_bytes())
+}
+
+/// Constant-time verify for [`derive_app_scoped_control_token`].
+#[must_use]
+pub fn validate_app_scoped_control_token(provided: &str, control_key: &str, app_id: &str) -> bool {
+    let expected = derive_app_scoped_control_token(control_key, app_id);
+    validate_control_key(provided, &expected)
+}
+
 /// Constant-time verify of `expected_hex` against `payload` HMAC-signed with `key`.
 #[must_use]
 pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) -> bool {

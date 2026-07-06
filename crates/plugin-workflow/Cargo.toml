@@ -1,0 +1,29 @@
+[package]
+name = "zeroship-plugin-workflow"
+version = "0.1.0"
+edition = "2021"
+description = "zeroship env.workflows native binding"
+
+[dependencies]
+zeroship-core = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
+compio = { workspace = true }
+cyper = { workspace = true }
+percent-encoding = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+v8 = { workspace = true }
+
+[dev-dependencies]
+zeroship-bundle = { workspace = true }
+zeroship-control = { workspace = true }
+zeroship-authz = { workspace = true }
+zeroship-authn = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+ntex = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

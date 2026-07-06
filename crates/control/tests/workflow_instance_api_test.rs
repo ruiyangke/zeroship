@@ -181,7 +181,9 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
 }
 
 fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
-    req.header("authorization", format!("Bearer {TEST_CONTROL_KEY}"))
+    let token =
+        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, &app_id.to_string());
+    req.header("authorization", format!("Bearer {token}"))
         .header(workflow_instance_api::APP_ID_HEADER, app_id.to_string())
 }
 
