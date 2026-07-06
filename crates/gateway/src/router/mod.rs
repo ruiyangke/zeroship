@@ -35,9 +35,8 @@ pub mod static_serve;
 pub mod streaming;
 pub mod variants;
 
-// Re-exports for external callers (`main.rs` registers `handle` and
-// `handle_subdomain` as the gateway's two ntex routes).
-pub use dispatch::{handle, handle_subdomain};
+// Re-exports for external callers (`main.rs` registers these ntex routes).
+pub use dispatch::{handle, handle_subdomain, workflow_dispatch_internal};
 
 // Re-exports for intra-crate callers — kept for API stability while
 // the gateway's outer middleware still spells these names against the

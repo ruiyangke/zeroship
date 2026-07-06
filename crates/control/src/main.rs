@@ -100,6 +100,14 @@ struct ControlCli {
     )]
     stripe_base_url: String,
 
+    /// Gateway internal base URL used by the workflow engine dispatch seam.
+    #[arg(
+        long = "gateway-url",
+        env = "ZEROSHIP_GATEWAY_URL",
+        default_value = "http://localhost"
+    )]
+    gateway_url: String,
+
     /// Metering/billing provider backend (M6). `native` (default) runs the
     /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
     /// Billing Meters — CU → meter_events, Stripe self-invoices) and `openmeter`
@@ -453,6 +461,7 @@ impl std::fmt::Debug for ControlCli {
             .field("worker_key", &"<redacted>")
             .field("signing_key_file", &self.signing_key_file)
             .field("stripe_webhook_secret", &"<redacted>")
+            .field("gateway_url", &self.gateway_url)
             .field("legacy_master_keys", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("trust_proxy", &self.trust_proxy)
@@ -770,6 +779,7 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let workers_str = cli.workers;
+    let gateway_url = cli.gateway_url.trim_end_matches('/').to_string();
     let worker_key = zeroship_core::config::obtain_secret(
         "WORKER_KEY / --worker-key",
         &cli.worker_key,
@@ -1136,6 +1146,7 @@ fn main() -> std::io::Result<()> {
             CheckValue::Secret(!pairwise_salt.is_empty()),
         );
         report.field("workers_count", CheckValue::Count(workers_count));
+        report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
 
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
@@ -1458,6 +1469,7 @@ fn main() -> std::io::Result<()> {
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
         stripe_base_url,
+        gateway_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)

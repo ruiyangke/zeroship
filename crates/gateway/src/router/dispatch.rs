@@ -18,8 +18,11 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
+use serde::Deserialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
@@ -81,6 +84,224 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
     }
 
     Some(subdomain.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStepRequest {
+    run_id: String,
+    app_id: Uuid,
+    workflow_name: String,
+    deploy_id: String,
+    deploy_hash: String,
+    dispatch_nonce: String,
+    #[serde(default)]
+    input: Option<Value>,
+    started_at: DateTime<Utc>,
+    #[serde(default)]
+    journal: Vec<Value>,
+}
+
+/// Internal durable-workflow dispatch edge.
+///
+/// This is deliberately mounted before the public app catch-all and rejects
+/// requests whose Host resolves as a creator app. The topology is still one
+/// ntex app today; a dedicated internal listener can mount this same handler
+/// without changing the transport contract.
+pub async fn workflow_dispatch_internal(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+    body: Bytes,
+) -> HttpResponse {
+    if req.method() != ntex::http::Method::POST {
+        return HttpResponse::NotFound().finish();
+    }
+    if extract_app_name(&req, None).is_some() {
+        return HttpResponse::NotFound().finish();
+    }
+
+    let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
+        Ok(request) => request,
+        Err(e) => {
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid StepRequest: {e}")}));
+        }
+    };
+    if request.run_id.is_empty()
+        || request.workflow_name.is_empty()
+        || request.deploy_id.is_empty()
+        || request.deploy_hash.is_empty()
+        || request.dispatch_nonce.is_empty()
+    {
+        return HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "StepRequest requires runId, appId, workflowName, deployId, deployHash, and dispatchNonce"
+        }));
+    }
+
+    let Some(compiled_route) = state.routes.lookup_by_app_id(&request.app_id) else {
+        return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
+    };
+
+    if let Err(resp) = enforce::check_account(compiled_route.entry.account_state) {
+        return resp;
+    }
+    if let Err(resp) = enforce::check_spend(compiled_route.entry.spend_state) {
+        return resp;
+    }
+
+    let worker_envelope = serde_json::json!({
+        "runId": &request.run_id,
+        "workflowName": &request.workflow_name,
+        "trigger": {
+            "input": request.input.clone().unwrap_or(Value::Null),
+            "startedAt": request.started_at.to_rfc3339(),
+            "runId": &request.run_id,
+            "workflowName": &request.workflow_name,
+        },
+        "journal": request.journal.clone(),
+        "deployHash": &request.deploy_hash,
+        "attempt": 0,
+        "nonce": &request.dispatch_nonce,
+    });
+    let worker_body = match serde_json::to_vec(&worker_envelope) {
+        Ok(body) => body,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": format!("encode worker StepRequest: {e}")}));
+        }
+    };
+
+    // TODO(DW-signed-transport): verify a control-plane signature/nonce before
+    // accepting this internal StepRequest, then sign the gateway->worker hop.
+    // For DW-05b the worker's unsigned test-flag route is the intentional seam.
+    let request_id = Uuid::new_v4();
+    let worker_response = match proxy::forward_workflow_dispatch(
+        &state.hash_ring,
+        &request.app_id,
+        &compiled_route.entry.plan_id,
+        &request_id,
+        &worker_body,
+        &state.config.worker_key,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            return HttpResponse::BadGateway()
+                .json(&serde_json::json!({"error": format!("worker error: {e}")}));
+        }
+    };
+
+    if !worker_response.status().is_success() {
+        return worker_response;
+    }
+
+    let (_buffered, worker_bytes) = buffer_response_body(worker_response).await;
+    match workflow_worker_result_to_step_result(&request, &worker_bytes) {
+        Ok(result) => HttpResponse::Ok().json(&result),
+        Err(e) => HttpResponse::BadGateway()
+            .json(&serde_json::json!({"error": format!("invalid worker StepResult: {e}")})),
+    }
+}
+
+fn workflow_worker_result_to_step_result(
+    request: &WorkflowStepRequest,
+    worker_bytes: &[u8],
+) -> Result<Value, String> {
+    let result: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
+    if result.get("runUpdate").is_some() && result.get("dispatchNonce").is_some() {
+        return Ok(result);
+    }
+
+    let kind = result
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing kind".to_string())?;
+    let run_id = result
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or(request.run_id.as_str());
+    let nonce = result
+        .get("nonce")
+        .and_then(Value::as_str)
+        .unwrap_or(request.dispatch_nonce.as_str());
+
+    let mut checkpoints = Vec::new();
+    let run_update = match kind {
+        "StepCompleted" => {
+            checkpoints.push(checkpoint_from_worker(&result, "run", "completed")?);
+            serde_json::json!({"state": "queued"})
+        }
+        "RunCompleted" => serde_json::json!({
+            "state": "completed",
+            "output": result.get("output").cloned().unwrap_or(Value::Null),
+        }),
+        "RunFailed" => {
+            if result.get("ordinal").is_some() && result.get("name").is_some() {
+                checkpoints.push(checkpoint_from_worker(&result, "run", "failed")?);
+            }
+            serde_json::json!({
+                "state": "failed",
+                "error": result.get("error").cloned().unwrap_or_else(|| {
+                    serde_json::json!({"type": "Error", "message": "workflow run failed"})
+                }),
+            })
+        }
+        "Sleep" => {
+            let mut checkpoint = checkpoint_from_worker(&result, "sleep", "running")?;
+            checkpoint["wakeAt"] = result.get("wakeAt").cloned().unwrap_or(Value::Null);
+            checkpoints.push(checkpoint);
+            serde_json::json!({
+                "state": "sleeping",
+                "wakeAt": result.get("wakeAt").cloned().unwrap_or(Value::Null),
+            })
+        }
+        "Wait" => {
+            let mut checkpoint = checkpoint_from_worker(&result, "wait_signal", "running")?;
+            checkpoint["signalType"] = result
+                .get("signalType")
+                .cloned()
+                .unwrap_or_else(|| result.get("name").cloned().unwrap_or(Value::Null));
+            checkpoint["maxSignalAgeMs"] = result.get("maxSignalAge").cloned().unwrap_or(Value::Null);
+            checkpoints.push(checkpoint);
+            serde_json::json!({
+                "state": "waiting",
+                "wakeAt": result.get("timeout").cloned().unwrap_or(Value::Null),
+            })
+        }
+        other => return Err(format!("unknown worker workflow result kind {other:?}")),
+    };
+
+    Ok(serde_json::json!({
+        "runId": run_id,
+        "dispatchNonce": nonce,
+        "checkpoints": checkpoints,
+        "runUpdate": run_update,
+    }))
+}
+
+fn checkpoint_from_worker(result: &Value, kind: &str, state: &str) -> Result<Value, String> {
+    let ordinal = result
+        .get("ordinal")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "missing ordinal".to_string())?;
+    let name = result
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing name".to_string())?;
+    Ok(serde_json::json!({
+        "ordinal": ordinal,
+        "name": name,
+        "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+        "kind": kind,
+        "state": state,
+        "output": result.get("output").cloned().unwrap_or(Value::Null),
+        "error": result.get("error").cloned().unwrap_or(Value::Null),
+        "wakeAt": Value::Null,
+        "signalType": Value::Null,
+        "maxSignalAgeMs": Value::Null,
+        "consumedSignalId": Value::Null,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1933,7 +2154,7 @@ mod tests {
 
     use ntex::http::body::{Body, MessageBody, ResponseBody};
     use ntex::util::Bytes;
-    use ntex::web::HttpResponse;
+    use ntex::web::{self, HttpResponse};
 
     use crate::compiled::{CompiledManifest, EffectivePolicy};
     use zeroship_bundle::{
@@ -2037,7 +2258,7 @@ mod tests {
         }
     }
 
-    fn build_idempotency_state() -> Arc<GateState> {
+    fn build_test_state_with_workers(worker_urls: Vec<String>) -> Arc<GateState> {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -2045,7 +2266,7 @@ mod tests {
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
-                worker_urls: vec![],
+                worker_urls: worker_urls.clone(),
                 poll_interval_secs: 5,
                 worker_key: String::new(),
                 auth_ui_url: String::new(),
@@ -2054,7 +2275,7 @@ mod tests {
                 public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),
-            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
+            hash_ring: crate::proxy::HashRing::new(worker_urls, 1),
             rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
             per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
             concurrency: crate::enforce::ConcurrencyRegistry::new(1),
@@ -2078,6 +2299,172 @@ mod tests {
             pairwise_salt: [0u8; 32],
             meter: Arc::new(zeroship_metering::Meter::new()),
         })
+    }
+
+    fn build_idempotency_state() -> Arc<GateState> {
+        build_test_state_with_workers(vec!["http://0.0.0.0:0".into()])
+    }
+
+    fn workflow_step_request(app_id: Uuid) -> Value {
+        serde_json::json!({
+            "runId": "run_test",
+            "appId": app_id,
+            "workflowName": "Checkout",
+            "deployId": "dep_test",
+            "deployHash": "hash_test",
+            "dispatchNonce": "wfd_test",
+            "input": {"orderId": "ord_1"},
+            "startedAt": "2026-07-06T00:00:00Z",
+            "journal": [],
+        })
+    }
+
+    async fn workflow_mock_worker(
+        seen: web::types::State<Arc<std::sync::Mutex<Vec<Value>>>>,
+        body: Bytes,
+    ) -> HttpResponse {
+        let request: Value = serde_json::from_slice(body.as_ref()).expect("worker request json");
+        seen.lock().expect("seen lock").push(request.clone());
+        HttpResponse::Ok().json(&serde_json::json!({
+            "runId": request["runId"],
+            "dispatchNonce": request["nonce"],
+            "checkpoints": [{
+                "ordinal": 0,
+                "name": "first",
+                "nameOccurrence": 0,
+                "kind": "run",
+                "state": "completed",
+                "output": {"ok": true},
+                "error": null,
+                "wakeAt": null,
+                "signalType": null,
+                "maxSignalAgeMs": null,
+                "consumedSignalId": null
+            }],
+            "runUpdate": {"state": "queued"}
+        }))
+    }
+
+    fn install_workflow_route(
+        state: &GateState,
+        app_id: Uuid,
+        spend_state: zeroship_core::types::SpendState,
+        account_state: zeroship_core::types::AccountState,
+    ) {
+        let mut entry = worker_spend_route(spend_state);
+        entry.account_state = account_state;
+        let mut routes = zeroship_core::types::RouteMap::new();
+        routes.insert(app_id, entry);
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
+    }
+
+    #[ntex::test]
+    async fn internal_workflow_dispatch_routes_to_worker_and_returns_step_result() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let server_seen = Arc::clone(&seen);
+        let worker = ntex::web::test::server(move || {
+            let seen = Arc::clone(&server_seen);
+            async move {
+                web::App::new().state(seen).service(
+                    web::resource("/workflow-dispatch-unsigned/{app_id}")
+                        .route(web::post().to(workflow_mock_worker)),
+                )
+            }
+        })
+        .await;
+
+        let state = build_test_state_with_workers(vec![worker.url("/")]);
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-dispatch")
+                    .route(web::post().to(workflow_dispatch_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-dispatch")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        let body = ntex::web::test::read_body(resp).await;
+        let result: Value = serde_json::from_slice(&body).expect("StepResult JSON");
+        assert_eq!(result["runId"], "run_test");
+        assert_eq!(result["dispatchNonce"], "wfd_test");
+        assert_eq!(result["runUpdate"]["state"], "queued");
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["runId"], "run_test");
+        assert_eq!(seen[0]["nonce"], "wfd_test");
+        assert_eq!(seen[0]["deployHash"], "hash_test");
+        assert_eq!(seen[0]["trigger"]["input"]["orderId"], "ord_1");
+    }
+
+    #[ntex::test]
+    async fn internal_workflow_dispatch_spend_blocked_app_returns_402() {
+        let state = build_test_state_with_workers(Vec::new());
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Block,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-dispatch")
+                    .route(web::post().to(workflow_dispatch_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-dispatch")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
+        let body = ntex::web::test::read_body(resp).await;
+        let json: Value = serde_json::from_slice(&body).expect("402 JSON");
+        assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    #[ntex::test]
+    async fn public_vhost_workflow_dispatch_path_is_404() {
+        let state = build_test_state_with_workers(Vec::new());
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-dispatch")
+                    .route(web::post().to(workflow_dispatch_internal)),
+            ),
+        )
+        .await;
+
+        let req = ntex::web::test::TestRequest::post()
+            .uri("/__zeroship/internal/workflow-dispatch")
+            .header("host", "spend-app.zeroship.localhost")
+            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .to_request();
+        let resp = ntex::web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
     }
 
     // -----------------------------------------------------------------------

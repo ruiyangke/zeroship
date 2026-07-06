@@ -755,6 +755,10 @@ fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
+            .service(
+                web::resource("/__zeroship/internal/workflow-dispatch")
+                    .route(web::post().to(router::workflow_dispatch_internal)),
+            )
             // auth-sdk BFF redesign slice R1b — the ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on
             // `/__zeroship/auth/session`:

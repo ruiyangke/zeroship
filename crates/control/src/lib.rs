@@ -138,6 +138,10 @@ pub struct AppState {
     /// `https://api.stripe.com`; the integration tests override it to point the
     /// REAL `cyper` client at a localhost mock-Stripe server.
     pub stripe_base_url: String,
+    /// Gateway internal base URL used by the workflow engine to dispatch
+    /// claimed runs through the spend/account-gated edge before they reach a
+    /// worker replay host.
+    pub gateway_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints. Empty means dev-only
