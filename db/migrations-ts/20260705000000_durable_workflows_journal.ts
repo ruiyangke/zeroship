@@ -308,6 +308,7 @@ export function up() {
       id: t.text().notNull(),
       app_id: t.uuid().notNull(),
       deploy_id: t.text().notNull(),
+      deploy_hash: t.text().notNull(),
       name: t.text().notNull(),
       workflow_name: t.text().notNull(),
       kind: t.text().notNull(),
@@ -317,13 +318,15 @@ export function up() {
       anchor: t.text(),
       input_json: t.json().notNull().default({}),
       overlap: t.text().notNull().default("allow"),
-      catchup: t.text().notNull().default("skip"),
-      catchup_max: t.int().notNull().default(0),
+      catch_up: t.text().notNull().default("skip"),
+      catch_up_max: t.int().notNull().default(0),
       next_fire_at: t.timestamp().notNull(),
       last_fire_at: t.timestamp(),
-      paused: t.boolean().notNull().default(false),
+      last_fired_epoch: t.bigInt(),
+      enabled: t.boolean().notNull().default(true),
       claimed_by: t.text(),
       claimed_at: t.timestamp(),
+      lease_expires: t.timestamp(),
       created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
@@ -332,8 +335,8 @@ export function up() {
   zs("workflow_schedules").check("workflow_schedules_kind_check").add({ expr: (c) => c("kind").in(["cron", "interval"]) });
   zs("workflow_schedules").check("workflow_schedules_anchor_check").add({ expr: (c) => c("anchor").in(["epoch", "deploy"]) });
   zs("workflow_schedules").check("workflow_schedules_overlap_check").add({ expr: (c) => c("overlap").in(["allow", "skipIfRunning"]) });
-  zs("workflow_schedules").check("workflow_schedules_catchup_check").add({ expr: (c) => c("catchup").in(["skip", "backfill"]) });
-  zs("workflow_schedules").check("workflow_schedules_catchup_max_check").add({ expr: (c) => c("catchup_max").ge(0) });
+  zs("workflow_schedules").check("workflow_schedules_catch_up_check").add({ expr: (c) => c("catch_up").in(["skip", "backfill"]) });
+  zs("workflow_schedules").check("workflow_schedules_catch_up_max_check").add({ expr: (c) => c("catch_up_max").ge(0) });
   zs("workflow_schedules").check("workflow_schedules_check").add({
     expr: (c) =>
       c("kind")
@@ -344,7 +347,7 @@ export function up() {
   zs("workflow_schedules").unique("workflow_schedules_app_id_name_key").add({ columns: ["app_id", "name"] });
   pzs("workflow_schedules").index("workflow_schedules_due_idx").add({
     on: ["next_fire_at"],
-    where: (c) => c("paused").not(),
+    where: (c) => c("enabled"),
   });
   zs("workflow_schedules").index("workflow_schedules_app_idx").add({ on: ["app_id"] });
 

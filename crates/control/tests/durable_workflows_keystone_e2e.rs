@@ -28,6 +28,7 @@ use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
     WorkflowEngineConfig,
 };
+use zeroship_control::cron::workflow_schedules::{self, ScheduleSweepConfig};
 use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -40,6 +41,7 @@ const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
 const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
+const SCHEDULED_WORKFLOW_NAME: &str = "ScheduledWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -446,6 +448,15 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         claim_ttl_ms: 1_500,
         heartbeat_ms: 60_000,
         stuck_strike_limit: 3,
+        owner_id: owner.to_string(),
+    }
+}
+
+fn schedule_config(owner: &str) -> ScheduleSweepConfig {
+    ScheduleSweepConfig {
+        batch_size: 4,
+        claim_ttl_ms: 1_500,
+        backfill_hard_max: 8,
         owner_id: owner.to_string(),
     }
 }
@@ -885,6 +896,35 @@ async fn run_output(fx: &Fixture, run_id: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+async fn scheduled_run_for(
+    fx: &Fixture,
+    schedule_id: &str,
+    planned: DateTime<Utc>,
+) -> Option<(String, DateTime<Utc>, serde_json::Value)> {
+    let key = format!("sched:{schedule_id}:{}", planned.timestamp_millis());
+    let rows = fx
+        .pg
+        .query(
+            "SELECT id, started_at, input \
+               FROM zeroship.workflow_runs \
+              WHERE app_id = $1 \
+                AND workflow_name = $2 \
+                AND dedup_key = $3 \
+              ORDER BY created_at, id",
+            &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+        )
+        .await
+        .expect("load scheduled run");
+    rows.first().map(|row| {
+        (
+            row.get("id"),
+            row.get("started_at"),
+            row.get::<_, Option<serde_json::Value>>("input")
+                .unwrap_or(serde_json::Value::Null),
+        )
+    })
+}
+
 async fn post_signal(
     control_url: &str,
     app_id: Uuid,
@@ -1013,6 +1053,141 @@ async fn durable_workflows_m1_keystone_real_spine() {
     compio::time::sleep(Duration::from_millis(100)).await;
 
     let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+
+    let schedule_row = fx
+        .pg
+        .query_one(
+            "SELECT id, deploy_hash, workflow_name, kind, cron_expr, tz, next_fire_at \
+               FROM zeroship.workflow_schedules \
+              WHERE app_id = $1 AND name = 'dw14-scheduled'",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load reconciled schedule row");
+    let schedule_id: String = schedule_row.get("id");
+    assert!(schedule_id.starts_with("sch_"));
+    let schedule_deploy_hash: String = schedule_row.get("deploy_hash");
+    assert!(!schedule_deploy_hash.is_empty(), "schedule row carries deploy hash");
+    assert_eq!(
+        schedule_row.get::<_, String>("workflow_name"),
+        SCHEDULED_WORKFLOW_NAME
+    );
+    assert_eq!(schedule_row.get::<_, String>("kind"), "cron");
+    assert_eq!(
+        schedule_row.get::<_, Option<String>>("cron_expr").as_deref(),
+        Some("* * * * *")
+    );
+    assert_eq!(
+        schedule_row.get::<_, Option<String>>("tz").as_deref(),
+        Some("UTC")
+    );
+    let initial_next: DateTime<Utc> = schedule_row.get("next_fire_at");
+    assert!(
+        initial_next > Utc::now() - ChronoDuration::minutes(1),
+        "initial next fire should be reconciled from deploy time, got {initial_next:?}"
+    );
+
+    let planned = DateTime::<Utc>::from_timestamp_millis(
+        (Utc::now() - ChronoDuration::minutes(3)).timestamp_millis(),
+    )
+    .expect("planned instant");
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_schedules \
+                SET next_fire_at = $2, claimed_by = NULL, claimed_at = NULL, lease_expires = NULL \
+              WHERE id = $1",
+            &[&schedule_id, &planned],
+        )
+        .await
+        .expect("advance schedule clock");
+    let fired = workflow_schedules::tick_with_config(&fx.state, schedule_config("dw14-schedule-a"))
+        .await
+        .expect("schedule sweep tick");
+    assert_eq!(fired, 1, "schedule sweep should fire one queued run");
+    let (scheduled_run, scheduled_started_at, scheduled_input) =
+        scheduled_run_for(&fx, &schedule_id, planned)
+            .await
+            .expect("scheduled run created");
+    assert_eq!(scheduled_started_at, planned);
+    assert_eq!(scheduled_input, serde_json::json!({"case": "schedule"}));
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw14-schedule-drive"),
+        &scheduled_run,
+    )
+    .await;
+    let scheduled_output = run_output(&fx, &scheduled_run).await;
+    assert_eq!(scheduled_output["input"], serde_json::json!({"case": "schedule"}));
+    assert_eq!(scheduled_output["workflowName"], SCHEDULED_WORKFLOW_NAME);
+    let output_started = DateTime::parse_from_rfc3339(
+        scheduled_output["startedAt"]
+            .as_str()
+            .expect("scheduled output startedAt"),
+    )
+    .expect("parse scheduled startedAt")
+    .with_timezone(&Utc);
+    assert_eq!(output_started, planned);
+
+    let concurrent_planned = DateTime::<Utc>::from_timestamp_millis(
+        (Utc::now() - ChronoDuration::minutes(2)).timestamp_millis(),
+    )
+    .expect("concurrent planned instant");
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_schedules \
+                SET next_fire_at = $2, claimed_by = NULL, claimed_at = NULL, lease_expires = NULL \
+              WHERE id = $1",
+            &[&schedule_id, &concurrent_planned],
+        )
+        .await
+        .expect("advance schedule clock for concurrent sweep");
+    let (tick_a, tick_b) = futures::future::join(
+        workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_config("dw14-schedule-concurrent-a"),
+        ),
+        workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_config("dw14-schedule-concurrent-b"),
+        ),
+    )
+    .await;
+    let tick_a = tick_a.expect("schedule concurrent tick a");
+    let tick_b = tick_b.expect("schedule concurrent tick b");
+    assert_eq!(
+        tick_a + tick_b,
+        1,
+        "two concurrent schedule ticks should fire the planned instant once"
+    );
+    let key = format!(
+        "sched:{schedule_id}:{}",
+        concurrent_planned.timestamp_millis()
+    );
+    let run_count: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs \
+              WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3",
+            &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+        )
+        .await
+        .expect("count concurrent scheduled runs")
+        .get("n");
+    assert_eq!(run_count, 1, "dedup key must leave exactly one run");
+    let (concurrent_scheduled_run, concurrent_started_at, _) =
+        scheduled_run_for(&fx, &schedule_id, concurrent_planned)
+            .await
+            .expect("concurrent scheduled run created");
+    assert_eq!(concurrent_started_at, concurrent_planned);
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw14-schedule-concurrent-drive"),
+        &concurrent_scheduled_run,
+    )
+    .await;
 
     let happy_run = seed_run(&fx, "happy").await;
     for _ in 0..120 {
@@ -1632,6 +1807,48 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(stale_counts.get("a").copied(), Some(1));
     assert_eq!(stale_counts.get("timeout").copied(), Some(1));
     assert_eq!(stale_counts.get("b").copied(), None);
+
+    let manifest_raw: String = fx
+        .pg
+        .query_one(
+            "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load app manifest")
+        .get::<_, Option<String>>("manifest_json")
+        .expect("manifest json");
+    let mut manifest_without_schedule: serde_json::Value =
+        serde_json::from_str(&manifest_raw).expect("manifest json parses");
+    manifest_without_schedule
+        .as_object_mut()
+        .expect("manifest object")
+        .remove("schedules");
+    let redeploy_hash = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let redeploy_manifest =
+        serde_json::to_string(&manifest_without_schedule).expect("serialize redeploy manifest");
+    let updated = fx
+        .state
+        .registry
+        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest)
+        .await
+        .expect("redeploy without schedule");
+    assert!(updated, "redeploy should update app");
+    let schedule_count: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_schedules \
+              WHERE app_id = $1 AND name = 'dw14-scheduled'",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("count schedules after redeploy")
+        .get("n");
+    assert_eq!(
+        schedule_count, 0,
+        "redeploy without the schedule must delete the registry row"
+    );
 }
 
 #[compio::test]
