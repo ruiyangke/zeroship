@@ -520,6 +520,7 @@ export declare function currentSetting(name: string, opts?: CurrentSettingOption
 export declare function currentUser(): ExprChain;
 export declare function interval(duration: Duration): ExprChain;
 export declare function concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
+export declare function countStar(): ExprChain;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
@@ -598,12 +599,20 @@ export interface ExprChain {
   extract(field: ExtractField | PgExtractField): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(delim: string, n: number): ExprChain;
+  // portable aggregate nodes (§3.4): receiver-first authoring for COUNT(expr),
+  // SUM/AVG/MIN/MAX. Receiver-less COUNT(*) is the top-level countStar() import.
+  count(opts?: { distinct?: boolean }): ExprChain;
+  sum(opts?: { distinct?: boolean }): ExprChain;
+  avg(opts?: { distinct?: boolean }): ExprChain;
+  min(opts?: { distinct?: boolean }): ExprChain;
+  max(opts?: { distinct?: boolean }): ExprChain;
 }
 
 /** The deliberately narrow builder available in column default expression
- *  callbacks. Defaults cannot reference columns, aggregates, vendor PG helpers,
- *  or trigger OLD/NEW state by construction. Receiver-less value constructors
- *  are top-level imports (`now()`, `genRandomUuid()`). */
+ *  callbacks. Defaults cannot reference columns, vendor PG helpers, or trigger
+ *  OLD/NEW state by construction. Aggregates are type-reachable through chain
+ *  methods / `countStar()` and rejected by Rust validation. Receiver-less value
+ *  constructors are top-level imports (`now()`, `genRandomUuid()`). */
 export interface DefaultBuilder {
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
@@ -619,9 +628,10 @@ interface ImmutableExprBuilderBase {
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
 
-/** Builder for index expressions and predicates. Column refs, immutable
- *  expression chain methods, and `c.case(...)` are available; aggregates and trigger
- *  OLD/NEW state are not. */
+/** Builder for index expressions and predicates. Column refs, expression chain
+ *  methods, and `c.case(...)` are available; volatile functions and aggregates
+ *  are rejected by Rust validation in these scalar contexts. Trigger OLD/NEW
+ *  state is not exposed. */
 export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
 
 /** Builder for generated column expressions. Structurally matches
@@ -629,40 +639,21 @@ export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
 export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
 
 /** Builder for portable table CHECK expressions. CHECKs must be immutable and
- *  non-aggregate. PG-only expression nodes fail closed off-PG at validate time. */
+ *  non-aggregate at validate time. PG-only expression nodes fail closed off-PG. */
 export interface CheckBuilder extends ImmutableExprBuilderBase {}
 
 export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
 export type GeneratedColumnExprFn = (c: GeneratedColumnBuilder) => ExprChain | Expr;
 export type CheckExprFn = (c: CheckBuilder) => ExprChain | Expr;
 
-/** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
- *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
- *  quoting differs), so there is no dialect gate. `count()` (no arg) is
- *  `COUNT(*)`; the optional `{ distinct: true }` inserts `DISTINCT`. Reachable
- *  from a SELECT/HAVING context (the position check is a Phase-2 obligation). */
-export interface AggNamespace {
-  /** `count(*)` (no arg) or `count(<expr>)` / `count(DISTINCT <expr>)`. */
-  count(expr?: unknown, opts?: { distinct?: boolean }): ExprChain;
-  /** `sum(<expr>)` / `sum(DISTINCT <expr>)`. */
-  sum(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
-  /** `avg(<expr>)` / `avg(DISTINCT <expr>)`. */
-  avg(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
-  /** `min(<expr>)` / `min(DISTINCT <expr>)`. */
-  min(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
-  /** `max(<expr>)` / `max(DISTINCT <expr>)`. */
-  max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
-}
-
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  carrying expression namespaces. A two-arg form
+ *  carrying only `case`. A two-arg form
  *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
-  agg: AggNamespace;
 }
 
 /** An expression position — a `(c) => Expr` callback (the all-strings fluent

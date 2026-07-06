@@ -29,6 +29,7 @@ import {
   currentUser,
   interval,
   concatWs,
+  countStar,
 } from "../src/index.js";
 import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
@@ -81,6 +82,7 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal(typeof imported.currentSetting, "function");
   assert.equal(typeof imported.currentUser, "function");
   assert.equal(typeof imported.interval, "function");
+  assert.equal(typeof imported.countStar, "function");
   assert.equal((imported as any).p, undefined);
   assert.equal((imported as any).partition, undefined);
   assert.equal((imported as any).dropPartition, undefined);
@@ -775,12 +777,11 @@ test("non-native function values fail closed instead of recording as JSON null",
       ),
     (e: any) => e.code === "OP_INVALID" && /column default cannot reference a column/.test(e.message),
   );
-  assert.throws(
-    () =>
-      record(() =>
-        table("t").create({ columns: { v: t.int().default((() => ({ node: "agg", func: "count" })) as any) } }),
-      ),
-    (e: any) => e.code === "OP_INVALID" && /column default cannot use an aggregate/.test(e.message),
+  assert.deepEqual(
+    record(() =>
+      table("t").create({ columns: { v: t.int().default((() => ({ node: "agg", func: "count" })) as any) } }),
+    )[0].columns[0].default,
+    { expr: { node: "agg", func: "count" } },
   );
   assert.throws(
     () =>
@@ -1171,18 +1172,18 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   assert.deepEqual(ops[1].set.user, { node: "fnCall", fn: "currentUser", args: [] });
 });
 
-test("core CHECK expressions reject vendor, aggregate, and volatile nodes at record time", () => {
+test("core CHECK expressions reject vendor/volatile and record aggregate nodes for validate", () => {
   assert.throws(
     () => record(() => table("t").check("no_pg").add({
       expr: (() => ({ node: "pgColumnSize", expr: { node: "colRef", name: "data" } })) as any,
     })),
     (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /PG-vendor/.test(e.message),
   );
-  assert.throws(
-    () => record(() => table("t").check("no_agg").add({
+  assert.deepEqual(
+    record(() => table("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+    }))[0].constraint.kind.expr,
+    { node: "agg", func: "count" },
   );
   assert.throws(
     () => record(() => table("t").check("no_now").add({
@@ -1192,7 +1193,7 @@ test("core CHECK expressions reject vendor, aggregate, and volatile nodes at rec
   );
 });
 
-test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile nodes", () => {
+test("pgTable CHECK expressions allow immutable PG nodes, record aggregates, and reject volatile nodes", () => {
   const ops = record(() =>
     pgTable("t").check("data_small").add({
       expr: (c) => c("data").columnSize().lt(1000),
@@ -1215,11 +1216,11 @@ test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile
     },
   });
 
-  assert.throws(
-    () => record(() => pgTable("t").check("no_agg").add({
+  assert.deepEqual(
+    record(() => pgTable("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+    }))[0].constraint.kind.expr,
+    { node: "agg", func: "count" },
   );
   assert.throws(
     () => record(() => pgTable("t").check("no_now").add({
@@ -1340,17 +1341,19 @@ test("dialect() rejects an empty leg set at record time", () => {
   assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
 });
 
-test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)", () => {
+test("aggregate chain methods and countStar record the portable aggregate node", () => {
   // §3.4/§3.6 portable aggregate nodes. count()/sum/avg/min/max render identically
-  // on all three dialects; count() (no arg) is COUNT(*); { distinct: true } sets the
-  // flag. `distinct` is skipped on the wire when false (byte-minimal).
+  // on all three dialects; countStar() is COUNT(*); { distinct: true } sets the
+  // flag for receiver aggregates. `distinct` is skipped on the wire when false.
   const ops = record(() =>
     table("t").update({
       set: {
-        n: (c) => c.agg.count(),
-        s: (c) => c.agg.sum(c("x")),
-        d: (c) => c.agg.count(c("x"), { distinct: true }),
-        a: (c) => c.agg.avg(c("x")),
+        n: () => countStar(),
+        s: (c) => c("x").sum(),
+        d: (c) => c("x").count({ distinct: true }),
+        a: (c) => c("x").avg(),
+        lo: (c) => c("x").min(),
+        hi: (c) => c("x").max(),
       },
     }),
   );
@@ -1371,6 +1374,16 @@ test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)"
   assert.deepEqual(set.a, {
     node: "agg",
     func: "avg",
+    arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.lo, {
+    node: "agg",
+    func: "min",
+    arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.hi, {
+    node: "agg",
+    func: "max",
     arg: { node: "colRef", name: "x" },
   });
 });
@@ -1615,7 +1628,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
   assert.equal(JSON.stringify(domainOps), JSON.stringify(expected));
 });
 
-test("domain check validation rejects smuggled volatile functions and aggregates", () => {
+test("domain check validation rejects smuggled volatile functions and records aggregates for validate", () => {
   assert.throws(
     () => record(() => domain("bad_now").create({
       as: t.timestamp(),
@@ -1623,12 +1636,12 @@ test("domain check validation rejects smuggled volatile functions and aggregates
     })),
     (e: any) => e.code === "OP_INVALID" && /now is volatile/.test(e.message),
   );
-  assert.throws(
-    () => record(() => domain("bad_agg").create({
+  assert.deepEqual(
+    record(() => domain("bad_agg").create({
       as: t.int(),
       check: { node: "agg", func: "count" } as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /aggregates are not allowed/.test(e.message),
+    }))[0].check,
+    { node: "agg", func: "count" },
   );
 });
 
@@ -1748,7 +1761,7 @@ test("index columns normalize to closed column/expression elements", () => {
   });
 });
 
-test("immutable-only slots reject forced volatile, aggregate, and vendor nodes at record time", () => {
+test("immutable-only slots reject forced volatile/vendor nodes and record aggregates for validate", () => {
   assert.throws(
     () =>
       record(() =>
@@ -1761,14 +1774,13 @@ test("immutable-only slots reject forced volatile, aggregate, and vendor nodes a
     (e: any) => e.code === "OP_INVALID" && /generated column expression/.test(e.message) && /now is volatile/.test(e.message),
   );
 
-  assert.throws(
-    () =>
-      record(() =>
-        table("users").index("users_bad_agg_idx").add({
-          on: [{ expr: { node: "agg", func: "count" } as any }],
-        }),
-      ),
-    (e: any) => e.code === "OP_INVALID" && /index expression element/.test(e.message) && /aggregates/.test(e.message),
+  assert.deepEqual(
+    record(() =>
+      table("users").index("users_bad_agg_idx").add({
+        on: [{ expr: { node: "agg", func: "count" } as any }],
+      }),
+    )[0].columns[0],
+    { kind: "expr", expr: { node: "agg", func: "count" } },
   );
 
   assert.throws(

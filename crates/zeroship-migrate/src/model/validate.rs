@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Duration, Expr, ScalarFn, SynthFn};
+use crate::model::expr::{AggFunc, CaseBranch, Duration, Expr, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -102,6 +102,9 @@ pub const CODE_COLUMN_DEFAULT_TYPE: &str = "COLUMN_DEFAULT_TYPE";
 /// A volatile expression node appeared in a SQL context that requires immutable
 /// expressions (index expression/predicate, generated column, or CHECK).
 pub const CODE_IMMUTABLE_CONTEXT_VOLATILE: &str = "IMMUTABLE_CONTEXT_VOLATILE";
+/// An aggregate expression appeared in a scalar context (index expression/
+/// predicate, generated column, CHECK, or column DEFAULT).
+pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT";
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
@@ -385,6 +388,58 @@ fn synth_fn_name(f: SynthFn) -> &'static str {
     }
 }
 
+fn agg_func_name(f: AggFunc) -> &'static str {
+    match f {
+        AggFunc::Count => "count",
+        AggFunc::Sum => "sum",
+        AggFunc::Avg => "avg",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+    }
+}
+
+fn first_aggregate(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::BinOp { lhs, rhs, .. } => first_aggregate(lhs).or_else(|| first_aggregate(rhs)),
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. } => first_aggregate(operand),
+        Expr::Case { branches, r#else } => branches
+            .iter()
+            .find_map(|CaseBranch { when, then }| {
+                first_aggregate(when).or_else(|| first_aggregate(then))
+            })
+            .or_else(|| r#else.as_deref().and_then(first_aggregate)),
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            args.iter().find_map(first_aggregate)
+        }
+        Expr::Between { operand, low, high } => first_aggregate(operand)
+            .or_else(|| first_aggregate(low))
+            .or_else(|| first_aggregate(high)),
+        Expr::Like { operand, pattern } => {
+            first_aggregate(operand).or_else(|| first_aggregate(pattern))
+        }
+        Expr::DistinctFrom { left, right } => {
+            first_aggregate(left).or_else(|| first_aggregate(right))
+        }
+        Expr::Agg { func, .. } => Some(agg_func_name(*func)),
+        Expr::InList { expr, .. } => first_aggregate(expr),
+        Expr::Dialectal { default, pg, sqlite, mysql } => [
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(first_aggregate),
+    }
+}
+
 fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
@@ -442,11 +497,12 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
 
 fn validate_immutable_expr_context(
     expr: &Expr,
-    context: &'static str,
+    context: &str,
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
+    validate_no_aggregate_expr_context(expr, context, target_dialect, op_index, ts_location)?;
     let Some(function_name) = first_volatile_function(expr) else {
         return Ok(());
     };
@@ -461,6 +517,32 @@ fn validate_immutable_expr_context(
         ),
         suggested_fix: Some(format!(
             "remove {function_name}() from the {context}; use it only in defaults, DML values, or another non-immutable expression context"
+        )),
+    })
+}
+
+fn validate_no_aggregate_expr_context(
+    expr: &Expr,
+    context: &str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let Some(aggregate_name) = first_aggregate(expr) else {
+        return Ok(());
+    };
+    Err(AuthoringError {
+        code: CODE_AGGREGATE_IN_SCALAR_CONTEXT.to_string(),
+        kind: Some(UnsupportedKind::Expr),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{context} requires a scalar expression, but contains aggregate {aggregate_name}()"
+        ),
+        suggested_fix: Some(format!(
+            "remove {aggregate_name}() from the {context}; use aggregates only in \
+             grouped SELECT/HAVING expression contexts"
         )),
     })
 }
@@ -3236,6 +3318,7 @@ fn validate_default_expr(
 ) -> Result<(), AuthoringError> {
     let scope = TargetScope::structural_only(position);
     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+    validate_no_aggregate_expr_context(expr, position, target_dialect, op_index, ts_location)?;
 
     fn mk_err(
         reason: String,
@@ -6708,6 +6791,50 @@ mod tests {
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_rejects_aggregate_count_in_index_predicate() {
+        // J2b regression: moving aggregates to ExprChain methods makes aggregate
+        // nodes type-reachable in immutable/scalar slots. The Rust validator is
+        // the authoritative backstop; before this check, this createIndex.where
+        // node passed validate cleanly.
+        let ir = ir_with(vec![Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![IndexElement::Column {
+                name: "a".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            name: None,
+            unique: None,
+            using: None,
+            r#where: Some(Expr::Agg {
+                func: AggFunc::Count,
+                arg: None,
+                distinct: false,
+            }),
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 0);
+        assert!(
+            err.reason.contains("count()"),
+            "reason names offending aggregate: {err}"
+        );
+        assert!(
+            err.reason.contains("index predicate"),
+            "reason names scalar context: {err}"
+        );
     }
 
     #[test]
