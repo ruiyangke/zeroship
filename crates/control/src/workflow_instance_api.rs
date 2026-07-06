@@ -168,7 +168,11 @@ fn infrastructure_error_response(
     web::HttpResponse::InternalServerError().json(&json!({ "error": "internal error" }))
 }
 
-fn check_control_auth(req: &web::HttpRequest, state: &AppState) -> Result<(), web::HttpResponse> {
+fn check_app_scoped_auth(
+    req: &web::HttpRequest,
+    state: &AppState,
+    app_id: &Uuid,
+) -> Result<(), web::HttpResponse> {
     if state.insecure_dev {
         return Ok(());
     }
@@ -181,13 +185,11 @@ fn check_control_auth(req: &web::HttpRequest, state: &AppState) -> Result<(), we
     match token {
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::validate_control_key(
+                && zeroship_core::auth::validate_app_scoped_control_token(
                     key,
                     state.control_key.expose_secret(),
-                ) =>
-        {
-            Ok(())
-        }
+                    &app_id.to_string(),
+                ) => Ok(()),
         _ => {
             tracing::warn!(
                 method = %req.method(),
@@ -203,7 +205,6 @@ fn app_id_from_channel(
     req: &web::HttpRequest,
     state: &AppState,
 ) -> Result<Uuid, web::HttpResponse> {
-    check_control_auth(req, state)?;
     let raw = [APP_ID_HEADER, ALT_APP_ID_HEADER, "x-app-id", "x-app"]
         .into_iter()
         .find_map(|name| req.headers().get(name).and_then(|v| v.to_str().ok()))
@@ -215,7 +216,10 @@ fn app_id_from_channel(
             }))
         })?;
 
-    parse_app_id(raw).map_err(|msg| web::HttpResponse::BadRequest().json(&json!({ "error": msg })))
+    let app_id = parse_app_id(raw)
+        .map_err(|msg| web::HttpResponse::BadRequest().json(&json!({ "error": msg })))?;
+    check_app_scoped_auth(req, state, &app_id)?;
+    Ok(app_id)
 }
 
 fn parse_app_id(raw: &str) -> Result<Uuid, String> {

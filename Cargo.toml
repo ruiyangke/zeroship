@@ -198,6 +198,7 @@ zeroship-migrate = { path = "crates/zeroship-migrate" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
+zeroship-plugin-workflow = { path = "crates/plugin-workflow" }
 zeroship-metering = { path = "crates/metering" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }

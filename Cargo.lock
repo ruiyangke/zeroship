@@ -6640,6 +6640,7 @@ dependencies = [
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
+ "zeroship-plugin-workflow",
  "zeroship-runtime",
 ]
 
@@ -7018,6 +7019,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-plugin-workflow"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-postgres",
+ "cyper",
+ "ntex",
+ "percent-encoding",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+ "v8",
+ "zeroship-authn",
+ "zeroship-authz",
+ "zeroship-bundle",
+ "zeroship-control",
+ "zeroship-core",
+ "zeroship-runtime",
+ "zeroship-runtime-macros",
+]
+
+[[package]]
 name = "zeroship-runtime"
 version = "0.1.0"
 dependencies = [
@@ -7120,6 +7144,7 @@ dependencies = [
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
+ "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zstd",
 ]

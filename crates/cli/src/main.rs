@@ -230,6 +230,20 @@ fn cmd_serve(args: &[String]) {
     };
     plugins.push(Arc::new(kv_plugin));
 
+    let workflow_control_url = std::env::var("ZEROSHIP_CONTROL_URL")
+        .or_else(|_| std::env::var("CONTROL_URL"))
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http://localhost:9090".to_string());
+    let workflow_control_key = std::env::var("ZEROSHIP_CONTROL_KEY")
+        .or_else(|_| std::env::var("CONTROL_KEY"))
+        .unwrap_or_default();
+    plugins.push(Arc::new(zeroship_plugin_workflow::WorkflowPlugin::new(
+        workflow_control_url,
+        workflow_control_key,
+    )));
+    eprintln!("[zeroship] workflows plugin registered");
+
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
     // in the spawned child env, and user apps expect access to OPENAI_API_KEY

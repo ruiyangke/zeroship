@@ -800,6 +800,8 @@ mod tests {
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,

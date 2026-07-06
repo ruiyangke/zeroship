@@ -806,6 +806,8 @@ export default { workflows: { Checkout } };
             10,
             max_pinned_isolates_per_app,
             crate::cache::KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
                 db_url: None,
                 kv_url: None,
                 storage_backend: None,
@@ -1096,6 +1098,8 @@ export default { workflows: { Checkout } };
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -1202,6 +1206,8 @@ export default { workflows: { Checkout } };
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -1301,6 +1307,8 @@ export default { workflows: { Checkout } };
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -1415,6 +1423,8 @@ export default { workflows: { Checkout } };
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     db_url: None,
                     kv_url: None,
                     storage_backend: None,
@@ -1600,6 +1610,8 @@ export default { workflows: { Checkout } };
                 10,
                 4,
                 crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
                     // Dummy DSN: DbPlugin stores the URL and connects lazily,
                     // so `env.db` is installed without a live Postgres.
                     db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
@@ -1718,6 +1730,8 @@ export default { workflows: { Checkout } };
             4,
             4,
             crate::cache::KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
                 db_url: None,
                 kv_url: None,
                 storage_backend: None,
