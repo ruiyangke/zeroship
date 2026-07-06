@@ -36,8 +36,8 @@ export default {
         mag: (c) => c.fn.abs(c("code").sub(500)),
         canon: (c) => c.fn.nullif(c("label"), ""),
         score: (c) => c("code").add(1).mul(2).sub(3).div(1),
-        joined: (c) => c("label").concat(" ", c("code").cast("text")),
-        code_txt: (c) => c("code").cast("text"),
+        joined: (c) => c("label").concat(" ", c("code").cast({ to: "text" })),
+        code_txt: (c) => c("code").cast({ to: "text" }),
       },
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
@@ -64,7 +64,7 @@ export default {
     // concatWs/splitPart/now/genRandomUuid.
     sc.backfill({
       set: {
-        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast("text")),
+        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),
         touched: (c) => c.fn.now(),
         token: (c) => c.fn.genRandomUuid(),
