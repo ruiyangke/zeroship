@@ -254,6 +254,20 @@ export class ConcurrentWorkflow {
   }
 }
 
+export class ConcurrentCommitWorkflow {
+  async run(trigger, step) {
+    const [a, b, c] = await Promise.all([
+      step.run("a", () => commit(trigger.runId, "frontier:a", \`\${trigger.runId}:frontier:a\`)),
+      step.run("b", () => commit(trigger.runId, "frontier:b", \`\${trigger.runId}:frontier:b\`)),
+      step.run("c", () => commit(trigger.runId, "frontier:c", \`\${trigger.runId}:frontier:c\`)),
+    ]);
+    const final = await step.run("final", () =>
+      commit(trigger.runId, "frontier:final", \`\${trigger.runId}:frontier:final\`),
+    );
+    return { a, b, c, final };
+  }
+}
+
 export class SideEffectWorkflow {
   async run(trigger, step) {
     const v = await step.sideEffect("v", () => bump(trigger.runId, "v"));
@@ -366,6 +380,14 @@ export class ChildBlockWorkflow {
   }
 }
 
+export class ChildTrackedBlockWorkflow {
+  async run(trigger, step) {
+    const started = await step.run("child-start", () => bump(trigger.runId, "child-start"));
+    await step.sleep("child-block", trigger.input.sleep ?? "PT30S");
+    return { started, unblocked: true };
+  }
+}
+
 export class ParentCallWorkflow {
   async run(trigger, step) {
     const child = await step.call(
@@ -421,6 +443,20 @@ export class ParentCascadeWorkflow {
   }
 }
 
+export class ParentManyCascadeWorkflow {
+  async run(trigger, step) {
+    await step.startMany(
+      ChildTrackedBlockWorkflow,
+      trigger.input.values.map((value) => ({
+        input: { value, sleep: trigger.input.sleep ?? "PT30S" },
+        key: \`tracked-\${value}\`,
+      })),
+      { cascade: true },
+    );
+    return { unreachable: true };
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
@@ -430,6 +466,7 @@ export default {
     SignalWorkflow,
     TopicSignalWorkflow,
     ConcurrentWorkflow,
+    ConcurrentCommitWorkflow,
     SideEffectWorkflow,
     BareAwaitWorkflow,
     NameDivergenceWorkflow,
@@ -441,10 +478,12 @@ export default {
     ChildEchoWorkflow,
     ChildFailWorkflow,
     ChildBlockWorkflow,
+    ChildTrackedBlockWorkflow,
     ParentCallWorkflow,
     ParentStartManyWorkflow,
     ParentCatchChildFailureWorkflow,
     ParentCascadeWorkflow,
+    ParentManyCascadeWorkflow,
   },
 };
 EOF

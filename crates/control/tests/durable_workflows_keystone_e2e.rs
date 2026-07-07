@@ -42,6 +42,7 @@ const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 const TOPIC_SIGNAL_WORKFLOW_NAME: &str = "TopicSignalWorkflow";
 const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
+const CONCURRENT_COMMIT_WORKFLOW_NAME: &str = "ConcurrentCommitWorkflow";
 const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
@@ -54,6 +55,7 @@ const PARENT_CALL_WORKFLOW_NAME: &str = "ParentCallWorkflow";
 const PARENT_START_MANY_WORKFLOW_NAME: &str = "ParentStartManyWorkflow";
 const PARENT_CATCH_CHILD_FAILURE_WORKFLOW_NAME: &str = "ParentCatchChildFailureWorkflow";
 const PARENT_CASCADE_WORKFLOW_NAME: &str = "ParentCascadeWorkflow";
+const PARENT_MANY_CASCADE_WORKFLOW_NAME: &str = "ParentManyCascadeWorkflow";
 
 static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
 
@@ -1529,30 +1531,154 @@ async fn wait_for_child_cancel_requested(fx: &Fixture, child_run_id: &str) {
     panic!("child {child_run_id} was not cancel_requested + parked");
 }
 
+async fn child_states(
+    fx: &Fixture,
+    child_run_ids: &[String],
+) -> Vec<(String, String, Option<String>, String)> {
+    fx.pg
+        .query(
+            "SELECT id, state, claimed_by, deploy_id \
+               FROM zeroship.workflow_runs \
+              WHERE id = ANY($1) \
+              ORDER BY id",
+            &[&child_run_ids],
+        )
+        .await
+        .expect("load child states")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("state"),
+                row.get("claimed_by"),
+                row.get("deploy_id"),
+            )
+        })
+        .collect()
+}
+
+async fn drive_children_until_sleeping<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    child_run_ids: &[String],
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..180 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .expect("child sleep tick");
+        let states = child_states(fx, child_run_ids).await;
+        assert_eq!(states.len(), child_run_ids.len(), "missing child rows");
+        if states
+            .iter()
+            .all(|(_, state, claimed_by, _)| state == "sleeping" && claimed_by.is_none())
+        {
+            return;
+        }
+        if states.iter().any(|(_, state, _, _)| {
+            matches!(state.as_str(), "completed" | "failed" | "cancelled" | "stalled")
+        }) {
+            panic!("child reached terminal before sleeping: {states:?}");
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "children did not park sleeping: {:?}",
+        child_states(fx, child_run_ids).await
+    );
+}
+
+async fn drive_children_until_cancelled<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    child_run_ids: &[String],
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..120 {
+        let claimed = workflow_engine::tick_with_dispatcher(
+            &fx.state,
+            Arc::clone(&dispatcher),
+            cfg.clone(),
+        )
+        .await
+        .expect("child cancel tick");
+        assert_eq!(claimed, 0, "cancel reap must not dispatch child code");
+        let states = child_states(fx, child_run_ids).await;
+        if states
+            .iter()
+            .all(|(_, state, claimed_by, _)| state == "cancelled" && claimed_by.is_none())
+        {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "children did not cancel: {:?}",
+        child_states(fx, child_run_ids).await
+    );
+}
+
+async fn active_child_count_for_deploy(
+    fx: &Fixture,
+    parent_run_id: &str,
+    deploy_id: &str,
+) -> i64 {
+    fx.pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1 \
+                AND deploy_id = $2 \
+                AND state IN ('queued','running','sleeping','waiting','compensating')",
+            &[&parent_run_id, &deploy_id],
+        )
+        .await
+        .expect("count active child runs for deploy")
+        .get("n")
+}
+
 async fn assert_child_dedup_keys(fx: &Fixture, parent_run_id: &str, expected: usize) {
     let rows = fx
         .pg
         .query(
             "SELECT dedup_key, parent_wait_step_key, tree_depth \
                FROM zeroship.workflow_runs \
-              WHERE parent_run_id = $1 \
-              ORDER BY created_at, id",
+              WHERE parent_run_id = $1",
             &[&parent_run_id],
         )
         .await
         .expect("load child dedup keys");
-    assert_eq!(rows.len(), expected);
-    for (idx, row) in rows.iter().enumerate() {
-        assert_eq!(
-            row.get::<_, Option<String>>("dedup_key"),
-            Some(workflow_engine::child_dedup_key(parent_run_id, idx as i32))
-        );
-        assert_eq!(
-            row.get::<_, Option<String>>("parent_wait_step_key"),
-            Some(workflow_engine::child_signal_type(idx as i32))
-        );
-        assert_eq!(row.get::<_, i16>("tree_depth"), 1);
-    }
+    assert_eq!(rows.len(), expected, "child count for parent {parent_run_id}");
+    // Children spawned in one startMany frontier can land in the runs table in
+    // any order relative to their ordinal (created_at can tie within a dispatch,
+    // and the UUIDv7 id is not ordinal-ordered), so compare the SET of
+    // (dedup_key, wait_step_key) rather than assume row position == ordinal.
+    // This still catches any wrong / missing / duplicate ordinal.
+    let mut actual: Vec<(Option<String>, Option<String>)> = rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row.get::<_, i16>("tree_depth"), 1);
+            (
+                row.get::<_, Option<String>>("dedup_key"),
+                row.get::<_, Option<String>>("parent_wait_step_key"),
+            )
+        })
+        .collect();
+    actual.sort();
+    let mut want: Vec<(Option<String>, Option<String>)> = (0..expected as i32)
+        .map(|i| {
+            (
+                Some(workflow_engine::child_dedup_key(parent_run_id, i)),
+                Some(workflow_engine::child_signal_type(i)),
+            )
+        })
+        .collect();
+    want.sort();
+    assert_eq!(actual, want, "child dedup/wait keys for parent {parent_run_id}");
 }
 
 async fn scheduled_run_for(
@@ -2137,6 +2263,110 @@ async fn durable_workflows_m1_keystone_real_spine() {
         concurrent_dispatcher.count() < 4,
         "3-wide frontier plus final should complete in fewer dispatches than serial a,b,c,final; got {}",
         concurrent_dispatcher.count()
+    );
+
+    let frontier_run = seed_workflow_run(
+        &fx,
+        CONCURRENT_COMMIT_WORKFLOW_NAME,
+        serde_json::json!({"case": "dw19-frontier"}),
+    )
+    .await;
+    let (frontier_dispatcher, frontier_dropped_rx, frontier_release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let frontier_dispatcher = Arc::new(frontier_dispatcher);
+    let frontier_owner = "dw19-frontier-first";
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&frontier_dispatcher),
+        config(frontier_owner),
+    )
+    .await
+    .expect("DW19 frontier first tick");
+    assert_eq!(claimed, 1);
+    let DispatchOutcome::Completed(frontier_result) = frontier_dropped_rx
+        .await
+        .expect("DW19 frontier held result")
+    else {
+        panic!("DW19 frontier dispatch did not complete");
+    };
+    assert_eq!(frontier_result.run_id, frontier_run);
+    assert_eq!(
+        frontier_result
+            .checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "c"],
+        "first dispatch must be the 3-wide frontier"
+    );
+    assert_eq!(
+        effect_commit_counts(&fx, &frontier_run).await,
+        BTreeMap::from([
+            ("frontier:a".to_string(), 1),
+            ("frontier:b".to_string(), 1),
+            ("frontier:c".to_string(), 1),
+        ]),
+        "frontier side effects commit once before the simulated partial crash"
+    );
+
+    let partial_frontier = workflow_engine::StepResult::from_checkpoints(
+        frontier_run.clone(),
+        frontier_result.dispatch_nonce.clone(),
+        frontier_result.checkpoints[..2].to_vec(),
+        workflow_engine::RunUpdate::Queued,
+    );
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, frontier_owner, partial_frontier)
+            .await
+            .expect("DW19 partial frontier apply"),
+        "partial frontier checkpoint should land under the live claim"
+    );
+    assert_eq!(
+        step_rows(&fx, &frontier_run).await,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "crash point lands only part of the concurrent frontier"
+    );
+    assert!(
+        !workflow_engine::apply_step_result(&fx.state, frontier_owner, frontier_result.clone())
+            .await
+            .expect("DW19 stale full frontier apply"),
+        "stale full frontier result must be rejected after the partial crash state settles"
+    );
+    assert_eq!(
+        step_rows(&fx, &frontier_run).await,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "stale full frontier result must not overwrite the partial crash state"
+    );
+    let _ = frontier_release_tx.send(());
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw19-frontier-redrive"),
+        &frontier_run,
+    )
+    .await;
+    assert_concurrent_steps(&fx, &frontier_run).await;
+    let frontier_commits = effect_commit_counts(&fx, &frontier_run).await;
+    assert_eq!(frontier_commits.get("frontier:a").copied(), Some(1));
+    assert_eq!(frontier_commits.get("frontier:b").copied(), Some(1));
+    assert_eq!(frontier_commits.get("frontier:c").copied(), Some(1));
+    assert_eq!(frontier_commits.get("frontier:final").copied(), Some(1));
+    let frontier_attempts = effect_attempt_counts(&fx, &frontier_run).await;
+    assert_eq!(frontier_attempts.get("frontier:a").copied(), Some(1));
+    assert_eq!(frontier_attempts.get("frontier:b").copied(), Some(1));
+    assert!(
+        frontier_attempts
+            .get("frontier:c")
+            .copied()
+            .unwrap_or_default()
+            >= 2,
+        "uncheckpointed frontier member should be retried after replay"
     );
 
     // CW1/CW2/CW3: step.call parks the parent, spawns one deterministic child,
@@ -3240,6 +3470,31 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .expect("first fanout tick");
     assert_eq!(first_fanout.broadcasts, 1);
     assert_eq!(first_fanout.deliveries, 2);
+    let first_delivered_rows = fx
+        .pg
+        .query(
+            "SELECT run_id, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_signals \
+              WHERE broadcast_id = $1 \
+              GROUP BY run_id \
+              ORDER BY run_id",
+            &[&broadcast_id],
+        )
+        .await
+        .expect("load partial broadcast deliveries");
+    assert_eq!(
+        first_delivered_rows.len(),
+        2,
+        "DW19 fanout crash point should commit only a partial subscriber set"
+    );
+    for row in &first_delivered_rows {
+        assert_eq!(
+            row.get::<_, i64>("n"),
+            1,
+            "partial fanout must not duplicate delivery for {:?}",
+            row.get::<_, String>("run_id")
+        );
+    }
     let pending_state: String = fx
         .pg
         .query_one(
@@ -3463,6 +3718,107 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(stale_counts.get("a").copied(), Some(1));
     assert_eq!(stale_counts.get("timeout").copied(), Some(1));
     assert_eq!(stale_counts.get("b").copied(), None);
+
+    let cascade_redeploy_parent = seed_workflow_run(
+        &fx,
+        PARENT_MANY_CASCADE_WORKFLOW_NAME,
+        serde_json::json!({
+            "case": "dw19-cascade-redeploy",
+            "sleep": "PT30S",
+            "values": ["one", "two"],
+        }),
+    )
+    .await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw19-cascade-parent-park"),
+        &cascade_redeploy_parent,
+    )
+    .await;
+    let cascade_children = wait_for_child_count(&fx, &cascade_redeploy_parent, 2).await;
+    assert_child_dedup_keys(&fx, &cascade_redeploy_parent, 2).await;
+    drive_children_until_sleeping(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw19-cascade-children-park"),
+        &cascade_children,
+    )
+    .await;
+    for child in &cascade_children {
+        assert_eq!(
+            side_counts(&fx, child).await.get("child-start").copied(),
+            Some(1),
+            "child should execute its pre-sleep effect once before cascade cancel"
+        );
+    }
+
+    let cascade_manifest_raw: String = fx
+        .pg
+        .query_one(
+            "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load app manifest before cascade redeploy")
+        .get::<_, Option<String>>("manifest_json")
+        .expect("manifest json");
+    let cascade_redeploy_hash = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let redeploy = fx.state.registry.set_deploy_with_manifest(
+        &fx.app_id,
+        &cascade_redeploy_hash,
+        &cascade_manifest_raw,
+    );
+    let cancel = post_control(
+        &control_url,
+        fx.app_id,
+        &cascade_redeploy_parent,
+        "cancel",
+        serde_json::json!({}),
+    );
+    let (redeploy, cancel) = futures::future::join(redeploy, cancel).await;
+    assert!(
+        redeploy.expect("DW19 cascade redeploy"),
+        "redeploy should bump the active deploy hash"
+    );
+    assert_eq!(cancel["state"], "cancelled");
+    let active_hash: Option<String> = fx
+        .pg
+        .query_one(
+            "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load active deploy hash after cascade redeploy")
+        .get("deploy_hash");
+    assert_eq!(active_hash.as_deref(), Some(cascade_redeploy_hash.as_str()));
+    for child in &cascade_children {
+        wait_for_child_cancel_requested(&fx, child).await;
+    }
+    let cancel_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    drive_children_until_cancelled(
+        &fx,
+        Arc::clone(&cancel_dispatcher),
+        config("dw19-cascade-child-cancel"),
+        &cascade_children,
+    )
+    .await;
+    assert_eq!(
+        cancel_dispatcher.count(),
+        0,
+        "parked child cancellation must not dispatch stale-deploy child code"
+    );
+    assert_eq!(
+        active_child_count_for_deploy(&fx, &cascade_redeploy_parent, &fx.deploy_id).await,
+        0,
+        "no child on the parent deploy pin should remain active after cascade cancel"
+    );
+    assert_eq!(run_state(&fx.pg, &cascade_redeploy_parent).await.0, "cancelled");
+    for (_, state, claimed_by, deploy_id) in child_states(&fx, &cascade_children).await {
+        assert_eq!(state, "cancelled");
+        assert_eq!(claimed_by, None);
+        assert_eq!(deploy_id, fx.deploy_id);
+    }
 
     let manifest_raw: String = fx
         .pg
@@ -3718,12 +4074,21 @@ async fn compensation_saga_rollback_real_spine() {
     assert_eq!(attempts.get("undo:a").copied(), Some(1));
     assert_eq!(commits.get("undo:a").copied(), Some(1));
     assert_eq!(
+        ordered_commit_steps(&fx, &crash_run).await,
+        vec!["undo:b".to_string(), "undo:a".to_string()],
+        "crash-redriven compensators must still finish in reverse order"
+    );
+    assert_eq!(
         compensation_step_rows(&fx, &crash_run).await,
         vec![
             (0, "a".to_string(), Some("completed".to_string()), 1),
             (1, "b".to_string(), Some("completed".to_string()), 1),
         ]
     );
+    let (state, target, outcome, _) = run_compensation_status(&fx, &crash_run).await;
+    assert_eq!(state, "failed");
+    assert_eq!(target.as_deref(), Some("failed"));
+    assert_eq!(outcome.as_deref(), Some("completed"));
 
     let nondet_run = seed_workflow_run(
         &fx,
