@@ -16,7 +16,11 @@ import {
   WorkflowMicrotaskQuiescenceBarrier,
 } from "../src/journal.ts";
 import {
+  ChildCancelledError,
+  ChildTimeoutError,
+  LimitExceededError,
   NondeterministicError,
+  Workflow,
   WorkflowNestedStepError,
   WorkflowStepTimeoutError,
   WorkflowTimeoutError,
@@ -24,6 +28,12 @@ import {
 } from "../src/index.ts";
 
 const TEST_TIMEOUT_MS = 5_000;
+
+class EchoChildWorkflow extends Workflow<{ value: string }, { value: string }> {
+  run(): { value: string } {
+    return { value: "unused" };
+  }
+}
 
 function envelope(steps: JournalEnvelope["steps"] = []): JournalEnvelope {
   return {
@@ -772,5 +782,119 @@ test("sleep and waitForSignal misses suspend and timeout replays throw WorkflowT
   await assert.rejects(
     () => timedOut.waitForSignal("approved", { timeout: "1h" }),
     WorkflowTimeoutError,
+  );
+});
+
+test("step.call miss emits a child frontier and completed replay returns child output", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  await assert.rejects(
+    async () => step.call(EchoChildWorkflow, { value: "input" }, {
+      cascade: true,
+      timeout: "5m",
+    }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assert.equal(signal.outcome.kind, "child");
+      assert.equal(signal.outcome.ordinal, 0);
+      assert.equal(signal.outcome.name, "EchoChildWorkflow");
+      assert.equal(signal.outcome.workflowName, "EchoChildWorkflow");
+      assert.deepEqual(signal.outcome.input, { value: "input" });
+      assert.deepEqual(signal.outcome.options, { cascade: true, timeout: "5m" });
+      return true;
+    },
+  );
+
+  const replay = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "EchoChildWorkflow",
+      nameOccurrence: 0,
+      kind: "child",
+      state: "completed",
+      output: { value: "child-output" },
+      childRunId: "run_child",
+    },
+  ]));
+  assert.deepEqual(
+    await replay.call(EchoChildWorkflow, { value: "input" }),
+    { value: "child-output" },
+  );
+});
+
+test("step.call failed replay surfaces child cancellation and timeout errors", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const cancelled = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "EchoChildWorkflow",
+      nameOccurrence: 0,
+      kind: "child",
+      state: "failed",
+      error: {
+        type: "ChildCancelledError",
+        message: "child workflow was cancelled",
+        retryable: false,
+      },
+    },
+  ]));
+  await assert.rejects(
+    () => cancelled.call(EchoChildWorkflow, { value: "input" }),
+    ChildCancelledError,
+  );
+
+  const timedOut = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "EchoChildWorkflow",
+      nameOccurrence: 0,
+      kind: "child",
+      state: "failed",
+      error: {
+        type: "ChildTimeoutError",
+        message: "child workflow timed out",
+        retryable: false,
+      },
+    },
+  ]));
+  await assert.rejects(
+    () => timedOut.call(EchoChildWorkflow, { value: "input" }),
+    ChildTimeoutError,
+  );
+});
+
+test("step.startMany emits bounded child frontier outcomes in issue order", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  await assert.rejects(
+    async () => step.startMany(EchoChildWorkflow, [
+      { input: { value: "a" }, key: "child-a" },
+      { input: { value: "b" }, key: "child-b", options: { timeout: "1m" } },
+    ], { cascade: true }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 2);
+      assert.equal(signal.outcomes[0]?.kind, "child");
+      assert.equal(signal.outcomes[0]?.ordinal, 0);
+      assert.equal(signal.outcomes[0]?.nameOccurrence, 0);
+      assert.deepEqual(signal.outcomes[0]?.input, { value: "a" });
+      assert.deepEqual(signal.outcomes[0]?.options, { cascade: true, key: "child-a" });
+      assert.equal(signal.outcomes[1]?.kind, "child");
+      assert.equal(signal.outcomes[1]?.ordinal, 1);
+      assert.equal(signal.outcomes[1]?.nameOccurrence, 1);
+      assert.deepEqual(signal.outcomes[1]?.input, { value: "b" });
+      assert.deepEqual(signal.outcomes[1]?.options, {
+        cascade: true,
+        timeout: "1m",
+        key: "child-b",
+      });
+      return true;
+    },
+  );
+
+  const tooMany = Array.from({ length: 1_001 }, (_, i) => ({
+    input: { value: String(i) },
+  }));
+  await assert.rejects(
+    () => step.startMany(EchoChildWorkflow, tooMany),
+    LimitExceededError,
   );
 });

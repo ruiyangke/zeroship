@@ -23,6 +23,7 @@ use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
 
 use crate::registry::RegistryError;
+use crate::cron::workflow_engine;
 use crate::{workflow_limits, AppState};
 
 pub const APP_ID_HEADER: &str = "x-zeroship-app-id";
@@ -47,6 +48,20 @@ pub struct CreateRunBody {
     pub key: Option<String>,
     #[serde(default, alias = "onConflict")]
     pub on_conflict: Option<OnConflictBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartManyBody {
+    pub items: Vec<StartManyItem>,
+    #[serde(default, alias = "onConflict")]
+    pub on_conflict: Option<OnConflictBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartManyItem {
+    pub input: Value,
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +205,7 @@ enum WorkflowApiError {
     Forbidden(String),
     NotFound(String),
     Conflict(String),
+    LimitExceeded(String),
     Restart(String),
     JournalCapExceeded(String),
     PayloadTooLarge(String),
@@ -213,6 +229,10 @@ impl WorkflowApiError {
             Self::NotFound(msg) => web::HttpResponse::NotFound().json(&json!({ "error": msg })),
             Self::Conflict(msg) => web::HttpResponse::Conflict().json(&json!({
                 "error": "RunConflict",
+                "message": msg,
+            })),
+            Self::LimitExceeded(msg) => web::HttpResponse::TooManyRequests().json(&json!({
+                "error": "LimitExceededError",
                 "message": msg,
             })),
             Self::Restart(msg) => web::HttpResponse::Conflict().json(&json!({
@@ -565,6 +585,7 @@ fn waiting_key_matches_signal(waiting_step_key: Option<&str>, signal_type: &str)
 fn restored_state_expr() -> &'static str {
     "COALESCE(paused_from_status, CASE \
         WHEN waiting_step_key LIKE 'wait:%' THEN 'waiting' \
+        WHEN waiting_step_key LIKE 'child:%' THEN 'waiting' \
         WHEN waiting_step_key LIKE 'sleep:%' THEN 'sleeping' \
         WHEN wake_at IS NULL OR wake_at <= now() THEN 'queued' \
         ELSE 'sleeping' \
@@ -1113,9 +1134,9 @@ fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
         WorkflowApiError::Conflict(msg) | WorkflowApiError::Restart(msg) => {
             RegistryError::Conflict(msg)
         }
-        WorkflowApiError::JournalCapExceeded(msg) | WorkflowApiError::RateLimitUnavailable(msg) => {
-            RegistryError::Conflict(msg)
-        }
+        WorkflowApiError::JournalCapExceeded(msg)
+        | WorkflowApiError::LimitExceeded(msg)
+        | WorkflowApiError::RateLimitUnavailable(msg) => RegistryError::Conflict(msg),
         WorkflowApiError::RateLimited { retry_after_secs } => RegistryError::Conflict(format!(
             "scheduled workflow start rate limited; retry after {retry_after_secs:.0}s"
         )),
@@ -1201,7 +1222,7 @@ async fn create_run_inner(
             }
             ConflictPolicy::Replace => {
                 check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
-                tx.execute(
+                let cancelled = tx.query(
                     "UPDATE zeroship.workflow_runs \
                         SET state = 'cancelled', \
                             dedup_key = NULL, \
@@ -1217,11 +1238,16 @@ async fn create_run_inner(
                             lease_expires = NULL, \
                             dispatch_nonce = NULL, \
                             claim_epoch = claim_epoch + 1 \
-                      WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3",
+                      WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
+                      RETURNING id",
                     &[&app_id, &workflow_name, key],
                 )
                 .await
                 .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+                for row in cancelled {
+                    let cancelled_run_id: String = row.get("id");
+                    workflow_engine::cascade_cancel_children(&tx, &cancelled_run_id).await?;
+                }
 
                 let candidate = typed_id::new_workflow_run_id();
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
@@ -1273,6 +1299,177 @@ async fn create_run_inner(
     Ok((StatusCode::CREATED, json!({ "id": run_id, "state": "queued" })))
 }
 
+async fn start_many_inner(
+    state: &AppState,
+    app_id: Uuid,
+    workflow_name: String,
+    body: StartManyBody,
+) -> Result<Value, WorkflowApiError> {
+    validate_workflow_name(&workflow_name)?;
+    if body.items.len() > workflow_engine::DEFAULT_MAX_START_MANY_BATCH {
+        return Err(WorkflowApiError::LimitExceeded(format!(
+            "startMany batch exceeds maxStartManyBatch ({} > {})",
+            body.items.len(),
+            workflow_engine::DEFAULT_MAX_START_MANY_BATCH
+        )));
+    }
+    let policy = match body.on_conflict.as_ref() {
+        Some(value) => value.policy().map_err(WorkflowApiError::BadRequest)?,
+        None => ConflictPolicy::Join,
+    };
+
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
+    workflow_limits::lock_app_journal_accounting(&tx, &app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+
+    let mut results = Vec::with_capacity(body.items.len());
+    let mut seen_keys = BTreeSet::new();
+    for item in body.items {
+        let input_journal_bytes = workflow_limits::json_column_size(&tx, &item.input)
+            .await
+            .map_err(WorkflowApiError::from)?;
+        let key = normalize_key(item.key)?;
+        if let Some(key) = key.as_ref() {
+            let duplicate_in_batch = !seen_keys.insert(key.clone());
+            let existing = existing_keyed_run(&tx, &app_id, &workflow_name, key).await?;
+            match policy {
+                ConflictPolicy::Join => {
+                    let created = existing.is_none() && !duplicate_in_batch;
+                    let run_id = join_or_create_keyed_run(
+                        &tx,
+                        &app_id,
+                        &workflow_name,
+                        &deploy.id,
+                        &item.input,
+                        input_journal_bytes,
+                        key,
+                        None,
+                    )
+                    .await?;
+                    results.push(json!({
+                        "run": { "id": run_id },
+                        "id": run_id,
+                        "runId": run_id,
+                        "created": created,
+                        "conflict": if created { Value::Null } else { json!("duplicate") },
+                    }));
+                }
+                ConflictPolicy::Reject => {
+                    if existing.is_some() || duplicate_in_batch {
+                        results.push(json!({
+                            "run": Value::Null,
+                            "created": false,
+                            "conflict": "rejected",
+                        }));
+                        continue;
+                    }
+                    check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
+                    let run_id = typed_id::new_workflow_run_id();
+                    insert_run(
+                        &tx,
+                        &app_id,
+                        &workflow_name,
+                        &deploy.id,
+                        &item.input,
+                        input_journal_bytes,
+                        Some(key),
+                        &run_id,
+                        None,
+                    )
+                    .await?;
+                    results.push(json!({
+                        "run": { "id": run_id },
+                        "id": run_id,
+                        "runId": run_id,
+                        "created": true,
+                    }));
+                }
+                ConflictPolicy::Replace => {
+                    let cancelled = tx.query(
+                        "UPDATE zeroship.workflow_runs \
+                            SET state = 'cancelled', \
+                                dedup_key = NULL, \
+                                wake_at = NULL, \
+                                output = NULL, \
+                                error = NULL, \
+                                output_kind = 'inline', \
+                                output_hash = NULL, \
+                                output_size = NULL, \
+                                output_content_type = NULL, \
+                                paused_from_status = NULL, \
+                                claimed_by = NULL, \
+                                lease_expires = NULL, \
+                                dispatch_nonce = NULL, \
+                                claim_epoch = claim_epoch + 1 \
+                          WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
+                          RETURNING id",
+                        &[&app_id, &workflow_name, key],
+                    )
+                    .await
+                    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+                    for row in cancelled {
+                        let cancelled_run_id: String = row.get("id");
+                        workflow_engine::cascade_cancel_children(&tx, &cancelled_run_id).await?;
+                    }
+                    check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
+                    let run_id = typed_id::new_workflow_run_id();
+                    insert_run(
+                        &tx,
+                        &app_id,
+                        &workflow_name,
+                        &deploy.id,
+                        &item.input,
+                        input_journal_bytes,
+                        Some(key),
+                        &run_id,
+                        None,
+                    )
+                    .await?;
+                    results.push(json!({
+                        "run": { "id": run_id },
+                        "id": run_id,
+                        "runId": run_id,
+                        "created": true,
+                        "conflict": if existing.is_some() || duplicate_in_batch { json!("replaced") } else { Value::Null },
+                    }));
+                }
+            }
+        } else {
+            check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
+            let run_id = typed_id::new_workflow_run_id();
+            insert_run(
+                &tx,
+                &app_id,
+                &workflow_name,
+                &deploy.id,
+                &item.input,
+                input_journal_bytes,
+                None,
+                &run_id,
+                None,
+            )
+            .await?;
+            results.push(json!({
+                "run": { "id": run_id },
+                "id": run_id,
+                "runId": run_id,
+                "created": true,
+            }));
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    Ok(json!({ "results": results }))
+}
+
 async fn consume_signal_rate_limit(
     state: &AppState,
     app_id: Uuid,
@@ -1303,6 +1500,22 @@ pub async fn create_run(
     };
     match create_run_inner(&state, app_id, workflow_name.into_inner(), body.into_inner()).await {
         Ok((status, value)) => web::HttpResponse::build(status).json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+pub async fn start_many_runs(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    workflow_name: Path<String>,
+    body: Json<StartManyBody>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    match start_many_inner(&state, app_id, workflow_name.into_inner(), body.into_inner()).await {
+        Ok(value) => web::HttpResponse::Ok().json(&value),
         Err(e) => e.response(),
     }
 }
@@ -1576,7 +1789,7 @@ pub async fn signal_run(
         return e.response();
     }
     let body = body.into_inner();
-    if let Err(e) = validate_signal_type(&body.signal_type) {
+    if let Err(e) = validate_ingress_signal_type(&body.signal_type) {
         return e.response();
     }
     if let Err(e) = signal_payload_size(&body.payload) {
@@ -2520,6 +2733,12 @@ async fn control_transition(
             return e.response();
         }
     };
+    if op == "cancel" {
+        if let Err(e) = workflow_engine::cascade_cancel_children(&tx, &run_id).await {
+            let _ = tx.commit().await;
+            return WorkflowApiError::from(e).response();
+        }
+    }
     if let Err(e) = tx.commit().await {
         return WorkflowApiError::Database(e.to_string()).response();
     }
@@ -2603,6 +2822,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/internal/workflows/{workflow_name}/runs")
             .route(web::post().to(create_run)),
+    )
+    .service(
+        web::resource("/internal/workflows/{workflow_name}/runs/startMany")
+            .state(web::types::PayloadConfig::new(SIGNAL_REQUEST_BODY_BYTES))
+            .route(web::post().to(start_many_runs)),
     )
     .service(web::resource("/internal/workflows/runs").route(web::get().to(list_runs)))
     .service(

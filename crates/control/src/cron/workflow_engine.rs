@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
@@ -28,6 +28,9 @@ const GATEWAY_WORKFLOW_DISPATCH_PATH: &str = "/__zeroship/internal/workflow-disp
 const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKPRESSURE_PARK_MS: i64 = 1_000;
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
+pub const DEFAULT_MAX_CHILD_DEPTH: i16 = 16;
+pub const DEFAULT_MAX_LIVE_DESCENDANTS: i64 = 1_024;
+pub const DEFAULT_MAX_START_MANY_BATCH: usize = 1_000;
 
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 static OWNER_ID: OnceLock<String> = OnceLock::new();
@@ -58,6 +61,12 @@ pub struct WorkflowEngineConfig {
     /// G3 placeholder: DW-23 will measure wide-frontier rollover behavior and
     /// replace this conservative seed with operator-plan defaults.
     pub stuck_strike_limit: i16,
+    /// Maximum parent/child depth for step.call trees.
+    pub max_child_depth: i16,
+    /// Maximum live descendants under a workflow tree root.
+    pub max_live_descendants: i64,
+    /// Maximum child starts committed by one frontier batch.
+    pub max_start_many_batch: usize,
     /// Stable owner id written into `claimed_by`.
     pub owner_id: String,
 }
@@ -72,6 +81,9 @@ impl Default for WorkflowEngineConfig {
             claim_ttl_ms: 120_000,
             heartbeat_ms: 5_000,
             stuck_strike_limit: 3,
+            max_child_depth: DEFAULT_MAX_CHILD_DEPTH,
+            max_live_descendants: DEFAULT_MAX_LIVE_DESCENDANTS,
+            max_start_many_batch: DEFAULT_MAX_START_MANY_BATCH,
             owner_id: default_owner_id(),
         }
     }
@@ -82,12 +94,16 @@ impl Default for WorkflowEngineConfig {
 pub struct JournalStep {
     pub ordinal: i32,
     pub name: String,
+    #[serde(default, rename = "nameOccurrence")]
+    pub name_occurrence: i32,
     pub kind: String,
     pub state: String,
     pub output: Option<Value>,
     #[serde(default, rename = "outputRef")]
     pub output_ref: Option<WorkflowOutputRef>,
     pub error: Option<Value>,
+    #[serde(default, rename = "childRunId")]
+    pub child_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +113,17 @@ pub struct WorkflowOutputRef {
     pub size: i64,
     #[serde(default)]
     pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildWorkflowOptions {
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub cascade: bool,
+    #[serde(default, deserialize_with = "deserialize_optional_wake_duration")]
+    pub timeout: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +158,10 @@ pub struct StepCheckpoint {
     pub max_signal_age_ms: Option<i64>,
     pub consumed_signal_id: Option<String>,
     pub topic: Option<String>,
+    pub child_run_id: Option<String>,
+    pub child_workflow_name: Option<String>,
+    pub child_input: Option<Value>,
+    pub child_options: Option<ChildWorkflowOptions>,
 }
 
 impl StepCheckpoint {
@@ -150,12 +181,129 @@ impl StepCheckpoint {
             max_signal_age_ms: None,
             consumed_signal_id: None,
             topic: None,
+            child_run_id: None,
+            child_workflow_name: None,
+            child_input: None,
+            child_options: None,
         }
     }
 }
 
 fn default_step_kind() -> String {
     "run".to_string()
+}
+
+fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(ms) = parse_iso_duration_ms(trimmed).or_else(|| parse_suffix_duration_ms(trimmed))
+    {
+        return Some(ms);
+    }
+    None
+}
+
+fn parse_iso_duration_ms(raw: &str) -> Option<i64> {
+    let rest = raw.strip_prefix('P')?;
+    let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
+    let mut total_ms = 0f64;
+    if let Some(days) = date.strip_suffix('D') {
+        if days.is_empty() {
+            return None;
+        }
+        total_ms += days.parse::<f64>().ok()? * 86_400_000.0;
+    } else if !date.is_empty() {
+        return None;
+    }
+    let mut number = String::new();
+    for ch in time.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+        if number.is_empty() {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        number.clear();
+        match ch {
+            'H' => total_ms += value * 3_600_000.0,
+            'M' => total_ms += value * 60_000.0,
+            'S' => total_ms += value * 1_000.0,
+            _ => return None,
+        }
+    }
+    if !number.is_empty() || total_ms <= 0.0 || !total_ms.is_finite() {
+        return None;
+    }
+    Some(total_ms.ceil() as i64)
+}
+
+fn parse_suffix_duration_ms(raw: &str) -> Option<i64> {
+    let units = [
+        ("ms", 1.0),
+        ("s", 1_000.0),
+        ("m", 60_000.0),
+        ("h", 3_600_000.0),
+        ("d", 86_400_000.0),
+    ];
+    for (suffix, multiplier) in units {
+        let Some(number) = raw.strip_suffix(suffix) else {
+            continue;
+        };
+        if number.is_empty() {
+            return None;
+        }
+        let value = number.parse::<f64>().ok()?;
+        let ms = value * multiplier;
+        if ms <= 0.0 || !ms.is_finite() {
+            return None;
+        }
+        return Some(ms.ceil() as i64);
+    }
+    raw.parse::<i64>().ok().filter(|v| *v > 0)
+}
+
+fn wake_at_from_str(raw: &str) -> Result<DateTime<Utc>, String> {
+    if let Ok(ts) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(ts.with_timezone(&Utc));
+    }
+    parse_workflow_duration_ms(raw)
+        .map(|ms| Utc::now() + chrono::Duration::milliseconds(ms))
+        .ok_or_else(|| format!("invalid workflow wake/duration value {raw:?}"))
+}
+
+fn deserialize_wake_at<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    wake_at_from_str(&raw).map_err(de::Error::custom)
+}
+
+fn deserialize_optional_wake_at<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    raw.as_deref()
+        .map(wake_at_from_str)
+        .transpose()
+        .map_err(de::Error::custom)
+}
+
+fn deserialize_optional_wake_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_wake_at(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +349,7 @@ pub enum StepOutcome {
         name: String,
         #[serde(default, rename = "nameOccurrence")]
         name_occurrence: i32,
-        #[serde(rename = "wakeAt")]
+        #[serde(rename = "wakeAt", deserialize_with = "deserialize_wake_at")]
         wake_at: DateTime<Utc>,
     },
     Wait {
@@ -209,8 +357,10 @@ pub enum StepOutcome {
         name: String,
         #[serde(default, rename = "nameOccurrence")]
         name_occurrence: i32,
-        #[serde(rename = "wakeAt")]
-        wake_at: DateTime<Utc>,
+        #[serde(default, rename = "wakeAt", deserialize_with = "deserialize_optional_wake_at")]
+        wake_at: Option<DateTime<Utc>>,
+        #[serde(default, deserialize_with = "deserialize_optional_wake_duration")]
+        timeout: Option<DateTime<Utc>>,
         #[serde(default, rename = "signalType")]
         signal_type: Option<String>,
         #[serde(default, rename = "maxSignalAgeMs")]
@@ -219,6 +369,18 @@ pub enum StepOutcome {
         consumed_signal_id: Option<String>,
         #[serde(default)]
         topic: Option<String>,
+    },
+    Child {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(rename = "childWorkflowName", alias = "workflowName")]
+        child_workflow_name: String,
+        #[serde(default)]
+        input: Value,
+        #[serde(default)]
+        options: ChildWorkflowOptions,
     },
 }
 
@@ -294,21 +456,33 @@ impl RunUpdate {
                 .map(|s| format!("sleep:{}:{}", s.ordinal, s.name)),
             Self::Waiting { .. } => checkpoints
                 .iter()
-                .find(|s| s.kind == "wait_signal" && s.state == "running")
+                .find(|s| matches!(s.kind.as_str(), "wait_signal" | "child") && s.state == "running")
                 .map(|s| {
-                    format!(
-                        "wait:{}:{}:{}{}",
-                        s.ordinal,
-                        s.name,
-                        s.signal_type.as_deref().unwrap_or(s.name.as_str()),
-                        s.max_signal_age_ms
-                            .map(|age| format!(":{age}"))
-                            .unwrap_or_default()
-                    )
+                    if s.kind == "child" {
+                        format!("child:{}:{}", s.ordinal, s.name)
+                    } else {
+                        format!(
+                            "wait:{}:{}:{}{}",
+                            s.ordinal,
+                            s.name,
+                            s.signal_type.as_deref().unwrap_or(s.name.as_str()),
+                            s.max_signal_age_ms
+                                .map(|age| format!(":{age}"))
+                                .unwrap_or_default()
+                        )
+                    }
                 }),
             _ => None,
         }
     }
+}
+
+pub fn child_signal_type(ordinal: i32) -> String {
+    format!("__zs.child:{ordinal}")
+}
+
+pub fn child_dedup_key(parent_run_id: &str, ordinal: i32) -> String {
+    format!("child:{parent_run_id}:{ordinal}")
 }
 
 #[derive(Debug, Clone)]
@@ -434,6 +608,7 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
             outcome,
             StepOutcome::StepCompleted { .. }
                 | StepOutcome::StepFailed { .. }
+                | StepOutcome::Child { .. }
                 | StepOutcome::RunFailed {
                     ordinal: Some(_),
                     name: Some(_),
@@ -478,6 +653,10 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
                     topic: None,
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 });
             }
             StepOutcome::StepFailed {
@@ -500,6 +679,10 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
                     topic: None,
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 });
                 saw_step_failure = true;
                 run_update = RunUpdate::Queued;
@@ -532,6 +715,10 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                             max_signal_age_ms: None,
                             consumed_signal_id: None,
                             topic: None,
+                            child_run_id: None,
+                            child_workflow_name: None,
+                            child_input: None,
+                            child_options: None,
                         });
                         saw_step_failure = true;
                         run_update = RunUpdate::Queued;
@@ -569,6 +756,10 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
                     topic: None,
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Sleeping {
@@ -581,11 +772,13 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 name,
                 name_occurrence,
                 wake_at,
+                timeout,
                 signal_type,
                 max_signal_age_ms,
                 consumed_signal_id,
                 topic,
             } => {
+                let wake_at = wake_at.or(*timeout);
                 checkpoints.push(StepCheckpoint {
                     ordinal: *ordinal,
                     name: name.clone(),
@@ -595,15 +788,52 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     output: None,
                     output_ref: None,
                     error: None,
-                    wake_at: Some(*wake_at),
+                    wake_at,
                     signal_type: signal_type.clone().or_else(|| Some(name.clone())),
                     max_signal_age_ms: *max_signal_age_ms,
                     consumed_signal_id: consumed_signal_id.clone(),
                     topic: topic.clone(),
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
-                        wake_at: Some(*wake_at),
+                        wake_at,
+                    };
+                }
+            }
+            StepOutcome::Child {
+                ordinal,
+                name,
+                name_occurrence,
+                child_workflow_name,
+                input,
+                options,
+            } => {
+                checkpoints.push(StepCheckpoint {
+                    ordinal: *ordinal,
+                    name: name.clone(),
+                    name_occurrence: *name_occurrence,
+                    kind: "child".to_string(),
+                    state: "running".to_string(),
+                    output: None,
+                    output_ref: None,
+                    error: None,
+                    wake_at: options.timeout,
+                    signal_type: Some(child_signal_type(*ordinal)),
+                    max_signal_age_ms: None,
+                    consumed_signal_id: None,
+                    topic: None,
+                    child_run_id: None,
+                    child_workflow_name: Some(child_workflow_name.clone()),
+                    child_input: Some(input.clone()),
+                    child_options: Some(options.clone()),
+                });
+                if !saw_step_failure {
+                    run_update = RunUpdate::Waiting {
+                        wake_at: options.timeout,
                     };
                 }
             }
@@ -665,18 +895,30 @@ fn outcomes_from_apply_parts(
                 }
             }
             ("wait_signal", "running") => {
-                if let Some(wake_at) = checkpoint.wake_at {
-                    outcomes.push(StepOutcome::Wait {
-                        ordinal: checkpoint.ordinal,
-                        name: checkpoint.name.clone(),
-                        name_occurrence: checkpoint.name_occurrence,
-                        wake_at,
-                        signal_type: checkpoint.signal_type.clone(),
-                        max_signal_age_ms: checkpoint.max_signal_age_ms,
-                        consumed_signal_id: checkpoint.consumed_signal_id.clone(),
-                        topic: checkpoint.topic.clone(),
-                    });
-                }
+                outcomes.push(StepOutcome::Wait {
+                    ordinal: checkpoint.ordinal,
+                    name: checkpoint.name.clone(),
+                    name_occurrence: checkpoint.name_occurrence,
+                    wake_at: checkpoint.wake_at,
+                    timeout: None,
+                    signal_type: checkpoint.signal_type.clone(),
+                    max_signal_age_ms: checkpoint.max_signal_age_ms,
+                    consumed_signal_id: checkpoint.consumed_signal_id.clone(),
+                    topic: checkpoint.topic.clone(),
+                });
+            }
+            ("child", "running") => {
+                outcomes.push(StepOutcome::Child {
+                    ordinal: checkpoint.ordinal,
+                    name: checkpoint.name.clone(),
+                    name_occurrence: checkpoint.name_occurrence,
+                    child_workflow_name: checkpoint
+                        .child_workflow_name
+                        .clone()
+                        .unwrap_or_else(|| checkpoint.name.clone()),
+                    input: checkpoint.child_input.clone().unwrap_or(Value::Null),
+                    options: checkpoint.child_options.clone().unwrap_or_default(),
+                });
             }
             _ => {}
         }
@@ -883,6 +1125,8 @@ pub async fn tick_with_dispatcher<D>(
 where
     D: StepDispatcher + 'static,
 {
+    reap_parked_cancel_requested_batch(&state.registry, &config).await?;
+
     let current = INFLIGHT_DISPATCHES.load(Ordering::SeqCst);
     if current >= config.max_inflight_dispatch {
         return Ok(0);
@@ -911,6 +1155,7 @@ struct CandidateRun {
     input: Option<Value>,
     started_at: DateTime<Utc>,
     waiting_step_key: Option<String>,
+    cancel_requested: bool,
 }
 
 async fn claim_due_batch(
@@ -920,6 +1165,7 @@ async fn claim_due_batch(
 ) -> Result<Vec<ClaimedRun>, RegistryError> {
     let mut conn = registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
+    rearm_waiting_runs_with_pending_signals(&tx).await?;
     let limit = i64::try_from(available)
         .unwrap_or(i64::MAX)
         .min(config.batch_apps.saturating_mul(config.per_app_fair_limit));
@@ -941,10 +1187,10 @@ async fn claim_due_batch(
                 LIMIT $1 \
              ) \
              SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
-                    r.input, r.started_at, r.waiting_step_key \
+                    r.input, r.started_at, r.waiting_step_key, r.cancel_requested \
                FROM due_apps a \
                CROSS JOIN LATERAL ( \
-                 SELECT id, app_id, workflow_name, deploy_id, input, started_at, waiting_step_key, wake_at \
+                 SELECT id, app_id, workflow_name, deploy_id, input, started_at, waiting_step_key, wake_at, cancel_requested \
                    FROM zeroship.workflow_runs \
                   WHERE app_id = a.app_id \
                     AND wake_at <= now() \
@@ -977,6 +1223,7 @@ async fn claim_due_batch(
             input: row.get("input"),
             started_at: row.get("started_at"),
             waiting_step_key: row.get("waiting_step_key"),
+            cancel_requested: row.get("cancel_requested"),
         };
 
         tx.batch_execute("SAVEPOINT workflow_claim_row")
@@ -1010,6 +1257,80 @@ async fn claim_due_batch(
     Ok(claimed)
 }
 
+async fn reap_parked_cancel_requested_batch(
+    registry: &Registry,
+    config: &WorkflowEngineConfig,
+) -> Result<u64, RegistryError> {
+    let limit = i64::try_from(config.batch_apps.saturating_mul(config.per_app_fair_limit))
+        .unwrap_or(i64::MAX);
+    if limit <= 0 {
+        return Ok(0);
+    }
+
+    let mut conn = registry.conn().await?;
+    let tx = conn.transaction().await.map_err(RegistryError::from)?;
+    let reaped = reap_parked_cancel_requested_runs(&tx, limit).await?;
+    tx.commit().await.map_err(RegistryError::from)?;
+    Ok(reaped)
+}
+
+async fn reap_parked_cancel_requested_runs<C>(
+    tx: &C,
+    limit: i64,
+) -> Result<u64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = tx
+        .query(
+            "SELECT id \
+               FROM zeroship.workflow_runs \
+              WHERE cancel_requested \
+                AND state IN ('queued','sleeping','waiting') \
+              ORDER BY wake_at NULLS FIRST, id \
+              LIMIT $1 \
+              FOR UPDATE SKIP LOCKED",
+            &[&limit],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+
+    let mut reaped = 0;
+    for row in rows {
+        let run_id: String = row.get("id");
+        if cancel_requested_run(tx, &run_id).await? {
+            reaped += 1;
+        }
+    }
+    Ok(reaped)
+}
+
+async fn rearm_waiting_runs_with_pending_signals<C>(tx: &C) -> Result<u64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    tx.execute(
+        "UPDATE zeroship.workflow_runs r \
+            SET wake_at = now() \
+          WHERE r.state = 'waiting' \
+            AND (r.wake_at IS NULL OR r.wake_at > now()) \
+            AND EXISTS ( \
+                SELECT 1 \
+                  FROM zeroship.workflow_steps s \
+                  JOIN zeroship.workflow_signals sig \
+                    ON sig.run_id = r.id \
+                   AND sig.consumed_by IS NULL \
+                   AND sig.type = s.signal_type \
+                 WHERE s.run_id = r.id \
+                   AND s.state = 'running' \
+                   AND s.kind IN ('wait_signal','child') \
+            )",
+        &[],
+    )
+    .await
+    .map_err(RegistryError::from)
+}
+
 async fn claim_one_locked<C>(
     tx: &C,
     config: &WorkflowEngineConfig,
@@ -1034,6 +1355,11 @@ where
         .map_err(RegistryError::from)?;
     let inflight: i64 = inflight[0].get("n");
     if inflight >= config.max_inflight_per_app {
+        return Ok(None);
+    }
+
+    if candidate.cancel_requested {
+        cancel_requested_run(tx, &candidate.run_id).await?;
         return Ok(None);
     }
 
@@ -1094,7 +1420,7 @@ where
 {
     let rows = conn
         .query(
-            "SELECT ordinal, name, kind, state, output, error, \
+            "SELECT ordinal, name, name_occurrence, kind, state, output, error, child_run_id, \
                     output_kind, output_hash, output_size, output_content_type \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 \
@@ -1114,10 +1440,12 @@ where
             ),
             ordinal: row.get("ordinal"),
             name: row.get("name"),
+            name_occurrence: row.get("name_occurrence"),
             kind: row.get("kind"),
             state: row.get("state"),
             output: row.get("output"),
             error: row.get("error"),
+            child_run_id: row.get("child_run_id"),
         })
         .collect())
 }
@@ -1138,6 +1466,21 @@ fn workflow_output_ref_from_row(
     })
 }
 
+fn workflow_output_ref_from_value(value: &Value) -> Option<WorkflowOutputRef> {
+    let hash = value.get("hash")?.as_str()?.to_string();
+    let size = value.get("size")?.as_i64()?;
+    let content_type = value
+        .get("contentType")
+        .or_else(|| value.get("content_type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(WorkflowOutputRef {
+        hash,
+        size,
+        content_type,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WaitingStep {
     Sleep {
@@ -1149,6 +1492,10 @@ enum WaitingStep {
         name: String,
         signal_type: String,
         max_signal_age_ms: Option<i64>,
+    },
+    Child {
+        ordinal: i32,
+        name: String,
     },
 }
 
@@ -1189,6 +1536,15 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, RegistryError> {
                 max_signal_age_ms: Some(max_signal_age_ms),
             })
         }
+        ["child", ordinal, name] => {
+            let ordinal = ordinal.parse::<i32>().map_err(|_| {
+                RegistryError::InvalidInput(format!("invalid child waiting_step_key ordinal: {key}"))
+            })?;
+            Ok(WaitingStep::Child {
+                ordinal,
+                name: (*name).to_string(),
+            })
+        }
         _ => Err(RegistryError::InvalidInput(format!(
             "unrecognized waiting_step_key: {key}"
         ))),
@@ -1222,6 +1578,10 @@ where
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
                     topic: None,
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1300,7 +1660,7 @@ where
                 .map_err(RegistryError::from)?;
 
             let Some(row) = signal.first() else {
-                if deadline.map_or(true, |deadline| deadline <= now) {
+                if deadline.is_some_and(|deadline| deadline <= now) {
                     if insert_resolved_step(
                         tx,
                         &StepCheckpoint {
@@ -1321,6 +1681,10 @@ where
                             max_signal_age_ms,
                             consumed_signal_id: None,
                             topic: None,
+                            child_run_id: None,
+                            child_workflow_name: None,
+                            child_input: None,
+                            child_options: None,
                         },
                         run_id,
                         dispatch_nonce,
@@ -1384,6 +1748,10 @@ where
                     max_signal_age_ms,
                     consumed_signal_id: Some(signal_id.clone()),
                     topic,
+                    child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1410,6 +1778,218 @@ where
             .await
             .map_err(RegistryError::from)?;
             delete_workflow_subscription(tx, run_id, ordinal).await?;
+            Ok(true)
+        }
+        WaitingStep::Child { ordinal, name } => {
+            let step_rows = tx
+                .query(
+                    "SELECT wake_at, child_run_id, name_occurrence \
+                       FROM zeroship.workflow_steps \
+                      WHERE run_id = $1 \
+                        AND ordinal = $2 \
+                        AND name = $3 \
+                        AND kind = 'child' \
+                        AND state = 'running' \
+                      FOR UPDATE",
+                    &[&run_id, &ordinal, &name],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+            let Some(step_row) = step_rows.first() else {
+                return Err(RegistryError::InvalidInput(format!(
+                    "child waiting_step_key child:{ordinal}:{name} has no running workflow_steps row"
+                )));
+            };
+            let deadline: Option<DateTime<Utc>> = step_row.get("wake_at");
+            let child_run_id: Option<String> = step_row.get("child_run_id");
+            let name_occurrence: i32 = step_row.get("name_occurrence");
+            let mut signal_type = child_signal_type(ordinal);
+            let now = Utc::now();
+            let signal = tx
+                .query(
+                    "SELECT id, payload \
+                       FROM zeroship.workflow_signals \
+                      WHERE run_id = $1 \
+                        AND type = $2 \
+                        AND consumed_by IS NULL \
+                      ORDER BY created_at, id \
+                      LIMIT 1 \
+                      FOR UPDATE SKIP LOCKED",
+                    &[&run_id, &signal_type],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+
+            let mut resolved_ordinal = ordinal;
+            let mut resolved_name = name;
+            let mut resolved_name_occurrence = name_occurrence;
+            let mut resolved_child_run_id = child_run_id;
+            let current_signal = signal
+                .first()
+                .map(|row| (row.get::<_, String>("id"), row.get::<_, Option<Value>>("payload")));
+            let resolved_signal = if let Some(signal) = current_signal {
+                Some(signal)
+            } else {
+                let any_signal = tx
+                    .query(
+                        "SELECT sig.id, sig.payload, s.ordinal, s.name, s.name_occurrence, s.child_run_id \
+                           FROM zeroship.workflow_steps s \
+                           JOIN zeroship.workflow_signals sig \
+                             ON sig.run_id = s.run_id \
+                            AND sig.type = s.signal_type \
+                            AND sig.consumed_by IS NULL \
+                          WHERE s.run_id = $1 \
+                            AND s.kind = 'child' \
+                            AND s.state = 'running' \
+                          ORDER BY sig.created_at, sig.id \
+                          LIMIT 1 \
+                          FOR UPDATE OF sig SKIP LOCKED",
+                        &[&run_id],
+                    )
+                    .await
+                    .map_err(RegistryError::from)?;
+                any_signal.first().map(|row| {
+                    resolved_ordinal = row.get("ordinal");
+                    resolved_name = row.get("name");
+                    resolved_name_occurrence = row.get("name_occurrence");
+                    resolved_child_run_id = row.get("child_run_id");
+                    signal_type = child_signal_type(resolved_ordinal);
+                    (row.get::<_, String>("id"), row.get::<_, Option<Value>>("payload"))
+                })
+            };
+
+            let Some((signal_id, payload)) = resolved_signal else {
+                if deadline.is_some_and(|deadline| deadline <= now) {
+                    if let Some(child_run_id) = resolved_child_run_id.as_ref() {
+                        tx.execute(
+                            "UPDATE zeroship.workflow_runs \
+                                SET cancel_requested = true, wake_at = now() \
+                              WHERE id = $1 \
+                                AND parent_cascade \
+                                AND state NOT IN ('completed','failed','cancelled','stalled')",
+                            &[child_run_id],
+                        )
+                        .await
+                        .map_err(RegistryError::from)?;
+                    }
+                    if insert_resolved_step(
+                        tx,
+                            &StepCheckpoint {
+                                ordinal: resolved_ordinal,
+                                name: resolved_name,
+                                name_occurrence: resolved_name_occurrence,
+                                kind: "child".to_string(),
+                                state: "failed".to_string(),
+                            output: None,
+                            output_ref: None,
+                            error: Some(serde_json::json!({
+                                "type": "ChildTimeoutError",
+                                "message": format!("child workflow timed out for {signal_type}"),
+                                "retryable": false,
+                            })),
+                            wake_at: None,
+                            signal_type: Some(signal_type),
+                            max_signal_age_ms: None,
+                            consumed_signal_id: None,
+                            topic: None,
+                            child_run_id: resolved_child_run_id,
+                            child_workflow_name: None,
+                            child_input: None,
+                            child_options: None,
+                        },
+                        run_id,
+                        dispatch_nonce,
+                        1,
+                    )
+                    .await? == StepWriteOutcome::CapExceeded
+                    {
+                        return Ok(false);
+                    }
+                    tx.execute(
+                        "UPDATE zeroship.workflow_runs \
+                            SET waiting_step_key = NULL, wake_at = now() \
+                          WHERE id = $1",
+                        &[&run_id],
+                    )
+                    .await
+                    .map_err(RegistryError::from)?;
+                    return Ok(true);
+                }
+
+                tx.execute(
+                    "UPDATE zeroship.workflow_runs \
+                        SET state = 'waiting', wake_at = $2 \
+                      WHERE id = $1",
+                    &[&run_id, &deadline],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+                return Ok(false);
+            };
+
+            let payload = payload.unwrap_or(Value::Null);
+            let ok = payload
+                .get("ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let output_ref = payload
+                .get("outputRef")
+                .or_else(|| payload.get("output_ref"))
+                .and_then(workflow_output_ref_from_value);
+            let checkpoint = StepCheckpoint {
+                ordinal: resolved_ordinal,
+                name: resolved_name,
+                name_occurrence: resolved_name_occurrence,
+                kind: "child".to_string(),
+                state: if ok { "completed" } else { "failed" }.to_string(),
+                output: if ok && output_ref.is_none() {
+                    payload.get("output").cloned()
+                } else {
+                    None
+                },
+                output_ref,
+                error: if ok {
+                    None
+                } else {
+                    Some(payload.get("error").cloned().unwrap_or_else(|| {
+                        serde_json::json!({
+                            "type": "PermanentError",
+                            "message": "child workflow failed",
+                            "retryable": false,
+                        })
+                    }))
+                },
+                wake_at: None,
+                signal_type: Some(signal_type),
+                max_signal_age_ms: None,
+                consumed_signal_id: Some(signal_id.clone()),
+                topic: None,
+                child_run_id: resolved_child_run_id,
+                child_workflow_name: None,
+                child_input: None,
+                child_options: None,
+            };
+            if insert_resolved_step(tx, &checkpoint, run_id, dispatch_nonce, 1).await?
+                == StepWriteOutcome::CapExceeded
+            {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE zeroship.workflow_signals \
+                    SET consumed_by = $1 \
+                  WHERE id = $2 AND consumed_by IS NULL",
+                &[&run_id, &signal_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
+            tx.execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET waiting_step_key = NULL, wake_at = now() \
+                  WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
             Ok(true)
         }
     }
@@ -1606,7 +2186,8 @@ async fn apply_step_result_on_registry(
     // Row-lock-first: this is intentionally the first statement in the txn.
     let rows = tx
         .query(
-            "SELECT app_id, claimed_by, state, dispatch_nonce, stuck_strikes \
+            "SELECT app_id, deploy_id, claimed_by, state, dispatch_nonce, stuck_strikes, \
+                    tree_depth \
                FROM zeroship.workflow_runs \
               WHERE id = $1 \
               FOR UPDATE",
@@ -1619,10 +2200,12 @@ async fn apply_step_result_on_registry(
         return Ok(false);
     };
     let app_id: Uuid = row.get("app_id");
+    let deploy_id: String = row.get("deploy_id");
     let claimed_by: Option<String> = row.get("claimed_by");
     let state: String = row.get("state");
     let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
     let stuck_strikes: i16 = row.get("stuck_strikes");
+    let tree_depth: i16 = row.get("tree_depth");
     if claimed_by.as_deref() != Some(config.owner_id.as_str())
         || dispatch_nonce.as_deref() != Some(result.dispatch_nonce.as_str())
         || !matches!(state.as_str(), "running" | "paused")
@@ -1631,8 +2214,41 @@ async fn apply_step_result_on_registry(
         return Ok(false);
     }
 
+    let child_checkpoint_count = result
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.kind == "child" && checkpoint.state == "running")
+        .count();
+    let start_many_over_cap = child_checkpoint_count > config.max_start_many_batch;
+
     let mut wrote_checkpoints = 0usize;
-    for checkpoint in &result.checkpoints {
+    for checkpoint in &mut result.checkpoints {
+        if checkpoint.kind == "child" && checkpoint.state == "running" {
+            if start_many_over_cap {
+                fail_child_checkpoint_with_limit(
+                    checkpoint,
+                    format!(
+                        "child workflow batch exceeds maxStartManyBatch ({} > {})",
+                        child_checkpoint_count, config.max_start_many_batch
+                    ),
+                );
+                result.run_update = RunUpdate::Queued;
+            } else if let Err(error) = prepare_child_spawn(
+                &tx,
+                config,
+                &result.run_id,
+                &app_id,
+                &deploy_id,
+                tree_depth,
+                checkpoint,
+            )
+            .await
+            .map_err(ApplyError::Db)?
+            {
+                fail_child_checkpoint_with_limit(checkpoint, error);
+                result.run_update = RunUpdate::Queued;
+            }
+        }
         match insert_resolved_step(
             &tx,
             checkpoint,
@@ -1831,6 +2447,25 @@ async fn apply_step_result_on_registry(
                     .await
                     .map_err(ApplyError::Db)?;
             }
+            if matches!(state, "completed" | "failed" | "cancelled" | "stalled") {
+                emit_child_terminal_hook(
+                    &tx,
+                    &result.run_id,
+                    ChildTerminalPayload {
+                        state,
+                        output: output.clone(),
+                        output_ref,
+                        error: error.clone(),
+                    },
+                )
+                .await
+                .map_err(ApplyError::Db)?;
+            }
+            if matches!(state, "failed" | "cancelled" | "stalled") {
+                cascade_cancel_children(&tx, &result.run_id)
+                    .await
+                    .map_err(ApplyError::Db)?;
+            }
         }
     }
 
@@ -1877,6 +2512,323 @@ where
     .await
     .map_err(RegistryError::from)?;
     Ok(())
+}
+
+fn child_limit_error(message: impl Into<String>) -> Value {
+    serde_json::json!({
+        "type": "LimitExceededError",
+        "message": message.into(),
+        "retryable": false,
+    })
+}
+
+fn child_cancelled_error() -> Value {
+    serde_json::json!({
+        "type": "ChildCancelledError",
+        "message": "child workflow was cancelled",
+        "retryable": false,
+    })
+}
+
+async fn cancel_requested_run<C>(conn: &C, run_id: &str) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let changed = conn
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state = 'cancelled', \
+                    cancel_requested = false, \
+                    wake_at = NULL, \
+                    waiting_step_key = NULL, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL, \
+                    claim_epoch = claim_epoch + 1 \
+              WHERE id = $1 \
+                AND cancel_requested \
+                AND state NOT IN ('completed','failed','cancelled','stalled')",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if changed == 0 {
+        return Ok(false);
+    }
+
+    emit_child_terminal_hook(
+        conn,
+        run_id,
+        ChildTerminalPayload {
+            state: "cancelled",
+            output: None,
+            output_ref: None,
+            error: Some(child_cancelled_error()),
+        },
+    )
+    .await?;
+    cascade_cancel_children(conn, run_id).await?;
+    Ok(true)
+}
+
+fn fail_child_checkpoint_with_limit(checkpoint: &mut StepCheckpoint, message: String) {
+    checkpoint.state = "failed".to_string();
+    checkpoint.output = None;
+    checkpoint.output_ref = None;
+    checkpoint.error = Some(child_limit_error(message));
+    checkpoint.wake_at = None;
+}
+
+async fn prepare_child_spawn<C>(
+    conn: &C,
+    config: &WorkflowEngineConfig,
+    parent_run_id: &str,
+    app_id: &Uuid,
+    deploy_id: &str,
+    parent_tree_depth: i16,
+    checkpoint: &mut StepCheckpoint,
+) -> Result<Result<(), String>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let existing_step = conn
+        .query(
+            "SELECT child_run_id, signal_type \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+                AND ordinal = $2 \
+                AND kind = 'child' \
+                AND state = 'running' \
+              FOR UPDATE",
+            &[&parent_run_id, &checkpoint.ordinal],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if let Some(row) = existing_step.first() {
+        checkpoint.child_run_id = row.get("child_run_id");
+        checkpoint.signal_type = row
+            .get::<_, Option<String>>("signal_type")
+            .or_else(|| Some(child_signal_type(checkpoint.ordinal)));
+        return Ok(Ok(()));
+    }
+
+    let Some(child_workflow_name) = checkpoint.child_workflow_name.clone() else {
+        return Ok(Err("child workflow name is missing".to_string()));
+    };
+    if child_workflow_name.is_empty() || child_workflow_name.len() > 128 {
+        return Ok(Err("child workflow name must be 1-128 bytes".to_string()));
+    }
+    if child_workflow_name.starts_with("__zs.") {
+        return Ok(Err("child workflow name uses a reserved prefix".to_string()));
+    }
+
+    let child_depth = parent_tree_depth.saturating_add(1);
+    if child_depth > config.max_child_depth.max(0) {
+        return Ok(Err(format!(
+            "child workflow depth exceeds maxChildDepth ({} > {})",
+            child_depth,
+            config.max_child_depth.max(0)
+        )));
+    }
+
+    let live_descendants = live_descendant_count(conn, parent_run_id).await?;
+    if live_descendants >= config.max_live_descendants.max(0) {
+        return Ok(Err(format!(
+            "child workflow tree exceeds maxLiveDescendants ({} >= {})",
+            live_descendants,
+            config.max_live_descendants.max(0)
+        )));
+    }
+
+    let child_input = checkpoint.child_input.clone().unwrap_or(Value::Null);
+    let input_journal_bytes = workflow_limits::json_column_size(conn, &child_input).await?;
+    let child_key = child_dedup_key(parent_run_id, checkpoint.ordinal);
+    let child_run_id = typed_id::new_workflow_run_id();
+    let parent_wait_step_key = child_signal_type(checkpoint.ordinal);
+    let cascade = checkpoint
+        .child_options
+        .as_ref()
+        .is_some_and(|options| options.cascade);
+    let rows = conn
+        .query(
+            "INSERT INTO zeroship.workflow_runs \
+                (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, \
+                 wake_at, parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, started_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), $8, $9, $10, $11, now()) \
+             ON CONFLICT (app_id, workflow_name, dedup_key) DO NOTHING \
+             RETURNING id",
+            &[
+                &child_run_id,
+                &child_workflow_name,
+                app_id,
+                &deploy_id,
+                &child_input,
+                &input_journal_bytes,
+                &child_key,
+                &parent_run_id,
+                &parent_wait_step_key,
+                &cascade,
+                &child_depth,
+            ],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    let actual_child_id = if let Some(row) = rows.first() {
+        row.get("id")
+    } else {
+        conn.query_one(
+            "SELECT id \
+               FROM zeroship.workflow_runs \
+              WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
+              LIMIT 1",
+            &[app_id, &child_workflow_name, &child_key],
+        )
+        .await
+        .map_err(RegistryError::from)?
+        .get("id")
+    };
+
+    checkpoint.child_run_id = Some(actual_child_id);
+    checkpoint.signal_type = Some(parent_wait_step_key);
+    Ok(Ok(()))
+}
+
+async fn live_descendant_count<C>(conn: &C, run_id: &str) -> Result<i64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let row = conn
+        .query_one(
+            "WITH RECURSIVE ancestors AS ( \
+                 SELECT id, parent_run_id \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1 \
+                 UNION ALL \
+                 SELECT p.id, p.parent_run_id \
+                   FROM zeroship.workflow_runs p \
+                   JOIN ancestors a ON a.parent_run_id = p.id \
+             ), root AS ( \
+                 SELECT id FROM ancestors WHERE parent_run_id IS NULL LIMIT 1 \
+             ), tree AS ( \
+                 SELECT id FROM root \
+                 UNION ALL \
+                 SELECT c.id \
+                   FROM zeroship.workflow_runs c \
+                   JOIN tree t ON c.parent_run_id = t.id \
+             ) \
+             SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs r \
+               JOIN tree t ON t.id = r.id \
+              WHERE r.id <> (SELECT id FROM root) \
+                AND r.state NOT IN ('completed','failed','cancelled','stalled')",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(row.get("n"))
+}
+
+#[derive(Debug, Clone)]
+struct ChildTerminalPayload<'a> {
+    state: &'a str,
+    output: Option<Value>,
+    output_ref: Option<WorkflowOutputRef>,
+    error: Option<Value>,
+}
+
+async fn emit_child_terminal_hook<C>(
+    conn: &C,
+    child_run_id: &str,
+    terminal: ChildTerminalPayload<'_>,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT parent_run_id, parent_wait_step_key \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 \
+                AND parent_run_id IS NOT NULL \
+                AND parent_wait_step_key IS NOT NULL",
+            &[&child_run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    let Some(row) = rows.first() else {
+        return Ok(());
+    };
+    let parent_run_id: String = row.get("parent_run_id");
+    let parent_wait_step_key: String = row.get("parent_wait_step_key");
+    let ok = terminal.state == "completed";
+    let error = if ok {
+        None
+    } else if terminal.state == "cancelled" {
+        Some(child_cancelled_error())
+    } else {
+        terminal.error
+    };
+    let output_ref = terminal.output_ref.map(|value| {
+        serde_json::json!({
+            "hash": value.hash,
+            "size": value.size,
+            "contentType": value.content_type,
+        })
+    });
+    let payload = serde_json::json!({
+        "ok": ok,
+        "output": if ok { terminal.output } else { None },
+        "outputRef": output_ref,
+        "error": error,
+        "state": terminal.state,
+        "childRunId": child_run_id,
+    });
+    let signal_id = typed_id::new_workflow_signal_id();
+    conn.execute(
+        "INSERT INTO zeroship.workflow_signals \
+            (id, run_id, type, payload, origin, delivery, idempotency_key, created_at) \
+         VALUES ($1, $2, $3, $4, 'system', 'direct', $3, now()) \
+         ON CONFLICT (run_id, type, idempotency_key) \
+         WHERE idempotency_key IS NOT NULL AND delivery <> 'topic' \
+         DO NOTHING",
+        &[
+            &signal_id,
+            &parent_run_id,
+            &parent_wait_step_key,
+            &payload,
+        ],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    conn.execute(
+        "UPDATE zeroship.workflow_runs \
+            SET wake_at = now() \
+          WHERE id = $1 \
+            AND state IN ('running','sleeping','waiting')",
+        &[&parent_run_id],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    Ok(())
+}
+
+pub(crate) async fn cascade_cancel_children<C>(
+    conn: &C,
+    parent_run_id: &str,
+) -> Result<u64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    conn.execute(
+        "UPDATE zeroship.workflow_runs \
+            SET cancel_requested = true, wake_at = now() \
+          WHERE parent_run_id = $1 \
+            AND parent_cascade \
+            AND state NOT IN ('completed','failed','cancelled','stalled')",
+        &[&parent_run_id],
+    )
+    .await
+    .map_err(RegistryError::from)
 }
 
 async fn delete_workflow_subscription<C>(
@@ -1988,6 +2940,7 @@ where
                     output_hash = $13, \
                     output_size = $14, \
                     output_content_type = $15, \
+                    child_run_id = COALESCE(child_run_id, $16), \
                     finished_at = now() \
               WHERE run_id = $1 \
                 AND ordinal = $2 \
@@ -2010,6 +2963,7 @@ where
                 &output_hash,
                 &output_size,
                 &output_content_type,
+                &checkpoint.child_run_id,
             ],
         )
         .await
@@ -2020,9 +2974,9 @@ where
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
              output_kind, output_hash, output_size, output_content_type, \
              wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
-             batch_id, batch_width, finished_at) \
+             child_run_id, batch_id, batch_width, finished_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now()) \
+                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now()) \
          ON CONFLICT (run_id, ordinal) DO NOTHING",
             &[
                 &run_id,
@@ -2041,6 +2995,7 @@ where
                 &checkpoint.signal_type,
                 &checkpoint.max_signal_age_ms,
                 &checkpoint.consumed_signal_id,
+                &checkpoint.child_run_id,
                 &batch_id,
                 &batch_width,
             ],

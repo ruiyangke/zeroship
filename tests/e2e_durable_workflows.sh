@@ -298,6 +298,84 @@ export class StreamLimitWorkflow {
   }
 }
 
+export class ChildEchoWorkflow {
+  async run(trigger, step) {
+    const seen = await step.run("child-seen", () => ({
+      value: trigger.input.value,
+      runId: trigger.runId,
+    }));
+    return seen;
+  }
+}
+
+export class ChildFailWorkflow {
+  async run() {
+    throw new Error("child failed as requested");
+  }
+}
+
+export class ChildBlockWorkflow {
+  async run(trigger, step) {
+    await step.sleep("child-block", trigger.input.sleep ?? "PT30S");
+    return { unblocked: true };
+  }
+}
+
+export class ParentCallWorkflow {
+  async run(trigger, step) {
+    const child = await step.call(
+      ChildEchoWorkflow,
+      { value: trigger.input.value },
+      { cascade: trigger.input.cascade === true },
+    );
+    const after = await step.run("after-child", () => ({
+      value: child.value,
+      childRunId: child.runId,
+    }));
+    return { child, after };
+  }
+}
+
+export class ParentStartManyWorkflow {
+  async run(trigger, step) {
+    const outputs = await step.startMany(
+      ChildEchoWorkflow,
+      trigger.input.values.map((value) => ({
+        input: { value },
+        key: \`child-\${value}\`,
+      })),
+      { cascade: true },
+    );
+    return { outputs };
+  }
+}
+
+export class ParentCatchChildFailureWorkflow {
+  async run(trigger, step) {
+    try {
+      await step.call(ChildFailWorkflow, { value: trigger.input.value });
+      return { caught: false };
+    } catch (error) {
+      const marker = await step.run("caught-child-failure", () => ({
+        name: error?.name,
+        message: error?.message,
+      }));
+      return { caught: true, marker };
+    }
+  }
+}
+
+export class ParentCascadeWorkflow {
+  async run(trigger, step) {
+    await step.call(
+      ChildBlockWorkflow,
+      { sleep: trigger.input.sleep ?? "PT30S" },
+      { cascade: true },
+    );
+    return { unreachable: true };
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
@@ -313,6 +391,13 @@ export default {
     ScheduledWorkflow,
     BlobOutputWorkflow,
     StreamLimitWorkflow,
+    ChildEchoWorkflow,
+    ChildFailWorkflow,
+    ChildBlockWorkflow,
+    ParentCallWorkflow,
+    ParentStartManyWorkflow,
+    ParentCatchChildFailureWorkflow,
+    ParentCascadeWorkflow,
   },
 };
 EOF

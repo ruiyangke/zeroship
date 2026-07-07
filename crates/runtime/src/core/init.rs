@@ -567,6 +567,29 @@ class ZsWorkflowTimeoutError extends Error {
     }
 }
 
+class ZsChildCancelledError extends Error {
+    constructor(message = "child workflow was cancelled") {
+        super(message);
+        this.name = "ChildCancelledError";
+    }
+}
+
+class ZsChildTimeoutError extends Error {
+    constructor(message = "child workflow timed out") {
+        super(message);
+        this.name = "ChildTimeoutError";
+    }
+}
+
+class ZsLimitExceededError extends Error {
+    constructor(message = "workflow limit exceeded") {
+        super(message);
+        this.name = "LimitExceededError";
+    }
+}
+
+const ZS_MAX_START_MANY_BATCH = 1000;
+
 function wfErr(message, status, code) {
     const e = new Error(message);
     e.status = status;
@@ -588,7 +611,13 @@ function wfDeserializeError(error) {
         ? new ZsWorkflowTimeoutError(error.message)
         : error && error.type === "NondeterministicError"
             ? new ZsNondeterministicError(error.message)
-        : new Error((error && error.message) || "workflow step failed");
+            : error && error.type === "ChildCancelledError"
+                ? new ZsChildCancelledError(error.message)
+                : error && error.type === "ChildTimeoutError"
+                    ? new ZsChildTimeoutError(error.message)
+                    : error && error.type === "LimitExceededError"
+                        ? new ZsLimitExceededError(error.message)
+                        : new Error((error && error.message) || "workflow step failed");
     e.name = (error && error.type) || e.name;
     if (error && error.stack) e.stack = error.stack;
     return e;
@@ -873,6 +902,26 @@ class ZsJournalBackedStep {
         });
     }
 
+    startMany(WorkflowClass, items, options) {
+        this.#assertNotNested();
+        const materialized = Array.from(items);
+        if (materialized.length > ZS_MAX_START_MANY_BATCH) {
+            return Promise.reject(new ZsLimitExceededError(
+                `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${ZS_MAX_START_MANY_BATCH})`,
+            ));
+        }
+        return Promise.all(materialized.map((raw) => {
+            const item = raw || {};
+            const itemOptions = item.options && typeof item.options === "object" ? item.options : {};
+            const mergedOptions = {
+                ...(options && typeof options === "object" ? options : {}),
+                ...itemOptions,
+                ...(typeof item.key === "string" ? { key: item.key } : {}),
+            };
+            return this.call(WorkflowClass, item.input, mergedOptions);
+        }));
+    }
+
     async #runFrontier(issued, name, config, fn) {
         const bodyPromise = this.#invokeStepBody(fn);
         try {
@@ -1131,7 +1180,7 @@ function workflowFrontierResult(envelope, outcome) {
     }
     return {
         ...base,
-        kind: "Wait",
+        kind: "Child",
         childWorkflowName: outcome.workflowName,
         input: outcome.input,
         options: outcome.options,

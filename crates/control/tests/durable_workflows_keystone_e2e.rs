@@ -48,6 +48,10 @@ const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
 const SCHEDULED_WORKFLOW_NAME: &str = "ScheduledWorkflow";
 const BLOB_OUTPUT_WORKFLOW_NAME: &str = "BlobOutputWorkflow";
 const STREAM_LIMIT_WORKFLOW_NAME: &str = "StreamLimitWorkflow";
+const PARENT_CALL_WORKFLOW_NAME: &str = "ParentCallWorkflow";
+const PARENT_START_MANY_WORKFLOW_NAME: &str = "ParentStartManyWorkflow";
+const PARENT_CATCH_CHILD_FAILURE_WORKFLOW_NAME: &str = "ParentCatchChildFailureWorkflow";
+const PARENT_CASCADE_WORKFLOW_NAME: &str = "ParentCascadeWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -466,6 +470,9 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         claim_ttl_ms: 1_500,
         heartbeat_ms: 60_000,
         stuck_strike_limit: 3,
+        max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
+        max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
+        max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
         owner_id: owner.to_string(),
     }
 }
@@ -939,6 +946,91 @@ async fn run_output(fx: &Fixture, run_id: &str) -> serde_json::Value {
     rows[0]
         .get::<_, Option<serde_json::Value>>("output")
         .unwrap_or(serde_json::Value::Null)
+}
+
+async fn child_run_ids(fx: &Fixture, parent_run_id: &str) -> Vec<String> {
+    fx.pg
+        .query(
+            "SELECT id \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1 \
+              ORDER BY created_at, id",
+            &[&parent_run_id],
+        )
+        .await
+        .expect("load child runs")
+        .into_iter()
+        .map(|row| row.get("id"))
+        .collect()
+}
+
+async fn wait_for_child_count(fx: &Fixture, parent_run_id: &str, expected: usize) -> Vec<String> {
+    for _ in 0..120 {
+        let ids = child_run_ids(fx, parent_run_id).await;
+        if ids.len() == expected {
+            return ids;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "parent {parent_run_id} did not reach {expected} children; got {:?}",
+        child_run_ids(fx, parent_run_id).await
+    );
+}
+
+async fn wait_for_child_cancel_requested(fx: &Fixture, child_run_id: &str) {
+    // Wait until the child is BOTH cancel_requested AND parked (queued/sleeping/
+    // waiting). The parked-cancel reap only reaps a run in a parked state; if the
+    // child's spawn dispatch is still in flight (state='running') when the reap
+    // tick fires, the reap can't see it and it parks to 'sleeping' just after the
+    // tick — a race. Waiting for the reachable parked state makes the single reap
+    // tick deterministic (the cooperative-cancel behavior itself is eventual: a
+    // running child self-cancels at its next step boundary, a parked one is reaped).
+    for _ in 0..200 {
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT cancel_requested, state FROM zeroship.workflow_runs WHERE id = $1",
+                &[&child_run_id],
+            )
+            .await
+            .expect("load child cancel flag");
+        let parked = matches!(
+            row.get::<_, String>("state").as_str(),
+            "queued" | "sleeping" | "waiting"
+        );
+        if row.get::<_, bool>("cancel_requested") && parked {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("child {child_run_id} was not cancel_requested + parked");
+}
+
+async fn assert_child_dedup_keys(fx: &Fixture, parent_run_id: &str, expected: usize) {
+    let rows = fx
+        .pg
+        .query(
+            "SELECT dedup_key, parent_wait_step_key, tree_depth \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1 \
+              ORDER BY created_at, id",
+            &[&parent_run_id],
+        )
+        .await
+        .expect("load child dedup keys");
+    assert_eq!(rows.len(), expected);
+    for (idx, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row.get::<_, Option<String>>("dedup_key"),
+            Some(workflow_engine::child_dedup_key(parent_run_id, idx as i32))
+        );
+        assert_eq!(
+            row.get::<_, Option<String>>("parent_wait_step_key"),
+            Some(workflow_engine::child_signal_type(idx as i32))
+        );
+        assert_eq!(row.get::<_, i16>("tree_depth"), 1);
+    }
 }
 
 async fn scheduled_run_for(
@@ -1482,6 +1574,217 @@ async fn durable_workflows_m1_keystone_real_spine() {
         concurrent_dispatcher.count() < 4,
         "3-wide frontier plus final should complete in fewer dispatches than serial a,b,c,final; got {}",
         concurrent_dispatcher.count()
+    );
+
+    // CW1/CW2/CW3: step.call parks the parent, spawns one deterministic child,
+    // and resumes with the child's output. The first dispatch result is applied
+    // manually before releasing the held dispatcher to simulate a duplicate
+    // post-crash apply racing the already-parked parent.
+    let cw1_parent = seed_workflow_run(
+        &fx,
+        PARENT_CALL_WORKFLOW_NAME,
+        serde_json::json!({"case": "cw1", "value": "alpha", "cascade": true}),
+    )
+    .await;
+    let (cw1_dispatcher, cw1_dropped_rx, cw1_release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let cw1_dispatcher = Arc::new(cw1_dispatcher);
+    let cw1_owner = "dw17-cw1-parent";
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&cw1_dispatcher),
+        config(cw1_owner),
+    )
+    .await
+    .expect("CW1 first tick");
+    assert_eq!(claimed, 1);
+    let dropped = cw1_dropped_rx.await.expect("CW1 dropped parent StepResult");
+    let DispatchOutcome::Completed(cw1_result) = dropped else {
+        panic!("CW1 parent did not produce a StepResult");
+    };
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, cw1_owner, cw1_result)
+            .await
+            .expect("CW1 manual parent spawn apply")
+    );
+    let cw1_children = wait_for_child_count(&fx, &cw1_parent, 1).await;
+    assert_child_dedup_keys(&fx, &cw1_parent, 1).await;
+    let cw1_parent_row = fx
+        .pg
+        .query_one(
+            "SELECT state, waiting_step_key FROM zeroship.workflow_runs WHERE id = $1",
+            &[&cw1_parent],
+        )
+        .await
+        .expect("CW1 parent parked");
+    assert_eq!(cw1_parent_row.get::<_, String>("state"), "waiting");
+    assert_eq!(
+        cw1_parent_row.get::<_, Option<String>>("waiting_step_key"),
+        Some("child:0:ChildEchoWorkflow".to_string())
+    );
+    let _ = cw1_release_tx.send(());
+    compio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        child_run_ids(&fx, &cw1_parent).await,
+        cw1_children,
+        "CW1 duplicate apply must not spawn a second child"
+    );
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw17-cw1-drive"),
+        &cw1_parent,
+    )
+    .await;
+    let cw1_output = run_output(&fx, &cw1_parent).await;
+    assert_eq!(cw1_output["child"]["value"], "alpha");
+    assert_eq!(cw1_output["after"]["value"], "alpha");
+    assert_eq!(
+        cw1_output["after"]["childRunId"].as_str(),
+        Some(cw1_children[0].as_str())
+    );
+    assert_eq!(
+        step_rows(&fx, &cw1_parent).await,
+        vec![
+            (
+                0,
+                "ChildEchoWorkflow".to_string(),
+                "child".to_string(),
+                "completed".to_string(),
+            ),
+            (
+                1,
+                "after-child".to_string(),
+                "run".to_string(),
+                "completed".to_string(),
+            ),
+        ],
+        "CW2/CW3 parent should contain the child join and follow-up step"
+    );
+
+    // CW4: startMany is a bounded child batch; all children are spawned once,
+    // run as real child workflows, and join in issue order.
+    let cw4_parent = seed_workflow_run(
+        &fx,
+        PARENT_START_MANY_WORKFLOW_NAME,
+        serde_json::json!({"case": "cw4", "values": ["a", "b", "c"]}),
+    )
+    .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw17-cw4-start-many"),
+        &cw4_parent,
+    )
+    .await;
+    assert_eq!(child_run_ids(&fx, &cw4_parent).await.len(), 3);
+    assert_child_dedup_keys(&fx, &cw4_parent, 3).await;
+    let cw4_output = run_output(&fx, &cw4_parent).await;
+    assert_eq!(cw4_output["outputs"][0]["value"], "a");
+    assert_eq!(cw4_output["outputs"][1]["value"], "b");
+    assert_eq!(cw4_output["outputs"][2]["value"], "c");
+
+    // CW5: child failure is catchable at the parent's step.call site.
+    let cw5_parent = seed_workflow_run(
+        &fx,
+        PARENT_CATCH_CHILD_FAILURE_WORKFLOW_NAME,
+        serde_json::json!({"case": "cw5", "value": "boom"}),
+    )
+    .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw17-cw5-catch-child-failure"),
+        &cw5_parent,
+    )
+    .await;
+    let cw5_output = run_output(&fx, &cw5_parent).await;
+    assert_eq!(cw5_output["caught"], true);
+    assert_eq!(cw5_output["marker"]["name"], "Error");
+    assert_eq!(
+        step_rows(&fx, &cw5_parent).await,
+        vec![
+            (
+                0,
+                "ChildFailWorkflow".to_string(),
+                "child".to_string(),
+                "failed".to_string(),
+            ),
+            (
+                1,
+                "caught-child-failure".to_string(),
+                "run".to_string(),
+                "completed".to_string(),
+            ),
+        ]
+    );
+
+    // CW6: parent cancel cascades cooperatively by setting cancel_requested on
+    // descendants; the child self-cancels on its next claim without dispatching
+    // user code under a cross-run lease.
+    let cw6_parent = seed_workflow_run(
+        &fx,
+        PARENT_CASCADE_WORKFLOW_NAME,
+        serde_json::json!({"case": "cw6", "sleep": "PT30S"}),
+    )
+    .await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw17-cw6-park-parent"),
+        &cw6_parent,
+    )
+    .await;
+    let mut cw6_children = wait_for_child_count(&fx, &cw6_parent, 1).await;
+    let cw6_child = cw6_children.remove(0);
+    let cancel = post_control(
+        &control_url,
+        fx.app_id,
+        &cw6_parent,
+        "cancel",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancel["state"], "cancelled");
+    wait_for_child_cancel_requested(&fx, &cw6_child).await;
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw17-cw6-child-cooperative-cancel"),
+    )
+    .await
+    .expect("CW6 child cancel tick");
+    assert_eq!(claimed, 0, "CW6 cancel pickup must not dispatch child code");
+    assert_eq!(run_state(&fx.pg, &cw6_child).await.0, "cancelled");
+
+    // CW7: maxLiveDescendants rejects the child frontier as a catchable step
+    // failure; this parent does not catch it, so the replay fails the run.
+    let cw7_parent = seed_workflow_run(
+        &fx,
+        PARENT_CALL_WORKFLOW_NAME,
+        serde_json::json!({"case": "cw7", "value": "over-cap"}),
+    )
+    .await;
+    let mut cw7_cfg = config("dw17-cw7-live-cap");
+    cw7_cfg.max_live_descendants = 0;
+    let cw7_error = drive_until_failed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        cw7_cfg,
+        &cw7_parent,
+        "CW7 maxLiveDescendants",
+    )
+    .await;
+    assert_eq!(cw7_error["type"], "LimitExceededError");
+    assert!(child_run_ids(&fx, &cw7_parent).await.is_empty());
+    assert_eq!(
+        step_rows(&fx, &cw7_parent).await,
+        vec![(
+            0,
+            "ChildEchoWorkflow".to_string(),
+            "child".to_string(),
+            "failed".to_string(),
+        )]
     );
 
     let side_effect_run = seed_workflow_run(

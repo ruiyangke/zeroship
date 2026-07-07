@@ -316,6 +316,18 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             "maxSignalAgeMs": result.get("maxSignalAgeMs").cloned().unwrap_or(Value::Null),
             "topic": result.get("topic").cloned().unwrap_or(Value::Null),
         })),
+        "Child" => Ok(serde_json::json!({
+            "kind": "Child",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "childWorkflowName": result.get("childWorkflowName")
+                .cloned()
+                .or_else(|| result.get("workflowName").cloned())
+                .unwrap_or(Value::Null),
+            "input": result.get("input").cloned().unwrap_or(Value::Null),
+            "options": result.get("options").cloned().unwrap_or_else(|| serde_json::json!({})),
+        })),
         other => Err(format!("unknown worker workflow result kind {other:?}")),
     }
 }
@@ -327,7 +339,7 @@ fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or("run");
     match step_kind {
-        "run" | "sideEffect" => Ok(Value::String(step_kind.to_string())),
+        "run" | "sideEffect" | "child" => Ok(Value::String(step_kind.to_string())),
         other => Err(format!("unknown workflow stepKind {other:?}")),
     }
 }
@@ -371,7 +383,11 @@ fn normalize_workflow_outcomes(
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| "outcome missing kind".to_string())?;
-        if kind != "StepCompleted" && idx != last {
+        // StepCompleted and Child may appear non-trailing: a dispatch can settle
+        // multiple concurrent steps and spawn multiple children (startMany) in one
+        // batch. A true suspension/terminal (Sleep/Wait/RunCompleted/RunFailed) is
+        // mutually exclusive and must be the trailing entry.
+        if kind != "StepCompleted" && kind != "Child" && idx != last {
             return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
         match kind {
@@ -413,6 +429,23 @@ fn normalize_workflow_outcomes(
                         .or_else(|| outcome.get("maxSignalAge")),
                 )
                 .ok_or_else(|| "invalid wait maxSignalAge".to_string())?;
+            }
+            "Child" => {
+                // Child spawn (parent parks) — a trailing suspension outcome.
+                // Fields (ordinal/name/childWorkflowName/input/options) pass through;
+                // the engine's StepOutcome::Child fold spawns the child run + parks
+                // the parent. The runtime emits both childWorkflowName and the base
+                // workflowName; keep only childWorkflowName (StepOutcome::Child aliases
+                // workflowName → child_workflow_name, so both present = a serde
+                // "duplicate field" error).
+                if let Some(obj) = outcome.as_object_mut() {
+                    if !obj.contains_key("childWorkflowName") {
+                        if let Some(wn) = obj.get("workflowName").cloned() {
+                            obj.insert("childWorkflowName".to_string(), wn);
+                        }
+                    }
+                    obj.remove("workflowName");
+                }
             }
             other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
         }
