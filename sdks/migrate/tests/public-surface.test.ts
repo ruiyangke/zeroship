@@ -58,13 +58,13 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "dropOwnedBy",
     "extension",
     "grant",
-    "pgTable",
     "raw",
     "revoke",
     "role",
     "schema",
     "sequence",
   ];
+  assert.equal(coreExports.has("table"), true, "table must be exported from @zeroship/migrate root declarations");
   for (const name of rootedVendorExports) {
     assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
   }
@@ -80,6 +80,7 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "cCase",
     "opProducers",
     "opProducerRegistry",
+    "pg" + "Table",
   ];
   for (const name of forbiddenInternalExports) {
     assert.equal(coreExports.has(name), false, `${name} must stay out of @zeroship/migrate root declarations`);

@@ -1,4 +1,4 @@
-import { table, t, now, genRandomUuid, pgTable } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
 
 export const name = "control_tables";
 
@@ -225,7 +225,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  pgTable("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("payouts", { schema: "zeroship" }).check("control_payouts_fee_lte_gross").add({ expr: (col) => col("platform_fee").le(col("gross_amount")) });
   table("payouts", { schema: "zeroship" }).check("control_payouts_fee_nonnegative").add({ expr: (col) => col("platform_fee").ge(0) });
   table("payouts", { schema: "zeroship" }).check("control_payouts_gross_nonnegative").add({ expr: (col) => col("gross_amount").ge(0) });

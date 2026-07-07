@@ -12,7 +12,7 @@
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t, decimal, now, pgTable } from "@zeroship/migrate";
+import { table, t, decimal, now } from "@zeroship/migrate";
 
 export default {
   name: "fluent_ddl",
@@ -68,7 +68,7 @@ export default {
 
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
 
-    pgTable("accounts").index("accounts_active_email_idx").add({
+    table("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
       where: (col) => col("active").isTrue(),

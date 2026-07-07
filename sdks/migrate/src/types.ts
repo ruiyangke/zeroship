@@ -666,16 +666,6 @@ export interface CheckDef {
   expr: CheckExprFn;
 }
 
-/** PostgreSQL-vendor CHECK builder: immutable core plus PG immutable value nodes. */
-export interface CheckBuilderWithPg extends CheckBuilder {}
-
-export type PgCheckExprFn = (col: CheckBuilderWithPg) => ExprChain | Expr;
-
-export interface PgCheckDef {
-  name: string;
-  expr: PgCheckExprFn;
-}
-
 /** Builder for PostgreSQL domain CHECK expressions. The handle itself is the
  *  domain VALUE expression; there is no general column accessor because a domain
  *  CHECK can only refer to the value being constrained. */
@@ -692,8 +682,7 @@ export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
  *  `FkAction` — these ARE rendered now (C1). */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
-export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
-export type PgIndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
+export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
 
 export interface PartitionBoundSentinel {
   readonly __zeroshipPartitionBound: "minValue" | "maxValue";
@@ -719,9 +708,9 @@ export type PartitionBoundArgs =
 
 export interface PartitionRef {
   create(bound: PartitionBoundArgs, args?: CreatePartitionOptions): TableHandle;
-  attach(bound: PartitionBoundArgs, args?: AttachPartitionArgs): PgTableHandle;
+  attach(bound: PartitionBoundArgs, args?: AttachPartitionArgs): TableHandle;
   drop(args?: DropPartitionArgs): TableHandle;
-  detach(args?: DetachPartitionArgs): PgTableHandle;
+  detach(args?: DetachPartitionArgs): TableHandle;
 }
 
 export interface DropPartitionArgs {
@@ -865,8 +854,8 @@ export interface PolicyDropArgs {
 }
 
 export interface PolicyRef {
-  create(args: PolicyCreateArgs): PgTableHandle;
-  drop(args?: PolicyDropArgs): PgTableHandle;
+  create(args: PolicyCreateArgs): TableHandle;
+  drop(args?: PolicyDropArgs): TableHandle;
 }
 
 // ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
@@ -934,30 +923,23 @@ export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 export interface IndexColumnElementArg {
   column: string;
   order?: IndexSortOrder;
+  opclass?: string;
+  collation?: string;
+  nulls?: "first" | "last";
 }
 
 export interface IndexExprElementArg {
   expr: IndexExprFn;
   order?: IndexSortOrder;
+  opclass?: string;
+  collation?: string;
+  nulls?: "first" | "last";
 }
 
 export type IndexElementArg =
   | string
   | IndexColumnElementArg
   | IndexExprElementArg;
-
-export type PgIndexElement =
-  | string
-  | (IndexColumnElementArg & {
-    opclass?: string;
-    collation?: string;
-    nulls?: "first" | "last";
-  })
-  | (IndexExprElementArg & {
-    opclass?: string;
-    collation?: string;
-    nulls?: "first" | "last";
-  });
 
 export type CommentTargetArg =
   | { kind: "table"; name: string; schema?: string }
@@ -1088,7 +1070,7 @@ export interface ForeignKeyRef {
     deferrable?: boolean;
     initiallyDeferred?: boolean;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID` (skip the
-     *  add-time scan), then `pgTable(...).constraint(name).validate()` later. */
+     *  add-time scan), then `table(...).constraint(name).validate()` later. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
@@ -1105,28 +1087,17 @@ export interface CheckRef {
   add(args: {
     expr: CheckExprFn;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
-     *  `pgTable(...).constraint(name).validate()` later. */
+     *  `table(...).constraint(name).validate()` later. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
 }
 
-export interface PgCheckRef extends CheckRef {
-  add(args: {
-    expr: PgCheckExprFn;
-    /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
-     *  `pgTable(...).constraint(name).validate()` later. */
-    notValid?: boolean;
-    ifNotExists?: boolean;
-    schema?: string;
-  }): PgTableHandle;
-}
-
 /** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
  *  `EXCLUDE`; SQLite/MySQL fail closed. */
 export interface ExclusionRef {
-  add(args: ExclusionAddArgs): PgTableHandle;
+  add(args: ExclusionAddArgs): TableHandle;
 }
 
 /** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic operations
@@ -1134,12 +1105,9 @@ export interface ExclusionRef {
 export interface ConstraintRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
-}
-
-export interface PgConstraintRef extends ConstraintRef {
   /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
    *  rows under a weaker lock (records a `validateConstraint` Op). */
-  validate(args?: { ifExists?: boolean; schema?: string }): PgTableHandle;
+  validate(args?: { ifExists?: boolean; schema?: string }): TableHandle;
 }
 
 /** The `.index(name)` selector sub-handle (§3.4). */
@@ -1148,12 +1116,8 @@ export interface IndexAddArgs {
   unique?: boolean;
   ifNotExists?: boolean;
   schema?: string;
-}
-
-export interface PgIndexAdd extends IndexAddArgs {
-  on: PgIndexElement[];
-  using?: PgIndexMethod;
-  /** Partial-index predicate. PG-vendor: reachable through `pgTable().index()`. */
+  using?: IndexMethod;
+  /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL fails closed. */
   where?: IndexExprFn;
   include?: readonly string[];
   with?: IndexStorageParamsArg;
@@ -1169,9 +1133,6 @@ export interface IndexDropArgs {
    *  plain reversible index drop. */
   unique?: boolean;
   schema?: string;
-}
-
-export interface PgIndexDropArgs extends IndexDropArgs {
   concurrently?: boolean;
 }
 
@@ -1187,11 +1148,6 @@ export interface IndexRef {
    */
   drop(args?: IndexDropArgs): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
-}
-
-export interface PgIndexRef extends IndexRef {
-  add(args: PgIndexAdd): PgTableHandle;
-  drop(args?: PgIndexDropArgs): PgTableHandle;
 }
 
 /**
@@ -1231,6 +1187,9 @@ export interface TableHandle {
   check(name: string): CheckRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;
+  exclusion(name: string): ExclusionRef;
+  setRls(args: { enabled?: boolean; forced?: boolean }): TableHandle;
+  policy(name: string): PolicyRef;
 
   // §3.5 — table data (direct named DML; no existence guard — DML is unguardable)
   insert<R extends Row = Row>(args: InsertArgs<R>): TableHandle;
@@ -1240,18 +1199,6 @@ export interface TableHandle {
 
   // §A2 — cross-dialect core triggers.
   trigger(name: string): TriggerRef;
-}
-
-/** The widened table handle returned by `@zeroship/migrate`'s `pgTable()`.
- *  It is the same runtime object as `table()`, with table-scoped PG vendor
- *  methods made reachable only from the `/pg` type surface. */
-export interface PgTableHandle extends TableHandle {
-  check(name: string): PgCheckRef;
-  constraint(name: string): PgConstraintRef;
-  index(name: string): PgIndexRef;
-  exclusion(name: string): ExclusionRef;
-  setRls(args: { enabled?: boolean; forced?: boolean }): PgTableHandle;
-  policy(name: string): PolicyRef;
 }
 
 /** One determinism-lint finding. */

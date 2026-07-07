@@ -62,7 +62,6 @@ export {
   dropOwnedBy,
   grant,
   revoke,
-  pgTable,
   createFunction,
   dropFunction,
   raw,

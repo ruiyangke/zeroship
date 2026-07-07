@@ -294,13 +294,13 @@ Select with `.index(name)`, then pass the target elements and optional modifiers
 in `.add({…})`.
 
 ```ts
-import { table, pgTable } from "@zeroship/migrate";
+import { table } from "@zeroship/migrate";
 
 // Basic
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 
 // Composite + partial (WHERE predicate is the (col) => Expr builder, PG vendor)
-pgTable("app_session_anchors").index("app_session_anchors_user_idx")
+table("app_session_anchors").index("app_session_anchors_user_idx")
   .add({ on: ["app_id",
   "global_user_id"],
   where: (col) => col("revoked_at").isNull() });
@@ -310,11 +310,11 @@ table("users").index("users_email_uq").add({ on: ["email"],
   unique: true });
 
 // Access method
-pgTable("docs").index("docs_body_fts").add({ on: ["body"],
+table("docs").index("docs_body_fts").add({ on: ["body"],
   using: "gin" });
-pgTable("events").index("events_ts_brin").add({ on: ["occurred_at"],
+table("events").index("events_ts_brin").add({ on: ["occurred_at"],
   using: "brin" });
-pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"],
+table("embeddings").index("embeddings_vec").add({ on: ["vec"],
   using: "hnsw" });
 
 // Per-column ASC/DESC ordering (IndexElementArg)
@@ -327,7 +327,7 @@ table("users").index("users_lower_email")
   .add({ on: [{ expr: (col) => col("email").lower() }] });
 
 // Covering (INCLUDE) + storage params + ONLY (don't recurse into partitions)
-pgTable("orders").index("orders_customer_idx")
+table("orders").index("orders_customer_idx")
   .add({
     on: ["customer_id"],
   include: ["total",
@@ -340,18 +340,11 @@ pgTable("orders").index("orders_customer_idx")
 table("orders").index("orders_customer_idx").drop({ ifExists: true });
 ```
 
-Portable `table().index()` accepts `on`,
-  `unique`,
-  `ifNotExists`,
-  `schema`,
-  and per-element
-`order`. Vendor options (`using`,
-  `where`,
-  `include`,
-  `with`,
-  `only`,
-  `nullsNotDistinct`,
-  per-element `opclass`/`collation`) live on `pgTable().index()`.
+`table().index()` accepts the full PG-first index surface: `on`, `unique`,
+`ifNotExists`, `schema`, `using`, `where`, `include`, `with`, `only`,
+`nullsNotDistinct`, and per-element `order`/`opclass`/`collation`/`nulls`.
+Vendor options remain capability/dialect-gated by the engine and fail closed
+where a target has no native realization.
 
 ---
 
@@ -547,7 +540,7 @@ A partition is authored from the parent table handle:
 the parent's `partitionBy`.
 
 ```ts
-import { table, pgTable, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
+import { table, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 // 1) Parent declares the partition strategy at create()
 table("sandbox_events",
@@ -589,7 +582,7 @@ table("events").partition("events_tail").create({ from: ["2027-01-01"],
   to: [maxValue] });
 
 // Lifecycle: detach and drop (both parent-subject)
-pgTable("sandbox_events",
+table("sandbox_events",
   { schema: "zeroship" }).partition("sandbox_events_2026_05").detach();
 table("sandbox_events",
   { schema: "zeroship" }).partition("sandbox_events_2026_05").drop();
@@ -651,24 +644,24 @@ view("legacy_report").create({
 ## 14. Row-level security & policies
 
 ```ts
-import { pgTable, currentSetting } from "@zeroship/migrate";
+import { table, currentSetting } from "@zeroship/migrate";
 
 // Table-scoped RLS state
-pgTable("apps",
+table("apps",
   { schema: "zeroship" }).setRls({ enabled: true,
   forced: true });
-pgTable("apps",
+table("apps",
   { schema: "zeroship" }).setRls({ enabled: false,
   forced: false });
 
 // Policy via the table handle
-pgTable("apps",
+table("apps",
   { schema: "zeroship" }).policy("tenant_isolation").create({
   using: (col) => col("app_id").eq(currentSetting("zeroship.tenant_app",
   { missingOk: true }).cast({ to: "uuid" })),
   withCheck: (col) => col("app_id").eq(currentSetting("zeroship.tenant_app",
   });
-pgTable("apps",
+table("apps",
   { schema: "zeroship" }).policy("tenant_isolation").drop();
 ```
 

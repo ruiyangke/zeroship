@@ -31,7 +31,6 @@ import {
   concatWs,
   countStar,
   domain,
-  pgTable,
   sequence,
 } from "../src/index.js";
 // The build-evaluator recorder seam (not part of the public surface).
@@ -84,7 +83,7 @@ test("@zeroship/migrate core exports enumType, pg vendor names, and omits old na
   assert.equal(typeof imported.countStar, "function");
   assert.equal(typeof imported.domain, "function");
   assert.equal(typeof imported.sequence, "function");
-  assert.equal(typeof imported.pgTable, "function");
+  assert.equal(typeof imported.table, "function");
   assert.equal(typeof imported.grant, "function");
   assert.equal(typeof imported.raw, "function");
   assert.equal((imported as any).p, undefined);
@@ -1133,7 +1132,7 @@ test("variadic boolean chains record the old free-combinator left fold", () => {
 
 test("PG-first chain methods and root RLS scalar constructors record PG-only nodes", () => {
   const ops = record(() => {
-    pgTable("t").create({
+    table("t").create({
       columns: {
         status: t.text().notNull(),
         name: t.text().notNull(),
@@ -1174,13 +1173,7 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   assert.deepEqual(ops[1].set.user, { node: "fnCall", fn: "currentUser", args: [] });
 });
 
-test("core CHECK expressions reject vendor/volatile and record aggregate nodes for validate", () => {
-  assert.throws(
-    () => record(() => table("t").check("no_pg").add({
-      expr: (() => ({ node: "pgColumnSize", expr: { node: "colRef", name: "data" } })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /PG-vendor/.test(e.message),
-  );
+test("CHECK expressions record aggregate nodes for validate and reject volatile nodes", () => {
   assert.deepEqual(
     record(() => table("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
@@ -1195,9 +1188,9 @@ test("core CHECK expressions reject vendor/volatile and record aggregate nodes f
   );
 });
 
-test("pgTable CHECK expressions allow immutable PG nodes, record aggregates, and reject volatile nodes", () => {
+test("table CHECK expressions allow immutable PG nodes, record aggregates, and reject volatile nodes", () => {
   const ops = record(() =>
-    pgTable("t").check("data_small").add({
+    table("t").check("data_small").add({
       expr: (col) => col("data").columnSize().lt(1000),
     }),
   );
@@ -1219,19 +1212,19 @@ test("pgTable CHECK expressions allow immutable PG nodes, record aggregates, and
   });
 
   assert.deepEqual(
-    record(() => pgTable("t").check("no_agg").add({
+    record(() => table("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
     }))[0].constraint.kind.expr,
     { node: "agg", func: "count" },
   );
   assert.throws(
-    () => record(() => pgTable("t").check("no_now").add({
+    () => record(() => table("t").check("no_now").add({
       expr: (() => ({ node: "fnSynth", fn: "now", args: [] })) as any,
     })),
     (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /volatile/.test(e.message),
   );
   assert.throws(
-    () => record(() => pgTable("t").check("no_current_setting").add({
+    () => record(() => table("t").check("no_current_setting").add({
       expr: (() => ({
         node: "fnCall",
         fn: "currentSetting",
@@ -1392,7 +1385,7 @@ test("aggregate chain methods and countStar record the portable aggregate node",
 
 test("check helper and expression helpers build the frozen Expr IR nodes", () => {
   const ops = record(() => {
-    pgTable("expr_checks").create({
+    table("expr_checks").create({
       columns: {
         pkce_method: t.text().notNull(),
         user_id: t.text().notNull(),
@@ -1658,10 +1651,10 @@ test("chain extract and root interval build extract and interval nodes", () => {
         year_part: (col) => col("created_at").extract("year"),
       },
     });
-    pgTable("epoch_events").check("epoch_positive").add({
+    table("epoch_events").check("epoch_positive").add({
       expr: (col) => col("created_at").extract("epoch").gt(0),
     });
-    pgTable("oauth_device_codes").create({
+    table("oauth_device_codes").create({
       columns: {
         issued_at: t.timestamp().notNull(),
         expires_at: t.timestamp().notNull(),
@@ -1744,7 +1737,7 @@ test("inList rejects malformed scalar arrays and chain regex rejects bad pattern
 
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
-    pgTable("users").index("users_email_lower_idx").add({
+    table("users").index("users_email_lower_idx").add({
       on: ["email", { expr: (col) => col("email").lower() }],
       where: (col) => col("active").isTrue(),
     }),
@@ -1803,7 +1796,7 @@ test("immutable-only slots reject forced volatile/vendor nodes and record aggreg
   assert.throws(
     () =>
       record(() =>
-        pgTable("bookings").exclusion("bookings_bad_excl").add({
+        table("bookings").exclusion("bookings_bad_excl").add({
           using: "gist",
           elements: [{ target: "room", operator: "=" }],
           where: { node: "fnCall", fn: "currentUser", args: [] } as any,
@@ -1839,7 +1832,7 @@ test("index column order records DESC and omits ASC/default order", () => {
 
 test("index records PG-vendor nullsNotDistinct + per-element opclass/collation", () => {
   const ops = record(() =>
-    pgTable("accounts").index("accounts_email_uq").add({
+    table("accounts").index("accounts_email_uq").add({
       on: [{ column: "email", opclass: "text_pattern_ops", collation: "C" }],
       unique: true,
       nullsNotDistinct: true,
@@ -1851,7 +1844,7 @@ test("index records PG-vendor nullsNotDistinct + per-element opclass/collation",
   ]);
 });
 
-test("pgTable index widening records the same createIndex op as the shared runtime selector", () => {
+test("table index widening records the same createIndex op as the shared runtime selector", () => {
   const args = {
     on: [{ column: "email", opclass: "text_pattern_ops" }],
     using: "gin",
@@ -1862,9 +1855,9 @@ test("pgTable index widening records the same createIndex op as the shared runti
     unique: true,
     nullsNotDistinct: true,
   } as const;
-  const viaPgTable = record(() => pgTable("accounts").index("accounts_email_uq").add(args));
+  const viaTable = record(() => table("accounts").index("accounts_email_uq").add(args));
   const viaSharedSelector = record(() => (table("accounts").index("accounts_email_uq") as any).add(args));
-  assert.deepEqual(viaPgTable, viaSharedSelector);
+  assert.deepEqual(viaTable, viaSharedSelector);
 });
 
 test("index omits nullsNotDistinct/opclass/collation when absent (byte-neutral)", () => {
@@ -2023,9 +2016,9 @@ test("table().partition().create records list and hash createPartition ops", () 
   ]);
 });
 
-test("pgTable().partition().attach records attachPartition with range bounds", () => {
+test("table().partition().attach records attachPartition with range bounds", () => {
   const ops = record(() => {
-    pgTable("events", { schema: "app" }).partition("events_2026_06").attach({
+    table("events", { schema: "app" }).partition("events_2026_06").attach({
       from: ["2026-06-01T00:00:00Z"],
       to: ["2026-07-01T00:00:00Z"],
     });
@@ -2087,9 +2080,9 @@ test("table().trigger().create/drop record legacy trigger op payloads", () => {
   ]);
 });
 
-test("pgTable().partition().detach records legacy detachPartition payload", () => {
+test("table().partition().detach records legacy detachPartition payload", () => {
   const ops = record(() =>
-    pgTable("events", { schema: "app" }).partition("events_2026_05").detach({
+    table("events", { schema: "app" }).partition("events_2026_05").detach({
       concurrently: true,
     }),
   );
@@ -2105,9 +2098,9 @@ test("pgTable().partition().detach records legacy detachPartition payload", () =
   ]);
 });
 
-test("pgTable().constraint().validate records legacy validateConstraint payload", () => {
+test("table().constraint().validate records legacy validateConstraint payload", () => {
   const ops = record(() =>
-    pgTable("line_items", { schema: "app" }).constraint("line_items_order_fkey").validate({ ifExists: true }),
+    table("line_items", { schema: "app" }).constraint("line_items_order_fkey").validate({ ifExists: true }),
   );
 
   assert.deepEqual(ops, [
@@ -2140,7 +2133,7 @@ test("table().partition().drop records parent-scoped dropPartition", () => {
 
 test("index builder records include/with/brin/only", () => {
   const ops = record(() =>
-    pgTable("events").index("events_ts_brin_idx").add({
+    table("events").index("events_ts_brin_idx").add({
       on: ["ts"],
       using: "brin",
       include: ["tenant_id"],

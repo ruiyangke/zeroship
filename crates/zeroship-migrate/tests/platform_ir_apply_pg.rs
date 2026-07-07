@@ -211,7 +211,7 @@ const CONFINED_GRANT_IR: &str = r#"{
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
 import { table, t, now, genRandomUuid } from "@zeroship/migrate";
-import { createFunction, pgTable, schema } from "@zeroship/migrate";
+import { createFunction, schema } from "@zeroship/migrate";
 
 export const name = "platform_attach";
 
@@ -240,7 +240,7 @@ export function up() {
     ],
   });
 
-  const registry = pgTable("platform_registry", { schema: "zeroship" });
+  const registry = table("platform_registry", { schema: "zeroship" });
   registry.foreignKey("platform_registry_app_fk").add({
     columns: ["app_id"],
     references: { table: "platform_apps", columns: ["id"] },
@@ -275,7 +275,7 @@ export function up() {
 "#;
 const PLATFORM_COMPOSITE_FK_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_composite_fk";
 
@@ -356,14 +356,14 @@ import {
   check,
   interval,
 } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_expr_surface";
 
 export function up() {
   schema("zeroship").create({ ifNotExists: true });
 
-  pgTable("expr_surface", { schema: "zeroship" }).create({
+  table("expr_surface", { schema: "zeroship" }).create({
     columns: {
       pkce_method: t.text().notNull(),
       amount_cents: t.int().notNull(),
@@ -410,7 +410,7 @@ export function up() {
 
   // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
-  pgTable("expr_surface", { schema: "zeroship" })
+  table("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
     .add({ on: ["status"], where: (col) => col("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 

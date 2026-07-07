@@ -30,13 +30,15 @@
 
 import type {
   BackfillArgs,
-  CheckBuilderWithPg,
+  CheckBuilder,
   CheckDef,
   CheckExprFn,
+  CheckRef,
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
   CommentTargetArg,
+  ConstraintRef,
   AlterSequenceArgs,
   CastTarget,
   CreateDomainArgs,
@@ -100,13 +102,8 @@ import type {
   PartitionBoundInput,
   PartitionBoundSentinel,
   PartitionByInput,
-  PgCheckExprFn,
-  PgConstraintRef,
-  PgCheckRef,
-  PgIndexAdd,
-  PgIndexDropArgs,
-  PgIndexRef,
-  PgTableHandle,
+  IndexAddArgs,
+  IndexDropArgs,
   RoleCreateArgs,
   RoleDropArgs,
   RoleHandle,
@@ -2135,8 +2132,8 @@ function immutableExprBuilder(): IndexExprBuilder {
   return Object.freeze(c);
 }
 
-function checkWithPgBuilder(): CheckBuilderWithPg {
-  const c = makeColumnAccessor() as unknown as CheckBuilderWithPg;
+function checkBuilder(): CheckBuilder {
+  const c = makeColumnAccessor() as unknown as CheckBuilder;
   c.case = caseExpr;
   return Object.freeze(c);
 }
@@ -2185,14 +2182,14 @@ function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node |
   return resolved;
 }
 
-function resolveCheckWithPg(
-  slot: PgCheckExprFn | ExprChainType | Node | undefined,
+function resolveCheckExpr(
+  slot: CheckExprFn | ExprChainType | Node | undefined,
   position: string,
 ): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
   let resolved: Node;
   if (typeof slot === "function") {
-    resolved = exprArg((slot as (col: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
+    resolved = exprArg((slot as (col: CheckBuilder) => unknown)(checkBuilder()));
   } else if (slot instanceof ExprChainImpl) {
     resolved = slot.__node;
   } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
@@ -2245,14 +2242,11 @@ function resolveDomainCheck(
   return resolved;
 }
 
-type CheckExprSlot = CheckExprFn | PgCheckExprFn | ExprChainType | Node | undefined;
+type CheckExprSlot = CheckExprFn | ExprChainType | Node | undefined;
 type CheckExprResolver = (slot: CheckExprSlot, position: string) => Node | undefined;
 
-const resolveCoreCheckExpr: CheckExprResolver = (slot, position) =>
-  resolveImmutableExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
-
-const resolvePgCheckExpr: CheckExprResolver = (slot, position) =>
-  resolveCheckWithPg(slot as PgCheckExprFn | ExprChainType | Node | undefined, position);
+const resolveTableCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveCheckExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
 
 function rejectImmutableExpr(position: string, reason: string): never {
   throw structuredError(
@@ -2787,7 +2781,7 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 function recordCreateTable(
   name: string,
   args: CreateTableArgs,
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
   const cols: Node[] = [];
   const constraints: Node[] = [];
@@ -3170,8 +3164,8 @@ function recordAddUnique(
 function recordAddCheck(
   table: string,
   name: string,
-  args: { expr: CheckExprFn | PgCheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+  args: { expr: CheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (col) => Expr }");
@@ -3334,7 +3328,7 @@ function recordDropConstraint(
 function recordCreateIndex(
   table: string,
   name: string,
-  args: PgIndexAdd,
+  args: IndexAddArgs,
 ): void {
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
@@ -3358,7 +3352,7 @@ function recordCreateIndex(
 function recordDropIndex(
   table: string,
   name: string,
-  args: PgIndexDropArgs,
+  args: IndexDropArgs,
 ): void {
   emitDropIndex({
     name,
@@ -3814,23 +3808,15 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
   return __makeTableHandle(name, opts);
 }
 
-export function pgTable(name: string, opts?: TableOptions): PgTableHandle {
-  return __makePgTableHandle(name, opts);
-}
-
-export function __makePgTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
-  return __makeTableHandle(name, opts, resolvePgCheckExpr);
-}
-
 export function __makeTableHandle(
   name: string,
   opts: TableOptions = {},
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
-): PgTableHandle {
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
+): TableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
-  const handle: PgTableHandle = {
+  const handle: TableHandle = {
     // §3.1 — the table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
@@ -3985,7 +3971,7 @@ export function __makeTableHandle(
         },
       };
     },
-    check(ckName): PgCheckRef {
+    check(ckName): CheckRef {
       requireString(ckName, ".check(name)");
       const id = registerSelector("check", ckName);
       return {
@@ -4007,7 +3993,7 @@ export function __makeTableHandle(
         },
       };
     },
-    constraint(cName): PgConstraintRef {
+    constraint(cName): ConstraintRef {
       requireString(cName, ".constraint(name)");
       const id = registerSelector("constraint", cName);
       return {
@@ -4030,10 +4016,10 @@ export function __makeTableHandle(
     },
 
     // §3.4 — indexes
-    index(idxName): PgIndexRef {
+    index(idxName): IndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      const indexRef: PgIndexRef = {
+      const indexRef: IndexRef = {
         add(args) {
           terminateSelector(id);
           recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
