@@ -1,8 +1,14 @@
 // op.* migration fixture — structured COMMENT ON plus closed index elements.
 // Covers expression index elements, partial-index predicates, and representative
 // comment targets through both fluent handles and the top-level closed target API.
-import { comment, enumType, table, t, view } from "@zeroship/migrate";
-import { pgTable, sequence } from "@zeroship/migrate/pg";
+import {
+  comment,
+  enumType,
+  table,
+  t,
+  view,
+  sequence,
+} from "@zeroship/migrate";
 
 export const name = "comments_indexes";
 
@@ -22,16 +28,16 @@ export function up() {
     uniques: [{ name: "users_email_uq", columns: ["email"] }],
   });
 
-  pgTable("users").index("users_email_lower_idx").add({
-    on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
-    where: (c) => c("active").isTrue(),
+  table("users").index("users_email_lower_idx").add({
+    on: ["email", { expr: (col) => col("email").lower() }],
+    where: (col) => col("active").isTrue(),
   });
 
   view("active_users", { columns: ["id", "email"] }).create({
     as: (q) => q
       .from("users")
       .select(["id", "email"])
-      .where((c) => c("active").isTrue()),
+      .where((col) => col("active").isTrue()),
   });
 
   table("users").comment("End-user accounts");

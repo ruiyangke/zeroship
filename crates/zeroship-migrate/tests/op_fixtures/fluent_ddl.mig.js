@@ -7,13 +7,12 @@
 //
 // Covers EVERY t.* column type + EVERY modifier:
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
-//   t.timestamp().default((c) => c.fn.now()), t.uuid(), t.bytes(), t.boolean().default,
+//   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t, decimal } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, t, decimal, now } from "@zeroship/migrate";
 
 export default {
   name: "fluent_ddl",
@@ -24,7 +23,7 @@ export default {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
         balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
+        authored_at: t.timestamp().notNull().default(now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
@@ -43,7 +42,7 @@ export default {
     table("memberships").create({
       columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
-      checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
+      checks: [{ name: "memberships_team_chk", expr: (col) => col("team").isNotNull() }],
       foreignKeys: [
         {
           name: "memberships_account_fk",
@@ -61,7 +60,7 @@ export default {
       references: { table: "teams", columns: ["name"] },
     });
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
-    table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
+    table("accounts").check("accounts_balance_chk").add({ expr: (col) => col("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
 
     table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
@@ -69,10 +68,10 @@ export default {
 
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
 
-    pgTable("accounts").index("accounts_active_email_idx").add({
+    table("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
-      where: (c) => c("active").isTrue(),
+      where: (col) => col("active").isTrue(),
     });
 
     table("accounts").column("nickname").add({ type: t.text() });

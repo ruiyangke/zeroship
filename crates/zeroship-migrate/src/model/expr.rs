@@ -160,21 +160,21 @@ pub enum SynthFn {
     GenRandomUuid,
 }
 
-/// The closed portable cast-target set (§3.3.1). A non-portable cast target is
-/// rejected (`UNSUPPORTED { kind: "expr" }`).
+/// The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A
+/// non-portable cast target is rejected (`UNSUPPORTED { kind: "expr" }`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum CastTarget {
     /// `text`
     Text,
-    /// `integer`
-    Integer,
+    /// `int` (`INTEGER` on SQL backends)
+    Int,
     /// `real`
     Real,
     /// `boolean`
     Boolean,
-    /// `blob` (`BYTEA` on PG)
-    Blob,
+    /// `bytes` (`BYTEA` on PG)
+    Bytes,
     /// `uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).
     /// Needed for the VENDOR policy predicates — the 0025 tenant-isolation
     /// policy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a
@@ -262,6 +262,14 @@ pub enum AggFunc {
     Min,
     /// `max(<arg>)`.
     Max,
+    /// `string_agg(<arg>, <delimiter>)` (PostgreSQL-first).
+    StringAgg,
+    /// `array_agg(<arg>)` (PostgreSQL-first).
+    ArrayAgg,
+    /// `bool_and(<arg>)` (PostgreSQL-first).
+    BoolAnd,
+    /// `bool_or(<arg>)` (PostgreSQL-first).
+    BoolOr,
 }
 
 /// `skip_serializing_if` predicate: a `false` bool emits NOTHING on the wire, so a
@@ -344,7 +352,7 @@ pub enum Expr {
         /// args, validated in-envelope structurally — §3.3.1.1(b)).
         args: Vec<Expr>,
     },
-    /// A cast to a portable type (`.cast("integer")`).
+    /// A cast to a portable type (`.cast({ to: "int" })`).
     Cast {
         /// The expression being cast.
         operand: Box<Expr>,
@@ -406,22 +414,27 @@ pub enum Expr {
         /// The single argument expression. `None` + `func: Count` = `COUNT(*)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arg: Option<Box<Expr>>,
+        /// Optional second argument for `StringAgg` only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delimiter: Option<Box<Expr>>,
         /// `DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the
         /// wire when `false` so the node serializes byte-minimally.
         #[serde(default, skip_serializing_if = "is_false")]
         distinct: bool,
     },
-    /// A **portable** text-list membership predicate (`c("x").in([...])` /
+    /// A **portable** scalar-list membership predicate (`c("x").in([...])` /
     /// `c("x").notIn([...])`). PostgreSQL renders in the pg_dump-faithful
-    /// `= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite
-    /// and MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:
+    /// `= ANY (ARRAY[...])` / `<> ALL (ARRAY[...])` shape; text elements keep an
+    /// explicit `::text` cast. SQLite and MySQL render `IN (...)` / `NOT IN (...)`.
+    /// Empty lists are defined:
     /// `IN []` renders false, `NOT IN []` renders true.
     InList {
-        /// The expression tested against the literal text list.
+        /// The expression tested against the literal scalar list.
         expr: Box<Expr>,
-        /// Text elements. PostgreSQL renders each as a safe string literal with an
+        /// Homogeneous scalar elements. Text elements serialize as plain JSON
+        /// strings and PostgreSQL renders each as a safe string literal with an
         /// explicit `::text` cast to match pg_dump's CHECK/domain shape.
-        elems: Vec<String>,
+        elems: Vec<IrScalar>,
         /// `false` => membership (`IN` / `= ANY`); `true` => non-membership
         /// (`NOT IN` / `<> ALL`).
         negated: bool,

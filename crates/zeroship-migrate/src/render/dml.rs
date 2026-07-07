@@ -52,8 +52,8 @@
 //!   a hard authoring error ([`DmlError::OnConflictNotPortable`], surfaced as
 //!   `dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is NO raw
 //!   route (property A) and we never silently drop the conflict clause.
-//! - A **batched** `backfill` (and an `update { batch }`) targets the
-//!   `BackfillSpec` executor, PORTABLE on BOTH backends since PR6b: PG via the
+//! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
+//!   BOTH backends since PR6b: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
 //!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`, §2.3.1). The inline
 //!   `set`/`filter` differ per dialect (the §9 `c.fn.splitPart` lowering,
@@ -380,32 +380,120 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
+fn in_list_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!("{what} must be non-empty")));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!("{what} contains a NUL byte")));
+    }
+    Ok(sql_string_literal(s))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InListScalarKind {
+    Text,
+    Number,
+    Bool,
+    Null,
+}
+
+fn in_list_scalar_kind(elem: &IrScalar) -> Result<InListScalarKind, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(_) => InListScalarKind::Text,
+        IrScalar::Int(_) | IrScalar::Decimal(_) => InListScalarKind::Number,
+        IrScalar::Bool(_) => InListScalarKind::Bool,
+        IrScalar::Null => InListScalarKind::Null,
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKind>, DmlError> {
+    let mut kind = None;
+    for elem in elems {
+        let elem_kind = in_list_scalar_kind(elem)?;
+        if let Some(first) = kind {
+            if elem_kind != first {
+                return Err(DmlError::UnrenderableExpr(
+                    "inList elements must be homogeneous".to_string(),
+                ));
+            }
+        } else {
+            kind = Some(elem_kind);
+        }
+    }
+    Ok(kind)
+}
+
+fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
+        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn render_in_list_elem_portable(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => in_list_text_literal(s, "inList element")?,
+        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
 fn render_in_list(
     expr: &str,
-    elems: &[String],
+    elems: &[IrScalar],
     negated: bool,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
     if elems.is_empty() {
         return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
     }
+    let kind = homogeneous_in_list_kind(elems)?.expect("non-empty list has kind");
+    let joiner = if matches!(kind, InListScalarKind::Text) { ", " } else { "," };
     match dialect {
         SqlDialect::Postgres => {
             let rendered: Result<Vec<_>, _> =
-                elems.iter().map(|elem| pg_text_literal(elem, "inList element")).collect();
+                elems.iter().map(render_in_list_elem_pg).collect();
             let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
             Ok(format!(
                 "({expr} {cmp} {quantifier} (ARRAY[{}]))",
-                rendered?.join(", ")
+                rendered?.join(joiner)
             ))
         }
         SqlDialect::Sqlite | SqlDialect::Mysql => {
             let rendered = elems
                 .iter()
-                .map(|elem| sql_string_literal(elem))
-                .collect::<Vec<_>>();
+                .map(render_in_list_elem_portable)
+                .collect::<Result<Vec<_>, _>>()?;
             let op = if negated { "NOT IN" } else { "IN" };
-            Ok(format!("({expr} {op} ({}))", rendered.join(", ")))
+            Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
         }
     }
 }
@@ -415,15 +503,20 @@ fn render_pg_regex_match(
     pattern: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG regex match is PostgreSQL-only".to_string(),
-        ));
+    match dialect {
+        SqlDialect::Postgres => Ok(format!(
+            "({expr} ~ {})",
+            pg_text_literal(pattern, "PG regex pattern")?
+        )),
+        SqlDialect::Mysql => Ok(format!(
+            "({expr} REGEXP {})",
+            in_list_text_literal(pattern, "regex pattern")?
+        )),
+        SqlDialect::Sqlite => Err(DmlError::UnrenderableExpr(
+            "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
+                .to_string(),
+        )),
     }
-    Ok(format!(
-        "({expr} ~ {})",
-        pg_text_literal(pattern, "PG regex pattern")?
-    ))
 }
 
 fn render_extract_field(field: ExtractField) -> &'static str {
@@ -620,8 +713,7 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
     }
 }
 
-/// The lower-cased SQL name of a PORTABLE [`AggFunc`]. Identical spelling on PG,
-/// SQLite, and MySQL (§3.4).
+/// The lower-cased SQL name of an [`AggFunc`].
 fn agg_fn_sql(f: AggFunc) -> &'static str {
     match f {
         AggFunc::Count => "count",
@@ -629,23 +721,51 @@ fn agg_fn_sql(f: AggFunc) -> &'static str {
         AggFunc::Avg => "avg",
         AggFunc::Min => "min",
         AggFunc::Max => "max",
+        AggFunc::StringAgg => "string_agg",
+        AggFunc::ArrayAgg => "array_agg",
+        AggFunc::BoolAnd => "bool_and",
+        AggFunc::BoolOr => "bool_or",
     }
 }
 
-/// Render a PORTABLE aggregate application from its already-rendered argument
-/// fragment (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; a present arg
-/// → `<func>([DISTINCT ]<arg>)`. Byte-identical on all three dialects — only the
-/// identifier quoting inside `arg_sql` differs.
-fn render_agg(f: AggFunc, arg_sql: Option<&str>, distinct: bool) -> String {
+/// Render an aggregate application from already-rendered argument fragments
+/// (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
+/// required delimiter as the second argument.
+fn render_agg(
+    f: AggFunc,
+    arg_sql: Option<&str>,
+    delimiter_sql: Option<&str>,
+    distinct: bool,
+) -> Result<String, DmlError> {
     let name = agg_fn_sql(f);
+    if matches!(f, AggFunc::StringAgg) {
+        let (Some(a), Some(d)) = (arg_sql, delimiter_sql) else {
+            return Err(DmlError::UnrenderableExpr(
+                "string_agg requires an argument and delimiter".to_string(),
+            ));
+        };
+        let prefix = if distinct { "DISTINCT " } else { "" };
+        return Ok(format!("{name}({prefix}{a}, {d})"));
+    }
+    if delimiter_sql.is_some() {
+        return Err(DmlError::UnrenderableExpr(
+            "aggregate delimiter is only valid for string_agg".to_string(),
+        ));
+    }
     match arg_sql {
-        None => format!("{name}(*)"),
-        Some(a) if distinct => format!("{name}(DISTINCT {a})"),
-        Some(a) => format!("{name}({a})"),
+        None if matches!(f, AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr) => {
+            Err(DmlError::UnrenderableExpr(format!(
+                "{} requires an argument",
+                agg_fn_sql(f)
+            )))
+        }
+        None => Ok(format!("{name}(*)")),
+        Some(a) if distinct => Ok(format!("{name}(DISTINCT {a})")),
+        Some(a) => Ok(format!("{name}({a})")),
     }
 }
 
-/// The portable cast-target SQL type per dialect (§3.3.1). `blob` is `BYTEA` on
+/// The portable cast-target SQL type per dialect (§3.3.1). `bytes` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(target: crate::model::expr::CastTarget, dialect: SqlDialect) -> &'static str {
     crate::render::renderer::renderer(dialect).cast_target(target)
@@ -854,12 +974,16 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let r = render_expr_bound(right, ctx)?;
             render_distinct_from(&l, &r, ctx.dialect)
         }
-        Expr::Agg { func, arg, distinct } => {
+        Expr::Agg { func, arg, delimiter, distinct } => {
             let a = match arg {
                 Some(e) => Some(render_expr_bound(e, ctx)?),
                 None => None,
             };
-            render_agg(*func, a.as_deref(), *distinct)
+            let d = match delimiter {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
         Expr::InList { expr, elems, negated } => {
             let e = render_expr_bound(expr, ctx)?;
@@ -1068,12 +1192,16 @@ where
             let r = render_expr_inline_with_col(right, dialect, col_ref)?;
             render_distinct_from(&l, &r, dialect)
         }
-        Expr::Agg { func, arg, distinct } => {
+        Expr::Agg { func, arg, delimiter, distinct } => {
             let a = match arg {
                 Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
                 None => None,
             };
-            render_agg(*func, a.as_deref(), *distinct)
+            let d = match delimiter {
+                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
         Expr::InList { expr, elems, negated } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -1611,6 +1739,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cast_renders_per_dialect_type_names() {
+        use crate::model::expr::CastTarget;
+
+        let cases = [
+            (
+                CastTarget::Int,
+                "CAST(\"x\" AS integer)",
+                "CAST(\"x\" AS integer)",
+                "CAST(`x` AS signed)",
+            ),
+            (
+                CastTarget::Bytes,
+                "CAST(\"x\" AS bytea)",
+                "CAST(\"x\" AS blob)",
+                "CAST(`x` AS binary)",
+            ),
+            (
+                CastTarget::Text,
+                "CAST(\"x\" AS text)",
+                "CAST(\"x\" AS text)",
+                "CAST(`x` AS char)",
+            ),
+        ];
+
+        for (target, pg, sqlite, mysql) in cases {
+            let expr = Expr::Cast { operand: Box::new(Expr::col("x")), target };
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+        }
+    }
+
     // ── Qualified column refs (§3.4, the join-ON fix) ────────────────────────
 
     /// A qualified `ColRef { table, name }` renders `<table>.<col>` with the SAME
@@ -1824,6 +1985,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn regex_match_renders_postgres_and_mysql_but_refuses_sqlite() {
+        let expr = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^a$".to_string(),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"name\" ~ '^a$'::text)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`name` REGEXP '^a$')"
+        );
+
+        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        assert!(
+            err.to_string().contains("SQLite") && err.to_string().contains("REGEXP"),
+            "SQLite regex must fail closed with a precise message: {err}"
+        );
+    }
+
     /// `c.fn.mod(a, b)` renders as the `%` OPERATOR — NOT `mod(...)` — on all three
     /// dialects. This is the one portable arithmetic fn whose spelling is an
     /// operator (SQLite has no `mod()` SQL function; `%` is universal).
@@ -1933,7 +2116,7 @@ mod tests {
     fn in_list_renders_pg_any_all_and_sql_in_not_in_on_all_three_dialects() {
         let includes = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["a".into(), "b".into()],
+            elems: vec![IrScalar::Str("a".into()), IrScalar::Str("b".into())],
             negated: false,
         };
         assert_eq!(
@@ -1951,7 +2134,7 @@ mod tests {
 
         let excludes = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["x".into(), "y".into()],
+            elems: vec![IrScalar::Str("x".into()), IrScalar::Str("y".into())],
             negated: true,
         };
         assert_eq!(
@@ -1965,6 +2148,42 @@ mod tests {
         assert_eq!(
             render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
             "(`status` NOT IN ('x', 'y'))"
+        );
+
+        let status_codes = Expr::InList {
+            expr: Box::new(Expr::col("http_status")),
+            elems: vec![IrScalar::Int(200), IrScalar::Int(404), IrScalar::Int(500)],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Postgres).unwrap(),
+            "(\"http_status\" = ANY (ARRAY[200,404,500]))"
+        );
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Sqlite).unwrap(),
+            "(\"http_status\" IN (200,404,500))"
+        );
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Mysql).unwrap(),
+            "(`http_status` IN (200,404,500))"
+        );
+
+        let enabled = Expr::InList {
+            expr: Box::new(Expr::col("enabled")),
+            elems: vec![IrScalar::Bool(true), IrScalar::Bool(false)],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Postgres).unwrap(),
+            "(\"enabled\" = ANY (ARRAY[TRUE,FALSE]))"
+        );
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Sqlite).unwrap(),
+            "(\"enabled\" IN (TRUE,FALSE))"
+        );
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Mysql).unwrap(),
+            "(`enabled` IN (TRUE,FALSE))"
         );
     }
 
@@ -1998,7 +2217,7 @@ mod tests {
     fn in_list_escapes_text_elements() {
         let expr = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["a'b".into()],
+            elems: vec![IrScalar::Str("a'b".into())],
             negated: false,
         };
         assert_eq!(
@@ -2012,6 +2231,31 @@ mod tests {
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
             "(`status` IN ('a''b'))"
+        );
+    }
+
+    #[test]
+    fn in_list_rejects_mixed_and_bytes_elements() {
+        let mixed = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
+            negated: false,
+        };
+        let err = render_expr_inline(&mixed, SqlDialect::Postgres).unwrap_err();
+        assert!(
+            err.to_string().contains("homogeneous"),
+            "mixed inList should fail homogeneous check: {err}"
+        );
+
+        let bytes = Expr::InList {
+            expr: Box::new(Expr::col("payload")),
+            elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
+            negated: false,
+        };
+        let err = render_expr_inline(&bytes, SqlDialect::Sqlite).unwrap_err();
+        assert!(
+            err.to_string().contains("bytes are not allowed"),
+            "bytes inList should fail closed: {err}"
         );
     }
 
@@ -2141,7 +2385,12 @@ mod tests {
         use crate::model::expr::AggFunc;
 
         // count(*) — no arg — is byte-identical everywhere (no identifier at all).
-        let count_star = Expr::Agg { func: AggFunc::Count, arg: None, distinct: false };
+        let count_star = Expr::Agg {
+            func: AggFunc::Count,
+            arg: None,
+            delimiter: None,
+            distinct: false,
+        };
         for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
             assert_eq!(
                 render_expr_inline(&count_star, d).unwrap(),
@@ -2154,6 +2403,7 @@ mod tests {
         let count_distinct = Expr::Agg {
             func: AggFunc::Count,
             arg: Some(Box::new(Expr::col("x"))),
+            delimiter: None,
             distinct: true,
         };
         assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(), "count(DISTINCT \"x\")");
@@ -2167,7 +2417,12 @@ mod tests {
             (AggFunc::Min, "min"),
             (AggFunc::Max, "max"),
         ] {
-            let e = Expr::Agg { func, arg: Some(Box::new(Expr::col("x"))), distinct: false };
+            let e = Expr::Agg {
+                func,
+                arg: Some(Box::new(Expr::col("x"))),
+                delimiter: None,
+                distinct: false,
+            };
             assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), format!("{name}(\"x\")"));
             assert_eq!(render_expr_inline(&e, SqlDialect::Sqlite).unwrap(), format!("{name}(\"x\")"));
             assert_eq!(render_expr_inline(&e, SqlDialect::Mysql).unwrap(), format!("{name}(`x`)"));
@@ -2182,6 +2437,47 @@ mod tests {
             render_expr_bound(&count_star, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
             "count(*)"
         );
+    }
+
+    #[test]
+    fn pg_first_aggregates_render_postgres_sql_names_and_string_agg_delimiter() {
+        use crate::model::expr::AggFunc;
+
+        let string_agg = Expr::Agg {
+            func: AggFunc::StringAgg,
+            arg: Some(Box::new(Expr::col("name"))),
+            delimiter: Some(Box::new(Expr::lit(IrScalar::Str(", ".to_string())))),
+            distinct: false,
+        };
+        assert_eq!(
+            render_expr_inline(&string_agg, SqlDialect::Postgres).unwrap(),
+            "string_agg(\"name\", ', ')"
+        );
+
+        let string_agg_distinct = Expr::Agg {
+            func: AggFunc::StringAgg,
+            arg: Some(Box::new(Expr::col("name"))),
+            delimiter: Some(Box::new(Expr::lit(IrScalar::Str("|".to_string())))),
+            distinct: true,
+        };
+        assert_eq!(
+            render_expr_inline(&string_agg_distinct, SqlDialect::Postgres).unwrap(),
+            "string_agg(DISTINCT \"name\", '|')"
+        );
+
+        for (func, sql) in [
+            (AggFunc::ArrayAgg, "array_agg(\"name\")"),
+            (AggFunc::BoolAnd, "bool_and(\"name\")"),
+            (AggFunc::BoolOr, "bool_or(\"name\")"),
+        ] {
+            let e = Expr::Agg {
+                func,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: None,
+                distinct: false,
+            };
+            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), sql);
+        }
     }
 
     // ── identifier safety ───────────────────────────────────────────────────

@@ -1,0 +1,83 @@
+{
+  "ir_version": 6,
+  "name": "grouped_views",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createView",
+      "name": "order_totals",
+      "query": {
+        "kind": "structured",
+        "select": {
+          "from": {
+            "name": "orders"
+          },
+          "projection": [
+            {
+              "kind": "colRef",
+              "name": "customer_id"
+            },
+            {
+              "kind": "expr",
+              "expr": {
+                "node": "agg",
+                "func": "count"
+              },
+              "alias": "n"
+            },
+            {
+              "kind": "expr",
+              "expr": {
+                "node": "agg",
+                "func": "sum",
+                "arg": {
+                  "node": "colRef",
+                  "name": "amount"
+                }
+              },
+              "alias": "revenue"
+            }
+          ],
+          "where": {
+            "node": "binOp",
+            "op": "eq",
+            "lhs": {
+              "node": "colRef",
+              "name": "status"
+            },
+            "rhs": {
+              "node": "literal",
+              "value": "paid"
+            }
+          },
+          "groupBy": [
+            {
+              "node": "colRef",
+              "name": "customer_id"
+            }
+          ],
+          "having": {
+            "node": "binOp",
+            "op": "gt",
+            "lhs": {
+              "node": "agg",
+              "func": "count",
+              "arg": {
+                "node": "colRef",
+                "name": "id"
+              }
+            },
+            "rhs": {
+              "node": "literal",
+              "value": 5
+            }
+          }
+        }
+      }
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

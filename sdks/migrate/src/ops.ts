@@ -8,7 +8,7 @@
 //     up() {
 //       table("users")
 //         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//         .backfill({ set: { first_name: col => col("name").splitPart(" ", 1) } });
 //     },
 //   };
 //
@@ -29,19 +29,22 @@
 // throws a structured `OP_OUTSIDE_RECORDER`.
 
 import type {
-  AggNamespace,
   BackfillArgs,
-  CheckBuilderWithPg,
+  CheckBuilder,
   CheckDef,
   CheckExprFn,
+  CheckRef,
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
   CommentTargetArg,
+  ConstraintRef,
   AlterSequenceArgs,
+  CastTarget,
   CreateDomainArgs,
   CreateEnumArgs,
   CreateSequenceArgs,
+  CurrentSettingOptions,
   CreateTableArgs,
   TriggerCreateArgs,
   CreateViewArgs,
@@ -52,6 +55,8 @@ import type {
   DefaultExprFn,
   DefaultValue,
   DelArgs,
+  DialectExprLegs,
+  DialectOpLegs,
   DmlSetValue,
   DomainCheckFn,
   DomainHandle,
@@ -77,14 +82,13 @@ import type {
   ExprChain as ExprChainType,
   ExprFn,
   EnumHandle,
-  FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
   GeneratedColumnExprFn,
   GeneratedOptions,
+  GroupByItem,
   IdOptions,
   IdentityOptions,
-  ImmutableFnNamespace,
   IndexExprBuilder,
   IndexExprFn,
   IndexRef,
@@ -101,20 +105,15 @@ import type {
   PartitionBoundInput,
   PartitionBoundSentinel,
   PartitionByInput,
-  PgCheckExprFn,
-  PgConstraintRef,
-  PgCheckRef,
-  PgExprNamespace,
-  PgIndexAdd,
-  PgIndexDropArgs,
-  PgIndexRef,
-  PgTableHandle,
+  IndexAddArgs,
+  IndexDropArgs,
   RoleCreateArgs,
   RoleDropArgs,
   RoleHandle,
   RoleSetOptionsArgs,
   RefAction,
   Row,
+  Scalar,
   ScalarValue,
   SchemaCreateArgs,
   SchemaDropArgs,
@@ -143,9 +142,58 @@ import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
-import type { Classification, MaskKind, VectorMetric } from "./generated/ir.js";
+import type {
+  Classification,
+  FuncArg,
+  FuncLanguage,
+  FuncVolatility,
+  GrantTarget,
+  MaskKind,
+  Privilege,
+  VectorMetric,
+} from "./generated/ir.js";
 
 type Node = Record<string, unknown>;
+
+export interface DropOwnedByArgs {
+  roles: string[];
+}
+
+export interface GrantArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  to: string[];
+  withGrantOption?: boolean;
+}
+
+export interface RevokeArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  from: string[];
+}
+
+export interface CreateFunctionArgs {
+  name: string;
+  schema?: string;
+  args?: FuncArg[];
+  returns: string;
+  language: FuncLanguage;
+  replace?: boolean;
+  volatility?: FuncVolatility;
+  body: string;
+}
+
+export interface DropFunctionArgs {
+  name: string;
+  schema?: string;
+  argTypes?: string[];
+  ifExists?: boolean;
+}
+
+export interface PgRawArgs {
+  sql: string;
+  reason: string;
+}
 
 // ── The ambient recorder (§3.1 / §5) ──
 
@@ -174,7 +222,7 @@ if (typeof globalThis !== "undefined") {
       value: function randomUUID() {
         throw new Error(
           "crypto.randomUUID() is not available in the migration recorder; " +
-            "use the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()",
+            "use the crypto.randomUUID symbol (no parens) or genRandomUuid()",
         );
       },
       configurable: true,
@@ -347,7 +395,7 @@ function pushOrDeferUp(op: Node): Node {
   return op;
 }
 
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+/** Internal hook used by vendor DDL helpers that record closed Postgres ops. */
 export function __pgPush(op: Node): Node {
   return push(op);
 }
@@ -453,6 +501,7 @@ const emitInsert = defineOp("insert");
 const emitUpdate = defineOp("update");
 const emitDelete = defineOp("delete");
 const emitBackfill = defineOp("backfill");
+const emitDialectal = defineOp("dialectal");
 const emitCreateView = defineOp("createView", "view.create");
 const emitDropView = defineOp("dropView");
 const emitSetRls = defineOp("setRls");
@@ -740,7 +789,7 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: DefaultValue | DefaultExprFn): ColumnDefImpl {
+  default(value: DefaultValue | DefaultExprFn | ExprChainType | Expr): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
   primaryKey(): ColumnDefImpl {
@@ -1043,17 +1092,17 @@ const IMMUTABLE_SYNTH_FNS = new Set([
 ]);
 
 const IMMUTABLE_HELPERS =
-  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/concatWs/splitPart";
+  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/extract/concatWs/splitPart";
 
 function defaultBuilder(): DefaultBuilder {
-  return Object.freeze({ fn, case: caseExpr });
+  return Object.freeze({ case: caseExpr });
 }
 
 function defaultFunctionValueError(): Error {
   return structuredError(
     "OP_INVALID",
-    "function defaults must be authored as an expression callback, e.g. " +
-      "`.default((c) => c.fn.now())` or `.default((c) => c.fn.genRandomUuid())`; " +
+    "function defaults must be authored with top-level value constructors, e.g. " +
+      "`.default(now())` or `.default(genRandomUuid())`; " +
       "the old `{ fn: ... }` and bare native-symbol default forms are removed",
   );
 }
@@ -1068,13 +1117,18 @@ function rejectRemovedDefaultFunctionValue(value: unknown): void {
   }
 }
 
-function resolveDefaultExpr(slot: DefaultExprFn): Node {
+function isExprNode(value: unknown): value is Node {
+  return Boolean(value && typeof value === "object" && typeof (value as Node).node === "string");
+}
+
+function resolveDefaultExpr(slot: DefaultExprFn | ExprChainType | Node): Node {
   rejectRemovedDefaultFunctionValue(slot);
-  const resolved = slot(defaultBuilder());
+  const resolved =
+    typeof slot === "function"
+      ? slot(defaultBuilder())
+      : slot;
   if (resolved instanceof ExprChainImpl) return resolved.__node;
-  if (resolved && typeof resolved === "object" && typeof (resolved as Node).node === "string") {
-    return resolved as Node;
-  }
+  if (isExprNode(resolved)) return resolved;
   return exprArg(resolved);
 }
 
@@ -1088,14 +1142,16 @@ function validateDefaultExpr(expr: Node): void {
       case "colRef":
         throw structuredError("OP_INVALID", "a column default cannot reference a column");
       case "agg":
-        throw structuredError("OP_INVALID", "a column default cannot use an aggregate");
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
+        return;
       case "literal":
         return;
       case "fnCall": {
         if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
           throw structuredError(
             "OP_INVALID",
-            "a column default cannot use volatile or vendor-only functions; use immutable c.fn helpers",
+            "a column default cannot use volatile or vendor-only functions; use immutable scalar chain helpers",
           );
         }
         if (!Array.isArray(n.args)) {
@@ -1172,14 +1228,16 @@ function validateDefaultExpr(expr: Node): void {
   walk(expr);
 }
 
-function defaultExprIr(slot: DefaultExprFn): Node {
+function defaultExprIr(slot: DefaultExprFn | ExprChainType | Node): Node {
   const expr = resolveDefaultExpr(slot);
   validateDefaultExpr(expr);
   return { expr };
 }
 
-function toIrDefault(value: DefaultValue | DefaultExprFn): Node {
-  if (typeof value === "function") return defaultExprIr(value);
+function toIrDefault(value: DefaultValue | DefaultExprFn | ExprChainType | Node): Node {
+  if (typeof value === "function" || value instanceof ExprChainImpl || isExprNode(value)) {
+    return defaultExprIr(value as DefaultExprFn | ExprChainType | Node);
+  }
   if (isNextvalDefault(value)) {
     return { nextval: compact({ name: value.name, schema: value.schema }) };
   }
@@ -1228,9 +1286,43 @@ export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault
   }) as unknown as NextvalDefault;
 }
 
+export function now(): ExprChainType {
+  return chain({ node: "fnSynth", fn: "now", args: [] });
+}
+
+export function genRandomUuid(): ExprChainType {
+  return chain({ node: "fnSynth", fn: "genRandomUuid", args: [] });
+}
+
+export function currentSetting(name: string, opts: CurrentSettingOptions = {}): ExprChainType {
+  requireString(name, "currentSetting(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "currentSetting(name, opts): opts must be { missingOk?: boolean }");
+  }
+  const missingOk = requireOptionalBoolean(opts.missingOk, "currentSetting(name, { missingOk })");
+  return chain({
+    node: "fnCall",
+    fn: "currentSetting",
+    args: missingOk === undefined
+      ? [{ node: "literal", value: name }]
+      : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+  });
+}
+
+export function currentUser(): ExprChainType {
+  return chain({ node: "fnCall", fn: "currentUser", args: [] });
+}
+
+export function interval(duration: Duration): ExprChainType {
+  return chain({
+    node: "pgInterval",
+    duration: pgDuration(duration),
+  });
+}
+
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default((c) => c.fn.genRandomUuid());
+    let col = new ColumnDefImpl("uuid").primaryKey().default(genRandomUuid());
     if (opts && opts.prefix !== undefined) {
       requireString(opts.prefix, "t.id({ prefix })");
       col = col.__withIdPrefix(opts.prefix);
@@ -1459,6 +1551,99 @@ export function __pgSequence(name: string): SequenceHandle {
   return handle;
 }
 
+export const domain = __pgDomain;
+export const schema = __pgSchema;
+export const extension = __pgExtension;
+export const role = __pgRole;
+export const sequence = __pgSequence;
+
+function recordVendor(op: Node): Node {
+  return __pgPush(compact(op));
+}
+
+export function dropOwnedBy(args: DropOwnedByArgs): Node {
+  if (!Array.isArray(args.roles)) {
+    throw structuredError("OP_INVALID", "dropOwnedBy({ roles }): roles must be an array");
+  }
+  return recordVendor({ op: "dropOwnedBy", roles: args.roles });
+}
+
+export function grant(args: GrantArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "grant({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.to) || args.to.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ to }): to must be a non-empty array");
+  }
+  return recordVendor({
+    op: "grant",
+    privileges: args.privileges,
+    on: args.on,
+    to: args.to,
+    withGrantOption: args.withGrantOption,
+  });
+}
+
+export function revoke(args: RevokeArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "revoke({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.from) || args.from.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ from }): from must be a non-empty array");
+  }
+  return recordVendor({
+    op: "revoke",
+    privileges: args.privileges,
+    on: args.on,
+    from: args.from,
+  });
+}
+
+export function createFunction(args: CreateFunctionArgs): Node {
+  requireString(args.name, "createFunction({ name })");
+  requireString(args.returns, "createFunction({ returns })");
+  requireString(args.language, "createFunction({ language })");
+  requireString(args.body, "createFunction({ body })");
+  return recordVendor({
+    op: "createFunction",
+    name: args.name,
+    schema: args.schema,
+    args: args.args,
+    returns: args.returns,
+    language: args.language,
+    replace: args.replace,
+    volatility: args.volatility,
+    body: args.body,
+  });
+}
+
+export function dropFunction(args: DropFunctionArgs): Node {
+  requireString(args.name, "dropFunction({ name })");
+  return recordVendor({
+    op: "dropFunction",
+    name: args.name,
+    schema: args.schema,
+    argTypes: args.argTypes,
+    ifExists: args.ifExists,
+  });
+}
+
+export function raw(args: PgRawArgs): Node {
+  requireString(args.sql, "raw({ sql })");
+  requireString(args.reason, "raw({ reason })");
+  return recordVendor({
+    op: "pgRaw",
+    sql: args.sql,
+    reason: args.reason,
+  });
+}
+
 // ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
 
 /**
@@ -1483,7 +1668,7 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   return def;
 }
 
-// ── (B) The fluent `(c) => Expr` builder (§3.6) ──
+// ── (B) The fluent `(col) => Expr` builder (§3.6) ──
 
 function chain(node: Node): ExprChainImpl {
   return new ExprChainImpl(node);
@@ -1498,33 +1683,59 @@ function exprArg(x: unknown): Node {
   return { node: "literal", value: toIrScalar(x) };
 }
 
-function textLiteralArray(values: unknown, what: string): string[] {
-  if (!Array.isArray(values)) {
-    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+type InListScalarKind = "string" | "number" | "boolean" | "null";
+
+function inListScalarKind(value: unknown, label: string): InListScalarKind {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      if (value.length === 0) {
+        throw structuredError("OP_INVALID", `${label} must be non-empty`);
+      }
+      if (value.includes("\0")) {
+        throw structuredError("OP_INVALID", `${label} must not contain a NUL byte`);
+      }
+      return "string";
+    case "number":
+      if (!Number.isFinite(value)) {
+        throw structuredError("OP_INVALID", `${label} must be a finite number`);
+      }
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      throw structuredError(
+        "OP_INVALID",
+        `${label} must be a Scalar (string, number, boolean, or null); got ${typeof value}`,
+      );
   }
+}
+
+function scalarLiteralArray(values: unknown, what: string): unknown[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a Scalar[]`);
+  }
+  let kind: InListScalarKind | undefined;
   return values.map((v, i) => {
-    if (typeof v !== "string") {
-      throw structuredError("OP_INVALID", `${what}[${i}] must be a string; got ${typeof v}`);
+    const elemKind = inListScalarKind(v, `${what}[${i}]`);
+    if (kind === undefined) {
+      kind = elemKind;
+    } else if (elemKind !== kind) {
+      throw structuredError("OP_INVALID", `${what} list must be homogeneous; ${what}[${i}] is ${elemKind}, expected ${kind}`);
     }
-    if (v.length === 0) {
-      throw structuredError("OP_INVALID", `${what}[${i}] must be non-empty`);
-    }
-    if (v.includes("\0")) {
-      throw structuredError("OP_INVALID", `${what}[${i}] must not contain a NUL byte`);
-    }
-    return v;
+    return toIrScalar(v);
   });
 }
 
 function pgRegexPattern(pattern: unknown): string {
   if (typeof pattern !== "string") {
-    throw structuredError("OP_INVALID", `c.pg.regex(pattern): pattern must be a string; got ${typeof pattern}`);
+    throw structuredError("OP_INVALID", `.regex(pattern): pattern must be a string; got ${typeof pattern}`);
   }
   if (pattern.length === 0) {
-    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must be non-empty");
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must be non-empty");
   }
   if (pattern.includes("\0")) {
-    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must not contain a NUL byte");
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must not contain a NUL byte");
   }
   return pattern;
 }
@@ -1553,14 +1764,21 @@ const pgExtractFields = [
 type PgExtractFieldToken = typeof pgExtractFields[number];
 const pgExtractFieldSet = new Set<string>(pgExtractFields);
 
-function extractField(field: unknown, what = "c.fn.extract(field, expr)"): PortableExtractField {
-  if (typeof field !== "string" || !portableExtractFieldSet.has(field)) {
+const castTargets = ["text", "int", "real", "boolean", "bytes", "uuid"] as const;
+const castTargetSet = new Set<string>(castTargets);
+
+function castTarget(args: unknown): CastTarget {
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", "cast(args): args must be { to }");
+  }
+  const to = args.to;
+  if (typeof to !== "string" || !castTargetSet.has(to)) {
     throw structuredError(
       "OP_INVALID",
-      `${what}: field must be one of ${portableExtractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+      `cast({ to }): to must be one of ${castTargets.map((t) => JSON.stringify(t)).join(", ")}; got ${JSON.stringify(to)}`,
     );
   }
-  return field as PortableExtractField;
+  return to as CastTarget;
 }
 
 function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldToken {
@@ -1572,7 +1790,7 @@ function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldTo
   }
   throw structuredError(
     "OP_INVALID",
-    `c.pg.extract(field, expr): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+    `.extract(field): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
   );
 }
 
@@ -1580,7 +1798,7 @@ const durationFields = ["years", "months", "days", "hours", "minutes", "seconds"
 
 function pgDuration(duration: unknown): Duration {
   if (!isPlainObject(duration)) {
-    throw structuredError("OP_INVALID", `c.pg.interval(duration): duration must be an object; got ${typeof duration}`);
+    throw structuredError("OP_INVALID", `interval(duration): duration must be an object; got ${typeof duration}`);
   }
 
   const normalized: Duration = {};
@@ -1590,7 +1808,7 @@ function pgDuration(duration: unknown): Duration {
     if (!Number.isInteger(value)) {
       throw structuredError(
         "OP_INVALID",
-        `c.pg.interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
+        `interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
       );
     }
     normalized[key] = value as number;
@@ -1600,13 +1818,13 @@ function pgDuration(duration: unknown): Duration {
     if (!(durationFields as readonly string[]).includes(key)) {
       throw structuredError(
         "OP_INVALID",
-        `c.pg.interval(duration): unknown duration field ${JSON.stringify(key)}`,
+        `interval(duration): unknown duration field ${JSON.stringify(key)}`,
       );
     }
   }
 
   if (Object.keys(normalized).length === 0) {
-    throw structuredError("OP_INVALID", "c.pg.interval(duration): at least one duration field is required");
+    throw structuredError("OP_INVALID", "interval(duration): at least one duration field is required");
   }
 
   return normalized;
@@ -1660,8 +1878,8 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
-    return chain({ node: "cast", operand: this.__node, target });
+  cast(args: { to: CastTarget }) {
+    return chain({ node: "cast", operand: this.__node, target: castTarget(args) });
   }
   // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
   // all three dialects; `distinctFrom` is portably named but per-dialect rendered
@@ -1672,31 +1890,129 @@ class ExprChainImpl implements ExprChainType {
   like(pattern: unknown) {
     return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
   }
-  "in"(values: readonly string[]) {
+  "in"(values: readonly Scalar[]) {
     return chain({
       node: "inList",
       expr: this.__node,
-      elems: textLiteralArray(values, ".in(values)"),
+      elems: scalarLiteralArray(values, ".in(values)"),
       negated: false,
     });
   }
-  notIn(values: readonly string[]) {
+  notIn(values: readonly Scalar[]) {
     return chain({
       node: "inList",
       expr: this.__node,
-      elems: textLiteralArray(values, ".notIn(values)"),
+      elems: scalarLiteralArray(values, ".notIn(values)"),
       negated: true,
     });
   }
   distinctFrom(x: unknown) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
+  // PG-first chain operators (P0). Same IR nodes as the old vendor helpers;
+  // the dialect gate lives in the Rust validator (fail-closed off-target).
+  regex(pattern: string) {
+    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+  }
+  columnSize() {
+    return chain({ node: "pgColumnSize", expr: this.__node });
+  }
+  lower() {
+    return chain({ node: "fnCall", fn: "lower", args: [this.__node] });
+  }
+  upper() {
+    return chain({ node: "fnCall", fn: "upper", args: [this.__node] });
+  }
+  trim() {
+    return chain({ node: "fnCall", fn: "trim", args: [this.__node] });
+  }
+  length() {
+    return chain({ node: "fnCall", fn: "length", args: [this.__node] });
+  }
+  abs() {
+    return chain({ node: "fnCall", fn: "abs", args: [this.__node] });
+  }
+  coalesce(...rest: unknown[]) {
+    return chain({ node: "fnCall", fn: "coalesce", args: [this.__node, ...rest.map(exprArg)] });
+  }
+  nullif(b: unknown) {
+    return chain({ node: "fnCall", fn: "nullif", args: [this.__node, exprArg(b)] });
+  }
+  mod(b: unknown) {
+    return chain({ node: "fnCall", fn: "mod", args: [this.__node, exprArg(b)] });
+  }
+  round(n?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "round",
+      args: n === undefined ? [this.__node] : [this.__node, exprArg(n)],
+    });
+  }
+  floor() {
+    return chain({ node: "fnCall", fn: "floor", args: [this.__node] });
+  }
+  ceil() {
+    return chain({ node: "fnCall", fn: "ceil", args: [this.__node] });
+  }
+  substr(start: unknown, len?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "substr",
+      args: len === undefined ? [this.__node, exprArg(start)] : [this.__node, exprArg(start), exprArg(len)],
+    });
+  }
+  replace(from: unknown, to: unknown) {
+    return chain({ node: "fnCall", fn: "replace", args: [this.__node, exprArg(from), exprArg(to)] });
+  }
+  extract(field: unknown) {
+    const f = pgExtractField(field);
+    return chain({
+      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
+      field: f,
+      from: this.__node,
+    });
+  }
+  splitPart(delim: string, n: number) {
+    splitPartGrammarLint(delim, n);
+    return chain({
+      node: "fnSynth",
+      fn: "splitPart",
+      args: [this.__node, { node: "literal", value: delim }, { node: "literal", value: n }],
+    });
+  }
+  count(opts?: { distinct?: boolean }) {
+    return aggNode("count", this.__node, opts);
+  }
+  sum(opts?: { distinct?: boolean }) {
+    return aggNode("sum", this.__node, opts);
+  }
+  avg(opts?: { distinct?: boolean }) {
+    return aggNode("avg", this.__node, opts);
+  }
+  min(opts?: { distinct?: boolean }) {
+    return aggNode("min", this.__node, opts);
+  }
+  max(opts?: { distinct?: boolean }) {
+    return aggNode("max", this.__node, opts);
+  }
+  stringAgg(delimiter: unknown) {
+    return aggNode("stringAgg", this.__node, { delimiter });
+  }
+  arrayAgg() {
+    return aggNode("arrayAgg", this.__node);
+  }
+  boolAnd() {
+    return aggNode("boolAnd", this.__node);
+  }
+  boolOr() {
+    return aggNode("boolOr", this.__node);
+  }
 }
 
 export function check(name: string, expr: CheckExprFn): CheckDef {
   requireString(name, "check(name, expr)");
   if (typeof expr !== "function") {
-    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
+    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (col) => Expr callback");
   }
   return { name, expr };
 }
@@ -1705,166 +2021,117 @@ export function lit(value: ScalarValue): ExprChainType {
   return chain({ node: "literal", value: toIrScalar(value) });
 }
 
+export function concatWs(sep: unknown, ...parts: unknown[]): ExprChainType {
+  return chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] });
+}
+
+export function countStar(): ExprChainType {
+  return aggNode("count", undefined);
+}
+
 /**
- * The one Layer-2 portability escape (design §3.4): a per-dialect VALUE
- * divergence in an expression position. Each leg is an expression (a `(c) =>
- * Expr` chain node, another combinator, or a bare scalar), and the engine
- * renders the leg matching the target dialect — the dialect's own leg if
- * present, else `default`:
+ * The one Layer-2 portability escape (design §3.4): either a per-dialect VALUE
+ * divergence in an expression position, or a per-dialect OP sequence in statement
+ * position. Expression legs are values (a `(col) => Expr` chain node, another
+ * combinator, or a bare scalar), and the engine renders the leg matching the
+ * target dialect — the dialect's own leg if present, else `default`:
  *
  * ```ts
- * default(dialect({ pg: c.fn.genRandomUuid(), sqlite: c.fn.now(), mysql: myUuid }))
- * dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
+ * default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
+ * dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
  * ```
  *
+ * Op-level legs are thunks. Each present thunk records normal ops into a
+ * sub-buffer that becomes a `dialectal` op leg. Missing own leg with no default
+ * is skipped on that target (unlike expression dialect(), which fails closed).
+ *
  * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
- * record in full in the checksummed IR as the `dialect` node in canonical order.
+ * record in full in the checksummed IR in canonical order.
  * The engine's validate applies the per-TARGET scope math: a target with no own
- * leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET (P11): each leg
- * is a ratcheted budget counter — the budget mechanism is a later phase.
+ * expression leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET
+ * (P11): each leg is a ratcheted budget counter — the budget mechanism is a
+ * later phase.
  */
-export function dialect(legs: {
-  default?: unknown;
-  pg?: unknown;
-  sqlite?: unknown;
-  mysql?: unknown;
-}): ExprChainType {
+export function dialect(legs: DialectOpLegs): void;
+export function dialect(legs: DialectExprLegs): ExprChainType;
+export function dialect(legs: DialectExprLegs | DialectOpLegs): ExprChainType | void {
   if (legs === null || typeof legs !== "object") {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression legs",
+      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression or op thunk legs",
     );
   }
-  const node: Node = { node: "dialect" };
-  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
-  let count = 0;
-  for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
-    const value = (legs as Record<string, unknown>)[leg];
-    if (value !== undefined) {
-      node[leg] = exprArg(value);
-      count++;
-    }
-  }
-  if (count === 0) {
+  const ordered = ["default", "pg", "sqlite", "mysql"] as const;
+  const present = ordered
+    .map((leg) => [leg, (legs as Record<string, unknown>)[leg]] as const)
+    .filter(([, value]) => value !== undefined);
+  if (present.length === 0) {
     throw structuredError(
       "OP_INVALID",
       "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present",
     );
   }
+
+  const isOpThunk = (value: unknown): boolean => typeof value === "function" && nativeFnSynthNode(value) === undefined;
+  const firstIsThunk = isOpThunk(present[0][1]);
+  for (const [, value] of present.slice(1)) {
+    if (isOpThunk(value) !== firstIsThunk) {
+      throw structuredError(
+        "OP_INVALID",
+        "dialect(legs): cannot mix op thunk legs with expression legs",
+      );
+    }
+  }
+
+  if (firstIsThunk) {
+    const node: Node = {};
+    for (const [leg, value] of present) {
+      const thunk = value as () => void;
+      const rec = recorder();
+      const start = rec.ops.length;
+      thunk();
+      node[leg] = rec.ops.splice(start);
+    }
+    emitDialectal(node);
+    return;
+  }
+
+  const node: Node = { node: "dialect" };
+  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
+  for (const [leg, value] of present) {
+    node[leg] = exprArg(value);
+  }
   return chain(node);
 }
 
-const fn: FnNamespace = {
-  lower: (e) => chain({ node: "fnCall", fn: "lower", args: [exprArg(e)] }),
-  upper: (e) => chain({ node: "fnCall", fn: "upper", args: [exprArg(e)] }),
-  trim: (e) => chain({ node: "fnCall", fn: "trim", args: [exprArg(e)] }),
-  length: (e) => chain({ node: "fnCall", fn: "length", args: [exprArg(e)] }),
-  abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
-  coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
-  nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
-  mod: (a, b) => chain({ node: "fnCall", fn: "mod", args: [exprArg(a), exprArg(b)] }),
-  round: (x, n) =>
-    chain({
-      node: "fnCall",
-      fn: "round",
-      args: n === undefined ? [exprArg(x)] : [exprArg(x), exprArg(n)],
-    }),
-  floor: (x) => chain({ node: "fnCall", fn: "floor", args: [exprArg(x)] }),
-  ceil: (x) => chain({ node: "fnCall", fn: "ceil", args: [exprArg(x)] }),
-  substr: (s, start, len) =>
-    chain({
-      node: "fnCall",
-      fn: "substr",
-      args: len === undefined ? [exprArg(s), exprArg(start)] : [exprArg(s), exprArg(start), exprArg(len)],
-    }),
-  replace: (s, from, to) => chain({ node: "fnCall", fn: "replace", args: [exprArg(s), exprArg(from), exprArg(to)] }),
-  extract: (field, expr) => chain({
-    node: "extract",
-    field: extractField(field),
-    from: exprArg(expr),
-  }),
-  concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
-  splitPart: (col, delim, n) => {
-    splitPartGrammarLint(delim, n);
-    return chain({
-      node: "fnSynth",
-      fn: "splitPart",
-      args: [exprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
-    });
-  },
-  now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
-  genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
-};
+type AggFuncToken =
+  | "count"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "stringAgg"
+  | "arrayAgg"
+  | "boolAnd"
+  | "boolOr";
 
-const immutableFn: ImmutableFnNamespace = Object.freeze({
-  lower: fn.lower,
-  upper: fn.upper,
-  trim: fn.trim,
-  length: fn.length,
-  abs: fn.abs,
-  coalesce: fn.coalesce,
-  nullif: fn.nullif,
-  mod: fn.mod,
-  round: fn.round,
-  floor: fn.floor,
-  ceil: fn.ceil,
-  substr: fn.substr,
-  replace: fn.replace,
-  extract: fn.extract,
-  concatWs: fn.concatWs,
-  splitPart: fn.splitPart,
-});
-
-// The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
-// records `count(*)`; a present arg records `<func>(<arg>)`. The optional
-// `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
-// count/sum/avg/min/max are byte-identical SQL on PG/SQLite/MySQL — no dialect
-// gate. The "aggregate only valid in a grouped/SELECT context" check is a
-// Phase-2 obligation; the recorder builds the node structurally here.
-function aggNode(func: "count" | "sum" | "avg" | "min" | "max", expr: unknown, opts?: { distinct?: boolean }): ExprChainType {
+// Aggregate nodes (§3.4/§3.6). Receiver chain methods record
+// `<func>(<receiver>)`; countStar() records `count(*)`; stringAgg records its
+// delimiter as the aggregate's second argument. The optional `{ distinct: true }`
+// sets the `distinct` flag (skipped on the wire when false). count/sum/avg/min/max
+// are three-dialect; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
+// off-PG in Rust validate unless wrapped in dialect({...}).
+function aggNode(
+  func: AggFuncToken,
+  expr: unknown,
+  opts?: { distinct?: boolean; delimiter?: unknown },
+): ExprChainType {
   const node: Node = { node: "agg", func };
   if (expr !== undefined) node.arg = exprArg(expr);
+  if (opts && opts.delimiter !== undefined) node.delimiter = exprArg(opts.delimiter);
   if (opts && opts.distinct === true) node.distinct = true;
   return chain(node);
 }
-
-const agg: AggNamespace = {
-  count: (expr, opts) => aggNode("count", expr, opts),
-  sum: (expr, opts) => aggNode("sum", expr, opts),
-  avg: (expr, opts) => aggNode("avg", expr, opts),
-  min: (expr, opts) => aggNode("min", expr, opts),
-  max: (expr, opts) => aggNode("max", expr, opts),
-};
-
-const pgExpr: PgExprNamespace = {
-  regex: (expr, pattern) => chain({
-    node: "pgRegexMatch",
-    expr: exprArg(expr),
-    pattern: pgRegexPattern(pattern),
-  }),
-  pgColumnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
-  currentSetting: (name, missingOk) =>
-    chain({
-      node: "fnCall",
-      fn: "currentSetting",
-      args: missingOk === undefined
-        ? [{ node: "literal", value: name }]
-        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
-    }),
-  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
-  extract: (field, expr) => {
-    const f = pgExtractField(field);
-    return chain({
-      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
-      field: f,
-      from: exprArg(expr),
-    });
-  },
-  interval: (duration) => chain({
-    node: "pgInterval",
-    duration: pgDuration(duration),
-  }),
-};
 
 type CaseExprArgs = {
   branches: Array<{ when: unknown; then: unknown }>;
@@ -1872,7 +2139,7 @@ type CaseExprArgs = {
 };
 
 function caseExpr(args: CaseExprArgs): ExprChainType {
-  const shape = "c.case({ branches: [{ when, then }], else? })";
+  const shape = "col.case({ branches: [{ when, then }], else? })";
   if (!isPlainObject(args)) {
     throw structuredError("OP_INVALID", `${shape}: args must be an object`);
   }
@@ -1904,16 +2171,16 @@ function caseExpr(args: CaseExprArgs): ExprChainType {
 }
 
 function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
-  // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
-  // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
+  // One-arg `col("col")` → unqualified colRef (byte-identical to the pre-
+  // qualification wire shape). Two-arg `col("table", "col")` → qualified colRef
   // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
   return ((first: string, second?: string) => {
     if (second === undefined) {
-      requireString(first, 'c("name")');
+      requireString(first, 'col("name")');
       return chain({ node: "colRef", name: first });
     }
-    requireString(first, 'c("table", "col")');
-    requireString(second, 'c("table", "col")');
+    requireString(first, 'col("table", "col")');
+    requireString(second, 'col("table", "col")');
     return chain({ node: "colRef", table: first, name: second });
   });
 }
@@ -1921,53 +2188,39 @@ function makeColumnAccessor(): (first: string, second?: string) => ExprChainType
 function immutableExprBuilder(): IndexExprBuilder {
   const c = makeColumnAccessor() as unknown as IndexExprBuilder;
   c.case = caseExpr;
-  c.fn = immutableFn;
   return Object.freeze(c);
 }
 
-function checkWithPgBuilder(): CheckBuilderWithPg {
-  const c = makeColumnAccessor() as unknown as CheckBuilderWithPg;
+function checkBuilder(): CheckBuilder {
+  const c = makeColumnAccessor() as unknown as CheckBuilder;
   c.case = caseExpr;
-  c.fn = immutableFn;
-  c.pg = pgExpr;
   return Object.freeze(c);
 }
 
 function domainValueBuilder(): DomainValueBuilder {
   const v = chain({ node: "colRef", name: "VALUE" }) as unknown as DomainValueBuilder;
   v.case = caseExpr;
-  v.fn = immutableFn;
-  v.pg = pgExpr;
   return Object.freeze(v);
 }
 
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.case = caseExpr;
-  c.fn = fn;
-  c.agg = agg;
-  c.pg = pgExpr;
   return c;
 }
 
-// The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
-// (`cCase(...)`, `cFn.now()`, `cPg.regex(...)`) — the SAME objects installed on the
-// `(c) => Expr` builder above. These are exported for the engine-embedded
-// recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
-// which requires the full engine-consumed surface. Not re-exported through the
-// SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
-// surface decision.
+// The standalone `col.case` builder surfaced at a value position (`cCase(...)`) is
+// exported for the engine-embedded recorder bundle (`src/embedded-recorder.ts`,
+// the `include_str!`'d artifact), which requires the full engine-consumed
+// surface. Not re-exported through the SDK public `.` entry (`index.ts`).
 export const cCase = caseExpr;
-export const cFn = fn;
-export const cAgg = agg;
-export const cPg = pgExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
   if (typeof slot === "function") return exprArg(slot(makeBuilder()));
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
-  throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
+  throw structuredError("OP_INVALID", "expression slot must be a (col) => Expr callback or a built expression");
 }
 
 type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | CheckExprFn | ExprChainType | Node | undefined;
@@ -1976,32 +2229,32 @@ function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node |
   if (slot === undefined || slot === null) return undefined;
   let resolved: Node;
   if (typeof slot === "function") {
-    resolved = exprArg((slot as (c: IndexExprBuilder) => unknown)(immutableExprBuilder()));
+    resolved = exprArg((slot as (col: IndexExprBuilder) => unknown)(immutableExprBuilder()));
   } else if (slot instanceof ExprChainImpl) {
     resolved = slot.__node;
   } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
     resolved = slot as Node;
   } else {
-    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position);
   return resolved;
 }
 
-function resolveCheckWithPg(
-  slot: PgCheckExprFn | ExprChainType | Node | undefined,
+function resolveCheckExpr(
+  slot: CheckExprFn | ExprChainType | Node | undefined,
   position: string,
 ): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
   let resolved: Node;
   if (typeof slot === "function") {
-    resolved = exprArg((slot as (c: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
+    resolved = exprArg((slot as (col: CheckBuilder) => unknown)(checkBuilder()));
   } else if (slot instanceof ExprChainImpl) {
     resolved = slot.__node;
   } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
     resolved = slot as Node;
   } else {
-    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position, { allowPgImmutable: true });
   return resolved;
@@ -2048,19 +2301,16 @@ function resolveDomainCheck(
   return resolved;
 }
 
-type CheckExprSlot = CheckExprFn | PgCheckExprFn | ExprChainType | Node | undefined;
+type CheckExprSlot = CheckExprFn | ExprChainType | Node | undefined;
 type CheckExprResolver = (slot: CheckExprSlot, position: string) => Node | undefined;
 
-const resolveCoreCheckExpr: CheckExprResolver = (slot, position) =>
-  resolveImmutableExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
-
-const resolvePgCheckExpr: CheckExprResolver = (slot, position) =>
-  resolveCheckWithPg(slot as PgCheckExprFn | ExprChainType | Node | undefined, position);
+const resolveTableCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveCheckExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
 
 function rejectImmutableExpr(position: string, reason: string): never {
   throw structuredError(
     "OP_INVALID",
-    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable c.fn helpers ` +
+    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable scalar chain helpers ` +
       `(${IMMUTABLE_HELPERS}); ${reason}`,
   );
 }
@@ -2079,13 +2329,15 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
       case "literal":
         return;
       case "agg":
-        rejectImmutableExpr(position, "aggregates are not allowed here");
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
+        return;
       case "fnCall": {
         if (n.fn === "currentSetting" || n.fn === "currentUser") {
           rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);
         }
         if (typeof n.fn !== "string" || !IMMUTABLE_SCALAR_FNS.has(n.fn)) {
-          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable c.fn helper`);
+          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable scalar chain helper`);
         }
         if (!Array.isArray(n.args)) {
           rejectImmutableExpr(position, "function expression args must be an array");
@@ -2193,7 +2445,7 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
   walk(expr);
 }
 
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+/** Internal hook used by widened Postgres checks/domain validation paths. */
 export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
   return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
 }
@@ -2589,7 +2841,7 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 function recordCreateTable(
   name: string,
   args: CreateTableArgs,
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
   const cols: Node[] = [];
   const constraints: Node[] = [];
@@ -2862,7 +3114,7 @@ function recordDropColumnNotNull(table: string, name: string, args: { schema?: s
 function recordSetColumnDefault(
   table: string,
   name: string,
-  value: DefaultValue | DefaultExprFn,
+  value: DefaultValue | DefaultExprFn | ExprChainType | Expr,
   args: { schema?: string },
 ): void {
   emitSetColumnDefault({
@@ -2972,11 +3224,11 @@ function recordAddUnique(
 function recordAddCheck(
   table: string,
   name: string,
-  args: { expr: CheckExprFn | PgCheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+  args: { expr: CheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
   if (!args || args.expr === undefined) {
-    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
+    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (col) => Expr }");
   }
   emitAddCheck({
     table,
@@ -3136,7 +3388,7 @@ function recordDropConstraint(
 function recordCreateIndex(
   table: string,
   name: string,
-  args: PgIndexAdd,
+  args: IndexAddArgs,
 ): void {
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
@@ -3160,13 +3412,11 @@ function recordCreateIndex(
 function recordDropIndex(
   table: string,
   name: string,
-  args: PgIndexDropArgs,
+  args: IndexDropArgs,
 ): void {
   emitDropIndex({
     name,
     table,
-    // `unique` drives the destructive/approval gating at apply — preserved here.
-    unique: args.unique,
     concurrently: args.concurrently,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists),
@@ -3228,7 +3478,6 @@ function recordUpdate(table: string, args: UpdateArgs): void {
     table,
     set: resolveSet(args.set),
     where: resolveExpr(args.where),
-    batch: args.batch,
     schema: args.schema,
   });
 }
@@ -3344,17 +3593,31 @@ function normalizeOrderItem(item: string | OrderItem | ExprFn | ExprChainType | 
   throw structuredError("OP_INVALID", "orderBy item must be a column name, expression, or OrderItem object");
 }
 
+function normalizeGroupByItem(item: GroupByItem): Expr {
+  if (typeof item === "string") return { node: "colRef", name: item } as Expr;
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return viewExpr(item as ExprFn | ExprChainType);
+  }
+  if (item && typeof item === "object" && (item as Node).node !== undefined) {
+    return viewExpr(item as Node);
+  }
+  throw structuredError("OP_INVALID", "groupBy item must be a column name or expression");
+}
+
 function viewQueryBuilder(): SelectAstBuilder {
   const state: {
     from?: TableRef;
     projection: SelectItem[];
     joins: Join[];
     where?: Expr;
+    groupBy: Expr[];
+    having?: Expr;
     orderBy?: OrderItem[];
     limit?: number;
   } = {
     projection: [],
     joins: [],
+    groupBy: [],
   };
 
   let builder: SelectAstBuilder;
@@ -3391,6 +3654,17 @@ function viewQueryBuilder(): SelectAstBuilder {
       state.where = viewExpr(expr as ExprFn | ExprChainType | Node);
       return builder;
     },
+    groupBy(items: GroupByItem[]) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query groupBy(items): items must be an array");
+      }
+      state.groupBy = items.map(normalizeGroupByItem);
+      return builder;
+    },
+    having(expr: ExprFn | ExprChainType | Expr) {
+      state.having = viewExpr(expr as ExprFn | ExprChainType | Node);
+      return builder;
+    },
     orderBy(items: Array<string | OrderItem | ExprFn | ExprChainType | Expr>) {
       if (!Array.isArray(items)) {
         throw structuredError("OP_INVALID", "view query orderBy(items): items must be an array");
@@ -3414,6 +3688,8 @@ function viewQueryBuilder(): SelectAstBuilder {
         projection: state.projection,
         joins: state.joins.length ? state.joins : undefined,
         where: state.where,
+        groupBy: state.groupBy.length ? state.groupBy : undefined,
+        having: state.having,
         orderBy: state.orderBy,
         limit: state.limit,
       }) as SelectAst;
@@ -3617,19 +3893,15 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
   return __makeTableHandle(name, opts);
 }
 
-export function __makePgTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
-  return __makeTableHandle(name, opts, resolvePgCheckExpr);
-}
-
 export function __makeTableHandle(
   name: string,
   opts: TableOptions = {},
-  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
-): PgTableHandle {
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
+): TableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
-  const handle: PgTableHandle = {
+  const handle: TableHandle = {
     // §3.1 — the table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
@@ -3649,7 +3921,10 @@ export function __makeTableHandle(
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
-      return handle;
+      // B7 (L10): rebind the returned handle to the NEW name so chained ops
+      // after a rename target the new name, not the dead one. (A table rename
+      // keeps the same schema, so `opts`/resolver carry over unchanged.)
+      return __makeTableHandle(args.to, opts, checkExprResolver);
     },
     setOptions(args) {
       recordSetTableOptions(name, { ...args, schema: dflt });
@@ -3784,7 +4059,7 @@ export function __makeTableHandle(
         },
       };
     },
-    check(ckName): PgCheckRef {
+    check(ckName): CheckRef {
       requireString(ckName, ".check(name)");
       const id = registerSelector("check", ckName);
       return {
@@ -3806,7 +4081,7 @@ export function __makeTableHandle(
         },
       };
     },
-    constraint(cName): PgConstraintRef {
+    constraint(cName): ConstraintRef {
       requireString(cName, ".constraint(name)");
       const id = registerSelector("constraint", cName);
       return {
@@ -3829,10 +4104,10 @@ export function __makeTableHandle(
     },
 
     // §3.4 — indexes
-    index(idxName): PgIndexRef {
+    index(idxName): IndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      const indexRef: PgIndexRef = {
+      const indexRef: IndexRef = {
         add(args) {
           terminateSelector(id);
           recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
@@ -3843,7 +4118,6 @@ export function __makeTableHandle(
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
             concurrently: args.concurrently,
-            unique: args.unique,
             schema: pickSchema(args, dflt),
           });
           return handle;
@@ -3875,7 +4149,7 @@ export function __makeTableHandle(
       return handle;
     },
 
-    // `@zeroship/migrate/pg` — table-scoped privileged primitives.
+    // Postgres vendor — table-scoped privileged primitives.
     setRls(args) {
       recordSetRls(name, { ...args, schema: dflt });
       return handle;
@@ -3984,10 +4258,10 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
 // ── (C) Determinism lint ──
 
 const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
-  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or c.fn.now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or c.fn.genRandomUuid()" },
-  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()" },
-  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or c.fn.now()" },
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or genRandomUuid()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or genRandomUuid()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or now()" },
 ];
 
 /**
@@ -4026,10 +4300,10 @@ function splitPartGrammarLint(delim: unknown, n: unknown): void {
         "forms are only renderable on dialects with a native renderer such as Postgres/MySQL",
     });
   };
-  if (typeof delim !== "string") fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
-  if ((delim as string).length === 0) fail("c.fn.splitPart delimiter must be a non-empty string literal");
+  if (typeof delim !== "string") fail(`.splitPart delimiter must be a string literal; got ${typeof delim}`);
+  if ((delim as string).length === 0) fail(".splitPart delimiter must be a non-empty string literal");
   if (typeof n !== "number" || !Number.isInteger(n)) {
-    fail(`c.fn.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
+    fail(`.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
   }
-  if ((n as number) < 1) fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
+  if ((n as number) < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }

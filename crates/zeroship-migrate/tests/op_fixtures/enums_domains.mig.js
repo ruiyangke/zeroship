@@ -1,5 +1,4 @@
-import { enumType, table, t } from "@zeroship/migrate";
-import { domain, pgTable } from "@zeroship/migrate/pg";
+import { enumType, table, t, domain } from "@zeroship/migrate";
 
 const planTier = enumType("plan_tier");
 const billingPeriod = domain("billing_period");
@@ -25,16 +24,16 @@ export function up() {
     },
   });
 
-  pgTable("pg_expr_checks").create({
+  table("pg_expr_checks").create({
     columns: {
       status: t.text().notNull(),
       name: t.text().notNull(),
       data: t.json().notNull(),
     },
     checks: [
-      { name: "status_ne_all", expr: (c) => c("status").notIn(["x"]) },
-      { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
-      { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) },
+      { name: "status_ne_all", expr: (col) => col("status").notIn(["x"]) },
+      { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
+      { name: "data_size", expr: (col) => col("data").columnSize().le(8192) },
     ],
   });
 

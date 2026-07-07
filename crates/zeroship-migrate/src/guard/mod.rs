@@ -1785,8 +1785,35 @@ pub(crate) fn check_ir_data_security_policy(
         return Ok(());
     }
 
-    let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
+    fn push_policy_ops<'a>(
+        cfg: &GuardConfig,
+        op_index: usize,
+        op: &'a Op,
+        out: &mut Vec<(usize, &'a Op)>,
+    ) {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+            let own = match cfg.dialect() {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(leg) = own.or(default.as_deref()) {
+                for inner in leg {
+                    push_policy_ops(cfg, op_index, inner, out);
+                }
+            }
+        } else {
+            out.push((op_index, op));
+        }
+    }
+
+    let mut policy_ops = Vec::new();
     for (op_index, op) in ir.ops.iter().enumerate() {
+        push_policy_ops(cfg, op_index, op, &mut policy_ops);
+    }
+
+    let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
+    for (op_index, op) in policy_ops {
         match op {
             Op::CreateTable { name, schema, .. } | Op::CreatePartition { name, schema, .. } => {
                 let key = table_key_for_policy(cfg, schema, name);

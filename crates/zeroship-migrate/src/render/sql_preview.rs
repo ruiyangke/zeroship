@@ -550,7 +550,7 @@ fn op_subject(op: &Op) -> String {
             CommentTarget::Column { table, name, .. }
             | CommentTarget::Constraint { table, name, .. } => quote_dotted(&[table, name]),
         },
-        // VENDOR (`@zeroship/migrate/pg`) — the best-effort subject is the named
+        // VENDOR (`@zeroship/migrate`) — the best-effort subject is the named
         // object (schema / extension / role / function) or the table+name for the
         // table-scoped RLS/policy/trigger ops.
         Op::CreateSchema { name, .. }
@@ -564,6 +564,7 @@ fn op_subject(op: &Op) -> String {
         | Op::DropFunction { name, .. } => quote_dotted(&[name]),
         Op::DropOwnedBy { roles } => quote_dotted(&[&roles.join(", ")]),
         Op::Grant { .. } | Op::Revoke { .. } => quote_dotted(&["<grant>"]),
+        Op::Dialectal { .. } => quote_dotted(&["<dialectal>"]),
         Op::SetRls { table, .. } => quote_dotted(&[table]),
         Op::CreatePolicy { name, table, .. }
         | Op::DropPolicy { name, table, .. }

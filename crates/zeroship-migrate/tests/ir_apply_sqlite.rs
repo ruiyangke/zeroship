@@ -4,7 +4,7 @@
 //!
 //! This is the SQLite peer of the control-plane `deploy_migrate_test.rs` PG e2e:
 //! a valid `.ir.json` lowers + applies (the table exists, the migration journals),
-//! and the SQLite-specific hostile case — an out-of-envelope `c.fn.splitPart`
+//! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
 //! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
 //! any apply. No shims, no PG-gating: the real SQLite runtime.
 
@@ -92,6 +92,46 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
         .await
         .expect("sqlite_master probe");
     assert_eq!(rows.len(), 1, "the IR-created 'notes' table must exist on SQLite");
+}
+
+// L7/M15: `date` is an honest portable column type. The SQLite leg stores it as
+// TEXT affinity and must accept/apply it through the real IR load gate.
+#[compio::test]
+async fn ir_json_date_column_lowers_and_applies_on_sqlite() {
+    let p = paths("ir_date_apply");
+    let be = backend(&p);
+
+    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_events","ops":[
+        {"op":"createTable","name":"events","columns":[
+            {"name":"happened_on","type":"date","nullable":false}
+        ]}
+    ]}"#);
+
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let migrations = author
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
+        .expect("date columns must validate and lower on SQLite");
+    assert!(
+        migrations.iter().any(|m| m.up.contains("\"happened_on\" TEXT NOT NULL")),
+        "SQLite date column must render with TEXT affinity: {migrations:#?}"
+    );
+
+    let engine = MigrationEngine::new();
+    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let plan = engine.plan(&migrations, &guard_cfg);
+    assert!(plan.denied.is_empty(), "no denials on a date-column IR set: {:?}", plan.denied);
+    engine
+        .apply(&plan, Approval::None, &be, &exec_cfg(), "deploy-ir")
+        .await
+        .expect("apply the date-column IR on SQLite");
+
+    let rows = be
+        .actor()
+        .query("SELECT type FROM pragma_table_info('events') WHERE name = 'happened_on'")
+        .await
+        .expect("pragma_table_info probe");
+    assert_eq!(rows.len(), 1, "the date column must exist");
+    assert_eq!(rows[0][0].as_deref(), Some("TEXT"));
 }
 
 // MED (code-critic): a LEGITIMATE portable string-literal column DEFAULT whose
@@ -189,7 +229,7 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
     );
 }
 
-// HOSTILE (SQLite-specific) — an out-of-envelope `c.fn.splitPart` in a backfill
+// HOSTILE (SQLite-specific) — an out-of-envelope `.splitPart` in a backfill
 // SET against a SQLite target is refused by the gate (EXPR_NOT_PORTABLE) BEFORE
 // any apply. `splitPart` is PG-expressible but out-of-envelope on SQLite (§9), so
 // the dialect-parameterized validate refuses it fail-closed.
