@@ -325,6 +325,8 @@ fn common_ops() -> Vec<Op> {
                         op: zeroship_migrate::UnaryOp::IsNull,
                         operand: Box::new(Expr::col("deleted_at")),
                     }),
+                    group_by: Vec::new(),
+                    having: None,
                     order_by: None,
                     limit: None,
                 },

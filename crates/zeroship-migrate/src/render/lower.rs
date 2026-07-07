@@ -4458,6 +4458,19 @@ fn render_select_ast(
         sql.push_str(" WHERE ");
         sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
     }
+    if !select.group_by.is_empty() {
+        let items: Result<Vec<_>, _> = select
+            .group_by
+            .iter()
+            .map(|expr| crate::render::dml::render_expr_inline(expr, dialect))
+            .collect();
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&items?.join(", "));
+    }
+    if let Some(pred) = &select.having {
+        sql.push_str(" HAVING ");
+        sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
+    }
     if let Some(order_by) = &select.order_by {
         if !order_by.is_empty() {
             let items: Result<Vec<_>, _> =

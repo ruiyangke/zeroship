@@ -469,6 +469,38 @@ export function up() {
   });
 }
 "#;
+const PLATFORM_GROUPED_VIEW_TS: &str = r#"
+import { countStar, table, t, view } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
+
+export const name = "platform_grouped_view";
+
+export function up() {
+  schema("zeroship").create({ ifNotExists: true });
+
+  table("orders", { schema: "zeroship" }).create({
+    columns: {
+      id: t.int().notNull(),
+      customer_id: t.text().notNull(),
+      amount: t.int().notNull(),
+      status: t.text().notNull(),
+    },
+  });
+
+  view("order_totals", { schema: "zeroship" }).create({
+    as: (q) => q
+      .from("orders")
+      .select([
+        "customer_id",
+        { kind: "expr", alias: "n", expr: () => countStar() },
+        { kind: "expr", alias: "revenue", expr: (col) => col("amount").sum() },
+      ])
+      .where((col) => col("status").eq("paid"))
+      .groupBy(["customer_id"])
+      .having((col) => col("id").count().gt(5)),
+  });
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -1350,6 +1382,58 @@ async fn platform_ts_domain_column_round_trips_on_live_pg() {
         Some(("zeroship", "myd")),
         "pg_catalog must show the column's physical type as zeroship.myd"
     );
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_grouped_view_applies_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_grouped_view_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_grouped_view",
+        "20260707000000_platform_grouped_view.ts",
+        PLATFORM_GROUPED_VIEW_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with grouped structured view applies");
+
+    conn.batch_execute(
+        "INSERT INTO zeroship.orders (id, customer_id, amount, status) VALUES \
+         (1, 'cust_a', 10, 'paid'), \
+         (2, 'cust_a', 20, 'paid'), \
+         (3, 'cust_a', 30, 'paid'), \
+         (4, 'cust_a', 40, 'paid'), \
+         (5, 'cust_a', 50, 'paid'), \
+         (6, 'cust_a', 60, 'paid'), \
+         (7, 'cust_b', 70, 'paid'), \
+         (8, 'cust_b', 80, 'paid'), \
+         (9, 'cust_c', 90, 'open');",
+    )
+    .await
+    .expect("seed grouped-view source rows");
+
+    let rows = conn
+        .query(
+            "SELECT customer_id, n, revenue FROM zeroship.order_totals ORDER BY customer_id",
+            &[],
+        )
+        .await
+        .expect("query grouped structured view");
+    assert_eq!(rows.len(), 1, "HAVING count(id) > 5 keeps only cust_a");
+    let row = &rows[0];
+    assert_eq!(row.get::<_, String>(0), "cust_a");
+    assert_eq!(row.get::<_, i64>(1), 6);
+    assert_eq!(row.get::<_, i64>(2), 210);
 
     reset(&conn, &meta).await;
     global_lock.release().await;

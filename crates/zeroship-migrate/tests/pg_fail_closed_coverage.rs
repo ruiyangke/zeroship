@@ -190,6 +190,8 @@ fn structured_view_query() -> ViewQuery {
             projection: vec![],
             joins: vec![],
             r#where: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: None,
             limit: None,
         },

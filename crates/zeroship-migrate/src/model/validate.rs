@@ -2746,6 +2746,19 @@ fn validate_select_ast(
     if let Some(pred) = &select.r#where {
         validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
     }
+    for expr in &select.group_by {
+        validate_no_aggregate_expr_context(
+            expr,
+            "view SELECT GROUP BY item",
+            target_dialect,
+            op_index,
+            ts_location,
+        )?;
+        validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+    }
+    if let Some(pred) = &select.having {
+        validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+    }
     if let Some(order_by) = &select.order_by {
         for item in order_by {
             if let OrderItem::Expr { expr, .. } = item {
