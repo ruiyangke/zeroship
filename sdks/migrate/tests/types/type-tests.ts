@@ -90,6 +90,14 @@ export function antiRotMigration(): void {
     where: (col) => col("phantom_col").isNotNull(),
   });
   table("nonexistent_table").insert({ rows: { phantom_col: "ok", another_phantom: 42 } });
+  view("phantom_totals").create({
+    as: (q) => q
+      .from("phantom_orders")
+      .select(["customer_id", () => countStar(), (col) => col("amount").sum()])
+      .where((col) => col("status").eq("paid"))
+      .groupBy(["customer_id"])
+      .having((col) => col("id").count().gt(5)),
+  });
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -151,6 +151,13 @@ surface (see [The `table()` surface](#the-table-surface)). The handle's terminal
 record eagerly and return the handle, so calls chain and a handle is reusable
 across statements ([Var-assign + reuse](#var-assign--reuse)).
 
+`view(name, opts?)` returns a structured `SelectAst` builder by default. Its
+query callback supports `from`, `select`, `join`/`innerJoin`/`leftJoin`, `where`,
+`groupBy`, `having`, `orderBy`, and `limit`; `groupBy` accepts column names or
+expressions, and `having` may use aggregate expressions such as `countStar()` or
+`col("amount").sum()`. The raw view body escape remains for constructs outside
+the structured view surface.
+
 There is **no scalar-function namespace**: scalar functions with a natural receiver are
 chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
 The one receiver-less scalar helper is the top-level `concatWs(...)` import.

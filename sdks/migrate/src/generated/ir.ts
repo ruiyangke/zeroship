@@ -423,6 +423,8 @@ export interface SelectAst {
   projection: SelectItem[];
   joins?: Join[];
   where?: Expr | null;
+  groupBy?: Expr[];
+  having?: Expr | null;
   orderBy?: OrderItem[] | null;
   limit?: number | null;
 }

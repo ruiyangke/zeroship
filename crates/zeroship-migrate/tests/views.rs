@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
-use zeroship_migrate::model::expr::{BinaryOp, Expr, UnaryOp};
+use zeroship_migrate::model::expr::{AggFunc, BinaryOp, Expr, UnaryOp};
 use zeroship_migrate::guard::GuardConfig;
 use zeroship_migrate::model::ir::{
-    IrFlagsOverride, MigrationIr, Op, OrderDir, OrderItem, SelectAst, SelectItem, TableRef,
-    ViewQuery, CURRENT_IR_VERSION,
+    IrFlagsOverride, IrScalar, MigrationIr, Op, OrderDir, OrderItem, SafeU64, SelectAst, SelectItem,
+    TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
 use zeroship_migrate::model::validate::{
-    validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+    validate_ir_scoped, Dialect, UnsupportedKind, CODE_AGGREGATE_IN_SCALAR_CONTEXT,
+    CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
 use zeroship_schema::query::SqlDialect;
@@ -53,6 +54,8 @@ fn active_users_select() -> SelectAst {
             op: UnaryOp::IsNull,
             operand: Box::new(Expr::col("deleted_at")),
         }),
+        group_by: Vec::new(),
+        having: None,
         order_by: None,
         limit: None,
     }
@@ -68,6 +71,82 @@ fn create_structured_view(replace: Option<bool>, materialized: Option<bool>) -> 
         },
         replace,
         materialized,
+    }
+}
+
+fn count_star() -> Expr {
+    Expr::Agg {
+        func: AggFunc::Count,
+        arg: None,
+        distinct: false,
+    }
+}
+
+fn count(expr: Expr) -> Expr {
+    Expr::Agg {
+        func: AggFunc::Count,
+        arg: Some(Box::new(expr)),
+        distinct: false,
+    }
+}
+
+fn sum(expr: Expr) -> Expr {
+    Expr::Agg {
+        func: AggFunc::Sum,
+        arg: Some(Box::new(expr)),
+        distinct: false,
+    }
+}
+
+fn grouped_order_totals_view() -> Op {
+    Op::CreateView {
+        name: "order_totals".to_string(),
+        schema: None,
+        columns: None,
+        query: ViewQuery::Structured {
+            select: SelectAst {
+                from: TableRef {
+                    name: "orders".to_string(),
+                    schema: None,
+                    alias: None,
+                },
+                projection: vec![
+                    SelectItem::ColRef {
+                        table: None,
+                        name: "customer_id".to_string(),
+                        alias: None,
+                    },
+                    SelectItem::Expr {
+                        expr: count_star(),
+                        alias: Some("n".to_string()),
+                    },
+                    SelectItem::Expr {
+                        expr: sum(Expr::col("amount")),
+                        alias: Some("revenue".to_string()),
+                    },
+                ],
+                joins: Vec::new(),
+                r#where: Some(Expr::BinOp {
+                    op: BinaryOp::Eq,
+                    lhs: Box::new(Expr::col("status")),
+                    rhs: Box::new(Expr::lit(IrScalar::Str("paid".to_string()))),
+                }),
+                group_by: vec![Expr::col("customer_id")],
+                having: Some(Expr::BinOp {
+                    op: BinaryOp::Gt,
+                    lhs: Box::new(count(Expr::col("id"))),
+                    rhs: Box::new(Expr::lit(IrScalar::Int(5))),
+                }),
+                order_by: Some(vec![OrderItem::ColRef {
+                    table: None,
+                    name: "customer_id".to_string(),
+                    dir: Some(OrderDir::Asc),
+                }]),
+                limit: Some(SafeU64::new(10).unwrap()),
+            },
+        },
+        replace: None,
+        materialized: None,
     }
 }
 
@@ -92,6 +171,68 @@ fn lower_up(dialect: SqlDialect, op: Op) -> Result<String, Box<IrLowerError>> {
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
     Ok(migrations[0].up.clone())
+}
+
+#[test]
+fn structured_select_supports_group_by_and_having_on_all_dialects() {
+    let pg = lower_up(SqlDialect::Postgres, grouped_order_totals_view()).unwrap();
+    assert_eq!(
+        pg,
+        "CREATE VIEW \"app\".\"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"app\".\"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
+    );
+
+    let sqlite = lower_up(SqlDialect::Sqlite, grouped_order_totals_view()).unwrap();
+    assert_eq!(
+        sqlite,
+        "CREATE VIEW \"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
+    );
+
+    let mysql = lower_up(SqlDialect::Mysql, grouped_order_totals_view()).unwrap();
+    assert_eq!(
+        mysql,
+        "CREATE VIEW `app`.`order_totals` AS SELECT `customer_id`, count(*) AS `n`, sum(`amount`) AS `revenue` FROM `app`.`orders` WHERE (`status` = 'paid') GROUP BY `customer_id` HAVING (count(`id`) > 5) ORDER BY `customer_id` ASC LIMIT 10"
+    );
+}
+
+#[test]
+fn structured_select_allows_aggregates_in_projection_and_having() {
+    let trusted = SchemaScope::Unconfined;
+    validate_ir_scoped(
+        &ir(grouped_order_totals_view()),
+        Dialect::Postgres,
+        &[],
+        Some(&trusted),
+        &PolicyProfile::platform(),
+    )
+    .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
+}
+
+#[test]
+fn structured_select_rejects_aggregate_group_by_item() {
+    let mut op = grouped_order_totals_view();
+    let Op::CreateView {
+        query: ViewQuery::Structured { select },
+        ..
+    } = &mut op
+    else {
+        unreachable!("grouped_order_totals_view returns a structured createView");
+    };
+    select.group_by = vec![count(Expr::col("id"))];
+
+    let trusted = SchemaScope::Unconfined;
+    let err = validate_ir_scoped(
+        &ir(op),
+        Dialect::Postgres,
+        &[],
+        Some(&trusted),
+        &PolicyProfile::platform(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
+    assert!(
+        err.reason.contains("GROUP BY") && err.reason.contains("count"),
+        "reason should name GROUP BY aggregate misuse: {err:?}"
+    );
 }
 
 #[test]
@@ -280,6 +421,8 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
         }],
         joins: Vec::new(),
         r#where: None,
+        group_by: Vec::new(),
+        having: None,
         order_by: Some(vec![OrderItem::ColRef {
             table: Some("u".to_string()),
             name: "created_at".to_string(),

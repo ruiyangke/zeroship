@@ -1559,6 +1559,8 @@ async fn top_level_comment_metadata_reintrospects_and_drifts() {
                     }],
                     joins: Vec::new(),
                     r#where: Some(active_true_expr()),
+                    group_by: Vec::new(),
+                    having: None,
                     order_by: None,
                     limit: None,
                 },

@@ -5671,6 +5671,24 @@
             }
           ]
         },
+        "groupBy": {
+          "description": "Optional GROUP BY expressions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Expr"
+          }
+        },
+        "having": {
+          "description": "Optional HAVING predicate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "orderBy": {
           "description": "Optional ORDER BY.",
           "type": [

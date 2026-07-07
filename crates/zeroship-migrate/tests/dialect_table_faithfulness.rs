@@ -252,6 +252,8 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
                 projection: vec![],
                 joins: vec![],
                 r#where: None,
+                group_by: Vec::new(),
+                having: None,
                 order_by: None,
                 limit: None,
             },
