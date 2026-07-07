@@ -47,7 +47,7 @@ The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
 | Bare-symbol / `{ fn }` **default** forms removed | **DONE** | `ops.ts:1055-1072` |
 | Scalar `c.fn.*` functions → chain methods | **DONE** (J2a, `37dced6a`) | chain methods on `ExprChain` (`types.ts:579-601`; `ops.ts:1776-1837`); `c.fn` deleted |
 | `c.pg.extract` → core; retire `c.pg` namespace | **DONE** (J2a, `37dced6a`) | `.extract(field)` accepts portable + PG fields (`types.ts:599`; `ops.ts:1823-1829`); `c.pg` deleted |
-| Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b, `e858cc15`) | `.count/.sum/.avg/.min/.max` (`types.ts:604-608`; `ops.ts:1839-1853`), `countStar()` import (`ops.ts:1872`), `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
+| Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b + #268) | `.count/.sum/.avg/.min/.max`, PG-first `.stringAgg/.arrayAgg/.boolAnd/.boolOr`, `countStar()` import, `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
 | Rename builder handle `c` → `col` (context-typed generic) | **DONE** (J4) | `(col) => col("x")` across the authoring surface; zero wire churn |
 | `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
 | Retire `@zeroship/migrate/pg` subpath | **DONE** (J5/J6) | `domain`/`grant`/… are rooted on `@zeroship/migrate`; `table()` is the one PG-first table handle; `pg.ts`, the package subpath, and the old split table handle are deleted |
@@ -632,7 +632,7 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 | Builder | Where | Column refs? | Scalar chain methods | Aggregates | PG-first nodes | source |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ExprBuilder` | DML where/set, policy, view, trigger | yes | yes | yes (`.count`/`.sum`/… plus `countStar()`) | yes; fail-closed off-target | `types.ts:652-656` |
+| `ExprBuilder` | DML where/set, policy, view, trigger | yes | yes | yes (`.count`/`.sum`/…/`.stringAgg` plus `countStar()`) | yes; fail-closed off-target | `types.ts:652-656` |
 | `DefaultBuilder` | column defaults | **no** | default-safe subset | no by Rust backstop | no | `types.ts:624-628`, `ops.ts:1085-1175` |
 | `IndexExprBuilder` | index expr/predicate | yes | immutable subset | no by Rust backstop | no | `types.ts:624-635` |
 | `GeneratedColumnBuilder` | generated columns | yes | immutable subset | no by Rust backstop | no | `types.ts:638-639` |
@@ -682,7 +682,7 @@ Every method returns a fresh `ExprChain`. Bare JS values auto-wrap to a `literal
 - **Portable predicates**: `.between(low,high)` → `between`; `.like(pattern)` → `like`; `.in(values)`/`.notIn(values)` → `inList` (require a **homogeneous** `Scalar[]`; empty strings, NUL bytes, non-finite numbers rejected; PG renders `= ANY(ARRAY[...])`); `.distinctFrom(x)` → `distinctFrom` (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
 - **PG-first chain operators — DONE in this redesign (J2)**: `.regex(pattern)` → `{ node:"pgRegexMatch", expr, pattern }` (`~` on PG, `REGEXP` on MySQL, **error on SQLite**); `.columnSize()` → `{ node:"pgColumnSize", expr }` (`pg_column_size()` on PG, **error elsewhere**). Previously `c.pg.regex`/`c.pg.columnSize`; the dialect gate now lives in the Rust validator, fail-closed off-target (`ops.ts:1770-1774`, `types.ts:575-577`).
 - **Scalar functions**: `.lower/.upper/.trim/.length/.abs/.coalesce/.nullif/.mod/.round/.floor/.ceil/.substr/.replace/.extract/.splitPart` record `fnCall`, `extract`/`pgExtract`, or `fnSynth` nodes; see [§4.4](#44-scalar-functions-chain-methods).
-- **Aggregates**: `.count/.sum/.avg/.min/.max` record `agg` nodes with the receiver as `arg`; receiver-less `COUNT(*)` is `countStar()`; see [§4.5](#45-aggregate-functions-chain-methods).
+- **Aggregates**: `.count/.sum/.avg/.min/.max` record `agg` nodes with the receiver as `arg`; receiver-less `COUNT(*)` is `countStar()`. `.stringAgg(delimiter)`, `.arrayAgg()`, `.boolAnd()`, and `.boolOr()` are PostgreSQL-first chain methods that fail closed off-PG unless wrapped in `dialect({...})`; see [§4.5](#45-aggregate-functions-chain-methods).
 
 ### 4.4 Scalar functions (chain methods)
 
@@ -706,15 +706,18 @@ Portable `.extract(field)` fields are `year, month, day, hour, minute, dow`. PG-
 
 ### 4.5 Aggregate functions (chain methods)
 
-Aggregates were flattened in J2b. Chain methods call `aggNode` → `{ node:"agg", func, arg?, distinct? }`:
+Aggregates were flattened in J2b and expanded in #268. Chain methods call `aggNode` → `{ node:"agg", func, arg?, delimiter?, distinct? }`:
 
 | Member | Wire node | Notes |
 |---|---|---|
 | `.count(opts?)` | `{ node:"agg", func:"count", arg:<receiver>, distinct? }` | `opts` is `{ distinct?: boolean }` |
 | `.sum(opts?)` / `.avg(opts?)` / `.min(opts?)` / `.max(opts?)` | `agg` | receiver-first: `col("total").sum({ distinct: true })` |
+| `.stringAgg(delimiter)` | `{ node:"agg", func:"stringAgg", arg:<receiver>, delimiter }` | PostgreSQL `string_agg(<expr>, <delimiter>)`; `delimiter` may be a string or expression |
+| `.arrayAgg()` | `{ node:"agg", func:"arrayAgg", arg:<receiver> }` | PostgreSQL `array_agg`; fail-closed off-PG |
+| `.boolAnd()` / `.boolOr()` | `{ node:"agg", func:"boolAnd"|"boolOr", arg:<receiver> }` | PostgreSQL `bool_and` / `bool_or`; fail-closed off-PG |
 | `countStar()` | `{ node:"agg", func:"count" }` | top-level import for receiver-less `COUNT(*)` |
 
-All five render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate**. The position check is now enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)).
+The standard five (`count/sum/avg/min/max`) render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate** for those variants. The long-tail PostgreSQL aggregates (`stringAgg/arrayAgg/boolAnd/boolOr`) are PG-first and validate as `DIALECT_UNSUPPORTED` on SQLite/MySQL unless the author supplies explicit alternatives with `dialect({...})`. The position check is enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)). Follow-ups intentionally not built here: `jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses.
 
 ### 4.6 PG extract fields and deleted vendor namespace
 
@@ -724,8 +727,8 @@ The old expression vendor namespace was deleted in J2a. `regex` and `columnSize`
 
 Rather than one polymorphic handle, the recorder hands out **different builder objects** per position (see the tier map in [§3.17](#317-the-builder-tier-map-which-slot-gets-which-restricted-builder)): `makeBuilder()` (full column accessor + `case`), `immutableExprBuilder()` (same handle shape, then validated for immutable scalar contexts), `checkWithPgBuilder()` (same, but allows PG-immutable nodes for PG checks), `domainValueBuilder()` (only the `VALUE` chain plus `case`), and `defaultBuilder()` (only `case`). There are no builder namespaces. Two JS-side walkers and two Rust backstops enforce the contexts:
 
-- **`validateImmutableExpr`** (`ops.ts:2123`): rejects volatile `fnSynth` (`now`/`genRandomUuid`), `currentSetting`/`currentUser`, non-immutable scalar/synth helpers, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. It walks aggregate arguments but does not reject the aggregate node itself; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop is authoritative for aggregate placement.
-- **`validateDefaultExpr`** (`ops.ts:1085`): rejects `colRef` ("a column default cannot reference a column"), `extract`, `dialect`, and all `pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `genRandomUuid`, `concatWs`, `splitPart` — so `now()`/`genRandomUuid()` **are** permitted in a default despite being volatile, but a column ref is not. It also walks aggregate arguments; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop rejects aggregates in defaults.
+- **`validateImmutableExpr`** (`ops.ts:2123`): rejects volatile `fnSynth` (`now`/`genRandomUuid`), `currentSetting`/`currentUser`, non-immutable scalar/synth helpers, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. It walks aggregate arguments and `stringAgg` delimiters but does not reject the aggregate node itself; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop is authoritative for aggregate placement.
+- **`validateDefaultExpr`** (`ops.ts:1085`): rejects `colRef` ("a column default cannot reference a column"), `extract`, `dialect`, and all `pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `genRandomUuid`, `concatWs`, `splitPart` — so `now()`/`genRandomUuid()` **are** permitted in a default despite being volatile, but a column ref is not. It also walks aggregate arguments and delimiters; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop rejects aggregates in defaults.
 - **Rust backstops**: `IMMUTABLE_CONTEXT_VOLATILE` rejects volatile functions in immutable SQL contexts, and `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts. These are the fail-closed gates for artifacts that bypass or outpace the TS/JS surface.
 
 The `DefaultBuilder` exposes only `{ case }` — deliberately no column accessor — so a default callback cannot reference columns by construction. Aggregates remain type-reachable through prebuilt chains/top-level imports and are rejected by Rust validation.
@@ -867,7 +870,7 @@ The expression AST (`expr.rs`) is **closed** and **never parsed from text** — 
 | `between` | `Between@357` | `operand`, `low`, `high` — portable inclusive range |
 | `like` | `Like@373` | `operand`, `pattern` — portable syntax |
 | `distinctFrom` | `DistinctFrom@385` | `left`, `right` — NULL-safe; MySQL lowers to `NOT (<=>)` |
-| `agg` | `Agg@403` | `func: AggFunc`, `arg: Option<Box<Expr>>` (`None`+`Count`=`COUNT(*)`), `distinct` |
+| `agg` | `Agg@403` | `func: AggFunc`, `arg: Option<Box<Expr>>` (`None`+`Count`=`COUNT(*)`), `delimiter: Option<Box<Expr>>` (`StringAgg` only), `distinct` |
 | `inList` | `InList@420` | `expr`, `elems: Vec<IrScalar>`, `negated` |
 | `pgRegexMatch` | `PgRegexMatch@433` | `expr`, `pattern` (rendered as SQL string literal). PG-only |
 | `pgColumnSize` | `PgColumnSize@441` | `expr`. PG-only `pg_column_size` |
@@ -876,7 +879,7 @@ The expression AST (`expr.rs`) is **closed** and **never parsed from text** — 
 | `pgInterval` | `PgInterval@461` | `duration: Duration`. PG-only |
 | `dialect` | `Dialectal@495` | `default`/`pg`/`sqlite`/`mysql` each `Option<Box<Expr>>` — the one Layer-2 escape; renders the matching leg else `default`, else refused fail-closed |
 
-**Closed lexicons** (serde rejects any out-of-set token at deserialize): `BinaryOp` (`eq, ne, lt, le, gt, ge, and, or, add, sub, mul, div, concat`); `UnaryOp` (`not, isNull, isNotNull, isTrue, isFalse`); `ScalarFn` (`coalesce, nullif, lower, upper, trim, length, abs, mod, round, floor, ceil, substr, replace, currentSetting, currentUser`); `SynthFn` (`concatWs, splitPart, now, genRandomUuid`); `CastTarget` (`text, int, real, boolean, bytes, uuid`); `ExtractField` (`year, month, day, hour, minute, dow`); `PgExtractField` (snake_case: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`); `AggFunc` (`count, sum, avg, min, max`).
+**Closed lexicons** (serde rejects any out-of-set token at deserialize): `BinaryOp` (`eq, ne, lt, le, gt, ge, and, or, add, sub, mul, div, concat`); `UnaryOp` (`not, isNull, isNotNull, isTrue, isFalse`); `ScalarFn` (`coalesce, nullif, lower, upper, trim, length, abs, mod, round, floor, ceil, substr, replace, currentSetting, currentUser`); `SynthFn` (`concatWs, splitPart, now, genRandomUuid`); `CastTarget` (`text, int, real, boolean, bytes, uuid`); `ExtractField` (`year, month, day, hour, minute, dow`); `PgExtractField` (snake_case: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`); `AggFunc` (`count, sum, avg, min, max, stringAgg, arrayAgg, boolAnd, boolOr`).
 
 ### 6.4 `IrScalar` — the custom serialization and why
 

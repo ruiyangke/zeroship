@@ -599,13 +599,22 @@ export interface ExprChain {
   extract(field: ExtractField | PgExtractField): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(delim: string, n: number): ExprChain;
-  // portable aggregate nodes (§3.4): receiver-first authoring for COUNT(expr),
-  // SUM/AVG/MIN/MAX. Receiver-less COUNT(*) is the top-level countStar() import.
+  // aggregate nodes (§3.4): receiver-first authoring for COUNT(expr),
+  // SUM/AVG/MIN/MAX plus PG-first stringAgg/arrayAgg/boolAnd/boolOr.
+  // Receiver-less COUNT(*) is the top-level countStar() import.
   count(opts?: { distinct?: boolean }): ExprChain;
   sum(opts?: { distinct?: boolean }): ExprChain;
   avg(opts?: { distinct?: boolean }): ExprChain;
   min(opts?: { distinct?: boolean }): ExprChain;
   max(opts?: { distinct?: boolean }): ExprChain;
+  /** `string_agg(<expr>, <delimiter>)` — PostgreSQL-first; use `dialect({...})` to port. */
+  stringAgg(delimiter: unknown): ExprChain;
+  /** `array_agg(<expr>)` — PostgreSQL-first; use `dialect({...})` to port. */
+  arrayAgg(): ExprChain;
+  /** `bool_and(<expr>)` — PostgreSQL-first; use `dialect({...})` to port. */
+  boolAnd(): ExprChain;
+  /** `bool_or(<expr>)` — PostgreSQL-first; use `dialect({...})` to port. */
+  boolOr(): ExprChain;
 }
 
 /** The deliberately narrow builder available in column default expression

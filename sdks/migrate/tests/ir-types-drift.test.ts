@@ -102,7 +102,7 @@ const TS = {
     "century", "decade", "millennium", "microseconds", "milliseconds",
     "timezone", "timezone_hour", "timezone_minute",
   ].sort(),
-  AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
+  AggFunc: ["count", "sum", "avg", "min", "max", "stringAgg", "arrayAgg", "boolAnd", "boolOr"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
   IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),

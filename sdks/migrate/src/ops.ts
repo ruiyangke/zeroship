@@ -1140,6 +1140,7 @@ function validateDefaultExpr(expr: Node): void {
         throw structuredError("OP_INVALID", "a column default cannot reference a column");
       case "agg":
         if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
         return;
       case "literal":
         return;
@@ -1991,6 +1992,18 @@ class ExprChainImpl implements ExprChainType {
   max(opts?: { distinct?: boolean }) {
     return aggNode("max", this.__node, opts);
   }
+  stringAgg(delimiter: unknown) {
+    return aggNode("stringAgg", this.__node, { delimiter });
+  }
+  arrayAgg() {
+    return aggNode("arrayAgg", this.__node);
+  }
+  boolAnd() {
+    return aggNode("boolAnd", this.__node);
+  }
+  boolOr() {
+    return aggNode("boolOr", this.__node);
+  }
 }
 
 export function check(name: string, expr: CheckExprFn): CheckDef {
@@ -2062,15 +2075,31 @@ export function dialect(legs: {
   return chain(node);
 }
 
-// PORTABLE aggregate nodes (§3.4/§3.6). Receiver chain methods record
-// `<func>(<receiver>)`; countStar() records `count(*)`. The optional
-// `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
-// count/sum/avg/min/max are byte-identical SQL on PG/SQLite/MySQL — no dialect
-// gate. Immutable/default scalar contexts reject them in Rust validate; grouped
-// SELECT/HAVING legality remains a Phase-2 obligation.
-function aggNode(func: "count" | "sum" | "avg" | "min" | "max", expr: unknown, opts?: { distinct?: boolean }): ExprChainType {
+type AggFuncToken =
+  | "count"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "stringAgg"
+  | "arrayAgg"
+  | "boolAnd"
+  | "boolOr";
+
+// Aggregate nodes (§3.4/§3.6). Receiver chain methods record
+// `<func>(<receiver>)`; countStar() records `count(*)`; stringAgg records its
+// delimiter as the aggregate's second argument. The optional `{ distinct: true }`
+// sets the `distinct` flag (skipped on the wire when false). count/sum/avg/min/max
+// are three-dialect; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
+// off-PG in Rust validate unless wrapped in dialect({...}).
+function aggNode(
+  func: AggFuncToken,
+  expr: unknown,
+  opts?: { distinct?: boolean; delimiter?: unknown },
+): ExprChainType {
   const node: Node = { node: "agg", func };
   if (expr !== undefined) node.arg = exprArg(expr);
+  if (opts && opts.delimiter !== undefined) node.delimiter = exprArg(opts.delimiter);
   if (opts && opts.distinct === true) node.distinct = true;
   return chain(node);
 }
@@ -2272,6 +2301,7 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
         return;
       case "agg":
         if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
         return;
       case "fnCall": {
         if (n.fn === "currentSetting" || n.fn === "currentUser") {

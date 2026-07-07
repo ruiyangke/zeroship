@@ -119,7 +119,7 @@ export type PgExtractField =
  * SQLite, and MySQL (only the surrounding identifier quoting differs), so there
  * is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
  */
-export type AggFunc = "count" | "sum" | "avg" | "min" | "max";
+export type AggFunc = "count" | "sum" | "avg" | "min" | "max" | "stringAgg" | "arrayAgg" | "boolAnd" | "boolOr";
 
 /**
  * CLOSED per-column index sort-order set. Omitted means the SQL default

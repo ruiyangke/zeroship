@@ -3494,6 +3494,17 @@
                 }
               ]
             },
+            "delimiter": {
+              "description": "Optional second argument for `StringAgg` only.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "distinct": {
               "description": "`DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the\nwire when `false` so the node serializes byte-minimally.",
               "type": "boolean"
@@ -3997,6 +4008,26 @@
           "description": "`max(<arg>)`.",
           "type": "string",
           "const": "max"
+        },
+        {
+          "description": "`string_agg(<arg>, <delimiter>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "stringAgg"
+        },
+        {
+          "description": "`array_agg(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "arrayAgg"
+        },
+        {
+          "description": "`bool_and(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "boolAnd"
+        },
+        {
+          "description": "`bool_or(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "boolOr"
         }
       ]
     },

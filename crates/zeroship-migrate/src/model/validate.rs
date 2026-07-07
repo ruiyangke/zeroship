@@ -395,7 +395,18 @@ fn agg_func_name(f: AggFunc) -> &'static str {
         AggFunc::Avg => "avg",
         AggFunc::Min => "min",
         AggFunc::Max => "max",
+        AggFunc::StringAgg => "stringAgg",
+        AggFunc::ArrayAgg => "arrayAgg",
+        AggFunc::BoolAnd => "boolAnd",
+        AggFunc::BoolOr => "boolOr",
     }
+}
+
+fn agg_func_is_pg_first(f: AggFunc) -> bool {
+    matches!(
+        f,
+        AggFunc::StringAgg | AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr
+    )
 }
 
 fn first_aggregate(expr: &Expr) -> Option<&'static str> {
@@ -426,7 +437,11 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         Expr::DistinctFrom { left, right } => {
             first_aggregate(left).or_else(|| first_aggregate(right))
         }
-        Expr::Agg { func, .. } => Some(agg_func_name(*func)),
+        Expr::Agg { func, arg, delimiter, .. } => arg
+            .as_deref()
+            .and_then(first_aggregate)
+            .or_else(|| delimiter.as_deref().and_then(first_aggregate))
+            .or(Some(agg_func_name(*func))),
         Expr::InList { expr, .. } => first_aggregate(expr),
         Expr::Dialectal { default, pg, sqlite, mysql } => [
             default.as_deref(),
@@ -479,7 +494,10 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
         Expr::DistinctFrom { left, right } => {
             first_volatile_function(left).or_else(|| first_volatile_function(right))
         }
-        Expr::Agg { arg, .. } => arg.as_deref().and_then(first_volatile_function),
+        Expr::Agg { arg, delimiter, .. } => arg
+            .as_deref()
+            .and_then(first_volatile_function)
+            .or_else(|| delimiter.as_deref().and_then(first_volatile_function)),
         Expr::InList { expr, .. } => first_volatile_function(expr),
         Expr::Dialectal { default, pg, sqlite, mysql } => {
             [
@@ -4042,16 +4060,12 @@ impl Ctx<'_> {
                 self.walk_depth(left, d)?;
                 self.walk_depth(right, d)
             }
-            // Portable aggregate node (§3.4/§3.6): count/sum/avg/min/max render
-            // identically on all three dialects, so there is NO dialect gate. The
-            // "aggregate only valid in a grouped/SELECT context" check
-            // (`AGG_POSITION_INVALID`) is coupled with the Phase-2 view/select
-            // builder — this additive slice accepts the node STRUCTURALLY, just
-            // recursing into the optional argument (`count(*)` has none).
-            Expr::Agg { func: _, arg, distinct: _ } => match arg {
-                Some(e) => self.walk_depth(e, d),
-                None => Ok(()),
-            },
+            // Aggregate node (§3.4/§3.6): count/sum/avg/min/max render on all three
+            // dialects. The long-tail aggregate variants are PostgreSQL-first and
+            // fail closed off-PG unless wrapped in dialect({...}).
+            Expr::Agg { func, arg, delimiter, distinct: _ } => {
+                self.check_agg(*func, arg.as_deref(), delimiter.as_deref(), d)
+            }
             Expr::InList { expr, elems, negated: _ } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
@@ -4415,6 +4429,66 @@ impl Ctx<'_> {
                     .to_string(),
             ),
         ))
+    }
+
+    fn check_pg_first_aggregate(&self, name: &'static str) -> Result<(), AuthoringError> {
+        if crate::model::support::pg_only_expr_disposition(self.target_dialect).is_supported() {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_DIALECT_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"
+            ),
+            Some(
+                "wrap this aggregate in dialect({ pg: ..., sqlite: ..., mysql: ... }) with \
+                 explicit non-Postgres legs, or target Postgres only"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    fn check_agg(
+        &self,
+        func: AggFunc,
+        arg: Option<&Expr>,
+        delimiter: Option<&Expr>,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        if agg_func_is_pg_first(func) {
+            self.check_pg_first_aggregate(agg_func_name(func))?;
+        }
+        if let Some(arg) = arg {
+            self.walk_depth(arg, depth)?;
+        } else if !matches!(func, AggFunc::Count) {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!("{} aggregate requires an argument", agg_func_name(func)),
+                Some("call the aggregate as a receiver chain method, e.g. col(\"x\").arrayAgg()".to_string()),
+            ));
+        }
+        match (func, delimiter) {
+            (AggFunc::StringAgg, Some(delimiter)) => self.walk_depth(delimiter, depth),
+            (AggFunc::StringAgg, None) => Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "stringAgg aggregate requires a delimiter".to_string(),
+                Some("call col(\"x\").stringAgg(delimiter) with a string or expression delimiter".to_string()),
+            )),
+            (_, Some(_)) => Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "aggregate delimiter is only valid for stringAgg".to_string(),
+                Some("remove delimiter unless func is stringAgg".to_string()),
+            )),
+            (_, None) => Ok(()),
+        }
     }
 
     fn check_pg_text_literal(&self, value: &str, what: &str) -> Result<(), AuthoringError> {
@@ -4829,23 +4903,48 @@ mod tests {
     #[test]
     fn portable_aggregate_nodes_validate_on_all_three_dialects() {
         use crate::model::expr::AggFunc;
-        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are PORTABLE (§3.4/
-        // §3.6): byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with
-        // NO dialect gate. (The grouped/SELECT position check is a Phase-2 concern;
-        // this slice accepts the node structurally, recursing into the arg.)
+        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are portable:
+        // byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with NO
+        // dialect gate. PG-first aggregate variants are covered by the next test.
         let c = cols();
         let sc = scope("users", &c);
         let nodes = [
-            Expr::Agg { func: AggFunc::Count, arg: None, distinct: false },
+            Expr::Agg {
+                func: AggFunc::Count,
+                arg: None,
+                delimiter: None,
+                distinct: false,
+            },
             Expr::Agg {
                 func: AggFunc::Count,
                 arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
                 distinct: true,
             },
-            Expr::Agg { func: AggFunc::Sum, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Avg, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Min, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Max, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg {
+                func: AggFunc::Sum,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Avg,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Min,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Max,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
@@ -4858,12 +4957,57 @@ mod tests {
         let bad = Expr::Agg {
             func: AggFunc::Sum,
             arg: Some(Box::new(Expr::col("does_not_exist"))),
+            delimiter: None,
             distinct: false,
         };
         assert!(
             validate_expr(&bad, Dialect::Postgres, &sc, 0, None).is_err(),
             "aggregate must still validate its argument's column ref"
         );
+    }
+
+    #[test]
+    fn pg_first_aggregate_nodes_validate_only_on_postgres() {
+        use crate::model::expr::AggFunc;
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Agg {
+                func: AggFunc::StringAgg,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: Some(Box::new(Expr::lit(IrScalar::Str(", ".to_string())))),
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::ArrayAgg,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::BoolAnd,
+                arg: Some(Box::new(Expr::col("active"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::BoolOr,
+                arg: Some(Box::new(Expr::col("active"))),
+                delimiter: None,
+                distinct: false,
+            },
+        ];
+
+        for e in &nodes {
+            validate_expr(e, Dialect::Postgres, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("PG-first aggregate must validate on Postgres: {err}"));
+            for d in [Dialect::Sqlite, Dialect::Mysql] {
+                let err = validate_expr(e, d, &sc, 0, None)
+                    .expect_err("PG-first aggregate must fail closed off Postgres");
+                assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{d:?}: {err}");
+                assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+            }
+        }
     }
 
     #[test]
@@ -6826,6 +6970,7 @@ mod tests {
             r#where: Some(Expr::Agg {
                 func: AggFunc::Count,
                 arg: None,
+                delimiter: None,
                 distinct: false,
             }),
             include: Vec::new(),

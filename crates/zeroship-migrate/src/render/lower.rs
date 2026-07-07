@@ -5640,9 +5640,12 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                 collect_col_refs(left, out);
                 collect_col_refs(right, out);
             }
-            Expr::Agg { arg, .. } => {
+            Expr::Agg { arg, delimiter, .. } => {
                 if let Some(arg) = arg {
                     collect_col_refs(arg, out);
+                }
+                if let Some(delimiter) = delimiter {
+                    collect_col_refs(delimiter, out);
                 }
             }
             Expr::PgInterval { .. } => {}

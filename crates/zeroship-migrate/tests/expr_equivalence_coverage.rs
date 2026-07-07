@@ -148,11 +148,21 @@ fn classify_expr(expr: &Expr) -> ExprCoverage {
             "render::dml::tests::distinct_from_diverges_pg_sqlite_vs_mysql",
             ProofClaim::SemanticEquivalence,
         ),
-        Expr::Agg { .. } => portable(
-            "Agg",
-            "render::dml::tests::agg_renders_identically_on_all_three_dialects",
-            ProofClaim::SemanticEquivalence,
-        ),
+        Expr::Agg { func, .. } => match func {
+            AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
+                portable(
+                    "Agg",
+                    "render::dml::tests::agg_renders_identically_on_all_three_dialects",
+                    ProofClaim::SemanticEquivalence,
+                )
+            }
+            AggFunc::StringAgg | AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr => {
+                vendor(
+                    "Agg::PgFirst",
+                    "PostgreSQL aggregate variant has no portable SQLite/MySQL equivalent",
+                )
+            }
+        },
         Expr::InList { .. } => portable(
             "InList",
             "mysql_jsdriver_e2e::in_list_not_in_and_empty_list_predicates_apply_equivalently",
@@ -257,6 +267,7 @@ fn portable_expr_samples() -> Vec<Expr> {
         Expr::Agg {
             func: AggFunc::Count,
             arg: Some(Box::new(Expr::col("x"))),
+            delimiter: None,
             distinct: true,
         },
         // covered by render and MySQL live inList/notIn/empty-list proofs
@@ -402,6 +413,12 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
             pg: Some(Box::new(lit_str("pg"))),
             sqlite: None,
             mysql: None,
+        },
+        Expr::Agg {
+            func: AggFunc::StringAgg,
+            arg: Some(Box::new(Expr::col("name"))),
+            delimiter: Some(Box::new(lit_str(", "))),
+            distinct: false,
         },
     ];
 

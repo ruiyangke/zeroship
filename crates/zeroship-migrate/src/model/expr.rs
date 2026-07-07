@@ -262,6 +262,14 @@ pub enum AggFunc {
     Min,
     /// `max(<arg>)`.
     Max,
+    /// `string_agg(<arg>, <delimiter>)` (PostgreSQL-first).
+    StringAgg,
+    /// `array_agg(<arg>)` (PostgreSQL-first).
+    ArrayAgg,
+    /// `bool_and(<arg>)` (PostgreSQL-first).
+    BoolAnd,
+    /// `bool_or(<arg>)` (PostgreSQL-first).
+    BoolOr,
 }
 
 /// `skip_serializing_if` predicate: a `false` bool emits NOTHING on the wire, so a
@@ -406,6 +414,9 @@ pub enum Expr {
         /// The single argument expression. `None` + `func: Count` = `COUNT(*)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arg: Option<Box<Expr>>,
+        /// Optional second argument for `StringAgg` only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delimiter: Option<Box<Expr>>,
         /// `DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the
         /// wire when `false` so the node serializes byte-minimally.
         #[serde(default, skip_serializing_if = "is_false")]

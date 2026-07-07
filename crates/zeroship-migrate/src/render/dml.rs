@@ -708,8 +708,7 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
     }
 }
 
-/// The lower-cased SQL name of a PORTABLE [`AggFunc`]. Identical spelling on PG,
-/// SQLite, and MySQL (§3.4).
+/// The lower-cased SQL name of an [`AggFunc`].
 fn agg_fn_sql(f: AggFunc) -> &'static str {
     match f {
         AggFunc::Count => "count",
@@ -717,19 +716,47 @@ fn agg_fn_sql(f: AggFunc) -> &'static str {
         AggFunc::Avg => "avg",
         AggFunc::Min => "min",
         AggFunc::Max => "max",
+        AggFunc::StringAgg => "string_agg",
+        AggFunc::ArrayAgg => "array_agg",
+        AggFunc::BoolAnd => "bool_and",
+        AggFunc::BoolOr => "bool_or",
     }
 }
 
-/// Render a PORTABLE aggregate application from its already-rendered argument
-/// fragment (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; a present arg
-/// → `<func>([DISTINCT ]<arg>)`. Byte-identical on all three dialects — only the
-/// identifier quoting inside `arg_sql` differs.
-fn render_agg(f: AggFunc, arg_sql: Option<&str>, distinct: bool) -> String {
+/// Render an aggregate application from already-rendered argument fragments
+/// (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
+/// required delimiter as the second argument.
+fn render_agg(
+    f: AggFunc,
+    arg_sql: Option<&str>,
+    delimiter_sql: Option<&str>,
+    distinct: bool,
+) -> Result<String, DmlError> {
     let name = agg_fn_sql(f);
+    if matches!(f, AggFunc::StringAgg) {
+        let (Some(a), Some(d)) = (arg_sql, delimiter_sql) else {
+            return Err(DmlError::UnrenderableExpr(
+                "string_agg requires an argument and delimiter".to_string(),
+            ));
+        };
+        let prefix = if distinct { "DISTINCT " } else { "" };
+        return Ok(format!("{name}({prefix}{a}, {d})"));
+    }
+    if delimiter_sql.is_some() {
+        return Err(DmlError::UnrenderableExpr(
+            "aggregate delimiter is only valid for string_agg".to_string(),
+        ));
+    }
     match arg_sql {
-        None => format!("{name}(*)"),
-        Some(a) if distinct => format!("{name}(DISTINCT {a})"),
-        Some(a) => format!("{name}({a})"),
+        None if matches!(f, AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr) => {
+            Err(DmlError::UnrenderableExpr(format!(
+                "{} requires an argument",
+                agg_fn_sql(f)
+            )))
+        }
+        None => Ok(format!("{name}(*)")),
+        Some(a) if distinct => Ok(format!("{name}(DISTINCT {a})")),
+        Some(a) => Ok(format!("{name}({a})")),
     }
 }
 
@@ -942,12 +969,16 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let r = render_expr_bound(right, ctx)?;
             render_distinct_from(&l, &r, ctx.dialect)
         }
-        Expr::Agg { func, arg, distinct } => {
+        Expr::Agg { func, arg, delimiter, distinct } => {
             let a = match arg {
                 Some(e) => Some(render_expr_bound(e, ctx)?),
                 None => None,
             };
-            render_agg(*func, a.as_deref(), *distinct)
+            let d = match delimiter {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
         Expr::InList { expr, elems, negated } => {
             let e = render_expr_bound(expr, ctx)?;
@@ -1156,12 +1187,16 @@ where
             let r = render_expr_inline_with_col(right, dialect, col_ref)?;
             render_distinct_from(&l, &r, dialect)
         }
-        Expr::Agg { func, arg, distinct } => {
+        Expr::Agg { func, arg, delimiter, distinct } => {
             let a = match arg {
                 Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
                 None => None,
             };
-            render_agg(*func, a.as_deref(), *distinct)
+            let d = match delimiter {
+                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
         Expr::InList { expr, elems, negated } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -2323,7 +2358,12 @@ mod tests {
         use crate::model::expr::AggFunc;
 
         // count(*) — no arg — is byte-identical everywhere (no identifier at all).
-        let count_star = Expr::Agg { func: AggFunc::Count, arg: None, distinct: false };
+        let count_star = Expr::Agg {
+            func: AggFunc::Count,
+            arg: None,
+            delimiter: None,
+            distinct: false,
+        };
         for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
             assert_eq!(
                 render_expr_inline(&count_star, d).unwrap(),
@@ -2336,6 +2376,7 @@ mod tests {
         let count_distinct = Expr::Agg {
             func: AggFunc::Count,
             arg: Some(Box::new(Expr::col("x"))),
+            delimiter: None,
             distinct: true,
         };
         assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(), "count(DISTINCT \"x\")");
@@ -2349,7 +2390,12 @@ mod tests {
             (AggFunc::Min, "min"),
             (AggFunc::Max, "max"),
         ] {
-            let e = Expr::Agg { func, arg: Some(Box::new(Expr::col("x"))), distinct: false };
+            let e = Expr::Agg {
+                func,
+                arg: Some(Box::new(Expr::col("x"))),
+                delimiter: None,
+                distinct: false,
+            };
             assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), format!("{name}(\"x\")"));
             assert_eq!(render_expr_inline(&e, SqlDialect::Sqlite).unwrap(), format!("{name}(\"x\")"));
             assert_eq!(render_expr_inline(&e, SqlDialect::Mysql).unwrap(), format!("{name}(`x`)"));
@@ -2364,6 +2410,47 @@ mod tests {
             render_expr_bound(&count_star, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
             "count(*)"
         );
+    }
+
+    #[test]
+    fn pg_first_aggregates_render_postgres_sql_names_and_string_agg_delimiter() {
+        use crate::model::expr::AggFunc;
+
+        let string_agg = Expr::Agg {
+            func: AggFunc::StringAgg,
+            arg: Some(Box::new(Expr::col("name"))),
+            delimiter: Some(Box::new(Expr::lit(IrScalar::Str(", ".to_string())))),
+            distinct: false,
+        };
+        assert_eq!(
+            render_expr_inline(&string_agg, SqlDialect::Postgres).unwrap(),
+            "string_agg(\"name\", ', ')"
+        );
+
+        let string_agg_distinct = Expr::Agg {
+            func: AggFunc::StringAgg,
+            arg: Some(Box::new(Expr::col("name"))),
+            delimiter: Some(Box::new(Expr::lit(IrScalar::Str("|".to_string())))),
+            distinct: true,
+        };
+        assert_eq!(
+            render_expr_inline(&string_agg_distinct, SqlDialect::Postgres).unwrap(),
+            "string_agg(DISTINCT \"name\", '|')"
+        );
+
+        for (func, sql) in [
+            (AggFunc::ArrayAgg, "array_agg(\"name\")"),
+            (AggFunc::BoolAnd, "bool_and(\"name\")"),
+            (AggFunc::BoolOr, "bool_or(\"name\")"),
+        ] {
+            let e = Expr::Agg {
+                func,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: None,
+                distinct: false,
+            };
+            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), sql);
+        }
     }
 
     // ── identifier safety ───────────────────────────────────────────────────

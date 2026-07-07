@@ -634,6 +634,21 @@ view("order_totals").create({
     .having((col) => col("id").count().gt(5)),
 });
 
+// PostgreSQL-first aggregate coverage. SQLite/MySQL targets fail closed with
+// DIALECT_UNSUPPORTED unless the expression is wrapped in dialect({...}) with
+// explicit non-PG legs.
+view("order_rollups").create({
+  as: (q) => q
+    .from("orders")
+    .select([
+      "customer_id",
+      { kind: "expr", alias: "item_names", expr: (col) => col("item_name").stringAgg(", ") },
+      { kind: "expr", alias: "order_ids", expr: (col) => col("id").arrayAgg() },
+      { kind: "expr", alias: "all_fulfilled", expr: (col) => col("fulfilled").boolAnd() },
+    ])
+    .groupBy(["customer_id"]),
+});
+
 view("active_users").drop({ ifExists: true });
 view("active_users").comment("non-deleted users");
 

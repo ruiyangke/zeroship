@@ -154,15 +154,21 @@ across statements ([Var-assign + reuse](#var-assign--reuse)).
 `view(name, opts?)` returns a structured `SelectAst` builder by default. Its
 query callback supports `from`, `select`, `join`/`innerJoin`/`leftJoin`, `where`,
 `groupBy`, `having`, `orderBy`, and `limit`; `groupBy` accepts column names or
-expressions, and `having` may use aggregate expressions such as `countStar()` or
-`col("amount").sum()`. The raw view body escape remains for constructs outside
-the structured view surface.
+expressions, and `having` may use aggregate expressions such as `countStar()`,
+`col("amount").sum()`, or PG-first aggregates like `col("name").stringAgg(", ")`.
+The raw view body escape remains for constructs outside the structured view
+surface.
 
 There is **no scalar-function namespace**: scalar functions with a natural receiver are
 chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
 The one receiver-less scalar helper is the top-level `concatWs(...)` import.
 Aggregates follow the same receiver-first shape (`col("x").sum()`, `col("x").count({ distinct: true })`);
-receiver-less `COUNT(*)` is the top-level `countStar()` import.
+receiver-less `COUNT(*)` is the top-level `countStar()` import. The common
+PostgreSQL aggregates `stringAgg(delimiter)`, `arrayAgg()`, `boolAnd()`, and
+`boolOr()` are first-class chain methods, but validate fail-closed on SQLite and
+MySQL (`DIALECT_UNSUPPORTED`) unless the value is wrapped in `dialect({...})`.
+`jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses are
+documented follow-ups, not part of the current surface.
 
 ## Names are strings (and why)
 
