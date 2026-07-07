@@ -1,4 +1,4 @@
-import { table, t, now, pgTable } from "@zeroship/migrate";
+import { table, t, now } from "@zeroship/migrate";
 
 export const name = "billing_metering_invoice_tables";
 
@@ -50,7 +50,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("billing_disputes", { schema: "zeroship" }).check("billing_disputes_amount_cents_check").add({ expr: (col) => col("amount_cents").gt(0) });
-  pgTable("billing_disputes", { schema: "zeroship" }).check("billing_disputes_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("billing_disputes", { schema: "zeroship" }).check("billing_disputes_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("billing_line_provider_refs", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),
@@ -127,7 +127,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("connect_checkout_failures", { schema: "zeroship" }).check("connect_checkout_failures_amount_cents_check").add({ expr: (col) => col("amount_cents").ge(0) });
-  pgTable("connect_checkout_failures", { schema: "zeroship" }).check("connect_checkout_failures_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("connect_checkout_failures", { schema: "zeroship" }).check("connect_checkout_failures_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("creator_billing", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
@@ -197,7 +197,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_amount_cents_check").add({ expr: (col) => col("amount_cents").ne(0) });
-  pgTable("credit_ledger", { schema: "zeroship" }).check("credit_ledger_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_grant_ref").add({ expr: (col) => col("kind").cast({ to: "text" }).in(["consumed", "void_reversal", "refund_clawback"]).and(col("consumed_from_grant_id").isNotNull()).or(col("kind").cast({ to: "text" }).notIn(["consumed", "void_reversal", "refund_clawback"]).and(col("consumed_from_grant_id").isNull())) });
   table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_kind_sign").add({ expr: (col) => col("kind").cast({ to: "text" }).in(["consumed", "refund_clawback"]).and(col("amount_cents").lt(0)).or(col("kind").cast({ to: "text" }).notIn(["consumed", "refund_clawback"]).and(col("amount_cents").gt(0))) });
   table("invoice_lines", { schema: "zeroship" }).create({
@@ -234,7 +234,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("invoice_payments", { schema: "zeroship" }).check("invoice_payments_amount_cents_check").add({ expr: (col) => col("amount_cents").ne(0) });
-  pgTable("invoice_payments", { schema: "zeroship" }).check("invoice_payments_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("invoice_payments", { schema: "zeroship" }).check("invoice_payments_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("invoices", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -255,7 +255,7 @@ export function up() {
   });
   table("invoices", { schema: "zeroship" }).check("invoice_total_balances").add({ expr: (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")).add(col("tax_cents"))) });
   table("invoices", { schema: "zeroship" }).check("invoices_credit_cents_check").add({ expr: (col) => col("credit_cents").ge(0) });
-  pgTable("invoices", { schema: "zeroship" }).check("invoices_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("invoices", { schema: "zeroship" }).check("invoices_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("invoices", { schema: "zeroship" }).check("invoices_subtotal_cents_check").add({ expr: (col) => col("subtotal_cents").ge(0) });
   table("invoices", { schema: "zeroship" }).check("invoices_tax_cents_check").add({ expr: (col) => col("tax_cents").ge(0) });
   table("invoices", { schema: "zeroship" }).check("invoices_total_cents_check").add({ expr: (col) => col("total_cents").ge(0) });
@@ -300,7 +300,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("payout_failures", { schema: "zeroship" }).check("payout_failures_amount_cents_check").add({ expr: (col) => col("amount_cents").ge(0) });
-  pgTable("payout_failures", { schema: "zeroship" }).check("payout_failures_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("payout_failures", { schema: "zeroship" }).check("payout_failures_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("pending_disputes", { schema: "zeroship" }).create({
     columns: {
       provider_dispute_id: t.text().notNull(),
@@ -316,7 +316,7 @@ export function up() {
   });
   table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_amount_cents_check").add({ expr: (col) => col("amount_cents").gt(0) });
   table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_check").add({ expr: (col) => col("payment_intent").isNotNull().or(col("charge").isNotNull()) });
-  pgTable("pending_disputes", { schema: "zeroship" }).check("pending_disputes_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("plan_change_events", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -392,7 +392,7 @@ export function up() {
   });
   table("refunds", { schema: "zeroship" }).check("refund_amount_split").add({ expr: (col) => col("amount_cents").eq(col("subtotal_cents").add(col("tax_cents"))) });
   table("refunds", { schema: "zeroship" }).check("refunds_amount_cents_check").add({ expr: (col) => col("amount_cents").gt(0) });
-  pgTable("refunds", { schema: "zeroship" }).check("refunds_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("refunds", { schema: "zeroship" }).check("refunds_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
   table("refunds", { schema: "zeroship" }).check("refunds_subtotal_cents_check").add({ expr: (col) => col("subtotal_cents").ge(0) });
   table("refunds", { schema: "zeroship" }).check("refunds_tax_cents_check").add({ expr: (col) => col("tax_cents").ge(0) });
   table("spend_state_history", { schema: "zeroship" }).create({

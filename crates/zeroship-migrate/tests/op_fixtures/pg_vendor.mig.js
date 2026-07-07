@@ -12,7 +12,6 @@ import {
   dropOwnedBy,
   extension,
   grant,
-  pgTable,
   raw,
   revoke,
   role,
@@ -53,13 +52,13 @@ export function up() {
   });
 
   // ── partition attach (PG vendor; distinct from createPartition) ──
-  pgTable("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+  table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
     from: ["2026-11-01T00:00:00Z"],
     to: ["2026-12-01T00:00:00Z"],
   });
 
   // ── RLS + policies (0025) ──
-  const secrets = pgTable("app_secrets", { schema: "zeroship" });
+  const secrets = table("app_secrets", { schema: "zeroship" });
   secrets.setRls({ enabled: true, forced: true });
   secrets.policy("tenant_isolation").create({
     for: "all",

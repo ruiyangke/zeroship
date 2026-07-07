@@ -972,10 +972,7 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
 #[test]
 fn sequences_and_exclusion_constraints_record_canonical_ir() {
     let src = r#"
-        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
-        import {
-  pgTable,
-  sequence } from "@zeroship/migrate";
+        import { table, t, sequence } from "@zeroship/migrate";
         export default { name: "n",
   up() {
             sequence("invoice_seq").create({
@@ -999,7 +996,7 @@ fn sequences_and_exclusion_constraints_record_canonical_ir() {
   });
             sequence("invoice_seq").drop({ schema: "app2",
   ifExists: true });
-            pgTable("bookings",
+            table("bookings",
   { schema: "app2" }).exclusion("bookings_no_overlap").add({
                 using: "gist",
   elements: [

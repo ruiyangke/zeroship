@@ -1,4 +1,4 @@
-import { enumType, table, t, domain, pgTable } from "@zeroship/migrate";
+import { enumType, table, t, domain } from "@zeroship/migrate";
 
 const planTier = enumType("plan_tier");
 const billingPeriod = domain("billing_period");
@@ -24,7 +24,7 @@ export function up() {
     },
   });
 
-  pgTable("pg_expr_checks").create({
+  table("pg_expr_checks").create({
     columns: {
       status: t.text().notNull(),
       name: t.text().notNull(),

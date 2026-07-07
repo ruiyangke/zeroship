@@ -17,7 +17,7 @@
 import { t as dbT } from "@zeroship/db";
 // @ts-expect-error — free boolean combinators are no longer exported from the public package.
 import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
-// @ts-expect-error — free policy helpers were deleted; use pgTable(...).policy(name).create/drop().
+// @ts-expect-error — free policy helpers were deleted; use table(...).policy(name).create/drop().
 import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
 // @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
 import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate";
@@ -40,7 +40,6 @@ import {
   interval,
   countStar,
   domain,
-  pgTable,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
@@ -136,8 +135,7 @@ export function badOpShapes(): void {
   table("users").rename({ from: "users", to: "people" });
 }
 
-export function pgTableBoundary(): void {
-  // @ts-expect-error — PG table policies are only reachable through `pgTable()`.
+export function tableVendorSurface(): void {
   table("secrets").policy("tenant_only").create({ using: (col) => col("tenant_id").isNotNull() });
 
   // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).create(...)`.
@@ -146,19 +144,16 @@ export function pgTableBoundary(): void {
   // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).drop(...)`.
   table("audit_events").dropTrigger({ name: "audit_events_trg", ifExists: true });
 
-  // @ts-expect-error — RLS is a PG table method and is not on portable `table()`.
   table("secrets").setRls({ enabled: true });
 
-  // @ts-expect-error — exclusion constraints are a PG table method and are not on portable `table()`.
   table("bookings").exclusion("bookings_no_overlap");
 
-  // @ts-expect-error — direct constraint validation method was deleted; use `pgTable(...).constraint(name).validate()`.
+  // @ts-expect-error — direct constraint validation method was deleted; use `table(...).constraint(name).validate()`.
   table("line_items").validateConstraint("line_items_order_fkey");
 
-  // @ts-expect-error — direct partition detach method was deleted; use `pgTable(...).partition(name).detach()`.
+  // @ts-expect-error — direct partition detach method was deleted; use `table(...).partition(name).detach()`.
   table("events").detachPartition("events_2026_05");
 
-  // @ts-expect-error — constraint validate is PG-only and only on the PG constraint ref.
   table("line_items").constraint("line_items_order_fkey").validate();
 
   table("audit_events").trigger("audit_events_trg").create({
@@ -170,35 +165,35 @@ export function pgTableBoundary(): void {
   table("audit_events").trigger("audit_events_trg").drop({ ifExists: true });
 
   // @ts-expect-error — deleted direct PG policy method; use `.policy(name).create(...)`.
-  pgTable("secrets").createPolicy({ name: "tenant_only", using: (col) => col("tenant_id").isNotNull() });
+  table("secrets").createPolicy({ name: "tenant_only", using: (col) => col("tenant_id").isNotNull() });
 
   // @ts-expect-error — deleted direct PG policy method; use `.policy(name).drop(...)`.
-  pgTable("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
+  table("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
 
-  pgTable("secrets")
+  table("secrets")
     .setRls({ enabled: true, forced: true })
     .policy("tenant_only").create({ using: (col) => col("tenant_id").isNotNull() })
     .policy("tenant_only").drop({ ifExists: true })
     .setRls({ enabled: false, forced: false });
   // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: true })`.
-  pgTable("secrets").enableRowLevelSecurity();
+  table("secrets").enableRowLevelSecurity();
   // @ts-expect-error — deleted RLS method; use `.setRls({ forced: true })`.
-  pgTable("secrets").forceRowLevelSecurity();
+  table("secrets").forceRowLevelSecurity();
   // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: false })`.
-  pgTable("secrets").disableRowLevelSecurity();
+  table("secrets").disableRowLevelSecurity();
   // @ts-expect-error — deleted RLS method; use `.setRls({ forced: false })`.
-  pgTable("secrets").noForceRowLevelSecurity();
-  pgTable("bookings").exclusion("bookings_no_overlap").add({
+  table("secrets").noForceRowLevelSecurity();
+  table("bookings").exclusion("bookings_no_overlap").add({
     using: "gist",
     elements: [{ target: "room_id", operator: "=" }],
   });
   // @ts-expect-error — deleted direct PG constraint validation method; use `.constraint(name).validate(...)`.
-  pgTable("line_items").validateConstraint("line_items_order_fkey");
-  pgTable("line_items").constraint("line_items_order_fkey").validate();
+  table("line_items").validateConstraint("line_items_order_fkey");
+  table("line_items").constraint("line_items_order_fkey").validate();
   // @ts-expect-error — deleted direct PG partition detach method; use `.partition(name).detach(...)`.
-  pgTable("events").detachPartition("events_2026_05", { concurrently: true });
-  pgTable("events").partition("events_2026_05").detach({ concurrently: true });
-  pgTable("events").partition("events_2026_06").attach({
+  table("events").detachPartition("events_2026_05", { concurrently: true });
+  table("events").partition("events_2026_05").detach({ concurrently: true });
+  table("events").partition("events_2026_06").attach({
     from: ["2026-06-01T00:00:00Z"],
     to: ["2026-07-01T00:00:00Z"],
   });
@@ -254,7 +249,7 @@ export function indexGrammar(): void {
     unique: true,
   });
 
-  pgTable("users").index("users_email_idx").add({
+  table("users").index("users_email_idx").add({
     on: [
       "email",
       { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
@@ -294,34 +289,26 @@ export function indexGrammar(): void {
   // @ts-expect-error — column object elements use `{ column }`, not `{ kind, name }`.
   table("users").index("bad_tagged_column").add({ on: [{ [oldKindKey]: oldColumnKind, name: "email" }] });
 
-  // @ts-expect-error — `using` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_using").add({ on: ["email"], using: "gin" });
+  table("users").index("using_idx").add({ on: ["email"], using: "gin" });
 
-  // @ts-expect-error — partial-index `where` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_where").add({ on: ["email"], where: (col) => col("active").isTrue() });
+  table("users").index("where_idx").add({ on: ["email"], where: (col) => col("active").isTrue() });
 
-  // @ts-expect-error — covering `include` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_include").add({ on: ["email"], include: ["id"] });
+  table("users").index("include_idx").add({ on: ["email"], include: ["id"] });
 
-  // @ts-expect-error — storage params are PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_with").add({ on: ["email"], with: { fillfactor: 90 } });
+  table("users").index("with_idx").add({ on: ["email"], with: { fillfactor: 90 } });
 
-  // @ts-expect-error — partition-recursion `only` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_only").add({ on: ["email"], only: true });
+  table("users").index("only_idx").add({ on: ["email"], only: true });
 
-  // @ts-expect-error — `nullsNotDistinct` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_nulls_not_distinct").add({ on: ["email"], unique: true, nullsNotDistinct: true });
+  table("users").index("nulls_not_distinct_idx").add({ on: ["email"], unique: true, nullsNotDistinct: true });
 
-  // @ts-expect-error — element `opclass` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_opclass").add({ on: [{ column: "email", opclass: "text_pattern_ops" }] });
+  table("users").index("opclass_idx").add({ on: [{ column: "email", opclass: "text_pattern_ops" }] });
 
-  // @ts-expect-error — element `collation` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_collation").add({ on: [{ column: "email", collation: "C" }] });
+  table("users").index("collation_idx").add({ on: [{ column: "email", collation: "C" }] });
 }
 
 export function immutableOnlyBuilderSlots(): void {
   t.text().generated((col) => col("email").lower());
-  pgTable("users").index("users_email_lower_idx").add({
+  table("users").index("users_email_lower_idx").add({
     on: [{ expr: (col) => col("email").lower() }],
     where: (col) => col("active").isTrue(),
   });
@@ -330,13 +317,13 @@ export function immutableOnlyBuilderSlots(): void {
 
   table("users").index("bad_index_now").add({ on: [{ expr: () => now() }] });
 
-  pgTable("users").index("bad_partial_now").add({ on: ["email"], where: () => now() });
+  table("users").index("bad_partial_now").add({ on: ["email"], where: () => now() });
 
   t.int().generated(() => countStar());
 
   table("users").index("bad_index_agg").add({ on: [{ expr: () => countStar() }] });
 
-  pgTable("users").index("bad_partial_agg").add({ on: ["email"], where: () => countStar() });
+  table("users").index("bad_partial_agg").add({ on: ["email"], where: () => countStar() });
 }
 
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
@@ -502,19 +489,19 @@ export function checkExpressionSurfaceTypechecks(): void {
   // PG-only extract fields typecheck on the core surface and fail closed off-PG at validate time.
   table("oauth_authorization_codes").check("pg_extract_field_validate_gated").add({ expr: (col) => col("created_at").extract("epoch").gt(0) });
 
-  pgTable("oauth_authorization_codes").check("max_ttl").add({
+  table("oauth_authorization_codes").check("max_ttl").add({
     expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))),
   });
   table("oauth_authorization_codes").check("no_core_interval").add({ expr: (col) => col("expires_at").le(interval({ minutes: 1 })) });
   // @ts-expect-error — interval takes a structured Duration, not HH:MM:SS text.
-  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval("00:01:00"))) });
-  pgTable("oauth_authorization_codes").check("epoch_positive").add({
+  table("oauth_authorization_codes").check("no_interval_string").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval("00:01:00"))) });
+  table("oauth_authorization_codes").check("epoch_positive").add({
     expr: (col) => col("created_at").extract("epoch").gt(0),
   });
-  pgTable("oauth_authorization_codes").check("user_id_fmt").add({
+  table("oauth_authorization_codes").check("user_id_fmt").add({
     expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
   });
-  pgTable("oauth_authorization_codes").check("data_size").add({
+  table("oauth_authorization_codes").check("data_size").add({
     expr: (col) => col("data").columnSize().lt(1000),
   });
   table("oauth_authorization_codes").check("active_is_bool").add({
@@ -524,7 +511,7 @@ export function checkExpressionSurfaceTypechecks(): void {
 }
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
-  pgTable("app_secrets").policy("tenant_only").create({
+  table("app_secrets").policy("tenant_only").create({
     using: (col) => col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
     withCheck: (col) => col("owner").eq(currentUser()),
   });

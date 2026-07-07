@@ -31,7 +31,6 @@ import {
   dropOwnedBy,
   extension,
   grant,
-  pgTable,
   raw,
   revoke,
   role,
@@ -164,7 +163,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
     table("accounts").column("profile").setNotNull();
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
-    pgTable("accounts").index("accounts_active_email_idx").add({
+    table("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
       where: (col) => col("active").isTrue(),
@@ -273,12 +272,12 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       from: ["public"],
     });
 
-    pgTable("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+    table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
       from: ["2026-11-01T00:00:00Z"],
       to: ["2026-12-01T00:00:00Z"],
     });
 
-    const secrets = pgTable("app_secrets", { schema: "zeroship" });
+    const secrets = table("app_secrets", { schema: "zeroship" });
     secrets.setRls({ enabled: true, forced: true });
     secrets.policy("tenant_isolation").create({
       for: "all",

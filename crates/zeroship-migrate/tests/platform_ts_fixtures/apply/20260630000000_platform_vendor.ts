@@ -4,7 +4,6 @@ import {
   currentSetting,
   extension,
   grant,
-  pgTable,
   role,
   schema,
 } from "@zeroship/migrate";
@@ -35,7 +34,7 @@ export function up() {
     to: ["zeroship_ts_test_app"],
   });
 
-  const accounts = pgTable("ts_accounts", { schema: "zeroship" });
+  const accounts = table("ts_accounts", { schema: "zeroship" });
   accounts.setRls({ enabled: true, forced: true });
   accounts.policy("tenant_isolation").create({
     for: "all",

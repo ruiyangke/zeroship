@@ -50,7 +50,7 @@ The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
 | Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b, `e858cc15`) | `.count/.sum/.avg/.min/.max` (`types.ts:604-608`; `ops.ts:1839-1853`), `countStar()` import (`ops.ts:1872`), `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
 | Rename builder handle `c` → `col` (context-typed generic) | **DONE** (J4) | `(col) => col("x")` across the authoring surface; zero wire churn |
 | `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
-| Retire `@zeroship/migrate/pg` subpath | **DONE** (J5) | `pgTable`/`domain`/`grant`/… are rooted on `@zeroship/migrate`; `pg.ts` and the package subpath are deleted |
+| Retire `@zeroship/migrate/pg` subpath | **DONE** (J5/J6) | `domain`/`grant`/… are rooted on `@zeroship/migrate`; `table()` is the one PG-first table handle; `pg.ts`, the package subpath, and the old split table handle are deleted |
 
 > **Caveat for readers.** The reference docs now reflect the J4 `(col) => Expr` callback param and J5 one-root import surface. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3/J4/J5 are landed.
 
@@ -324,7 +324,7 @@ This section documents the TypeScript authoring surface a creator imports to des
 | --- | --- | --- |
 | `@zeroship/migrate` | Tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers, core DML, domains, sequences, schemas, extensions, roles, grants, functions, RLS/policies, vendor index options, `raw` | PG first; non-PG targets fail closed where no native realization exists |
 
-The former `/pg` root is retired. Public vendor names (`domain`, `schema`, `extension`, `role`, `sequence`, `pgTable`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`, `raw`) are exported directly from `@zeroship/migrate`; the internal `__pg*` factories remain implementation hooks in `ops.ts`. The import path is **not** a security boundary: confined creator deploys reject privileged vendor ops with `VENDOR_OP_DENIED`; operator/platform callers pass an explicit trusted capability. See [§3.15](#315-the-postgres-vendor-authoring-surface) for the JS-authoring surface, and [§10.4](#10-security-first-design) for the capability gate.
+The former `/pg` root is retired. `table()` is the one table handle, and public vendor names (`domain`, `schema`, `extension`, `role`, `sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`, `raw`) are exported directly from `@zeroship/migrate`; the internal `__pg*` factories remain implementation hooks in `ops.ts`. The import path is **not** a security boundary: confined creator deploys reject privileged vendor ops with `VENDOR_OP_DENIED`; operator/platform callers pass an explicit trusted capability. See [§3.15](#315-the-postgres-vendor-authoring-surface) for the JS-authoring surface, and [§10.4](#10-security-first-design) for the capability gate.
 
 ### 3.3 Migration module shape
 
@@ -433,11 +433,11 @@ Scalars pass through `toIrScalar` (`ops.ts:949-967`): branded `decimal("...")` �
 
 ### 3.7 The fluent `table()` handle grammar
 
-`table(name, opts?)` returns a reusable `TableHandle` carrying `{ name, schemaDefault }` (`types.ts:1269-1301`, impl `ops.ts:3689-4024`). `pgTable(...)` returns the widened `PgTableHandle` — the same runtime object with PG-only methods typed-in. Schema precedence: the `{ schema }` from `table()` is the default; a per-op `schema` overrides via `pickSchema` (`ops.ts:3666-3669`).
+`table(name, opts?)` returns a reusable PG-first `TableHandle` carrying `{ name, schemaDefault }` (`types.ts`, impl `ops.ts`). It includes portable table operations and vendor table-scoped methods on the same handle; the Rust validator remains the capability/dialect security gate. Schema precedence: the `{ schema }` from `table()` is the default; a per-op `schema` overrides via `pickSchema`.
 
 **Direct table methods:** `.create(args)` → `createTable`; `.drop({ifExists?, cascade?, schema?})` → `dropTable`; `.rename({to, ifExists?, schema?})` → `renameTable` (fast `ALTER TABLE … RENAME TO`, engine emits inverse as down); `.setOptions(args)` → `setTableOptions` (`{ softDelete?, versioning?, strictness? }`, must set ≥1); `.comment(text|null, {schema?})` → `comment` (`null` clears); `.partition(name)` → `PartitionRef`.
 
-**Selector sub-handles:** `.column(name)`, `.foreignKey(name)`, `.unique(name)`, `.check(name)`, `.constraint(name)`, `.index(name)`, `.trigger(name)`; plus PG-only `.exclusion(name)`, `.policy(name)`, `.setRls(...)` on `pgTable`.
+**Selector sub-handles:** `.column(name)`, `.foreignKey(name)`, `.unique(name)`, `.check(name)`, `.constraint(name)`, `.index(name)`, `.trigger(name)`, `.exclusion(name)`, `.policy(name)`, and `.setRls(...)`.
 
 **Direct DML (no existence guard):** `.insert(args)`, `.update(args)`, `.delete(args)`, `.backfill(args)`.
 
@@ -501,7 +501,7 @@ table("line_items").foreignKey("line_items_order_fkey").add({
 table("reservations").exclusion("no_overlap").add({    // PG only — fails closed on SQLite/MySQL
   using: "gist", elements: [{ target: "room_id", operator: "=" }, { target: "during", operator: "&&" }], deferrable: true });
 table("orders").constraint("orders_qty_positive").drop({ ifExists: true });   // kind-agnostic
-pgTable("orders").constraint("orders_fk").validate();   // PG-only: validate a NOT VALID constraint
+table("orders").constraint("orders_fk").validate();   // PG-only: validate a NOT VALID constraint
 ```
 
 - `RefAction` = `"cascade" | "restrict" | "setNull" | "setDefault" | "noAction"` (camelCase wire tags, rendered now, C1); emitted compacted so an action-free FK is byte-identical to the pre-C1 image.
@@ -510,22 +510,22 @@ pgTable("orders").constraint("orders_fk").validate();   // PG-only: validate a N
 
 ### 3.10 Indexes
 
-Select with `.index(name)`; `.add({...})` takes target elements plus modifiers. Portable `IndexRef.add` accepts `on`/`unique`/`ifNotExists`/`schema` + per-element `order`; PG `PgIndexRef.add` adds `using`, `where`, `include`, `with`, `only`, `nullsNotDistinct`, and per-element `opclass`/`collation`/`nulls` (`types.ts:1204-1253`).
+Select with `.index(name)`; `.add({...})` takes target elements plus modifiers. `IndexRef.add` accepts the full PG-first surface: `on`/`unique`/`ifNotExists`/`schema`, `using`, `where`, `include`, `with`, `only`, `nullsNotDistinct`, and per-element `order`/`opclass`/`collation`/`nulls`. Vendor options stay fail-closed at validate/render time on targets without a native realization.
 
 ```ts
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 table("posts").index("posts_created_desc").add({ on: [{ column: "created_at", order: "desc" }] });  // only "desc" serialized
 table("users").index("users_lower_email").add({ on: [{ expr: (col) => col("email").lower() }] });
-pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
-pgTable("app_session_anchors").index("app_session_anchors_user_idx")
+table("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
+table("app_session_anchors").index("app_session_anchors_user_idx")
   .add({ on: ["app_id", "global_user_id"], where: (col) => col("revoked_at").isNull() });
-pgTable("orders").index("orders_customer_idx")
+table("orders").index("orders_customer_idx")
   .add({ on: ["customer_id"], include: ["total", "status"], with: { fillfactor: 90 }, only: true });
-table("orders").index("orders_customer_idx").drop({ ifExists: true });   // PgIndexDropArgs adds concurrently
+table("orders").index("orders_customer_idx").drop({ ifExists: true });   // drop args also support concurrently
 ```
 
-- `IndexMethod` (portable) = `"btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5"`; `PgIndexMethod` also `"hash" | "spgist"`.
+- `IndexMethod` = `"btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5"`.
 - `IndexStorageParams` (`with`) recognizes `pagesPerRange` and `fillfactor` (u32, compacted).
 - On `.drop(...)`, `unique: true` is kept because `Op::DropIndex.unique` drives destructive/approval gating (dropping a unique index removes a data-integrity guarantee).
 
@@ -585,7 +585,7 @@ table("events").partition("events_eu").create({ in: ["de","fr","es"] });        
 table("events").partition("events_h0").create({ modulus: 4, remainder: 0 });                         // HASH
 table("events").partition("events_default").create({ default: true });                               // DEFAULT
 table("events").partition("events_head").create({ from: [minValue], to: ["2026-01-01"] });           // unbounded sentinel
-pgTable("sandbox_events").partition("y2026_05").detach();   // PG concurrently
+table("sandbox_events").partition("y2026_05").detach();   // PG concurrently
 table("sandbox_events").partition("y2026_05").drop();
 ```
 
@@ -593,7 +593,7 @@ table("sandbox_events").partition("y2026_05").drop();
 
 ### 3.15 The Postgres vendor authoring surface
 
-`@zeroship/migrate` is also the privileged Postgres vendor authoring surface — platform/operator migrations can author closed vendor IR from the same root import, but **the import path is not the security gate**. Confined creator deploy/load paths reject privileged vendor ops with `VENDOR_OP_DENIED`; operator callers must pass an explicit platform/trusted capability. Each method records the same op payload shape as before. The vendor handle exports are `domain`, `schema`, `extension`, `role`, `sequence`, and `pgTable`; it also exports six free functions:
+`@zeroship/migrate` is also the privileged Postgres vendor authoring surface — platform/operator migrations can author closed vendor IR from the same root import and `table()` handle, but **the import path is not the security gate**. Confined creator deploy/load paths reject privileged vendor ops with `VENDOR_OP_DENIED`; operator callers must pass an explicit platform/trusted capability. Each method records the same op payload shape as before. Vendor value exports include `domain`, `schema`, `extension`, `role`, and `sequence`; the package also exports six free functions:
 
 | Function | Args (interface) | Records | Validation |
 | --- | --- | --- | --- |
@@ -629,9 +629,9 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 | --- | --- | --- | --- | --- | --- | --- |
 | `ExprBuilder` | DML where/set, policy, view, trigger | yes | yes | yes (`.count`/`.sum`/… plus `countStar()`) | yes; fail-closed off-target | `types.ts:652-656` |
 | `DefaultBuilder` | column defaults | **no** | default-safe subset | no by Rust backstop | no | `types.ts:624-628`, `ops.ts:1085-1175` |
-| `IndexExprBuilder` | index expr/predicate | yes | immutable subset | no by Rust backstop | no, except PG CHECK variants below | `types.ts:624-635` |
+| `IndexExprBuilder` | index expr/predicate | yes | immutable subset | no by Rust backstop | no | `types.ts:624-635` |
 | `GeneratedColumnBuilder` | generated columns | yes | immutable subset | no by Rust backstop | no | `types.ts:638-639` |
-| `CheckBuilder` / `CheckBuilderWithPg` | table CHECK / PG CHECK | yes | immutable subset | no by Rust backstop | core: fail-closed / PG CHECK: allowed on PG | `types.ts:643,669-674` |
+| `CheckBuilder` | table CHECK | yes | immutable subset | no by Rust backstop | allowed on PG, fail-closed off-target | `types.ts` |
 | `DomainValueBuilder` | domain CHECK | VALUE only | immutable subset | no by Rust backstop | allowed on PG | `types.ts:676-685` |
 
 ### 3.18 Determinism lint
@@ -1547,7 +1547,7 @@ grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: 
 
 A confined creator writes `table("posts").create({…})` with **no** `{schema}` — their unqualified ops resolve against a default project schema at apply time (and `gen-types` folds them under the neutral literal `"public"`, [§5.3](#5-authoring-declarative-desired-state--the-fold)). The Platform corpus spans the shared `zeroship` schema and must name it explicitly on every op. The Platform profile is the only profile that permits `cross_schema` references and schema/extension/role/grant DDL at all ([§10.5](#10-security-first-design)).
 
-The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. Files mix `table(...)` (portable) and `pgTable(...)` (partial indexes, RLS, regex CHECKs). Where even the DSL can't express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL can't express (`functions_triggers_comments.ts:27`, with a `// TODO(dsl-v2)`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
+The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where even the DSL can't express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL can't express (`functions_triggers_comments.ts:27`, with a `// TODO(dsl-v2)`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
 
 ### 11.3 The two trust profiles (Confined vs Platform)
 

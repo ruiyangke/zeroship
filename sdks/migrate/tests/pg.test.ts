@@ -9,7 +9,7 @@ import {
   dropOwnedBy,
   extension,
   grant,
-  pgTable,
+  table,
   raw,
   revoke,
   role,
@@ -35,7 +35,7 @@ test("@zeroship/migrate root exports vendor names and /pg subpath is retired", a
   assert.equal(typeof imported.raw, "function");
   assert.equal(typeof imported.createFunction, "function");
   assert.equal(typeof imported.domain, "function");
-  assert.equal(typeof imported.pgTable, "function");
+  assert.equal(typeof imported.table, "function");
   assert.equal(typeof imported.sequence, "function");
   assert.equal(imported.dropSchema, undefined);
   assert.equal(imported.dropExtension, undefined);
@@ -61,15 +61,15 @@ test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object tar
   );
 });
 
-test("pgTable().policy().create requires using and rejects an explicit empty to[]", () => {
+test("table().policy().create requires using and rejects an explicit empty to[]", () => {
   assert.throws(
-    () => record(() => pgTable("u").policy("p").create({} as any)),
+    () => record(() => table("u").policy("p").create({} as any)),
     (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
   );
   assert.throws(
     () =>
       record(() =>
-        pgTable("u").policy("p").create({ to: [], using: (col: any) => col("x").isNotNull() } as any),
+        table("u").policy("p").create({ to: [], using: (col: any) => col("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
@@ -106,13 +106,13 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
       on: { kind: "table", names: ["users"], schema: "zs" },
       from: ["public"],
     });
-    pgTable("users", { schema: "zs" }).policy("tenant_only").create({
+    table("users", { schema: "zs" }).policy("tenant_only").create({
       for: "select",
       to: ["app_role"],
       using: (col) => col("app_id").eq("app_demo"),
       withCheck: (col) => col("app_id").isNotNull(),
     });
-    pgTable("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
+    table("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
     createFunction({
       name: "tenant_guard",
       schema: "zs",
@@ -217,7 +217,7 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
 
 test("table-scoped pg methods record setRls and legacy policy op payloads", () => {
   const ops = record(() => {
-    pgTable("secrets", { schema: "zs" })
+    table("secrets", { schema: "zs" })
       .setRls({ enabled: true, forced: true })
       .policy("tenant_only").create({
         using: (col) => col("tenant_id").eq(currentSetting("tenant.id", { missingOk: true })),
@@ -255,11 +255,11 @@ test("table-scoped pg methods record setRls and legacy policy op payloads", () =
 
 test("setRls omits absent fields and rejects empty patches", () => {
   assert.deepEqual(
-    record(() => pgTable("secrets", { schema: "zs" }).setRls({ enabled: true })),
+    record(() => table("secrets", { schema: "zs" }).setRls({ enabled: true })),
     [{ op: "setRls", table: "secrets", schema: "zs", enabled: true }],
   );
   assert.throws(
-    () => record(() => pgTable("secrets", { schema: "zs" }).setRls({})),
+    () => record(() => table("secrets", { schema: "zs" }).setRls({})),
     (e: any) => e.code === "OP_INVALID" && /\.setRls needs at least one/.test(e.message),
   );
 });

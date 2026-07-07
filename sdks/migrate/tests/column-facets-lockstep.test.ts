@@ -22,7 +22,6 @@ import {
   __drain as pubDrain,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
-  pgTable as pubPgTable,
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
@@ -34,7 +33,6 @@ import {
   __drain as engDrain,
   maxValue as engMaxValue,
   minValue as engMinValue,
-  pgTable as engPgTable,
   t as engT,
   table as engTable,
 } from "../dist/embedded-recorder.js";
@@ -42,9 +40,8 @@ import {
 type Rec = {
   begin: () => void;
   drain: () => any[];
-  pgTable: any;
-  t: any;
   table: any;
+  t: any;
   minValue: any;
   maxValue: any;
 };
@@ -52,7 +49,6 @@ type Rec = {
 const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
-  pgTable: pubPgTable,
   t: pubT,
   table: pubTable,
   minValue: pubMinValue,
@@ -61,7 +57,6 @@ const PUBLIC: Rec = {
 const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
-  pgTable: engPgTable,
   t: engT,
   table: engTable,
   minValue: engMinValue,
@@ -164,9 +159,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 function authorPartitionWith({
   begin,
   drain,
-  pgTable,
-  t,
   table,
+  t,
   minValue,
   maxValue,
 }: Rec): any[] {
@@ -183,7 +177,7 @@ function authorPartitionWith({
     to: ["2026-06-01T00:00:00Z", maxValue],
   }, { ifNotExists: true });
   table("events").partition("events_default").create({ default: true });
-  pgTable("events")
+  table("events")
     .index("events_ts_brin_idx")
     .add({
       on: ["ts"],
@@ -192,7 +186,7 @@ function authorPartitionWith({
       with: { pagesPerRange: 32 },
       only: true,
     });
-  pgTable("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
+  table("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
   table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }

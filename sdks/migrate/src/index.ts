@@ -21,7 +21,6 @@
 export {
   // table DDL/DML entry — the reusable fluent TableHandle
   table,
-  pgTable,
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
   enumType,
@@ -120,12 +119,6 @@ export type {
   IndexRef,
   IndexAddArgs,
   IndexDropArgs,
-  PgIndexAdd,
-  PgIndexDropArgs,
-  PgIndexElement,
-  PgIndexMethod,
-  PgIndexRef,
-  PgTableHandle,
   PolicyCreateArgs,
   PolicyDropArgs,
   PolicyRef,
@@ -158,11 +151,6 @@ export type {
   ExtensionCreateArgs,
   ExtensionDropArgs,
   ExtensionHandle,
-  CheckBuilderWithPg,
-  PgCheckDef,
-  PgCheckExprFn,
-  PgCheckRef,
-  PgConstraintRef,
   RoleCreateArgs,
   RoleDropArgs,
   RoleHandle,

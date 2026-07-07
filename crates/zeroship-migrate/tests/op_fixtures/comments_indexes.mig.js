@@ -7,7 +7,6 @@ import {
   table,
   t,
   view,
-  pgTable,
   sequence,
 } from "@zeroship/migrate";
 
@@ -29,7 +28,7 @@ export function up() {
     uniques: [{ name: "users_email_uq", columns: ["email"] }],
   });
 
-  pgTable("users").index("users_email_lower_idx").add({
+  table("users").index("users_email_lower_idx").add({
     on: ["email", { expr: (col) => col("email").lower() }],
     where: (col) => col("active").isTrue(),
   });

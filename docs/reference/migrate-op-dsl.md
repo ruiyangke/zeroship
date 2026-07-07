@@ -5,13 +5,13 @@ zeroship database migrations. A migration is a `.ts` module that imports the
 helpers it needs from `@zeroship/migrate` and exports a single
 `default { name?, up, down? }` object. You
 describe schema changes (DDL) and data migrations (DML) once through the fluent
-`table()`/`pgTable()` handles; the engine lowers them per-dialect and applies
+`table()` handle; the engine lowers them per-dialect and applies
 them faithfully. PostgreSQL is the first-class target; constructs with no native
 realization on another target fail closed unless the author supplies an explicit
 dialect leg.
 
 There is one import root: `@zeroship/migrate`. Core value exports include
-`table`, `pgTable`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
+`table`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
 `sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
 `raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
 `check`/`unique` stay fluent methods on the table handle; they are not
@@ -456,7 +456,7 @@ members.index("members_created_idx").add({
 });
 members.index("members_email_idx").drop({ unique: true });
 
-pgTable("members").index("members_active_email_idx").add({
+table("members").index("members_active_email_idx").add({
   on: ["email"],
   where: (col) => col("active").isTrue(),
   include: ["id"],
@@ -470,7 +470,7 @@ engine gates a UNIQUE-index drop as destructive (it silently removes a
 data-integrity guarantee) — omit it for a plain, reversible drop.
 PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
 `nullsNotDistinct`, per-element `opclass`/`collation`) are authored with
-`pgTable(...).index(...)` from `@zeroship/migrate`.
+`table(...).index(...)` from `@zeroship/migrate`.
 
 ### Table data — direct named DML
 
@@ -1125,13 +1125,13 @@ the `--check` generated-artifact gate on a production build. See
 for the build/watch wiring.
 
 > **Implemented: Postgres vendor primitives.** `@zeroship/migrate` exposes direct
-> named exports, not a `pg` namespace object. The current vendor value exports
-> are `schema`, `extension`, `role`, `dropOwnedBy`,
-> `grant`, `revoke`, `pgTable`, `createFunction`, `dropFunction`, `domain`,
-> `sequence`, and `raw`.
-> Table-scoped policies are authored as
-> `pgTable(table).policy(name).create/drop(...)`. These are Postgres-only and
-> capability-gated so the platform's own privileged DDL can be authored in the DSL.
+> named exports and one PG-first `table()` handle, not a `pg` namespace object.
+> The current vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
+> `grant`, `revoke`, `createFunction`, `dropFunction`, `domain`, `sequence`, and
+> `raw`; table-scoped vendor operations are methods on `table(name)`.
+> Policies are authored as `table(name).policy(policyName).create/drop(...)`.
+> These are Postgres-only and capability-gated so the platform's own privileged
+> DDL can be authored in the DSL.
 > The engine lowers
 > these vendor ops through the Postgres vendor renderer, hard-gated to the
 > Trusted/Platform profile and unreachable from a Confined creator migration by

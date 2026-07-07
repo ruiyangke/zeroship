@@ -5,7 +5,6 @@ import {
   now,
   genRandomUuid,
   interval,
-  pgTable,
   sequence,
 } from "@zeroship/migrate";
 
@@ -241,7 +240,7 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) });
+  table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) });
   table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (col) => col("pkce_method").eq("S256") });
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
