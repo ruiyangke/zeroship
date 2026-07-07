@@ -2085,6 +2085,111 @@ fn in_list_predicates_apply_identically_on_mysql() {
 }
 
 #[test]
+fn regex_predicate_renders_regexp_and_applies_on_mysql() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "regex", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (\
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,\
+                    name VARCHAR(64) NOT NULL,\
+                    matched VARCHAR(8) NOT NULL\
+                )",
+                qi(&cfg.project_schema),
+                qi("regex_rows")
+            ))
+            .await
+            .expect("create MySQL regex proof table");
+
+        let reg = std::collections::BTreeMap::from([("regex_rows".to_string(), OWNER.to_string())]);
+        let seed = r#"{"ir_version":1,"name":"seed_regex_rows","ops":[
+            {"op":"insert","table":"regex_rows",
+             "columns":["name","matched"],
+             "rows":[["a","no"],["aa","no"],["b","no"]]}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, seed, &reg).await;
+
+        let update = r#"{"ir_version":1,"name":"update_regex_rows","ops":[
+            {"op":"update","table":"regex_rows",
+             "set":{"matched":{"node":"literal","value":"yes"}},
+             "where":{"node":"pgRegexMatch","expr":{"node":"colRef","name":"name"},"pattern":"^a$"}}
+        ]}"#;
+        let document = zeroship_migrate::model::load::load_ir_document(
+            update,
+            OWNER,
+            zeroship_migrate::model::validate::Dialect::Mysql,
+            &reg,
+            None,
+            None,
+        )
+        .expect("load MySQL regex DML");
+        let author = IrAuthor::new(cfg.project_schema.clone(), OWNER, SqlDialect::Mysql);
+        let plan = author
+            .lower_plan(&document, &LiveSchema::default())
+            .expect("lower regex DML plan on MySQL");
+        let dml_templates = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                PlanStep::Dml { template, .. } => Some(template.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            dml_templates
+                .iter()
+                .any(|template| template.contains(" REGEXP ") && template.contains("'^a$'")),
+            "MySQL regex DML must render REGEXP with a string literal: {dml_templates:?}"
+        );
+
+        MigrationEngine::new()
+            .apply_plan(
+                &plan.steps,
+                Approval::None,
+                backend,
+                cfg,
+                OWNER,
+                LockMode::Acquire,
+            )
+            .await
+            .expect("apply regex DML plan on MySQL");
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT name, matched FROM {}.{} ORDER BY name",
+                qi(&cfg.project_schema),
+                qi("regex_rows")
+            ),
+            &[],
+        )
+        .await;
+        let got = rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    value_as_string(row.get("name")),
+                    value_as_string(row.get("matched")),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                ("a".into(), "yes".into()),
+                ("aa".into(), "no".into()),
+                ("b".into(), "no".into()),
+            ],
+            "MySQL REGEXP predicate should update only exact ^a$ matches"
+        );
+    }));
+}
+
+#[test]
 fn update_set_scalar_and_expr_apply_on_mysql() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
