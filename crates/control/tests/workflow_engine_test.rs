@@ -23,7 +23,7 @@ use ntex::web::{self, test};
 use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
-use zeroship_control::cron::workflow_blob_gc;
+use zeroship_control::cron::{workflow_blob_gc, workflow_retention};
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, RunUpdate, StepCheckpoint, StepDispatcher, StepRequest, StepResult,
     WorkflowEngineConfig,
@@ -471,9 +471,10 @@ async fn seed_run(
             "INSERT INTO zeroship.workflow_runs \
                 (id, workflow_name, app_id, deploy_id, state, input, wake_at, \
                  claimed_by, lease_expires, dispatch_nonce, \
-                 waiting_step_key, started_at) \
+                 waiting_step_key, started_at, terminal_at) \
              VALUES ($1, 'TestWorkflow', $2, $3, $4, $5, $6, \
-                     $7, $8, $9, $10, now())",
+                     $7, $8, $9, $10, now(), \
+                     CASE WHEN $4 IN ('completed','failed','cancelled','stalled') THEN now() ELSE NULL END)",
             &[
                 &run_id,
                 &app_id,
@@ -1850,6 +1851,271 @@ async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
             .get_blob(&young_hash)
             .await
             .is_ok());
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+#[serial]
+async fn workflow_retention_reaps_only_expired_terminal_runs() {
+    let Some(fx) = isolated_fixture("retention-gc").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "retention-gc").await;
+        let window_ms = 2 * 24 * 60 * 60 * 1_000;
+        let old_terminal_at = Utc::now() - ChronoDuration::milliseconds(window_ms + 60_000);
+        let fresh_terminal_at = Utc::now() - ChronoDuration::milliseconds(60_000);
+
+        let expired = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "completed",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let fresh = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "failed",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let live = seed_run(
+            &fx,
+            app_id,
+            &deploy_id,
+            "compensating",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET wake_at = NULL, terminal_at = $2 \
+                  WHERE id = $1",
+                &[&expired, &old_terminal_at],
+            )
+            .await
+            .expect("age expired terminal run");
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET wake_at = NULL, terminal_at = $2 \
+                  WHERE id = $1",
+                &[&fresh, &fresh_terminal_at],
+            )
+            .await
+            .expect("age fresh terminal run");
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET wake_at = NULL, terminal_at = $2 \
+                  WHERE id = $1",
+                &[&live, &old_terminal_at],
+            )
+            .await
+            .expect("stamp non-terminal run with old timestamp");
+
+        let expired_bytes = b"expired-terminal-blob".to_vec();
+        let expired_hash = sha256_hex(&expired_bytes);
+        fx.state
+            .workflow_blob_store
+            .put_blob(&expired_hash, &expired_bytes)
+            .await
+            .expect("write expired workflow blob");
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_blobs \
+                    (hash, size, content_type, refcount, last_referenced_at) \
+                 VALUES ($1, $2, 'application/json', 1, $3)",
+                &[&expired_hash, &(expired_bytes.len() as i64), &old_terminal_at],
+            )
+            .await
+            .expect("insert expired workflow blob ref");
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_steps \
+                    (run_id, ordinal, name, name_occurrence, kind, state, output_kind, \
+                     output_hash, output_size, output_content_type, batch_id, batch_width, finished_at) \
+                 VALUES ($1, 0, 'expired-blob', 0, 'run', 'completed', 'blob', \
+                         $2, $3, 'application/json', 'wfd_retention', 1, $4)",
+                &[&expired, &expired_hash, &(expired_bytes.len() as i64), &old_terminal_at],
+            )
+            .await
+            .expect("insert expired blob step");
+
+        for run_id in [&fresh, &live] {
+            fx.pg
+                .execute(
+                    "INSERT INTO zeroship.workflow_steps \
+                        (run_id, ordinal, name, name_occurrence, kind, state, output, output_kind, \
+                         batch_id, batch_width, finished_at) \
+                     VALUES ($1, 0, 'kept', 0, 'run', 'completed', $2, 'inline', \
+                             'wfd_retention', 1, now())",
+                    &[run_id, &serde_json::json!({"kept": true})],
+                )
+                .await
+                .expect("insert kept step");
+        }
+
+        let broadcast_id = zeroship_core::typed_id::new_workflow_broadcast_id();
+        let signal_id = zeroship_core::typed_id::new_workflow_signal_id();
+        let subscription_id = zeroship_core::typed_id::new_workflow_subscription_id();
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_broadcasts \
+                    (id, app_id, topic, type, payload, origin, idempotency_key, deploy_id, \
+                     fanout_state, created_at, expires_at) \
+                 VALUES ($1, $2, 'retention.topic', 'retention.event', $3, 'app', $4, $5, \
+                         'completed', $6, $6)",
+                &[
+                    &broadcast_id,
+                    &app_id,
+                    &serde_json::json!({"expired": true}),
+                    &format!("idem-{broadcast_id}"),
+                    &deploy_id,
+                    &old_terminal_at,
+                ],
+            )
+            .await
+            .expect("insert expired broadcast");
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_signals \
+                    (id, run_id, type, payload, origin, delivery, topic, broadcast_id, \
+                     idempotency_key, created_at) \
+                 VALUES ($1, $2, 'retention.event', $3, 'app', 'topic', 'retention.topic', $4, \
+                         $5, $6)",
+                &[
+                    &signal_id,
+                    &expired,
+                    &serde_json::json!({"expired": true}),
+                    &broadcast_id,
+                    &format!("sig-{signal_id}"),
+                    &old_terminal_at,
+                ],
+            )
+            .await
+            .expect("insert expired signal");
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_subscriptions \
+                    (id, app_id, topic, run_id, signal_name, ordinal, created_at, expires_at) \
+                 VALUES ($1, $2, 'retention.topic', $3, 'wait', 0, $4, $4)",
+                &[&subscription_id, &app_id, &expired, &old_terminal_at],
+            )
+            .await
+            .expect("insert expired subscription");
+
+        let stats = workflow_retention::tick_with_config(
+            &fx.state,
+            workflow_retention::WorkflowRetentionConfig {
+                retention_window_ms: window_ms,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("run retention sweep");
+        assert_eq!(stats.runs, 1);
+        assert_eq!(stats.steps, 1);
+        assert_eq!(stats.signals, 1);
+        assert_eq!(stats.subscriptions, 1);
+        assert_eq!(stats.broadcasts, 1);
+        assert_eq!(stats.blobs, 1);
+
+        let expired_count = fx
+            .pg
+            .query_one(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE id = $1",
+                &[&expired],
+            )
+            .await
+            .expect("expired run count");
+        assert_eq!(expired_count.get::<_, i64>("n"), 0);
+        for (run_id, expected_state) in [(&fresh, "failed"), (&live, "compensating")] {
+            let row = fx
+                .pg
+                .query_one(
+                    "SELECT state FROM zeroship.workflow_runs WHERE id = $1",
+                    &[run_id],
+                )
+                .await
+                .expect("kept run");
+            assert_eq!(row.get::<_, String>("state"), expected_state);
+            let step_count = fx
+                .pg
+                .query_one(
+                    "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                    &[run_id],
+                )
+                .await
+                .expect("kept step count");
+            assert_eq!(step_count.get::<_, i64>("n"), 1);
+        }
+
+        for (sql, value) in [
+            (
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                expired.as_str(),
+            ),
+            (
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_signals WHERE run_id = $1",
+                expired.as_str(),
+            ),
+            (
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_subscriptions WHERE run_id = $1",
+                expired.as_str(),
+            ),
+            (
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_broadcasts WHERE id = $1",
+                broadcast_id.as_str(),
+            ),
+            (
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_blobs WHERE hash = $1",
+                expired_hash.as_str(),
+            ),
+        ] {
+            let row = fx
+                .pg
+                .query_one(sql, &[&value])
+                .await
+                .expect("deleted row count");
+            assert_eq!(row.get::<_, i64>("n"), 0, "expected no rows for {sql}");
+        }
+        assert!(fx
+            .state
+            .workflow_blob_store
+            .get_blob(&expired_hash)
+            .await
+            .is_err());
+
+        let again = workflow_retention::tick_with_config(
+            &fx.state,
+            workflow_retention::WorkflowRetentionConfig {
+                retention_window_ms: window_ms,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("run retention sweep again");
+        assert_eq!(again, workflow_retention::RetentionStats::default());
     })
     .await
     .expect("test timeout");

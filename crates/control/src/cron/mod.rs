@@ -23,6 +23,7 @@ pub mod spend_reconcile;
 pub mod stripe_reconcile;
 pub mod workflow_blob_gc;
 pub mod workflow_engine;
+pub mod workflow_retention;
 pub mod workflow_signal_fanout;
 pub mod workflow_schedules;
 
@@ -129,6 +130,16 @@ pub fn spawn_all_with_options(
             workflow_blob_gc::run_orphan_sweep(
                 blob_orphan_gc_state,
                 workflow_blob_gc::DEFAULT_ORPHAN_SWEEP_TICK_SECS,
+            )
+            .await;
+        })
+        .detach();
+
+        let workflow_retention_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_retention::run(
+                workflow_retention_state,
+                workflow_retention::DEFAULT_TICK_SECS,
             )
             .await;
         })

@@ -90,6 +90,7 @@ export function up() {
       restarted_by: t.text(),
       dedup_key: t.text(),
       started_at: t.timestamp().notNull(),
+      terminal_at: t.timestamp(),
       created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
@@ -124,6 +125,10 @@ export function up() {
   pzs("workflow_runs").index("workflow_runs_cancel_requested_idx").add({
     on: ["id"],
     where: (c) => c("cancel_requested"),
+  });
+  pzs("workflow_runs").index("workflow_runs_terminal_retention_idx").add({
+    on: ["terminal_at", { column: "tree_depth", order: "desc" }, "id"],
+    where: (c) => c("state").in(["completed", "failed", "cancelled", "stalled"]).and(c("terminal_at").isNotNull()),
   });
 
   zs("workflow_blobs").create({

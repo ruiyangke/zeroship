@@ -1467,6 +1467,7 @@ where
                     dispatch_nonce = $3, \
                     claim_epoch = claim_epoch + 1, \
                     state = CASE WHEN state = 'compensating' THEN 'compensating' ELSE 'running' END, \
+                    terminal_at = NULL, \
                     last_dispatch_at = now() \
               WHERE id = $4 \
                 AND wake_at <= now() \
@@ -2553,6 +2554,7 @@ async fn apply_step_result_on_registry(
             "UPDATE zeroship.workflow_runs \
                 SET state = 'paused', \
                     wake_at = $1, \
+                    terminal_at = NULL, \
                     next_ordinal = GREATEST(next_ordinal, $2), \
                     waiting_step_key = $3, \
                     paused_from_status = $4, \
@@ -2623,6 +2625,10 @@ async fn apply_step_result_on_registry(
                     output = $2, \
                     error = $3, \
                     wake_at = $4, \
+                    terminal_at = CASE \
+                        WHEN $1 IN ('completed','failed','cancelled','stalled') THEN now() \
+                        ELSE NULL \
+                    END, \
                     next_ordinal = GREATEST(next_ordinal, $5), \
                     waiting_step_key = $6, \
                     paused_from_status = NULL, \
@@ -2791,6 +2797,10 @@ where
                     output = NULL, \
                     error = $2, \
                     wake_at = $3, \
+                    terminal_at = CASE \
+                        WHEN $1 IN ('completed','failed','cancelled','stalled') THEN now() \
+                        ELSE NULL \
+                    END, \
                     waiting_step_key = NULL, \
                     compensation_outcome = $4, \
                     paused_from_status = NULL, \
@@ -2913,6 +2923,7 @@ where
                 SET state = $2, \
                     error = $3, \
                     wake_at = NULL, \
+                    terminal_at = now(), \
                     waiting_step_key = NULL, \
                     compensation_outcome = $4, \
                     claimed_by = NULL, \
@@ -3104,6 +3115,7 @@ where
                 SET state = 'cancelled', \
                     cancel_requested = false, \
                     wake_at = NULL, \
+                    terminal_at = now(), \
                     waiting_step_key = NULL, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
@@ -3701,6 +3713,7 @@ where
                 output_size = NULL, \
                 output_content_type = NULL, \
                 wake_at = NULL, \
+                terminal_at = now(), \
                 waiting_step_key = NULL, \
                 paused_from_status = NULL, \
                 claimed_by = NULL, \
@@ -3729,6 +3742,7 @@ async fn requeue_claim(
                     ELSE 'queued' \
                 END, \
                 wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE now() END, \
+                terminal_at = NULL, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
                 dispatch_nonce = NULL \
@@ -3759,6 +3773,7 @@ async fn park_backpressure_claim(
                     ELSE 'queued' \
                 END, \
                 wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE $1 END, \
+                terminal_at = NULL, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
                 dispatch_nonce = NULL \

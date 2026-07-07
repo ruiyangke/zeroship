@@ -4,6 +4,7 @@
 //! manifests are managed by their own storage contract and are never listed or
 //! deleted here.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -91,25 +92,32 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     let mut deleted = 0usize;
     for row in rows {
         let hash: String = row.get("hash");
-        match state.workflow_blob_store.delete_blob(&hash).await {
-            Ok(()) => {
-                let changed = tx
-                    .execute(
-                        "DELETE FROM zeroship.workflow_blobs \
-                          WHERE hash = $1 AND refcount = 0",
-                        &[&hash],
-                    )
-                    .await?;
-                if changed > 0 {
-                    deleted += 1;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(hash = %hash, error = %e, "workflow blob ref GC delete failed");
-            }
+        if delete_zero_ref_blob_locked(state, &tx, &hash).await? {
+            deleted += 1;
         }
     }
 
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+pub(crate) async fn delete_zero_ref_hashes(
+    state: &AppState,
+    hashes: impl IntoIterator<Item = String>,
+) -> Result<usize, RegistryError> {
+    let hashes: BTreeSet<String> = hashes.into_iter().collect();
+    if hashes.is_empty() {
+        return Ok(0);
+    }
+
+    let mut conn = state.registry.conn().await?;
+    let tx = conn.transaction().await?;
+    let mut deleted = 0usize;
+    for hash in hashes {
+        if delete_zero_ref_blob_locked(state, &tx, &hash).await? {
+            deleted += 1;
+        }
+    }
     tx.commit().await?;
     Ok(deleted)
 }
@@ -186,4 +194,52 @@ where
         )
         .await?;
     Ok(rows.first().is_some_and(|row| row.get("referenced")))
+}
+
+async fn delete_zero_ref_blob_locked<C>(
+    state: &AppState,
+    conn: &C,
+    hash: &str,
+) -> Result<bool, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT b.hash \
+               FROM zeroship.workflow_blobs b \
+              WHERE b.hash = $1 \
+                AND b.refcount = 0 \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM zeroship.workflow_steps s \
+                     WHERE s.output_kind = 'blob' AND s.output_hash = b.hash \
+                ) \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM zeroship.workflow_runs r \
+                     WHERE r.output_kind = 'blob' AND r.output_hash = b.hash \
+                ) \
+              FOR UPDATE SKIP LOCKED",
+            &[&hash],
+        )
+        .await?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    match state.workflow_blob_store.delete_blob(hash).await {
+        Ok(()) => {
+            let changed = conn
+                .execute(
+                    "DELETE FROM zeroship.workflow_blobs \
+                      WHERE hash = $1 AND refcount = 0",
+                    &[&hash],
+                )
+                .await?;
+            Ok(changed > 0)
+        }
+        Err(e) => {
+            tracing::warn!(hash = %hash, error = %e, "workflow blob GC delete failed");
+            Ok(false)
+        }
+    }
 }
