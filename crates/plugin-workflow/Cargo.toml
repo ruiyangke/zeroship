@@ -8,9 +8,13 @@ description = "zeroship env.workflows native binding"
 zeroship-core = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
+async-trait = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 compio = { workspace = true }
 cyper = { workspace = true }
 percent-encoding = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 v8 = { workspace = true }

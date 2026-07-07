@@ -408,6 +408,29 @@ With `from`, the journal prefix before the named step is retained and the target
 step plus everything after it is dropped. Without `from`, the full journal is
 dropped. The run input is retained; use a new `start()` to change input.
 
+## Local Development
+
+`zeroship serve` runs `env.workflows` through an in-process SQLite mini-engine.
+It uses the same `@zeroship/workflows` SDK surface and the same runtime replay
+shim as deployed runs, but stores the journal in a dev-local SQLite database
+owned by the local process.
+
+The local engine is dev-only by construction: the CLI serve path is the only
+construction vector that can create the SQLite backend. Production workers build
+`env.workflows` with the HTTP control-plane backend and never select the local
+engine.
+
+Intentional local divergences:
+
+- Single process only. There are no multi-node leases, lease reclaim races, or
+  cross-worker handoffs in the SQLite engine.
+- No gateway ingress edge. `run.signal(...)` works locally; public signal
+  routes and topic ingress are deployed-only features.
+- SQLite lifetime is local to the dev process and configured file path. Deleting
+  the file deletes the local workflow journal.
+- Schedules, child workflow joins, compensation replay, and large workflow blobs
+  are deployed-engine parity items unless explicitly listed as local support.
+
 ## Schedules
 
 Schedules start fresh runs at deploy-reconciled times. Use `schedule(...)` with

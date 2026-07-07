@@ -8,16 +8,16 @@
 
 #![allow(unsafe_code)]
 
+use std::future::Future;
+
 use serde_json::{json, Map, Value};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
-use crate::client::{
-    build_get_status_request, build_restart_request, build_signal_request, build_start_request,
-    build_transition_request, execute_json, WorkflowClientConfig, WorkflowRpcError,
-};
+use crate::backend::SharedWorkflowBackend;
+use crate::client::WorkflowRpcError;
 
 // ---------------------------------------------------------------------------
 // State
@@ -25,18 +25,18 @@ use crate::client::{
 
 #[derive(Debug)]
 pub struct Workflows {
-    pub(crate) client: WorkflowClientConfig,
+    pub(crate) backend: SharedWorkflowBackend,
 }
 
 #[derive(Debug)]
 pub struct WorkflowHandle {
-    pub(crate) client: WorkflowClientConfig,
+    pub(crate) backend: SharedWorkflowBackend,
     pub(crate) workflow_name: String,
 }
 
 #[derive(Debug)]
 pub struct WorkflowRun {
-    pub(crate) client: WorkflowClientConfig,
+    pub(crate) backend: SharedWorkflowBackend,
     pub(crate) run_id: String,
 }
 
@@ -274,16 +274,13 @@ fn setup_promise<'s>(
 
 fn dispatch_json<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    request: Result<crate::client::WorkflowHttpRequest, WorkflowRpcError>,
+    op: impl Future<Output = Result<Value, WorkflowRpcError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match request {
-            Ok(req) => match execute_json(req).await {
-                Ok(value) => ResolveValue::Json(value.to_string()),
-                Err(e) => ResolveValue::RejectError(e.to_op_error()),
-            },
+        let value = match op.await {
+            Ok(value) => ResolveValue::Json(value.to_string()),
             Err(e) => ResolveValue::RejectError(e.to_op_error()),
         };
         OpResult::JsValue {
@@ -297,51 +294,46 @@ fn dispatch_json<'s>(
 
 fn dispatch_start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    client: WorkflowClientConfig,
+    backend: SharedWorkflowBackend,
     workflow_name: String,
     body: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let request = build_start_request(&client, &workflow_name, body);
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match request {
-            Ok(req) => match execute_json(req).await {
-                Ok(value) => {
-                    let run_id = value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .ok_or_else(|| {
-                            WorkflowRpcError::Decode(
-                                "workflow start response did not include id".to_string(),
-                            )
-                        });
-                    match run_id {
-                        Ok(run_id) => {
-                            let resolver_for_continuation = resolver.clone();
-                            ResolveValue::Continuation(Box::new(move |scope, _state| {
-                                let local_resolver =
-                                    v8::Local::new(scope, &resolver_for_continuation);
-                                match mint_workflow_run(scope, client, run_id) {
-                                    Some(obj) => {
-                                        local_resolver.resolve(scope, obj.into());
-                                    }
-                                    None => {
-                                        let err = OpError::error(
-                                            "workflow start: failed to mint WorkflowRun",
-                                        );
-                                        let exc = err.to_exception(scope);
-                                        local_resolver.reject(scope, exc);
-                                    }
+        let value = match backend.start(workflow_name, body).await {
+            Ok(value) => {
+                let run_id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        WorkflowRpcError::Decode(
+                            "workflow start response did not include id".to_string(),
+                        )
+                    });
+                match run_id {
+                    Ok(run_id) => {
+                        let backend = backend.clone();
+                        let resolver_for_continuation = resolver.clone();
+                        ResolveValue::Continuation(Box::new(move |scope, _state| {
+                            let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
+                            match mint_workflow_run(scope, backend, run_id) {
+                                Some(obj) => {
+                                    local_resolver.resolve(scope, obj.into());
                                 }
-                            }))
-                        }
-                        Err(e) => ResolveValue::RejectError(e.to_op_error()),
+                                None => {
+                                    let err =
+                                        OpError::error("workflow start: failed to mint WorkflowRun");
+                                    let exc = err.to_exception(scope);
+                                    local_resolver.reject(scope, exc);
+                                }
+                            }
+                        }))
                     }
+                    Err(e) => ResolveValue::RejectError(e.to_op_error()),
                 }
-                Err(e) => ResolveValue::RejectError(e.to_op_error()),
-            },
+            }
             Err(e) => ResolveValue::RejectError(e.to_op_error()),
         };
         OpResult::JsValue {
@@ -355,42 +347,38 @@ fn dispatch_start<'s>(
 
 fn dispatch_restart<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    client: WorkflowClientConfig,
+    backend: SharedWorkflowBackend,
     run_id: String,
     body: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let request = build_restart_request(&client, &run_id, body);
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match request {
-            Ok(req) => match execute_json(req).await {
-                Ok(value) => {
-                    let response_run_id = value
-                        .get("runId")
-                        .or_else(|| value.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| run_id.clone());
-                    let resolver_for_continuation = resolver.clone();
-                    ResolveValue::Continuation(Box::new(move |scope, _state| {
-                        let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
-                        match mint_workflow_run(scope, client, response_run_id) {
-                            Some(obj) => {
-                                local_resolver.resolve(scope, obj.into());
-                            }
-                            None => {
-                                let err = OpError::error(
-                                    "workflow restart: failed to mint WorkflowRun",
-                                );
-                                let exc = err.to_exception(scope);
-                                local_resolver.reject(scope, exc);
-                            }
+        let value = match backend.restart(run_id.clone(), body).await {
+            Ok(value) => {
+                let response_run_id = value
+                    .get("runId")
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| run_id.clone());
+                let backend = backend.clone();
+                let resolver_for_continuation = resolver.clone();
+                ResolveValue::Continuation(Box::new(move |scope, _state| {
+                    let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
+                    match mint_workflow_run(scope, backend, response_run_id) {
+                        Some(obj) => {
+                            local_resolver.resolve(scope, obj.into());
                         }
-                    }))
+                        None => {
+                            let err =
+                                OpError::error("workflow restart: failed to mint WorkflowRun");
+                            let exc = err.to_exception(scope);
+                            local_resolver.reject(scope, exc);
+                        }
+                    }
+                }))
                 }
-                Err(e) => ResolveValue::RejectError(e.to_op_error()),
-            },
             Err(e) => ResolveValue::RejectError(e.to_op_error()),
         };
         OpResult::JsValue {
@@ -433,7 +421,7 @@ impl WorkflowHandle {
         let body = start_body(scope, opts)?;
         Ok(dispatch_start(
             scope,
-            self.client.clone(),
+            self.backend.clone(),
             self.workflow_name.clone(),
             body,
         )
@@ -452,7 +440,7 @@ impl WorkflowHandle {
                 "workflow.get: runId must be a non-empty string",
             ));
         }
-        mint_workflow_run(scope, self.client.clone(), run_id)
+        mint_workflow_run(scope, self.backend.clone(), run_id)
             .ok_or_else(|| OpError::error("workflow.get: failed to mint WorkflowRun"))
     }
 }
@@ -476,11 +464,9 @@ impl WorkflowRun {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        Ok(dispatch_json(
-            scope,
-            build_get_status_request(&self.client, &self.run_id),
-        )
-        .into())
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        Ok(dispatch_json(scope, async move { backend.status(run_id).await }).into())
     }
 
     /// `run.signal({ type, payload })` → Promise<{ id }>.
@@ -491,11 +477,9 @@ impl WorkflowRun {
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let body = signal_body(scope, opts)?;
-        Ok(dispatch_json(
-            scope,
-            build_signal_request(&self.client, &self.run_id, body),
-        )
-        .into())
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        Ok(dispatch_json(scope, async move { backend.signal(run_id, body).await }).into())
     }
 
     #[v8_method]
@@ -503,11 +487,9 @@ impl WorkflowRun {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        Ok(dispatch_json(
-            scope,
-            build_transition_request(&self.client, &self.run_id, "pause"),
-        )
-        .into())
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        Ok(dispatch_json(scope, async move { backend.transition(run_id, "pause").await }).into())
     }
 
     #[v8_method]
@@ -515,11 +497,9 @@ impl WorkflowRun {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        Ok(dispatch_json(
-            scope,
-            build_transition_request(&self.client, &self.run_id, "resume"),
-        )
-        .into())
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        Ok(dispatch_json(scope, async move { backend.transition(run_id, "resume").await }).into())
     }
 
     #[v8_method]
@@ -528,11 +508,9 @@ impl WorkflowRun {
         scope: &mut v8::PinScope<'s, '_>,
         _opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        Ok(dispatch_json(
-            scope,
-            build_transition_request(&self.client, &self.run_id, "cancel"),
-        )
-        .into())
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        Ok(dispatch_json(scope, async move { backend.transition(run_id, "cancel").await }).into())
     }
 
     #[v8_method]
@@ -544,7 +522,7 @@ impl WorkflowRun {
         let body = restart_body(scope, opts)?;
         Ok(dispatch_restart(
             scope,
-            self.client.clone(),
+            self.backend.clone(),
             self.run_id.clone(),
             body,
         )
@@ -612,7 +590,7 @@ fn workflows_named_getter(
     let Some(state) = state_from_object::<Workflows>(scope, holder) else {
         return v8::Intercepted::kNo;
     };
-    match mint_workflow_handle(scope, state.client.clone(), name) {
+    match mint_workflow_handle(scope, state.backend.clone(), name) {
         Some(handle) => {
             rv.set(handle.into());
             v8::Intercepted::kYes
@@ -662,7 +640,7 @@ fn install_state<T: 'static>(
 
 pub fn mint_workflows<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    client: WorkflowClientConfig,
+    backend: SharedWorkflowBackend,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = Workflows::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -671,13 +649,13 @@ pub fn mint_workflows<'s>(
     );
     let obj = inst_tmpl.new_instance(scope)?;
     set_proto(scope, obj, class_tmpl)?;
-    install_state(scope, obj, Workflows { client });
+    install_state(scope, obj, Workflows { backend });
     Some(obj)
 }
 
 pub fn mint_workflow_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    client: WorkflowClientConfig,
+    backend: SharedWorkflowBackend,
     workflow_name: String,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = WorkflowHandle::install(scope);
@@ -687,7 +665,7 @@ pub fn mint_workflow_handle<'s>(
         scope,
         obj,
         WorkflowHandle {
-            client,
+            backend,
             workflow_name,
         },
     );
@@ -696,12 +674,12 @@ pub fn mint_workflow_handle<'s>(
 
 pub fn mint_workflow_run<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    client: WorkflowClientConfig,
+    backend: SharedWorkflowBackend,
     run_id: String,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = WorkflowRun::install(scope);
     let obj = class_tmpl.instance_template(scope).new_instance(scope)?;
     set_proto(scope, obj, class_tmpl)?;
-    install_state(scope, obj, WorkflowRun { client, run_id });
+    install_state(scope, obj, WorkflowRun { backend, run_id });
     Some(obj)
 }
