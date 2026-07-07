@@ -170,7 +170,7 @@ fn classify_expr(expr: &Expr) -> ExprCoverage {
         ),
         Expr::PgRegexMatch { .. } => vendor(
             "PgRegexMatch",
-            "PostgreSQL regex operator is a PG-only vendor expression",
+            "Regex renders with PostgreSQL/MySQL vendor syntax; SQLite has no stock REGEXP",
         ),
         Expr::PgColumnSize { .. } => vendor(
             "PgColumnSize",

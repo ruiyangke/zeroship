@@ -503,15 +503,20 @@ fn render_pg_regex_match(
     pattern: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG regex match is PostgreSQL-only".to_string(),
-        ));
+    match dialect {
+        SqlDialect::Postgres => Ok(format!(
+            "({expr} ~ {})",
+            pg_text_literal(pattern, "PG regex pattern")?
+        )),
+        SqlDialect::Mysql => Ok(format!(
+            "({expr} REGEXP {})",
+            in_list_text_literal(pattern, "regex pattern")?
+        )),
+        SqlDialect::Sqlite => Err(DmlError::UnrenderableExpr(
+            "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
+                .to_string(),
+        )),
     }
-    Ok(format!(
-        "({expr} ~ {})",
-        pg_text_literal(pattern, "PG regex pattern")?
-    ))
 }
 
 fn render_extract_field(field: ExtractField) -> &'static str {
@@ -1977,6 +1982,28 @@ mod tests {
             render_expr_inline(&second, SqlDialect::Postgres).unwrap(),
             "EXTRACT(second FROM \"ts\")",
             "second stays PG-only because PG preserves fractional seconds"
+        );
+    }
+
+    #[test]
+    fn regex_match_renders_postgres_and_mysql_but_refuses_sqlite() {
+        let expr = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^a$".to_string(),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"name\" ~ '^a$'::text)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`name` REGEXP '^a$')"
+        );
+
+        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        assert!(
+            err.to_string().contains("SQLite") && err.to_string().contains("REGEXP"),
+            "SQLite regex must fail closed with a precise message: {err}"
         );
     }
 

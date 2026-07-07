@@ -6,8 +6,8 @@ use zeroship_migrate::model::ir::{
     Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::model::validate::{
-    validate_expr, validate_ir_scoped, Dialect, TargetScope, CODE_UNSUPPORTED,
-    CODE_VENDOR_OP_DENIED,
+    validate_expr, validate_ir_scoped, Dialect, TargetScope, CODE_DIALECT_UNSUPPORTED,
+    CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::render::dml::assemble_backfill_clauses;
 use zeroship_migrate::{IrAuthor, LiveSchema, PolicyProfile, SchemaScope, SqlDialect};
@@ -18,7 +18,6 @@ const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "PgColumnSize",
     "PgExtract",
     "PgInterval",
-    "PgRegexMatch",
 ];
 
 const EXPECTED_PG_VENDOR_OP_KINDS: &[&str] = &[
@@ -80,10 +79,10 @@ fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
             ScalarFn::CurrentSetting => Some("FnCall::CurrentSetting"),
             ScalarFn::CurrentUser => Some("FnCall::CurrentUser"),
         },
-        Expr::PgRegexMatch { .. } => Some("PgRegexMatch"),
         Expr::PgColumnSize { .. } => Some("PgColumnSize"),
         Expr::PgExtract { .. } => Some("PgExtract"),
         Expr::PgInterval { .. } => Some("PgInterval"),
+        Expr::PgRegexMatch { .. } => None,
     }
 }
 
@@ -96,10 +95,6 @@ fn pg_only_expr_samples() -> Vec<Expr> {
         Expr::FnCall {
             r#fn: ScalarFn::CurrentUser,
             args: vec![],
-        },
-        Expr::PgRegexMatch {
-            expr: Box::new(Expr::col("name")),
-            pattern: "^a".to_string(),
         },
         Expr::PgColumnSize {
             expr: Box::new(Expr::col("name")),
@@ -159,6 +154,38 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
     let expected: BTreeSet<&'static str> =
         EXPECTED_PG_ONLY_EXPR_NODES.iter().copied().collect();
     assert_eq!(seen, expected, "PG-only Expr coverage drifted");
+}
+
+#[test]
+fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
+    let columns = scope_columns();
+    let scope = TargetScope::new("t", &columns);
+    let expr = Expr::PgRegexMatch {
+        expr: Box::new(Expr::col("name")),
+        pattern: "^a".to_string(),
+    };
+
+    for (validator_dialect, sql_dialect) in [
+        (Dialect::Postgres, SqlDialect::Postgres),
+        (Dialect::Mysql, SqlDialect::Mysql),
+    ] {
+        validate_expr(&expr, validator_dialect, &scope, 0, None)
+            .unwrap_or_else(|err| panic!("regex must validate on {validator_dialect:?}: {err:?}"));
+        let mut set = BTreeMap::new();
+        set.insert("out".to_string(), IrValue::Expr(expr.clone()));
+        let rendered = assemble_backfill_clauses(sql_dialect, "t", &set, Some(&expr))
+            .unwrap_or_else(|err| panic!("regex must render on {sql_dialect:?}: {err:?}"));
+        assert!(
+            !rendered.set_clause.trim().is_empty(),
+            "regex set clause rendered empty on {sql_dialect:?}"
+        );
+    }
+
+    let err = validate_expr(&expr, Dialect::Sqlite, &scope, 0, None)
+        .expect_err("regex must fail closed on SQLite");
+    assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
+    assert_eq!(err.dialect, Dialect::Sqlite);
+    assert!(err.reason.contains("SQLite"), "got: {err}");
 }
 
 fn ir_with(op: Op) -> MigrationIr {
