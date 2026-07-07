@@ -2914,6 +2914,22 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
+    /// A per-dialect op sequence. The target's own leg wins; otherwise `default`
+    /// wins; otherwise the wrapper emits nothing on that target.
+    Dialectal {
+        /// Fallback op sequence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Vec<Op>>,
+        /// PostgreSQL op sequence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pg: Option<Vec<Op>>,
+        /// SQLite op sequence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sqlite: Option<Vec<Op>>,
+        /// MySQL op sequence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mysql: Option<Vec<Op>>,
+    },
 
     /// `CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.
     CreateView {
@@ -3475,6 +3491,9 @@ impl Op {
             // Backfill and column-rename are live-rendered on every supported
             // dialect (they need the resolved live schema).
             Op::Backfill { .. } | Op::RenameColumn { .. } => RenderMode::LiveResolved,
+            // The wrapper itself is expanded before per-op lower; the selected
+            // inner ops report their own render modes.
+            Op::Dialectal { .. } => RenderMode::Offline,
             // Container / JSON column defaults are live-resolved on every dialect.
             Op::SetColumnDefault { .. } if variant == "containerOrJson" => RenderMode::LiveResolved,
             // ALTER-shaped column/constraint ops are live-resolved only on SQLite
@@ -3876,6 +3895,7 @@ impl Op {
             Op::Update { .. } => ("update", "base"),
             Op::Delete { .. } => ("delete", "base"),
             Op::Backfill { .. } => ("backfill", "base"),
+            Op::Dialectal { .. } => ("dialectal", "base"),
             Op::Comment { .. } => ("comment", "base"),
             Op::CreateView {
                 materialized,
@@ -4150,6 +4170,7 @@ impl Op {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
+            | Op::Dialectal { .. }
             | Op::CreateTrigger { .. }
             | Op::DropTrigger { .. }
             | Op::CreateEnum { .. }
@@ -4249,7 +4270,8 @@ impl Op {
             | Op::DropDomain { .. }
             | Op::CreateSequence { .. }
             | Op::AlterSequence { .. }
-            | Op::DropSequence { .. } => None,
+            | Op::DropSequence { .. }
+            | Op::Dialectal { .. } => None,
             Op::Comment { target, .. } => target.touched_table(),
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
@@ -4275,6 +4297,24 @@ impl Op {
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
             | Op::PgRaw { .. } => None,
+        }
+    }
+
+    /// Add every table this op can touch into `set`. Most ops touch at most one
+    /// table and delegate to [`Self::touched_table`]; `Dialectal` recursively
+    /// flattens all present legs because its op sequence can touch several tables.
+    pub fn collect_touched_tables<'a>(&'a self, set: &mut std::collections::BTreeSet<&'a str>) {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = self {
+            for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                for op in leg {
+                    op.collect_touched_tables(set);
+                }
+            }
+        } else if let Some(table) = self.touched_table() {
+            set.insert(table);
         }
     }
 
@@ -4346,7 +4386,8 @@ impl Op {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::PgRaw { .. } => None,
+            | Op::PgRaw { .. }
+            | Op::Dialectal { .. } => None,
         }
     }
 
@@ -4385,6 +4426,7 @@ impl Op {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
+            | Op::Dialectal { .. }
             | Op::Comment { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
@@ -4452,6 +4494,7 @@ impl Op {
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
+            | Op::Dialectal { .. }
             | Op::Comment { .. }
             | Op::CreateView { .. }
             | Op::CreateEnum { .. }
@@ -4490,8 +4533,10 @@ impl MigrationIr {
     /// `OnlineRename` plan steps.
     #[must_use]
     pub fn touched_tables(&self) -> Vec<String> {
-        let set: std::collections::BTreeSet<&str> =
-            self.ops.iter().filter_map(Op::touched_table).collect();
+        let mut set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for op in &self.ops {
+            op.collect_touched_tables(&mut set);
+        }
         set.into_iter().map(str::to_string).collect()
     }
 }

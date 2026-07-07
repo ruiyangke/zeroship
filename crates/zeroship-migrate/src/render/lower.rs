@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::analyze::Advisory;
-use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
+use crate::guard::{guard_for, GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use crate::model::expr::Expr;
 use crate::model::load::op_created_table;
 use crate::render::declarative::{
@@ -1560,28 +1560,90 @@ impl IrAuthor {
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
-        for (op_index, op) in ir.ops.iter().enumerate() {
-            // The whole-up step lowering discards the structural statement list (it
-            // is the §6.4 parity leg, which only compares the joined `up`); the
-            // guarded path ([`lower_guarded`]) consumes the list to guard true
-            // statements. `op_index` is the plan position the DML-step version folds
-            // in (so two byte-identical DML ops get distinct journal ids).
-            match self.lower_one_op(
-                op_index,
+        let mut plan_index = 0usize;
+        for op in &ir.ops {
+            self.lower_op_into_steps(
                 op,
+                &mut plan_index,
+                &mut out,
                 &mut live_tables,
                 &mut partition_state,
                 live,
                 &mut named_types,
-            )? {
-                LoweredOp::Ddl(units) => {
-                    out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
-                }
-                LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
-                LoweredOp::Dml(step) => out.push(step),
-            }
+            )?;
         }
         Ok(out)
+    }
+
+    fn selected_dialectal_leg<'a>(
+        &self,
+        default: &'a Option<Vec<Op>>,
+        pg: &'a Option<Vec<Op>>,
+        sqlite: &'a Option<Vec<Op>>,
+        mysql: &'a Option<Vec<Op>>,
+    ) -> Option<&'a [Op]> {
+        let own = match self.dialect {
+            SqlDialect::Postgres => pg.as_deref(),
+            SqlDialect::Sqlite => sqlite.as_deref(),
+            SqlDialect::Mysql => mysql.as_deref(),
+        };
+        own.or(default.as_deref())
+    }
+
+    fn lower_op_into_steps(
+        &self,
+        op: &Op,
+        plan_index: &mut usize,
+        out: &mut Vec<PlanStep>,
+        live_tables: &mut BTreeSet<String>,
+        partition_state: &mut PartitionLowerState,
+        live: &LiveSchema,
+        named_types: &mut NamedTypeRegistry,
+    ) -> Result<(), IrLowerError> {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+                for inner in leg {
+                    if matches!(inner, Op::Dialectal { .. }) {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "nested dialectal op reached lower",
+                        ));
+                    }
+                    self.lower_op_into_steps(
+                        inner,
+                        plan_index,
+                        out,
+                        live_tables,
+                        partition_state,
+                        live,
+                        named_types,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        // The whole-up step lowering discards the structural statement list (it is
+        // the §6.4 parity leg, which only compares the joined `up`); the guarded
+        // path ([`lower_guarded`]) consumes the list to guard true statements.
+        // `plan_index` is the flattened plan position the DML-step version folds
+        // in (so two byte-identical DML ops get distinct journal ids).
+        let op_index = *plan_index;
+        *plan_index += 1;
+        match self.lower_one_op(
+            op_index,
+            op,
+            live_tables,
+            partition_state,
+            live,
+            named_types,
+        )? {
+            LoweredOp::Ddl(units) => {
+                out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
+            }
+            LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
+            LoweredOp::Dml(step) => out.push(step),
+        }
+        Ok(())
     }
 
     /// Lower a SINGLE op, advancing the working `live` table set when the op creates
@@ -1679,6 +1741,11 @@ impl IrAuthor {
         let guard = op.existence_guard();
         let mut probe: Option<crate::model::probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
+            Op::Dialectal { .. } => {
+                return Err(IrLowerError::UnsupportedOp(
+                    "dialectal op must be expanded before lower_one_op",
+                ));
+            }
             Op::CreateEnum { name, values, .. } => {
                 named_types.create_enum(name, &eff_schema, values)?;
                 if self.dialect.supports(Capability::MaterializedEnumType) {
@@ -3125,126 +3192,184 @@ impl IrAuthor {
             }
         })?;
 
-        for (op_index, op) in ir.ops.iter().enumerate() {
-            let op_kind = op_kind_tag(op);
-            enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
-            // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
-            // lower failure aborts before any guarding — nothing applied. Each unit
-            // carries its STRUCTURAL per-statement list (the exact statements the
-            // renderer built, NOT a textual re-split of `up`).
-            let op_units = match self.lower_one_op(
-                op_index,
+        let mut plan_index = 0usize;
+        for op in &ir.ops {
+            self.lower_op_guarded(
                 op,
+                &mut plan_index,
+                &mut steps,
+                &mut fragments,
                 &mut live_tables,
                 &mut partition_state,
                 live,
                 &mut named_types,
-            )? {
-                LoweredOp::Ddl(units) => units,
-                LoweredOp::Rename(step) => {
-                    // §2.6.1 — one online-rename plan step, carried verbatim. NOT
-                    // fragment-guarded (the producer is trusted; `apply_plan`
-                    // re-guards at execution). It produces no `GuardedFragment` row.
-                    steps.push(PlanStep::OnlineRename(*step));
-                    continue;
-                }
-                LoweredOp::Dml(step) => {
-                    // §PR6a — a DML step is NOT fragment-guarded the way DDL is. A
-                    // one-shot `Dml` carries its values as NATIVE binds (`$n`/`?n`),
-                    // so there is no rendered-literal fragment a deny-list guard
-                    // would inspect; the executor's `run_dml_step` re-runs the
-                    // destructive approval gate. A `Backfill`'s assembled `UPDATE` is
-                    // guard-checked by the backfill executor before any batch runs
-                    // (`backfill.rs`). The op's expression AST was already gated by
-                    // the structural validator in `lower_dml_op`. So it produces no
-                    // `GuardedFragment` row, exactly like an online rename.
-                    steps.push(step);
-                    continue;
-                }
-            };
-
-            for (mig, statements) in op_units {
-                // Guard EACH true statement individually so a denial is attributed
-                // to THIS op (§6.1.1) — not buried in a concatenated blob. The
-                // statements come STRUCTURALLY from the renderer (the CREATE/ALTER,
-                // its `COMMENT ON COLUMN` side output, follow-on system indexes),
-                // never from a textual `;\n` split — so a string-literal column
-                // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
-                // is one whole statement, never broken mid-literal.
-                for stmt in &statements {
-                    let mut advisories = Vec::new();
-                    if guard_cfg.trust() == TrustProfile::Trusted {
-                        match op {
-                            Op::PgRaw { .. } => raw_island_guard
-                                .check_raw_island_sql_backstop(stmt)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                                .and_then(|()| {
-                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                        op_index,
-                                        op_kind,
-                                        source,
-                                    })
-                                })
-                                .map(|outcome| advisories.extend(outcome.advisories))?,
-                            Op::CreateFunction { body, .. } => raw_island_guard
-                                .check_raw_island_body_backstop(body, stmt)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                                .and_then(|()| {
-                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                        op_index,
-                                        op_kind,
-                                        source,
-                                    })
-                                })
-                                .map(|outcome| advisories.extend(outcome.advisories))?,
-                            _ => {
-                                let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })?;
-                                advisories.extend(outcome.advisories);
-                            }
-                        }
-                    } else {
-                        let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                            op_index,
-                            op_kind,
-                            source,
-                        })?;
-                        advisories.extend(outcome.advisories);
-                    }
-                    fragments.push(GuardedFragment {
-                        op_index,
-                        op_kind,
-                        sql: stmt.clone(),
-                        advisories,
-                    });
-                }
-                // Byte-identity invariant: the step's `up` MUST be exactly the join
-                // of the structural statements we just guarded — nothing inserted,
-                // rewritten, or re-quoted between guarding and concatenation
-                // (§6.1.1). With structural fragments this is the renderer's own
-                // `join(";\n")` round-tripping, so it holds by construction; the
-                // assertion remains a fail-closed engine-bug tripwire.
-                let reassembled = statements.join(";\n");
-                if reassembled != mig.up {
-                    return Err(IrGuardedLowerError::ReassemblyMismatch {
-                        name: mig.name.clone(),
-                    });
-                }
-                steps.push(PlanStep::Ddl(mig));
-            }
+                guard_scope.as_ref(),
+                guard.as_ref(),
+                &raw_island_guard,
+                guard_cfg.trust(),
+            )?;
         }
         Ok((steps, fragments))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_op_guarded(
+        &self,
+        op: &Op,
+        plan_index: &mut usize,
+        steps: &mut Vec<PlanStep>,
+        fragments: &mut Vec<GuardedFragment>,
+        live_tables: &mut BTreeSet<String>,
+        partition_state: &mut PartitionLowerState,
+        live: &LiveSchema,
+        named_types: &mut NamedTypeRegistry,
+        guard_scope: Option<&crate::model::policy::SchemaScope>,
+        guard: &dyn MigrationGuard,
+        raw_island_guard: &SqlGuard,
+        trust: TrustProfile,
+    ) -> Result<(), IrGuardedLowerError> {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+                for inner in leg {
+                    if matches!(inner, Op::Dialectal { .. }) {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "nested dialectal op reached lower",
+                        )
+                        .into());
+                    }
+                    self.lower_op_guarded(
+                        inner,
+                        plan_index,
+                        steps,
+                        fragments,
+                        live_tables,
+                        partition_state,
+                        live,
+                        named_types,
+                        guard_scope,
+                        guard,
+                        raw_island_guard,
+                        trust,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        let op_index = *plan_index;
+        *plan_index += 1;
+        let op_kind = op_kind_tag(op);
+        enforce_vendor_capability_at_lower(op, guard_scope)?;
+        // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
+        // lower failure aborts before any guarding — nothing applied. Each unit
+        // carries its STRUCTURAL per-statement list (the exact statements the
+        // renderer built, NOT a textual re-split of `up`).
+        let op_units = match self.lower_one_op(
+            op_index,
+            op,
+            live_tables,
+            partition_state,
+            live,
+            named_types,
+        )? {
+            LoweredOp::Ddl(units) => units,
+            LoweredOp::Rename(step) => {
+                // §2.6.1 — one online-rename plan step, carried verbatim. NOT
+                // fragment-guarded (the producer is trusted; `apply_plan`
+                // re-guards at execution). It produces no `GuardedFragment` row.
+                steps.push(PlanStep::OnlineRename(*step));
+                return Ok(());
+            }
+            LoweredOp::Dml(step) => {
+                // §PR6a — a DML step is NOT fragment-guarded the way DDL is. A
+                // one-shot `Dml` carries its values as NATIVE binds (`$n`/`?n`),
+                // so there is no rendered-literal fragment a deny-list guard
+                // would inspect; the executor's `run_dml_step` re-runs the
+                // destructive approval gate. A `Backfill`'s assembled `UPDATE` is
+                // guard-checked by the backfill executor before any batch runs
+                // (`backfill.rs`). The op's expression AST was already gated by
+                // the structural validator in `lower_dml_op`. So it produces no
+                // `GuardedFragment` row, exactly like an online rename.
+                steps.push(step);
+                return Ok(());
+            }
+        };
+
+        for (mig, statements) in op_units {
+            // Guard EACH true statement individually so a denial is attributed to
+            // THIS op (§6.1.1) — not buried in a concatenated blob.
+            for stmt in &statements {
+                let mut advisories = Vec::new();
+                if trust == TrustProfile::Trusted {
+                    match op {
+                        Op::PgRaw { .. } => raw_island_guard
+                            .check_raw_island_sql_backstop(stmt)
+                            .map_err(|source| FragmentGuardDenied {
+                                op_index,
+                                op_kind,
+                                source,
+                            })
+                            .and_then(|()| {
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                            })
+                            .map(|outcome| advisories.extend(outcome.advisories))?,
+                        Op::CreateFunction { body, .. } => raw_island_guard
+                            .check_raw_island_body_backstop(body, stmt)
+                            .map_err(|source| FragmentGuardDenied {
+                                op_index,
+                                op_kind,
+                                source,
+                            })
+                            .and_then(|()| {
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                            })
+                            .map(|outcome| advisories.extend(outcome.advisories))?,
+                        _ => {
+                            let outcome = guard.check(stmt).map_err(|source| {
+                                FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                }
+                            })?;
+                            advisories.extend(outcome.advisories);
+                        }
+                    }
+                } else {
+                    let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                        op_index,
+                        op_kind,
+                        source,
+                    })?;
+                    advisories.extend(outcome.advisories);
+                }
+                fragments.push(GuardedFragment {
+                    op_index,
+                    op_kind,
+                    sql: stmt.clone(),
+                    advisories,
+                });
+            }
+            // Byte-identity invariant: the step's `up` MUST be exactly the join of
+            // the structural statements we just guarded — nothing inserted,
+            // rewritten, or re-quoted between guarding and concatenation (§6.1.1).
+            let reassembled = statements.join(";\n");
+            if reassembled != mig.up {
+                return Err(IrGuardedLowerError::ReassemblyMismatch {
+                    name: mig.name.clone(),
+                });
+            }
+            steps.push(PlanStep::Ddl(mig));
+        }
+        Ok(())
     }
 
     /// Map an IR `createTable` op to the [`CollectionDescriptor`] the shared
@@ -5059,6 +5184,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
         Op::Backfill { .. } => "backfill",
+        Op::Dialectal { .. } => "dialectal",
         Op::CreateView { .. } => "createView",
         Op::DropView { .. } => "dropView",
         Op::CreateEnum { .. } => "createEnum",

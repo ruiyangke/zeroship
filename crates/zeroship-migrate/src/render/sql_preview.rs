@@ -564,6 +564,7 @@ fn op_subject(op: &Op) -> String {
         | Op::DropFunction { name, .. } => quote_dotted(&[name]),
         Op::DropOwnedBy { roles } => quote_dotted(&[&roles.join(", ")]),
         Op::Grant { .. } | Op::Revoke { .. } => quote_dotted(&["<grant>"]),
+        Op::Dialectal { .. } => quote_dotted(&["<dialectal>"]),
         Op::SetRls { table, .. } => quote_dotted(&[table]),
         Op::CreatePolicy { name, table, .. }
         | Op::DropPolicy { name, table, .. }

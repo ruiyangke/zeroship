@@ -65,6 +65,8 @@ export {
   createFunction,
   dropFunction,
   raw,
+  // dialect() — expression legs AND op-level thunked legs (J1)
+  dialect,
   // the determinism lint (best-effort source scan)
   lintDeterminism,
 } from "./ops.js";

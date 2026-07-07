@@ -55,6 +55,8 @@ import type {
   DefaultExprFn,
   DefaultValue,
   DelArgs,
+  DialectExprLegs,
+  DialectOpLegs,
   DmlSetValue,
   DomainCheckFn,
   DomainHandle,
@@ -499,6 +501,7 @@ const emitInsert = defineOp("insert");
 const emitUpdate = defineOp("update");
 const emitDelete = defineOp("delete");
 const emitBackfill = defineOp("backfill");
+const emitDialectal = defineOp("dialectal");
 const emitCreateView = defineOp("createView", "view.create");
 const emitDropView = defineOp("dropView");
 const emitSetRls = defineOp("setRls");
@@ -2027,50 +2030,76 @@ export function countStar(): ExprChainType {
 }
 
 /**
- * The one Layer-2 portability escape (design §3.4): a per-dialect VALUE
- * divergence in an expression position. Each leg is an expression (a `(col) =>
- * Expr` chain node, another combinator, or a bare scalar), and the engine
- * renders the leg matching the target dialect — the dialect's own leg if
- * present, else `default`:
+ * The one Layer-2 portability escape (design §3.4): either a per-dialect VALUE
+ * divergence in an expression position, or a per-dialect OP sequence in statement
+ * position. Expression legs are values (a `(col) => Expr` chain node, another
+ * combinator, or a bare scalar), and the engine renders the leg matching the
+ * target dialect — the dialect's own leg if present, else `default`:
  *
  * ```ts
  * default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
  * dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
  * ```
  *
+ * Op-level legs are thunks. Each present thunk records normal ops into a
+ * sub-buffer that becomes a `dialectal` op leg. Missing own leg with no default
+ * is skipped on that target (unlike expression dialect(), which fails closed).
+ *
  * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
- * record in full in the checksummed IR as the `dialect` node in canonical order.
+ * record in full in the checksummed IR in canonical order.
  * The engine's validate applies the per-TARGET scope math: a target with no own
- * leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET (P11): each leg
- * is a ratcheted budget counter — the budget mechanism is a later phase.
+ * expression leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET
+ * (P11): each leg is a ratcheted budget counter — the budget mechanism is a
+ * later phase.
  */
-export function dialect(legs: {
-  default?: unknown;
-  pg?: unknown;
-  sqlite?: unknown;
-  mysql?: unknown;
-}): ExprChainType {
+export function dialect(legs: DialectOpLegs): void;
+export function dialect(legs: DialectExprLegs): ExprChainType;
+export function dialect(legs: DialectExprLegs | DialectOpLegs): ExprChainType | void {
   if (legs === null || typeof legs !== "object") {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression legs",
+      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression or op thunk legs",
     );
   }
-  const node: Node = { node: "dialect" };
-  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
-  let count = 0;
-  for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
-    const value = (legs as Record<string, unknown>)[leg];
-    if (value !== undefined) {
-      node[leg] = exprArg(value);
-      count++;
-    }
-  }
-  if (count === 0) {
+  const ordered = ["default", "pg", "sqlite", "mysql"] as const;
+  const present = ordered
+    .map((leg) => [leg, (legs as Record<string, unknown>)[leg]] as const)
+    .filter(([, value]) => value !== undefined);
+  if (present.length === 0) {
     throw structuredError(
       "OP_INVALID",
       "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present",
     );
+  }
+
+  const isOpThunk = (value: unknown): boolean => typeof value === "function" && nativeFnSynthNode(value) === undefined;
+  const firstIsThunk = isOpThunk(present[0][1]);
+  for (const [, value] of present.slice(1)) {
+    if (isOpThunk(value) !== firstIsThunk) {
+      throw structuredError(
+        "OP_INVALID",
+        "dialect(legs): cannot mix op thunk legs with expression legs",
+      );
+    }
+  }
+
+  if (firstIsThunk) {
+    const node: Node = {};
+    for (const [leg, value] of present) {
+      const thunk = value as () => void;
+      const rec = recorder();
+      const start = rec.ops.length;
+      thunk();
+      node[leg] = rec.ops.splice(start);
+    }
+    emitDialectal(node);
+    return;
+  }
+
+  const node: Node = { node: "dialect" };
+  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
+  for (const [leg, value] of present) {
+    node[leg] = exprArg(value);
   }
   return chain(node);
 }

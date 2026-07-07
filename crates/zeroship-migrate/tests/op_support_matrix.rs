@@ -41,6 +41,7 @@ const EXPECTED_OPS: &[&str] = &[
     "update",
     "delete",
     "backfill",
+    "dialectal",
     "comment",
     "createView",
     "dropView",
@@ -240,8 +241,8 @@ fn support_declarations_cover_every_op_and_dialect() {
     let expected: BTreeSet<String> = EXPECTED_OPS.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(
         expected.len(),
-        53,
-        "matrix must mirror the closed 53-op v1 discriminant set"
+        54,
+        "matrix must mirror the closed 54-op v1 discriminant set"
     );
     assert_eq!(
         schema_op_tags(),
