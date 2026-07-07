@@ -506,6 +506,19 @@ API_KEY="$(awk -F= '/^api_key=/{print $2}' "$WORK/provision.out")"
 [ -n "$APP_ID" ] || { fail "dev-provision did not return app_id"; cat "$WORK/provision.out"; exit 1; }
 
 docker exec -i "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null <<SQL
+UPDATE zeroship.plans
+   SET workflows_allowed = true, updated_at = now()
+ WHERE id = (SELECT plan_id FROM zeroship.apps WHERE id = '$APP_ID');
+UPDATE zeroship.apps
+   SET workflows_enabled = true, updated_at = now()
+ WHERE id = '$APP_ID';
+INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by)
+VALUES ('global', false, false, 'dw-e2e')
+ON CONFLICT (id) DO UPDATE SET
+  dispatch_paused = false,
+  ingress_disabled = false,
+  updated_at = now(),
+  updated_by = EXCLUDED.updated_by;
 INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note)
 VALUES ('$APP_ID', '127.0.0.1', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
 ON CONFLICT (app_id, host, port) DO UPDATE SET granted_at = now(), note = EXCLUDED.note;

@@ -700,6 +700,38 @@ async fn seed_topic_signal_run(fx: &Fixture, label: &str, topic: &str) -> String
     .await
 }
 
+async fn set_dispatch_paused(fx: &Fixture, paused: bool) {
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_rollout_config \
+                (id, dispatch_paused, ingress_disabled, updated_by) \
+             VALUES ('global', $1, false, 'dw24-e2e') \
+             ON CONFLICT (id) DO UPDATE SET \
+                dispatch_paused = EXCLUDED.dispatch_paused, \
+                updated_at = now(), \
+                updated_by = EXCLUDED.updated_by",
+            &[&paused],
+        )
+        .await
+        .expect("set workflow dispatch pause switch");
+}
+
+async fn set_ingress_disabled(fx: &Fixture, disabled: bool) {
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_rollout_config \
+                (id, dispatch_paused, ingress_disabled, updated_by) \
+             VALUES ('global', false, $1, 'dw24-e2e') \
+             ON CONFLICT (id) DO UPDATE SET \
+                ingress_disabled = EXCLUDED.ingress_disabled, \
+                updated_at = now(), \
+                updated_by = EXCLUDED.updated_by",
+            &[&disabled],
+        )
+        .await
+        .expect("set workflow ingress disable switch");
+}
+
 async fn seed_completed_step(
     fx: &Fixture,
     run_id: &str,
@@ -825,6 +857,101 @@ async fn drive_until_completed<D>(
         rows[0].get::<_, Option<String>>("claimed_by"),
         rows[0].get::<_, Option<String>>("dispatch_nonce"),
         run_debug(fx, run_id).await
+    );
+}
+
+async fn rollout_switch_drill(
+    fx: &Fixture,
+    control_url: &str,
+    gateway_url: &str,
+    dispatcher: Arc<GatewayStepDispatcher>,
+) {
+    let enabled_run = seed_run(fx, "dw24-enabled").await;
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("dw24-enabled-claim"),
+    )
+    .await
+    .expect("DW24 enabled claim tick");
+    assert_eq!(claimed, 1, "enabled workflow run should dispatch once");
+    drive_until_completed(
+        fx,
+        Arc::clone(&dispatcher),
+        config("dw24-enabled-complete"),
+        &enabled_run,
+    )
+    .await;
+
+    let parked_run = seed_run(fx, "dw24-dispatch-paused").await;
+    set_dispatch_paused(fx, true).await;
+    let paused_claims = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("dw24-dispatch-paused"),
+    )
+    .await
+    .expect("DW24 dispatch-pause tick");
+    set_dispatch_paused(fx, false).await;
+    assert_eq!(paused_claims, 0, "dispatch pause must stop claiming");
+    let (state, wake_at, claimed_by, dispatch_nonce) = run_state(&fx.pg, &parked_run).await;
+    assert_eq!(state, "queued");
+    assert!(
+        wake_at.is_some(),
+        "paused due run should stay durably parked with its wake_at"
+    );
+    assert_eq!(claimed_by, None);
+    assert_eq!(dispatch_nonce, None);
+    drive_until_completed(
+        fx,
+        Arc::clone(&dispatcher),
+        config("dw24-dispatch-resume"),
+        &parked_run,
+    )
+    .await;
+
+    let signal_run = seed_signal_run(fx, "dw24-ingress-disabled", "PT30S", None).await;
+    drive_until_waiting(
+        fx,
+        Arc::clone(&dispatcher),
+        config("dw24-ingress-park"),
+        &signal_run,
+    )
+    .await;
+    let token = create_run_signal_token(control_url, fx.app_id, &signal_run, "PT30S").await;
+    set_ingress_disabled(fx, true).await;
+    let (public_status, public_body) = post_public_signal(
+        gateway_url,
+        &token,
+        serde_json::json!({"ok": true, "source": "dw24-public"}),
+    )
+    .await;
+    let point_signal = post_signal(
+        control_url,
+        fx.app_id,
+        &signal_run,
+        serde_json::json!({"ok": true, "source": "dw24-point-to-point"}),
+    )
+    .await;
+    set_ingress_disabled(fx, false).await;
+    assert_eq!(
+        public_status, 503,
+        "public signal ingress should be disabled: {public_body}"
+    );
+    assert!(
+        point_signal["id"].as_str().is_some_and(|id| id.starts_with("sig_")),
+        "app-scoped run.signal should still work while public ingress is disabled"
+    );
+    drive_until_completed(
+        fx,
+        Arc::clone(&dispatcher),
+        config("dw24-ingress-resume"),
+        &signal_run,
+    )
+    .await;
+    assert_eq!(
+        run_output(fx, &signal_run).await["signal"]["payload"],
+        serde_json::json!({"ok": true, "source": "dw24-point-to-point"})
     );
 }
 
@@ -1760,6 +1887,13 @@ async fn durable_workflows_m1_keystone_real_spine() {
     compio::time::sleep(Duration::from_millis(100)).await;
 
     let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+    rollout_switch_drill(
+        &fx,
+        &control_url,
+        &gateway_url,
+        Arc::clone(&real_dispatcher),
+    )
+    .await;
 
     let schedule_row = fx
         .pg

@@ -47,6 +47,7 @@ pub mod token_handlers;
 pub mod void_reissue;
 pub mod workflow_instance_api;
 pub(crate) mod workflow_limits;
+pub(crate) mod workflow_rollout;
 
 use std::collections::HashSet;
 use std::sync::Arc;

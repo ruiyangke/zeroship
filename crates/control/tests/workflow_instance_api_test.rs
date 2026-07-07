@@ -69,6 +69,19 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
+    let setup_pg = pg(db_url).await;
+    setup_pg
+        .execute(
+            "UPDATE zeroship.plans SET workflows_allowed = true \
+              WHERE id IN ($1, $2, $3)",
+            &[
+                &zeroship_control::bootstrap_console::free_plan_id(),
+                &zeroship_control::bootstrap_console::pro_plan_id(),
+                &zeroship_control::bootstrap_console::unlimited_plan_id(),
+            ],
+        )
+        .await
+        .expect("enable workflow built-in plans for test");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
@@ -151,8 +164,8 @@ async fn seed_app_on_plan(
     let app_name = format!("wf-api-{label}-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
+             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash', true)",
             &[&app_id, &app_name, &plan_id],
         )
         .await
@@ -195,8 +208,8 @@ async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap
     fx.pg
         .execute(
             "INSERT INTO zeroship.plans \
-                (id, name, runtime_limits_json, net_policy_limits_json, spend_limit_default_cents) \
-             VALUES ($1, $2, $3, $4, 0)",
+                (id, name, runtime_limits_json, net_policy_limits_json, spend_limit_default_cents, workflows_allowed) \
+             VALUES ($1, $2, $3, $4, 0, true)",
             &[&plan_id, &format!("wf-api-cap-{label}"), &runtime, &net],
         )
         .await
@@ -219,8 +232,8 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
     let app_id = Uuid::new_v4();
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
+             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash', true)",
             &[
                 &app_id,
                 &format!("wf-api-nodeploy-{label}-{}", Uuid::new_v4().simple()),
