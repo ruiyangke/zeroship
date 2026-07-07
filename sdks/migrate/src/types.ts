@@ -1141,23 +1141,13 @@ export interface IndexAddArgs {
 
 export interface IndexDropArgs {
   ifExists?: boolean;
-  /** `unique` drives the destructive/approval gating at apply; absent/false is a
-   *  plain reversible index drop. */
-  unique?: boolean;
   schema?: string;
   concurrently?: boolean;
 }
 
 export interface IndexRef {
   add(args: IndexAddArgs): TableHandle;
-  /**
-   * Drop the index. `unique` is NOT in the spec's literal §3.4 arg list, but the
-   * IR `Op::DropIndex.unique` field DRIVES the destructive/approval gating at apply
-   * (a `unique: true` drop silently removes a data-integrity guarantee and lowers
-   * `destructive + requires_approval`). Keeping it on the surface preserves that
-   * apply-path safety signal (the brief's "apply path UNCHANGED"); absent/false ⇒
-   * a plain, reversible drop.
-   */
+  /** Drop the index. Uniqueness is derived by the engine from the live schema. */
   drop(args?: IndexDropArgs): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }

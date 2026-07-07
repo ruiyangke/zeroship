@@ -3388,8 +3388,6 @@ function recordDropIndex(
   emitDropIndex({
     name,
     table,
-    // `unique` drives the destructive/approval gating at apply — preserved here.
-    unique: args.unique,
     concurrently: args.concurrently,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists),
@@ -4088,7 +4086,6 @@ export function __makeTableHandle(
           recordDropIndex(name, idxName, {
             ifExists: args.ifExists,
             concurrently: args.concurrently,
-            unique: args.unique,
             schema: pickSchema(args, dflt),
           });
           return handle;

@@ -467,7 +467,7 @@ members.index("members_email_idx").add({ on: ["email"], unique: true });
 members.index("members_created_idx").add({
   on: ["org_id", { column: "created_at", order: "desc" }],
 });
-members.index("members_email_idx").drop({ unique: true });
+members.index("members_email_idx").drop();
 
 table("members").index("members_active_email_idx").add({
   on: ["email"],
@@ -478,9 +478,10 @@ table("members").index("members_active_email_idx").add({
 ```
 
 Indexes are **name-first** (the selector name), so a later migration can drop them
-deterministically. `.index().drop({ unique: true })` carries `unique` because the
-engine gates a UNIQUE-index drop as destructive (it silently removes a
-data-integrity guarantee) — omit it for a plain, reversible drop.
+deterministically. `.index().drop()` does not accept an author-declared
+`unique` flag; the engine derives whether the target index is unique from the
+live/folded schema and gates a UNIQUE-index drop as destructive (it silently
+removes a data-integrity guarantee).
 PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
 `nullsNotDistinct`, per-element `opclass`/`collation`) are authored with
 `table(...).index(...)` from `@zeroship/migrate`.

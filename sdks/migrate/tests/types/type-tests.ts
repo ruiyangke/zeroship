@@ -324,6 +324,9 @@ export function indexGrammar(): void {
   table("users").index("opclass_idx").add({ on: [{ column: "email", opclass: "text_pattern_ops" }] });
 
   table("users").index("collation_idx").add({ on: [{ column: "email", collation: "C" }] });
+
+  // @ts-expect-error — `.index().drop()` no longer accepts author-declared uniqueness.
+  table("users").index("bad_unique_drop").drop({ unique: true });
 }
 
 export function immutableOnlyBuilderSlots(): void {
