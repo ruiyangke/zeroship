@@ -1,10 +1,8 @@
-// `@zeroship/migrate/pg` package-boundary + op-shape tests.
+// Rooted Postgres vendor op-shape tests.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { currentSetting } from "../src/index.js";
-import { __begin, __drain } from "../src/ops.js";
 import {
   createFunction,
   dropFunction,
@@ -16,7 +14,9 @@ import {
   revoke,
   role,
   schema,
-} from "../src/pg.js";
+  currentSetting,
+} from "../src/index.js";
+import { __begin, __drain } from "../src/ops.js";
 
 function record(up: () => void): any[] {
   __begin();
@@ -24,11 +24,12 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-test("@zeroship/migrate/pg subpath resolves through package exports", async () => {
+test("@zeroship/migrate root exports vendor names and /pg subpath is retired", async () => {
   const resolveImport = (import.meta as ImportMeta & { resolve(specifier: string): string }).resolve;
-  const resolved = resolveImport("@zeroship/migrate/pg");
-  assert.match(resolved, /\/dist\/pg\.js$/);
-  const imported = await import("@zeroship/migrate/pg");
+  const resolved = resolveImport("@zeroship/migrate");
+  assert.match(resolved, /\/dist\/index\.js$/);
+  assert.throws(() => resolveImport("@zeroship/migrate/pg"), /Package subpath|ERR_PACKAGE_PATH_NOT_EXPORTED/);
+  const imported = await import("@zeroship/migrate");
   assert.equal((imported as any).pg, undefined);
   assert.equal(typeof imported.schema, "function");
   assert.equal(typeof imported.raw, "function");
@@ -277,7 +278,7 @@ test("raw requires reason and never records binds", () => {
 });
 
 test("sql is not exposed", async () => {
-  const imported = await import("../src/pg.js");
+  const imported = await import("../src/index.js");
   assert.equal((imported as any).sql, undefined);
   assert.equal((imported as any).pg, undefined);
 });

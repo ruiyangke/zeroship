@@ -26,8 +26,6 @@ import {
   genRandomUuid,
   currentSetting,
   concatWs,
-} from "../src/index.js";
-import {
   createFunction,
   dropFunction,
   dropOwnedBy,
@@ -38,7 +36,7 @@ import {
   revoke,
   role,
   schema,
-} from "../src/pg.js";
+} from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));

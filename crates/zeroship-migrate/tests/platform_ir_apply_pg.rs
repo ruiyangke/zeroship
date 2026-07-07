@@ -211,7 +211,7 @@ const CONFINED_GRANT_IR: &str = r#"{
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
 import { table, t, now, genRandomUuid } from "@zeroship/migrate";
-import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
+import { createFunction, pgTable, schema } from "@zeroship/migrate";
 
 export const name = "platform_attach";
 
@@ -275,7 +275,7 @@ export function up() {
 "#;
 const PLATFORM_COMPOSITE_FK_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate";
 
 export const name = "platform_composite_fk";
 
@@ -329,7 +329,7 @@ export function up() {
 "#;
 const PLATFORM_SYNTH_DEFAULT_TS: &str = r#"
 import { table, t, now, genRandomUuid } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_synth_defaults";
 
@@ -356,7 +356,7 @@ import {
   check,
   interval,
 } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate";
 
 export const name = "platform_expr_surface";
 
@@ -425,7 +425,7 @@ export function up() {
 "#;
 const PLATFORM_SCALAR_TYPES_TS: &str = r#"
 import { table, t, genRandomUuid } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_scalar_types";
 
@@ -447,7 +447,7 @@ export function up() {
 "#;
 const PLATFORM_DOMAIN_COLUMN_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { domain, schema } from "@zeroship/migrate/pg";
+import { domain, schema } from "@zeroship/migrate";
 
 export const name = "platform_domain_column";
 

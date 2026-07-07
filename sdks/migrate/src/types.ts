@@ -267,7 +267,7 @@ export interface TypeLexicon {
   inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
   enum(name: string | EnumHandle): ColumnDef;
-  /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate/pg`. */
+  /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate`. */
   domain(name: string | DomainHandle): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
   encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;
@@ -1242,7 +1242,7 @@ export interface TableHandle {
   trigger(name: string): TriggerRef;
 }
 
-/** The widened table handle returned by `@zeroship/migrate/pg`'s `pgTable()`.
+/** The widened table handle returned by `@zeroship/migrate`'s `pgTable()`.
  *  It is the same runtime object as `table()`, with table-scoped PG vendor
  *  methods made reachable only from the `/pg` type surface. */
 export interface PgTableHandle extends TableHandle {

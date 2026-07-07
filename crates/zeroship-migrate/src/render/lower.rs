@@ -607,14 +607,14 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
-    /// **VENDOR** — a vendor (`@zeroship/migrate/pg`) op was lowered against a
+    /// **VENDOR** — a vendor (`@zeroship/migrate`) op was lowered against a
     /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
     /// functions/extensions/schemas/`pgRaw`) is `dialect_scope = PgOnly` and has no
     /// SQLite analogue (vendor spec §4.3) — refused fail-closed at lower (the
     /// validate gate already refuses it at load on a SQLite target). Carries the op
     /// kind tag.
     #[error(
-        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate/pg \
+        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate \
          vendor primitives have no SQLite analogue (PgOnly); a SQLite deploy of them is \
          refused fail-closed"
     )]
@@ -2514,7 +2514,7 @@ impl IrAuthor {
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
                 self.lower_trigger_op(op, &eff_schema, &decl)?
             }
-            // VENDOR (`@zeroship/migrate/pg`) — render the privileged primitive to
+            // VENDOR (`@zeroship/migrate`) — render the privileged primitive to
             // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
             // SQLite target is refused fail-closed here (the validate gate already
             // refuses it at load on SQLite, §4.3 — this is defense in depth). The
@@ -5056,7 +5056,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::AlterSequence { .. } => "alterSequence",
         Op::DropSequence { .. } => "dropSequence",
         Op::Comment { .. } => "comment",
-        // VENDOR (`@zeroship/migrate/pg`).
+        // VENDOR (`@zeroship/migrate`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
         Op::CreateExtension { .. } => "createExtension",

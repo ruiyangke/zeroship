@@ -1,4 +1,4 @@
-//! VENDOR (`@zeroship/migrate/pg`) V1 — render + capability-gate + closed-enum +
+//! VENDOR (`@zeroship/migrate`) V1 — render + capability-gate + closed-enum +
 //! ir_version + checksum-neutrality faithful tests (vendor spec §6.1 PR-V1).
 //!
 //! Each test would FAIL pre-change (the Op variants, the capability gate, the

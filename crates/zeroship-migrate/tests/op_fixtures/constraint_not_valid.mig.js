@@ -3,8 +3,7 @@
 // … NOT VALID`), then a later `constraint(name).validate()` (rendered `ALTER TABLE …
 // VALIDATE CONSTRAINT …`). Gates the new `not_valid` FK/CHECK facet + the new
 // `Op::ValidateConstraint` through the REAL recorder → frozen wire ops.
-import { table } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, pgTable } from "@zeroship/migrate";
 
 export const name = "constraint_not_valid";
 

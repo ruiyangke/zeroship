@@ -40,13 +40,13 @@ const DOC = resolve(PKG_ROOT, "../../docs/reference/migrate-op-dsl.md");
 // time. (The flat ops are GONE — a doc that still imports them fails the gate.)
 const VOCAB_PREAMBLE = `import {
   table,
+  pgTable,
   view,
   enumType,
   comment,
   t, fromDb, lintDeterminism,
   now, genRandomUuid, currentSetting, currentUser, interval, concatWs,
 } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
 import { t as dbT } from "@zeroship/db";
 `;
 

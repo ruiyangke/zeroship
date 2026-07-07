@@ -1,5 +1,13 @@
-import { table, t, currentSetting } from "@zeroship/migrate";
-import { extension, grant, pgTable, role, schema } from "@zeroship/migrate/pg";
+import {
+  table,
+  t,
+  currentSetting,
+  extension,
+  grant,
+  pgTable,
+  role,
+  schema,
+} from "@zeroship/migrate";
 
 export const name = "platform_ts_vendor";
 

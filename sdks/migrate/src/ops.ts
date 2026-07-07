@@ -142,9 +142,58 @@ import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
-import type { Classification, MaskKind, VectorMetric } from "./generated/ir.js";
+import type {
+  Classification,
+  FuncArg,
+  FuncLanguage,
+  FuncVolatility,
+  GrantTarget,
+  MaskKind,
+  Privilege,
+  VectorMetric,
+} from "./generated/ir.js";
 
 type Node = Record<string, unknown>;
+
+export interface DropOwnedByArgs {
+  roles: string[];
+}
+
+export interface GrantArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  to: string[];
+  withGrantOption?: boolean;
+}
+
+export interface RevokeArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  from: string[];
+}
+
+export interface CreateFunctionArgs {
+  name: string;
+  schema?: string;
+  args?: FuncArg[];
+  returns: string;
+  language: FuncLanguage;
+  replace?: boolean;
+  volatility?: FuncVolatility;
+  body: string;
+}
+
+export interface DropFunctionArgs {
+  name: string;
+  schema?: string;
+  argTypes?: string[];
+  ifExists?: boolean;
+}
+
+export interface PgRawArgs {
+  sql: string;
+  reason: string;
+}
 
 // ── The ambient recorder (§3.1 / §5) ──
 
@@ -346,7 +395,7 @@ function pushOrDeferUp(op: Node): Node {
   return op;
 }
 
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+/** Internal hook used by vendor DDL helpers that record closed Postgres ops. */
 export function __pgPush(op: Node): Node {
   return push(op);
 }
@@ -1500,6 +1549,99 @@ export function __pgSequence(name: string): SequenceHandle {
   return handle;
 }
 
+export const domain = __pgDomain;
+export const schema = __pgSchema;
+export const extension = __pgExtension;
+export const role = __pgRole;
+export const sequence = __pgSequence;
+
+function recordVendor(op: Node): Node {
+  return __pgPush(compact(op));
+}
+
+export function dropOwnedBy(args: DropOwnedByArgs): Node {
+  if (!Array.isArray(args.roles)) {
+    throw structuredError("OP_INVALID", "dropOwnedBy({ roles }): roles must be an array");
+  }
+  return recordVendor({ op: "dropOwnedBy", roles: args.roles });
+}
+
+export function grant(args: GrantArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "grant({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.to) || args.to.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ to }): to must be a non-empty array");
+  }
+  return recordVendor({
+    op: "grant",
+    privileges: args.privileges,
+    on: args.on,
+    to: args.to,
+    withGrantOption: args.withGrantOption,
+  });
+}
+
+export function revoke(args: RevokeArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "revoke({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.from) || args.from.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ from }): from must be a non-empty array");
+  }
+  return recordVendor({
+    op: "revoke",
+    privileges: args.privileges,
+    on: args.on,
+    from: args.from,
+  });
+}
+
+export function createFunction(args: CreateFunctionArgs): Node {
+  requireString(args.name, "createFunction({ name })");
+  requireString(args.returns, "createFunction({ returns })");
+  requireString(args.language, "createFunction({ language })");
+  requireString(args.body, "createFunction({ body })");
+  return recordVendor({
+    op: "createFunction",
+    name: args.name,
+    schema: args.schema,
+    args: args.args,
+    returns: args.returns,
+    language: args.language,
+    replace: args.replace,
+    volatility: args.volatility,
+    body: args.body,
+  });
+}
+
+export function dropFunction(args: DropFunctionArgs): Node {
+  requireString(args.name, "dropFunction({ name })");
+  return recordVendor({
+    op: "dropFunction",
+    name: args.name,
+    schema: args.schema,
+    argTypes: args.argTypes,
+    ifExists: args.ifExists,
+  });
+}
+
+export function raw(args: PgRawArgs): Node {
+  requireString(args.sql, "raw({ sql })");
+  requireString(args.reason, "raw({ reason })");
+  return recordVendor({
+    op: "pgRaw",
+    sql: args.sql,
+    reason: args.reason,
+  });
+}
+
 // ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
 
 /**
@@ -2249,7 +2391,7 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
   walk(expr);
 }
 
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
+/** Internal hook used by widened Postgres checks/domain validation paths. */
 export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
   return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
 }
@@ -3672,6 +3814,10 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
   return __makeTableHandle(name, opts);
 }
 
+export function pgTable(name: string, opts?: TableOptions): PgTableHandle {
+  return __makePgTableHandle(name, opts);
+}
+
 export function __makePgTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
   return __makeTableHandle(name, opts, resolvePgCheckExpr);
 }
@@ -3930,7 +4076,7 @@ export function __makeTableHandle(
       return handle;
     },
 
-    // `@zeroship/migrate/pg` — table-scoped privileged primitives.
+    // Postgres vendor — table-scoped privileged primitives.
     setRls(args) {
       recordSetRls(name, { ...args, schema: dflt });
       return handle;

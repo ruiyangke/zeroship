@@ -1,5 +1,4 @@
-import { table } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, pgTable } from "@zeroship/migrate";
 
 export const name = "constraints_indexes_fks";
 

@@ -1,5 +1,4 @@
-import { table } from "@zeroship/migrate";
-import { createFunction, raw } from "@zeroship/migrate/pg";
+import { table, createFunction, raw } from "@zeroship/migrate";
 
 export const name = "functions_triggers_comments";
 

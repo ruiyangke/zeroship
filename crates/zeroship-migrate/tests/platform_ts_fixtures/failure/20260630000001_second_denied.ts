@@ -1,5 +1,4 @@
-import { table, t } from "@zeroship/migrate";
-import { raw } from "@zeroship/migrate/pg";
+import { table, t, raw } from "@zeroship/migrate";
 
 export const name = "platform_ts_second_denied";
 

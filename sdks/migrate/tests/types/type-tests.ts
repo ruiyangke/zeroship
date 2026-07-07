@@ -18,9 +18,9 @@ import { t as dbT } from "@zeroship/db";
 // @ts-expect-error — free boolean combinators are no longer exported from the public package.
 import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
 // @ts-expect-error — free policy helpers were deleted; use pgTable(...).policy(name).create/drop().
-import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate/pg";
+import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
 // @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
-import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate/pg";
+import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
 import {
@@ -39,6 +39,8 @@ import {
   currentUser,
   interval,
   countStar,
+  domain,
+  pgTable,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
@@ -47,7 +49,6 @@ import {
 } from "../../src/index.js";
 // @ts-expect-error — free boolean combinators are no longer exported; use chain `.and`/`.or`/`.not`.
 import { and as removedAnd, or as removedOr, not as removedNot } from "../../src/index.js";
-import { domain, pgTable } from "../../src/pg.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";

@@ -1,11 +1,12 @@
-// op.* VENDOR fixture (`@zeroship/migrate/pg`) — the variant-exhaustiveness +
+// op.* VENDOR fixture (`@zeroship/migrate`) — the variant-exhaustiveness +
 // cross-impl round-trip gate for the privileged Postgres primitives (vendor spec
 // §4.5). Exercises EVERY vendor Op variant at least once, modelled on the
 // platform's own 0025_roles_rls / 0001_extensions_schemas / 0002_auth constructs,
 // so the JS recorder's vendor named exports + table-handle augmentations stay
 // byte-identical to the Rust `Op` wire shape.
-import { table, currentSetting } from "@zeroship/migrate";
 import {
+  table,
+  currentSetting,
   createFunction,
   dropFunction,
   dropOwnedBy,
@@ -16,7 +17,7 @@ import {
   revoke,
   role,
   schema,
-} from "@zeroship/migrate/pg";
+} from "@zeroship/migrate";
 
 export const name = "pg_vendor";
 

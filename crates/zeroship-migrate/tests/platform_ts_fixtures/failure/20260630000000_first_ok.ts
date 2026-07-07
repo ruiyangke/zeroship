@@ -1,5 +1,4 @@
-import { table, t } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { table, t, schema } from "@zeroship/migrate";
 
 export const name = "platform_ts_first_ok";
 
