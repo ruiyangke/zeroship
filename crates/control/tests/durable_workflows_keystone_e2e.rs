@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -49,6 +49,7 @@ const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
 const COMPENSATION_WORKFLOW_NAME: &str = "CompensationWorkflow";
 const COMPENSATION_DIVERGENCE_WORKFLOW_NAME: &str = "CompensationNameDivergenceWorkflow";
 const SCHEDULED_WORKFLOW_NAME: &str = "ScheduledWorkflow";
+const BENCH_WORKFLOW_NAME: &str = "BenchWorkflow";
 const BLOB_OUTPUT_WORKFLOW_NAME: &str = "BlobOutputWorkflow";
 const STREAM_LIMIT_WORKFLOW_NAME: &str = "StreamLimitWorkflow";
 const PARENT_CALL_WORKFLOW_NAME: &str = "ParentCallWorkflow";
@@ -287,6 +288,38 @@ impl StepDispatcher for CountingDispatcher {
     async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.inner.dispatch(request).await
+    }
+}
+
+#[derive(Clone)]
+struct TimingGatewayDispatcher {
+    inner: GatewayStepDispatcher,
+    latencies: Arc<Mutex<Vec<Duration>>>,
+}
+
+impl TimingGatewayDispatcher {
+    fn new(gateway_url: String) -> Self {
+        Self {
+            inner: GatewayStepDispatcher::new(gateway_url),
+            latencies: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn latencies(&self) -> Vec<Duration> {
+        self.latencies.lock().expect("latencies lock").clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for TimingGatewayDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        let started = Instant::now();
+        let outcome = self.inner.dispatch(request).await;
+        self.latencies
+            .lock()
+            .expect("latencies lock")
+            .push(started.elapsed());
+        outcome
     }
 }
 
@@ -675,6 +708,211 @@ async fn seed_run(fx: &Fixture, label: &str) -> String {
         serde_json::json!({ "case": label }),
     )
     .await
+}
+
+fn bench_env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn bench_percentile_ms(values: &[Duration], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let idx = ((percentile * (sorted.len().saturating_sub(1) as f64)).round() as usize)
+        .min(sorted.len() - 1);
+    sorted[idx].as_secs_f64() * 1_000.0
+}
+
+fn bench_max_ms(values: &[Duration]) -> f64 {
+    values
+        .iter()
+        .copied()
+        .max()
+        .map_or(0.0, |value| value.as_secs_f64() * 1_000.0)
+}
+
+fn machine_summary() -> String {
+    let cpus = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(0);
+    let mem_gib = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let rest = line.strip_prefix("MemTotal:")?;
+                let kib = rest.split_whitespace().next()?.parse::<f64>().ok()?;
+                Some(kib / 1024.0 / 1024.0)
+            })
+        });
+    match mem_gib {
+        Some(mem_gib) => format!(
+            "{} {} logical_cpus={} mem_gib={:.1}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            cpus,
+            mem_gib
+        ),
+        None => format!(
+            "{} {} logical_cpus={}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            cpus
+        ),
+    }
+}
+
+async fn bench_counts(fx: &Fixture, run_ids: &[String]) -> (i64, i64) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT \
+                (SELECT COUNT(*)::bigint \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = ANY($1) AND state = 'completed') AS completed, \
+                (SELECT COUNT(*)::bigint \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = ANY($1)) AS checkpoints",
+            &[&run_ids],
+        )
+        .await
+        .expect("load DW-23 bench counts");
+    (row.get("completed"), row.get("checkpoints"))
+}
+
+#[test]
+#[ignore = "DW-23 load bench: requires tests/e2e_durable_workflows.sh with ZEROSHIP_DW23_BENCH_ONLY=1"]
+fn dw23_workflow_engine_load_bench() {
+    let rt = compio::runtime::Runtime::new().expect("compio runtime");
+    rt.block_on(async {
+        if !enabled() {
+            eprintln!(
+                "skip: run via tests/e2e_durable_workflows.sh with ZEROSHIP_DW23_BENCH_ONLY=1"
+            );
+            return;
+        }
+
+        let db_url = required_env("CONTROL_TEST_DB");
+        let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+        let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+            .parse()
+            .expect("ZEROSHIP_DW_E2E_APP_ID uuid");
+        let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+        let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+        set_dispatch_paused(&fx, false).await;
+
+        let run_count = bench_env_usize("ZEROSHIP_DW23_BENCH_RUNS", 128);
+        let concurrency = bench_env_usize("ZEROSHIP_DW23_BENCH_CONCURRENCY", 32);
+        let max_secs = bench_env_usize("ZEROSHIP_DW23_BENCH_MAX_SECS", 60);
+        let mut run_ids = Vec::with_capacity(run_count);
+        for idx in 0..run_count {
+            run_ids
+                .push(seed_workflow_run(
+                    &fx,
+                    BENCH_WORKFLOW_NAME,
+                    serde_json::json!({ "marker": idx }),
+                )
+                .await);
+        }
+
+        let dispatcher = Arc::new(TimingGatewayDispatcher::new(gateway_url));
+        let cfg = WorkflowEngineConfig {
+            batch_apps: 4,
+            per_app_fair_limit: i64::try_from(concurrency).unwrap_or(i64::MAX),
+            max_inflight_per_app: i64::try_from(concurrency).unwrap_or(i64::MAX),
+            max_inflight_dispatch: concurrency,
+            claim_ttl_ms: 60_000,
+            heartbeat_ms: 60_000,
+            stuck_strike_limit: 3,
+            max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
+            max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
+            max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
+            owner_id: format!("dw23-bench-{}", Uuid::new_v4().simple()),
+        };
+
+        let started = Instant::now();
+        let max_duration = Duration::from_secs(u64::try_from(max_secs).unwrap_or(u64::MAX));
+        let mut total_claimed = 0usize;
+        let mut checkpoint_elapsed = None;
+        let final_counts = loop {
+            let claimed = workflow_engine::tick_with_dispatcher(
+                &fx.state,
+                Arc::clone(&dispatcher),
+                cfg.clone(),
+            )
+            .await
+            .expect("DW-23 bench workflow tick");
+            total_claimed += claimed;
+
+            let counts = bench_counts(&fx, &run_ids).await;
+            if checkpoint_elapsed.is_none()
+                && counts.1 >= i64::try_from(run_count).unwrap_or(i64::MAX)
+            {
+                checkpoint_elapsed = Some(started.elapsed());
+            }
+            if counts.0 >= i64::try_from(run_count).unwrap_or(i64::MAX) {
+                break counts;
+            }
+            if started.elapsed() > max_duration {
+                panic!(
+                    "DW-23 bench exceeded {:?}: completed={} checkpoints={} total_claimed={}",
+                    max_duration, counts.0, counts.1, total_claimed
+                );
+            }
+            let sleep_ms = if claimed == 0 { 10 } else { 1 };
+            compio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        };
+
+        let elapsed = started.elapsed();
+        let checkpoint_elapsed = checkpoint_elapsed.unwrap_or(elapsed);
+        let latencies = dispatcher.latencies();
+        assert_eq!(
+            final_counts.0,
+            i64::try_from(run_count).unwrap(),
+            "all bench runs must complete"
+        );
+        assert_eq!(
+            final_counts.1,
+            i64::try_from(run_count).unwrap(),
+            "BenchWorkflow should write one checkpoint per run"
+        );
+        assert!(
+            !latencies.is_empty(),
+            "real gateway/worker dispatch path should record latencies"
+        );
+
+        let elapsed_secs = elapsed.as_secs_f64();
+        let checkpoint_secs = checkpoint_elapsed.as_secs_f64();
+        println!("DW23_BENCH_RESULT machine=\"{}\"", machine_summary());
+        println!(
+            "DW23_BENCH_RESULT runs={} concurrency={} elapsed_ms={:.3} total_claims={} claims_per_sec={:.3} completed_runs_per_sec={:.3}",
+            run_count,
+            concurrency,
+            elapsed_secs * 1_000.0,
+            total_claimed,
+            total_claimed as f64 / elapsed_secs,
+            run_count as f64 / elapsed_secs
+        );
+        println!(
+            "DW23_BENCH_RESULT checkpoints={} checkpoint_elapsed_ms={:.3} checkpoints_per_sec={:.3}",
+            final_counts.1,
+            checkpoint_secs * 1_000.0,
+            final_counts.1 as f64 / checkpoint_secs
+        );
+        println!(
+            "DW23_BENCH_RESULT replay_latency_ms count={} p50={:.3} p95={:.3} p99={:.3} max={:.3}",
+            latencies.len(),
+            bench_percentile_ms(&latencies, 0.50),
+            bench_percentile_ms(&latencies, 0.95),
+            bench_percentile_ms(&latencies, 0.99),
+            bench_max_ms(&latencies)
+        );
+    });
 }
 
 async fn seed_signal_run(

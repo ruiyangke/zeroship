@@ -340,6 +340,16 @@ export class ScheduledWorkflow {
   }
 }
 
+export class BenchWorkflow {
+  async run(trigger, step) {
+    const checkpoint = await step.run("checkpoint", () => ({
+      runId: trigger.runId,
+      marker: trigger.input.marker,
+    }));
+    return { checkpoint };
+  }
+}
+
 export class BlobOutputWorkflow {
   async run(trigger, step) {
     const payload = "x".repeat(trigger.input.size);
@@ -473,6 +483,7 @@ export default {
     CompensationWorkflow,
     CompensationNameDivergenceWorkflow,
     ScheduledWorkflow,
+    BenchWorkflow,
     BlobOutputWorkflow,
     StreamLimitWorkflow,
     ChildEchoWorkflow,
@@ -575,6 +586,33 @@ curl -sf "http://localhost:$GATE_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 
   exit 1
 }
 pass "gateway/worker warmed real deployed app"
+
+if [ "${ZEROSHIP_DW23_BENCH_ONLY:-0}" = "1" ]; then
+  echo "=== DW-23 workflow engine load bench ==="
+  ZEROSHIP_DW_E2E=1 \
+  CONTROL_TEST_DB="$DBURL" \
+  ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
+  ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
+  ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
+  ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
+  ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
+  ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
+  ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
+  ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
+  ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
+    cargo test -p zeroship-control --test durable_workflows_keystone_e2e dw23_workflow_engine_load_bench -- --ignored --nocapture --test-threads=1 || {
+      fail "DW-23 workflow engine load bench failed"
+      echo "--- control.log ---"
+      tail -120 "$WORK/control.log" || true
+      echo "--- worker.log ---"
+      tail -160 "$WORK/worker.log" || true
+      echo "--- gate.log ---"
+      tail -120 "$WORK/gate.log" || true
+      exit 1
+    }
+  pass "DW-23 workflow engine load bench passed"
+  exit 0
+fi
 
 echo "=== DW-07 keystone assertions ==="
 ZEROSHIP_DW_E2E=1 \
