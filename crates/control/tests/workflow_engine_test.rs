@@ -275,6 +275,22 @@ async fn scrub_cloned_fixture_data(pg: &compio_postgres::Client) {
     )
     .await
     .expect("scrub cloned workflow fixture data");
+    pg.batch_execute(
+        "DO $$ \
+         BEGIN \
+           IF to_regclass('zeroship.workflow_e2e_side_effects') IS NOT NULL THEN \
+             TRUNCATE TABLE zeroship.workflow_e2e_side_effects; \
+           END IF; \
+           IF to_regclass('zeroship.workflow_e2e_effect_attempts') IS NOT NULL THEN \
+             TRUNCATE TABLE zeroship.workflow_e2e_effect_attempts; \
+           END IF; \
+           IF to_regclass('zeroship.workflow_e2e_effect_commits') IS NOT NULL THEN \
+             TRUNCATE TABLE zeroship.workflow_e2e_effect_commits; \
+           END IF; \
+         END $$;",
+    )
+    .await
+    .expect("scrub cloned workflow e2e effect tables");
 }
 
 async fn build_fixture_with_gateway(

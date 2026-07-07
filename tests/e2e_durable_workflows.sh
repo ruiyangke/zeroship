@@ -188,6 +188,17 @@ async function bump(runId, stepName) {
   return await response.json();
 }
 
+async function commit(runId, stepName, key) {
+  const response = await fetch(
+    \`\${SIDE_EFFECT_URL}/commit?run=\${encodeURIComponent(runId)}&step=\${encodeURIComponent(stepName)}&key=\${encodeURIComponent(key)}\`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(\`commit \${stepName} failed: \${response.status}\`);
+  }
+  return await response.json();
+}
+
 export class KeystoneWorkflow {
   async run(trigger, step) {
     const a = await step.run("a", () => bump(trigger.runId, "a"));
@@ -267,6 +278,40 @@ export class BareAwaitWorkflow {
 export class NameDivergenceWorkflow {
   async run(trigger, step) {
     return await step.run("actual", () => bump(trigger.runId, "actual"));
+  }
+}
+
+export class CompensationWorkflow {
+  async run(trigger, step) {
+    const a = await step.run(
+      "a",
+      { compensate: (output, ctx) => commit(trigger.runId, \`undo:\${output.step}\`, ctx.idempotencyKey) },
+      () => bump(trigger.runId, "a"),
+    );
+    const b = await step.run(
+      "b",
+      { compensate: (output, ctx) => commit(trigger.runId, \`undo:\${output.step}\`, ctx.idempotencyKey) },
+      () => bump(trigger.runId, "b"),
+    );
+    if (trigger.input.case === "cancel-compensate") {
+      await step.sleep("rollback-wait", "PT30S");
+      return { unreachable: true, a, b };
+    }
+    await step.run("c", () => {
+      throw new Error("c failed");
+    });
+    return { unreachable: true };
+  }
+}
+
+export class CompensationNameDivergenceWorkflow {
+  async run(trigger, step) {
+    await step.run(
+      "actual",
+      { compensate: (output, ctx) => commit(trigger.runId, \`undo:\${output.step ?? "actual"}\`, ctx.idempotencyKey) },
+      () => bump(trigger.runId, "actual"),
+    );
+    return { ok: true };
   }
 }
 
@@ -388,6 +433,8 @@ export default {
     SideEffectWorkflow,
     BareAwaitWorkflow,
     NameDivergenceWorkflow,
+    CompensationWorkflow,
+    CompensationNameDivergenceWorkflow,
     ScheduledWorkflow,
     BlobOutputWorkflow,
     StreamLimitWorkflow,

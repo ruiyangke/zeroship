@@ -96,6 +96,8 @@ struct WorkflowStepRequest {
     deploy_hash: String,
     dispatch_nonce: String,
     #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
     input: Option<Value>,
     started_at: DateTime<Utc>,
     #[serde(default)]
@@ -159,6 +161,7 @@ pub async fn workflow_dispatch_internal(
             "workflowName": &request.workflow_name,
         },
         "journal": request.journal.clone(),
+        "phase": request.phase.as_deref().unwrap_or("running"),
         "deployHash": &request.deploy_hash,
         "attempt": 0,
         "nonce": &request.dispatch_nonce,
@@ -273,6 +276,8 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
                 "name": required_str(result, "name")?,
                 "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
                 "stepKind": workflow_step_kind_or_run(result)?,
+                "compensable": result.get("compensable").and_then(Value::as_bool).unwrap_or(false),
+                "compensationMaxAttempts": result.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1),
             });
             copy_workflow_output(result, &mut outcome);
             Ok(outcome)
@@ -327,6 +332,19 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
                 .unwrap_or(Value::Null),
             "input": result.get("input").cloned().unwrap_or(Value::Null),
             "options": result.get("options").cloned().unwrap_or_else(|| serde_json::json!({})),
+        })),
+        "CompensationCompleted" => Ok(serde_json::json!({
+            "kind": "CompensationCompleted",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+        })),
+        "CompensationFailed" => Ok(serde_json::json!({
+            "kind": "CompensationFailed",
+            "ordinal": required_i64(result, "ordinal")?,
+            "name": required_str(result, "name")?,
+            "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "error": workflow_error_or_default(result.get("error"), "workflow compensator failed"),
         })),
         other => Err(format!("unknown worker workflow result kind {other:?}")),
     }
@@ -386,7 +404,8 @@ fn normalize_workflow_outcomes(
         // StepCompleted and Child may appear non-trailing: a dispatch can settle
         // multiple concurrent steps and spawn multiple children (startMany) in one
         // batch. A true suspension/terminal (Sleep/Wait/RunCompleted/RunFailed) is
-        // mutually exclusive and must be the trailing entry.
+        // mutually exclusive and must be the trailing entry. Compensation is a
+        // serial reverse-frontier outcome and is trailing too.
         if kind != "StepCompleted" && kind != "Child" && idx != last {
             return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
@@ -394,6 +413,12 @@ fn normalize_workflow_outcomes(
             "StepCompleted" => {
                 let step_kind = workflow_step_kind_or_run(outcome)?;
                 outcome["stepKind"] = step_kind;
+                outcome["compensable"] = serde_json::json!(
+                    outcome.get("compensable").and_then(Value::as_bool).unwrap_or(false)
+                );
+                outcome["compensationMaxAttempts"] = serde_json::json!(
+                    outcome.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1)
+                );
                 ensure_workflow_output(outcome);
             }
             "RunCompleted" => ensure_workflow_output(outcome),
@@ -447,6 +472,21 @@ fn normalize_workflow_outcomes(
                     obj.remove("workflowName");
                 }
             }
+            "CompensationCompleted" => {
+                let _ = required_i64(outcome, "ordinal")?;
+                let _ = required_str(outcome, "name")?;
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+            }
+            "CompensationFailed" => {
+                let _ = required_i64(outcome, "ordinal")?;
+                let _ = required_str(outcome, "name")?;
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), "workflow compensator failed");
+                }
+            }
             other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
         }
     }
@@ -465,12 +505,28 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
         match (kind, state) {
             ("run" | "sideEffect", "completed") => {
+                let compensable = checkpoint
+                    .get("compensable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| {
+                        checkpoint
+                            .get("compensationState")
+                            .and_then(Value::as_str)
+                            .is_some_and(|state| {
+                                matches!(state, "pending" | "running" | "completed" | "failed")
+                            })
+                    });
                 let mut outcome = serde_json::json!({
                     "kind": "StepCompleted",
                     "ordinal": required_i64(checkpoint, "ordinal")?,
                     "name": required_str(checkpoint, "name")?,
                     "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
                     "stepKind": kind,
+                    "compensable": compensable,
+                    "compensationMaxAttempts": checkpoint
+                        .get("compensationMaxAttempts")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(1),
                 });
                 copy_workflow_output(checkpoint, &mut outcome);
                 outcomes.push(outcome);
@@ -2952,6 +3008,109 @@ mod tests {
             .as_str()
             .expect("sleep wakeAt");
         assert!(DateTime::parse_from_rfc3339(wake_at).is_ok());
+    }
+
+    #[test]
+    fn workflow_batch_preserves_compensable_on_every_completed_step() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "stepKind": "run",
+                    "compensable": true,
+                    "compensationMaxAttempts": 1,
+                    "output": "A"
+                },
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "stepKind": "run",
+                    "compensable": true,
+                    "compensationMaxAttempts": 3,
+                    "output": "B"
+                },
+                {
+                    "kind": "RunFailed",
+                    "ordinal": 2,
+                    "name": "c",
+                    "nameOccurrence": 0,
+                    "error": {"type": "Error", "message": "c failed"}
+                }
+            ]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("compensable batch result");
+
+        assert_eq!(result["outcomes"][0]["compensable"], true);
+        assert_eq!(result["outcomes"][0]["compensationMaxAttempts"], 1);
+        assert_eq!(result["outcomes"][1]["compensable"], true);
+        assert_eq!(result["outcomes"][1]["compensationMaxAttempts"], 3);
+        assert_eq!(result["outcomes"][2]["kind"], "RunFailed");
+    }
+
+    #[test]
+    fn workflow_legacy_checkpoints_preserve_compensation_metadata() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "checkpoints": [
+                {
+                    "ordinal": 0,
+                    "name": "a",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "A",
+                    "compensable": true,
+                    "compensationMaxAttempts": 1
+                },
+                {
+                    "ordinal": 1,
+                    "name": "b",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "B",
+                    "compensationState": "pending",
+                    "compensationMaxAttempts": 2
+                },
+                {
+                    "ordinal": 2,
+                    "name": "plain",
+                    "nameOccurrence": 0,
+                    "kind": "run",
+                    "state": "completed",
+                    "output": "plain"
+                }
+            ],
+            "runUpdate": {"state": "queued"}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("legacy checkpoint result");
+
+        assert_eq!(result["outcomes"][0]["compensable"], true);
+        assert_eq!(result["outcomes"][0]["compensationMaxAttempts"], 1);
+        assert_eq!(result["outcomes"][1]["compensable"], true);
+        assert_eq!(result["outcomes"][1]["compensationMaxAttempts"], 2);
+        assert_eq!(result["outcomes"][2]["compensable"], false);
+        assert_eq!(result["outcomes"][2]["compensationMaxAttempts"], 1);
     }
 
     #[test]
