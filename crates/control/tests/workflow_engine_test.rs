@@ -2669,6 +2669,93 @@ async fn stale_lease_is_taken_over_after_ttl() {
 }
 
 #[compio::test]
+#[serial]
+async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
+    let Some(fx) = isolated_fixture("lease-handoff-guard").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "lease-handoff-guard").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "running",
+        -1_000,
+        None,
+        Some("owner-lease-a"),
+        Some(-10_000),
+        Some("wfd_lease_a"),
+    )
+    .await;
+
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::new(CompleteDispatcher),
+        config("owner-lease-b"),
+    )
+    .await
+    .expect("lease handoff claim");
+    assert_eq!(claimed, 1, "second owner should reclaim the expired lease");
+    wait_for_completed(&fx, &[run_id.clone()]).await;
+
+    let stale = StepResult::from_checkpoints(
+        run_id.clone(),
+        "wfd_lease_a".to_string(),
+        vec![StepCheckpoint::completed_run(
+            0,
+            "done",
+            serde_json::json!({"writer": "stale"}),
+        )],
+        RunUpdate::Completed {
+            output: Some(serde_json::json!({"writer": "stale"})),
+            output_ref: None,
+        },
+    );
+    assert!(
+        !workflow_engine::apply_step_result(&fx.state, "owner-lease-a", stale)
+            .await
+            .expect("stale lease apply"),
+        "old owner/nonce must not commit after a second owner completed the run"
+    );
+
+    let run = fx
+        .pg
+        .query_one(
+            "SELECT state, output, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load lease handoff run");
+    assert_eq!(run.get::<_, String>("state"), "completed");
+    assert_eq!(
+        run.get::<_, Option<serde_json::Value>>("output"),
+        Some(serde_json::json!({"ok": true}))
+    );
+    assert_eq!(run.get::<_, Option<String>>("claimed_by"), None);
+    assert_eq!(run.get::<_, Option<String>>("dispatch_nonce"), None);
+
+    let steps = fx
+        .pg
+        .query(
+            "SELECT ordinal, name, output \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+              ORDER BY ordinal",
+            &[&run_id],
+        )
+        .await
+        .expect("load lease handoff steps");
+    assert_eq!(steps.len(), 1, "exactly one checkpoint should win");
+    assert_eq!(steps[0].get::<_, i32>("ordinal"), 0);
+    assert_eq!(steps[0].get::<_, String>("name"), "done");
+    assert_eq!(
+        steps[0].get::<_, Option<serde_json::Value>>("output"),
+        Some(serde_json::json!({"ok": true}))
+    );
+}
+
+#[compio::test]
 async fn sleep_suspension_resolves_into_journal_row_at_wake() {
     let Some(fx) = isolated_fixture("sleep").await else {
         return;
