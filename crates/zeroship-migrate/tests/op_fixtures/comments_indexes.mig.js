@@ -1,8 +1,15 @@
 // op.* migration fixture — structured COMMENT ON plus closed index elements.
 // Covers expression index elements, partial-index predicates, and representative
 // comment targets through both fluent handles and the top-level closed target API.
-import { comment, enumType, table, t, view } from "@zeroship/migrate";
-import { pgTable, sequence } from "@zeroship/migrate/pg";
+import {
+  comment,
+  enumType,
+  table,
+  t,
+  view,
+  pgTable,
+  sequence,
+} from "@zeroship/migrate";
 
 export const name = "comments_indexes";
 

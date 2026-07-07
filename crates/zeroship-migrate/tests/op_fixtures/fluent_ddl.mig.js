@@ -12,8 +12,7 @@
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t, decimal, now } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, t, decimal, now, pgTable } from "@zeroship/migrate";
 
 export default {
   name: "fluent_ddl",

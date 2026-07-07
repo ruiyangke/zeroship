@@ -108,7 +108,7 @@ pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT"
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
-/// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
+/// **VENDOR (`@zeroship/migrate`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pgRaw`) whose required
 /// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
 /// active capability set (vendor spec §3.2). The Confined creator/AI posture
@@ -1348,7 +1348,7 @@ pub fn validate_op_scoped(
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
-    // **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+    // **VENDOR (`@zeroship/migrate`)** — the capability-composition gate (vendor
     // spec §3.2 gate 1), BEFORE any expression walk. A privileged vendor op is
     // refused fail-closed when (a) the target is SQLite (every vendor op is
     // `PgOnly`, §4.3), or (b) the active capability set — derived from the threaded
@@ -2437,7 +2437,7 @@ fn validate_op_support(
     Ok(())
 }
 
-/// **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+/// **VENDOR (`@zeroship/migrate`)** — the capability-composition gate (vendor
 /// spec §3.2 gate 1). For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
 /// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
@@ -2487,13 +2487,13 @@ fn validate_vendor_op(
         } else {
             (
                 format!(
-                    "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
+                    "the @zeroship/migrate vendor op (capability {:?}) is Postgres-only — \
                      roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have \
                      no SQLite analogue (PgOnly)",
                     cap.as_token()
                 ),
                 "vendor primitives target Postgres only — deploy this migration against a \
-                 Postgres backend, or remove the @zeroship/migrate/pg op"
+                 Postgres backend, or remove the privileged Postgres op"
                     .to_string(),
             )
         };
@@ -2523,7 +2523,7 @@ fn validate_vendor_op(
                 reason: format!(
                     "vendor PG primitive (op capability {:?}) requires the {} capability, which \
                      the active (Confined creator) capability set does not grant — the privileged \
-                     @zeroship/migrate/pg primitives are unreachable from a confined migration by \
+                     @zeroship/migrate primitives are unreachable from a confined migration by \
                      construction (vendor spec §3.2)",
                     cap.as_token(),
                     cap.flag_name(),
