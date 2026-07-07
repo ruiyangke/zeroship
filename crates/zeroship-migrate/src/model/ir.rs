@@ -1740,16 +1740,6 @@ pub struct IrOnConflict {
     pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
-/// A batched-backfill knob.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct IrBatch {
-    /// The cursor column to page over.
-    pub cursor_column: String,
-    /// Rows per batch (JS-safe-integer bounded).
-    pub batch_size: SafeU64,
-}
-
 /// **PR10** — the uniform existence-guard modifier (§2.7). Carried on a guarded
 /// DDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on
 /// the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE

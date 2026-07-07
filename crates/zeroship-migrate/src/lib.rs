@@ -226,7 +226,7 @@ pub use model::snapshot::{
 pub use model::ir::{
     CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
     ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod,
-    IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
+    IndexSortOrder, IndexStorageParams, IrClassification, IrColumn, IrConstraint,
     IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind,
     IrScalar, IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
     PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
