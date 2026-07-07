@@ -53,3 +53,4 @@ Platform SDK examples:
 | [`db-todos/`](./db-todos/) | `@zeroship/db` schema discovery, relations, RPC procedures, and live snapshots |
 | [`db-chat/`](./db-chat/) | reactive DB queries and broker-driven updates |
 | [`db-migrations-playground/`](./db-migrations-playground/) | online data backfills with `@zeroship/migrations` |
+| [`workflows-order/`](./workflows-order/) | `@zeroship/workflows` steps, sleeps, signals, child calls, and compensation |

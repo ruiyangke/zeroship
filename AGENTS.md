@@ -42,6 +42,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/plugin-workflow/` · `crates/control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
@@ -172,6 +173,8 @@ env.auth.*     getUser/requireUser — per-request identity (AuthPlugin, registe
                on the worker + CLI `zeroship serve` vectors). Fed in prod by the
                gateway's `ZeroShip-User` header; in dev by the dev-auth provider
                (see `docs/reference/auth-dev-tier.md`).
+env.workflows.* durable workflow run start/control handles (`WorkflowPlugin`,
+               registered on the worker + CLI `zeroship serve` vectors).
 ```
 
 Planned or platform-internal namespaces must be documented as such until the
@@ -199,6 +202,7 @@ import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
 import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
+import { Workflow } from "@zeroship/workflows";
 import { query, mutation } from "@zeroship/rpc/server";
 
 // Author schema changes as committed op.* migrations. The toolchain folds
@@ -245,6 +249,7 @@ Stable contracts, live in `docs/reference/`:
 - `db.md` — `@zeroship/db`: generated `env.db` typing, CRUD, aggregation, naming strategy
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
+- `workflows.md` — `@zeroship/workflows`: replayable workflow classes, steps, sleeps, signals, children, schedules, outputs, and compensation
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `auth-dev-tier.md` — the self-contained `pnpm dev` auth provider (the peer of `env.db`→SQLite / `env.kv`→redb): contract parity, the dev impl, the dev-only-by-construction guarantee
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
