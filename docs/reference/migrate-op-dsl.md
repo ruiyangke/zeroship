@@ -169,7 +169,7 @@ PostgreSQL aggregates `stringAgg(delimiter)`, `arrayAgg()`, `boolAnd()`, and
 `boolOr()` are first-class chain methods, but validate fail-closed on SQLite and
 MySQL (`DIALECT_UNSUPPORTED`) unless the value is wrapped in `dialect({...})`.
 `jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses are
-documented follow-ups, not part of the current surface.
+outside the current surface.
 
 ## `dialect()` at value and op position
 
@@ -203,8 +203,8 @@ different: absent own leg plus absent `default` means "skip" for op-level
 expression-value legs in the same call throws `OP_INVALID`.
 
 Spec-level dialectal fragments, such as wrapping one index element inside
-`indexes: []` or wrapping a `ColumnDef`, are a future increment. Today, use
-op-level `dialect()` around the whole op or op sequence.
+`indexes: []` or wrapping a `ColumnDef`, are not accepted. Use op-level
+`dialect()` around the whole op or op sequence.
 
 ## Names are strings (and why)
 
@@ -303,7 +303,7 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | Modifier | Effect |
 | --- | --- |
 | `.notNull()` | mark `NOT NULL` |
-| `.default(value)` | a typed scalar literal, `now()` / `genRandomUuid()`, **or** a function-expression callback for composed defaults (the `{ fn: … }` carrier was deleted, P4) — never raw SQL |
+| `.default(value)` | a typed scalar literal, `now()` / `genRandomUuid()`, **or** a function-expression callback for composed defaults — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
@@ -590,8 +590,8 @@ into. Its meaning is **profile-gated**:
   the SQLite emitter renders unqualified `main` DDL and the engine does **NOT**
   auto-`ATTACH`, so honoring a non-`main` qualifier would silently drop it and land
   the op in `main` — a silent wrong-target. Rather than that, lowering refuses; a
-  non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` the operator
-  arranges, never an implicit re-pin to `main`.
+  non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` arranged
+  by the caller, never an implicit re-pin to `main`.
 
 - **Backfill + an explicit schema (profile-gated):** the resumable
   backfill executor now threads a **per-spec schema** (`BackfillSpec.schema`), so a
@@ -604,7 +604,7 @@ into. Its meaning is **profile-gated**:
     qualifier is refused at validate-time (`CROSS_SCHEMA`) before the backfill is
     lowered, so the spec's schema is always the project schema (the render is
     byte-identical to the pre-threading project pin).
-  - **Trusted / Platform (operator CLI):** the widened scope admits the
+  - **Trusted / Platform (standalone CLI):** the widened scope admits the
     gate-approved schema, so the cross-schema backfill runs — under Trusted as the
     connecting/admin role (no migrator `SET ROLE`), the documented posture.
 
@@ -614,11 +614,11 @@ into. Its meaning is **profile-gated**:
     > + cross-schema walk), so a creator's fragments are statically bounded. Under
     > **Trusted / Platform** the runner uses the **trusted guard** — the deny-list
     > and cross-schema walk are **skipped by design** (only the structural checks
-    > remain: cursor-not-mutated + parse). So an operator-authored
+    > remain: cursor-not-mutated + parse). So a trusted
     > `set`/`where` is run as trusted SQL, and a Trusted *cross-schema* backfill
     > runs those fragments cross-schema under that non-deny-listed guard. This
-    > exactly mirrors the one-shot DML Trusted posture (operator-token-gated, the
-    > operator owns the DB) and is **not** a confinement hole: creators can never
+    > exactly mirrors the one-shot DML Trusted posture (capability-token-gated,
+    > caller-owned DB access) and is **not** a confinement hole: creators can never
     > reach the Trusted profile, so they cannot author these fragments.
   - **SQLite (any profile):** a non-`main` schema is still refused **earlier**
     (`SqliteSchemaUnsupported`, before the backfill lower); SQLite's single `main`
@@ -658,10 +658,9 @@ drop family (`.drop`, `.column().drop`, `.index().drop`,
 `.constraint().drop`) carries an `ifExists` option. A guard on
 the wrong family is a `GUARD_DIRECTION` authoring error.
 
-> **Supported as of op.* PR10 Part B** (executor-side catalog probe). The option
-> types are plain `boolean`; the guard is honored at apply time by a probe under the
-> held advisory lock + the open per-step transaction (see the semantics list and the
-> fail-closed defaults below).
+The option types are plain `boolean`; the guard is honored at apply time by a
+probe under the held advisory lock + the open per-step transaction (see the
+semantics list and the fail-closed defaults below).
 
 These are **NOT** lowered to a native `IF [NOT] EXISTS` clause. Native support is
 patchy and asymmetric: Postgres has no `ADD CONSTRAINT IF NOT EXISTS` and none on
@@ -688,8 +687,7 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 - `ifExists`, object **absent** → a journaled satisfied no-op (a drop has no shape
   to verify — presence alone governs).
 
-> **Supported as of op.* PR10 Part B** (executor-side catalog probe). The probe
-> reads the live catalog (PG `information_schema`/`pg_catalog`; SQLite `sqlite_master`
+> The probe reads the live catalog (PG `information_schema`/`pg_catalog`; SQLite `sqlite_master`
 > + PRAGMAs) inside the SAME open transaction that will run the `up`, under the
 > project advisory lock the whole plan already holds — so there is no probe→act
 > TOCTOU window. `decide` is pure Rust over the snapshot, never a SQL-level
@@ -1034,10 +1032,9 @@ time, not silently at runtime on one backend.
 
 ## Online rename
 
-> **Status: available in dev/CLI; production deploy go-live is a planned
-> follow-up.** `renameColumn` lowering works and is exercised end-to-end in
-> dev/CLI and tests. The production control-plane deploy handler does **not**
-> apply online renames today — see below.
+`renameColumn` lowering works and is exercised end-to-end in dev/CLI and tests.
+The production control-plane deploy handler does **not** apply online renames
+today — see below.
 
 `table(t).column(from).rename({ to, type })` records a single op that the engine
 lowers to a dual-dialect online change:
@@ -1067,11 +1064,11 @@ today. That test-only status is load-bearing and pinned by a regression test
 `crates/control/tests/deploy_migrate_test.rs:643`), which fails RED the instant
 the approved surface is wired into a production handler.
 
-Production go-live gating, post-PR9a:
+Production go-live gating:
 
 1. The cross-deploy **pending-contract interlock** — the PG expand/contract is a
    multi-deploy flow (the contract that drops the old column owes a later
-   approved deploy). As of PR9a this owed contract **IS** journaled as a durable
+   approved deploy). This owed contract **IS** journaled as a durable
    obligation and **IS** fail-closed enforced across deploys: a completed EXPAND
    records the obligation (keyed on a deterministic, re-lower-stable version,
    §2.0.1), a later deploy whose ops touch the pending table is refused with
@@ -1107,8 +1104,8 @@ waiting on `ACCESS EXCLUSIVE`, every subsequent query on that table queues behin
 *it*. That is a tenant-wide availability outage for the lifetime of the wait. A
 **short** `lock_timeout` makes the blocked DDL fail fast and roll back cleanly
 (the lock-timeout failure is retryable, never data-corrupting — the two-phase
-recovery handles the abort), freeing the table immediately; the operator retries
-during a quieter window. A long lock-acquisition budget would make the outage
+recovery handles the abort), freeing the table immediately; retry during a quieter
+window. A long lock-acquisition budget would make the outage
 last that long.
 
 The 3s default is the **executor-wide** floor. A single migration that
@@ -1192,7 +1189,7 @@ for the build/watch wiring.
 `zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
 per-dialect SQL the pending migration set WOULD execute** — without a database and
 without applying anything. This is the canonical Alembic `--sql` / Atlas / Flyway /
-dbmate feature, here for one job: **operator go-live review**. Before approving an
+dbmate feature, here for **go-live review**. Before approving an
 `approved_versions` go-live you can read the precise SQL the deploy will run,
 instead of approving blind.
 
@@ -1315,14 +1312,11 @@ snippet would also survive record-time.
 - **Security / threat model** — the recorder runs untrusted creator code inside
   a kernel sandbox (seccomp + landlock + netns); the apply path runs under a
   least-privilege per-app migrator role behind a parse deny-list and an immutable
-  journal. See the migration-engine threat model
-  ([docs/proposals/2026-06-16-db-migration-engine-design.md §1](../proposals/2026-06-16-db-migration-engine-design.md))
-  and the SQLite authorizer allow-list discipline (`§9` of the op-DSL design,
-  below).
-- **The op-DSL design (normative source of truth)** —
-  [docs/proposals/2026-06-23-js-op-dsl-migration-design-normative.md](../proposals/2026-06-23-js-op-dsl-migration-design-normative.md):
-  the IR wire contract (§2), the typing stance (§3.3), the closed expression AST
-  (§3.3.1), and the authoritative DML portability boundary (§9).
+  journal. See [zeroship-migrate-guide.md](./zeroship-migrate-guide.md) for the
+  engine threat model and apply path.
+- **The IR and expression contract** — [zeroship-migrate-guide.md](./zeroship-migrate-guide.md)
+  covers the IR wire contract, typing stance, closed expression AST, and DML
+  portability boundary.
 - **SQLite divergences** — intentional Postgres↔SQLite differences in search,
   isolation, locking, and ordering: [sqlite-divergences.md](./sqlite-divergences.md).
 - **The schema SDK** — [db.md](./db.md): the `@zeroship/db` `t.*` lexicon the

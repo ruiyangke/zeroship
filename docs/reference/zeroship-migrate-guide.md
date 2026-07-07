@@ -4,7 +4,7 @@
 
 **Who it's for:** engineers modifying the crate, authors writing platform/creator migrations, and reviewers auditing the security substrate.
 
-**Snapshot:** originally generated at commit `544eaada` (through job J3 of the "PG-first fluent redesign"). The authoring-surface sections have been refreshed through current HEAD `c0b97acf` for J2a/J2b, where scalar functions and aggregates moved off `c.fn`/`c.agg` into chain methods and `c.pg` was deleted. The engine core is stable; where docs/proposals diverge, the code at current HEAD is authoritative and the two proposals (`docs/proposals/2026-07-04-dsl-surface-redesign-design.md`, `docs/proposals/2026-07-06-pg-first-fluent-redesign-design.md`) describe direction. See [§0 Status & in-flight redesign](#0-status--in-flight-redesign) for the exact DONE/PLANNED breakdown.
+This guide describes the current `@zeroship/migrate` authoring surface and engine.
 
 All file:line citations are relative to the repo root and were read from the source tree for this guide so every claim is checkable.
 
@@ -12,7 +12,6 @@ All file:line citations are relative to the repo root and were read from the sou
 
 ## Table of contents
 
-- [§0 Status & in-flight redesign](#0-status--in-flight-redesign)
 - [§1 Overview — what & why](#1-overview--what--why)
 - [§2 Crate architecture](#2-crate-architecture)
 - [§3 Authoring: schema-structure DSL](#3-authoring-schema-structure-dsl)
@@ -25,36 +24,6 @@ All file:line citations are relative to the repo root and were read from the sou
 - [§10 Security-first design](#10-security-first-design)
 - [§11 Platform self-hosting & build integration](#11-platform-self-hosting--build-integration)
 - [§12 Testing & operating](#12-testing--operating)
-
----
-
-## §0 Status & in-flight redesign
-
-This guide was generated at commit `544eaada` — *"refactor(migrate): value constructors → top-level imports (J3, P0)"* — and its authoring-surface notes/examples are refreshed through current HEAD `c0b97acf`, which includes **J2a** (`37dced6a`) and **J2b** (`e858cc15`). The **engine core** (guard, journal, executor, IR, the `MigrationBackend` seam, the validate gate, the trust profiles, the immutable journal) is **stable**. The **authoring grammar** on top of it is mid two nested redesigns:
-
-1. **The v2 DSL constitution** (`docs/proposals/2026-07-04-dsl-surface-redesign-design.md`) — twelve principles P1–P12 reshaping the shipped surface (one grammar/one spelling; one grammatical subject per object; values-are-values; a complete algebra before any escape hatch; raw-is-a-debt-instrument; best-effort native realization with transparent degradation). No back-compat (pre-launch).
-2. **The PG-first re-redesign** (`docs/proposals/2026-07-06-pg-first-fluent-redesign-design.md`), governed by **P0 — "PostgreSQL is first-class."** The core surface *is* PG-shaped, not bent toward a lowest-common-denominator portable core; portability to SQLite/MySQL is explicit, opt-in `dialect({ pg, sqlite, mysql })`, and anything with no native realization and no `dialect()` leg **fails closed** at that target. Sequenced as jobs **J1–J8**.
-
-The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
-
-| Change | State | Evidence |
-|---|---|---|
-| `dialect()` op/spec generalization | landed (J1 partial) — see caveat | design `2026-07-06:79-90` |
-| `.regex()` / `.columnSize()` core chain methods (off `c.pg`) | **DONE** (J2 part) | `sdks/migrate/src/ops.ts:1770,1773` |
-| Value constructors `now/genRandomUuid/currentSetting/currentUser/interval` as top-level imports | **DONE** (J3) | `ops.ts:1238-1273`; `index.ts:33-37` |
-| Structured `interval(Duration)` (string form removed) | **DONE** | `ops.ts:1268,1668` |
-| `dialect({...})` at expression position | **DONE** | `ops.ts:1894` |
-| Bare-symbol / `{ fn }` **default** forms removed | **DONE** | `ops.ts:1055-1072` |
-| Scalar `c.fn.*` functions → chain methods | **DONE** (J2a, `37dced6a`) | chain methods on `ExprChain` (`types.ts:579-601`; `ops.ts:1776-1837`); `c.fn` deleted |
-| `c.pg.extract` → core; retire `c.pg` namespace | **DONE** (J2a, `37dced6a`) | `.extract(field)` accepts portable + PG fields (`types.ts:599`; `ops.ts:1823-1829`); `c.pg` deleted |
-| Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b + #268) | `.count/.sum/.avg/.min/.max`, PG-first `.stringAgg/.arrayAgg/.boolAnd/.boolOr`, `countStar()` import, `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
-| Rename builder handle `c` → `col` (context-typed generic) | **DONE** (J4) | `(col) => col("x")` across the authoring surface; zero wire churn |
-| `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
-| Retire `@zeroship/migrate/pg` subpath | **DONE** (J5/J6) | `domain`/`grant`/… are rooted on `@zeroship/migrate`; `table()` is the one PG-first table handle; `pg.ts`, the package subpath, and the old split table handle are deleted |
-
-> **Caveat for readers.** The reference docs now reflect the J4 `(col) => Expr` callback param and J5 one-root import surface. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3/J4/J5 are landed.
-
-Because the wire format did not churn across J1–J3 ("zero wire churn"), the **Rust crate structure, the IR shape, the `MigrationBackend` seam, and the dependency graph are stable across the redesign** — what moves is the JS ergonomics and one validate-time backstop (the immutable-context volatility gate, [§7](#7-the-validate-gate--error-taxonomy)).
 
 ---
 
@@ -74,11 +43,11 @@ The crate index summarizes it as: "*Migration engine. Multi-dialect apply: nativ
 
 ### 1.2 The problem it solves
 
-A zeroship migration is an unusually hostile artifact. From the threat model in `docs/proposals/2026-06-16-db-migration-engine-design.md:24-31` and mirrored in `lib.rs:42-47`:
+A zeroship migration is an unusually hostile artifact. The crate threat model is summarized in `lib.rs:42-47`:
 
 > Migrations are **privileged arbitrary-SQL** authored by **untrusted** creators *and* a **prompt-injectable AI**.
 
-That single sentence is why an off-the-shelf tool doesn't fit. A migration must run **DDL** (which needs elevated privilege), but the SQL comes from a creator who is untrusted, or — worse — from an AI builder that can be prompt-injected via app content or templates. The enumerated attack vectors (design §1.1, lines 24-31):
+That single sentence is why an off-the-shelf tool doesn't fit. A migration must run **DDL** (which needs elevated privilege), but the SQL comes from a creator who is untrusted, or — worse — from an AI builder that can be prompt-injected via app content or templates. The threat vectors are:
 
 | # | Vector | Concrete danger |
 | --- | --- | --- |
@@ -90,27 +59,27 @@ That single sentence is why an off-the-shelf tool doesn't fit. A migration must 
 | 6 | DoS | indefinite locks / unbounded ops starving shared infra |
 | 7 | Destructive ops | `DROP` / `TRUNCATE` data loss |
 
-Flyway and Liquibase are **trusted-operator** tools: they assume a human DBA authored the changesets, execute SQL through the connection privileges you hand them, and perform no adversarial parse-time analysis of statement content. None of vectors 1–4 are in their model. zeroship needed an engine where every migration is treated as **untrusted input, confined by DB privilege *and* independently verified at parse time** — "belt and suspenders" (design §1.2, lines 33-34). The full security substrate is documented in [§10 Security-first design](#10-security-first-design), which is the canonical home for the two-line defense model.
+Flyway and Liquibase are **trusted-operator** tools: they assume a human DBA authored the changesets, execute SQL through the connection privileges you hand them, and perform no adversarial parse-time analysis of statement content. None of vectors 1–4 are in their model. zeroship needed an engine where every migration is treated as **untrusted input, confined by DB privilege *and* independently verified at parse time** — "belt and suspenders." The full security substrate is documented in [§10 Security-first design](#10-security-first-design), which is the canonical home for the two-line defense model.
 
 ### 1.3 Why zeroship built its own engine
 
-The design records this as an explicit premise (design §0, `2026-06-16-...design.md:15`). Four forcing functions:
+Four forcing functions:
 
 1. **Untrusted-by-default, defense-in-depth security** (the decisive reason). The engine enforces two independent lines (`lib.rs:49-62`): **Line 1** — the `SqlGuard` parses every statement with the **real Postgres parser** (`pg_query` / `libpg_query` C bindings) and checks a hard deny-list (the choice of real parser is itself a security decision — a pure-Rust `sqlparser-rs` is incomplete for exotic PG syntax = a security gap; `Cargo.toml` comment). **Line 2** — the least-privilege per-project `migrator` role (`NOSUPERUSER NOCREATEROLE NOCREATEDB`, no grants on platform/other-project schemas, `search_path` pinned) so the DB itself rejects the same ops even if SQL slips past parse. Defense is layered *and redundant*: the engine gate refuses denied/destructive-unapproved plans, then the executor **independently re-runs the guard and re-applies the role** (`lib.rs:36-40`, `engine.rs:20-27`).
 2. **Zero-tokio, in-stack execution.** A platform key invariant is "*Zero tokio in the stack — everything is compio/io_uring*" (`AGENTS.md`). The apply fast path runs through the bespoke **`compio-postgres`** driver. An external JVM tool or a tokio-based Rust migrator would violate that invariant. The guard itself runs out-of-band at deploy time, so it is plain synchronous logic with no async runtime (`lib.rs:63-65`).
-3. **UUIDv7 versioning for concurrent multi-app authoring.** Migration version = `UUIDv7` (`mig_…` typed-id), *not* Flyway-style sequential integers (which "collide under concurrent multi-app authoring") or raw timestamps (which skew). UUIDv7 gives a collision-free total order by its time component (design §2.1, lines 63-76).
+3. **UUIDv7 versioning for concurrent multi-app authoring.** Migration version = `UUIDv7` (`mig_…` typed-id), *not* Flyway-style sequential integers (which collide under concurrent multi-app authoring) or raw timestamps (which skew). UUIDv7 gives a collision-free total order by its time component.
 4. **Integration with zeroship's own conventions** — the immutable/append-only journal reuses "*the billing-ledger pattern*", the `typed_id` scheme, the project advisory lock, and the deploy/`.zship` artifact flow. A third-party tool cannot participate.
 
 ### 1.4 The project-umbrella model
 
-The engine is built for a data model off-the-shelf tools don't contemplate (design §0/§4, lines 12-14, 108-114):
+The engine is built for a data model off-the-shelf tools don't contemplate:
 
 - A **project** (`prj_…`) is the umbrella over resources: one **db**, one **kv**, one **storage**, and *one or more* **apps**.
 - Apps in a project **share** the DB. A `storefront` and a `storebackend` app hit the same `products`/`orders` tables.
 - **Schema is the union of all member apps' declarations.** Each app `export default { schema }` declares the tables it owns; the project DB schema is the *merged union*.
 - **Declare vs use.** *Using* a table (read/write rows) is always shared and free. *Declaring* a table (its structure) is ownership: one owner per table; identical re-declaration is idempotent; a conflicting declaration is a deploy error.
 
-This drives three engine features Flyway has no notion of: (a) **UUIDv7 versioning** so concurrent app deploys don't collide; (b) the **per-project advisory lock** so concurrent deploys serialize and the second no-ops already-applied migrations; and (c) **per-table ownership + `depends_on` cross-slice ordering** for app-B's FK pointing at app-A's table. Removing an app never auto-drops its tables (design §4, line 113).
+This drives three engine features Flyway has no notion of: (a) **UUIDv7 versioning** so concurrent app deploys don't collide; (b) the **per-project advisory lock** so concurrent deploys serialize and the second no-ops already-applied migrations; and (c) **per-table ownership + `depends_on` ordering** for app-B's FK pointing at app-A's table. Removing an app never auto-drops its tables.
 
 ### 1.5 Where it sits in the platform
 
@@ -137,17 +106,17 @@ The engine's portability and integrity both rest on a **single canonical interme
 
 ### 1.7 Standalone product vs. managed server
 
-The engine is a **generic, standalone-capable engine** with a **thin managed profile** layered on by call-site — "*trust separation is the call-site invariant, not tool separation*" (design §1.7):
+The engine is a **generic, standalone-capable engine** with a **thin managed profile** layered on by call-site — trust separation is the call-site invariant, not tool separation:
 
 - The creator-migration engine's roles have **zero** access to `control`/`auth`/`billing`.
 - The platform's *own* DB **also runs on `zeroship-migrate`**, under the **Platform** trust profile, from the committed JS DSL corpus in `db/migrations-ts/`. There is *no legacy platform SQL source*.
-- The Platform profile is constructible **only at the operator call site** (gated by an `OperatorCapability` token); the creator submission ingress is hard-wired to **Confined** with *no API path to Platform*. This is mechanically enforced by the `standalone-cli` Cargo feature and `compile_fail` doctests ([§2.8](#2-crate-architecture), [§10](#10-security-first-design)).
+- The Platform profile is constructible **only at a trusted capability call site** (gated by an `OperatorCapability` token); the creator submission ingress is hard-wired to **Confined** with *no API path to Platform*. This is mechanically enforced by the `standalone-cli` Cargo feature and `compile_fail` doctests ([§2.8](#2-crate-architecture), [§10](#10-security-first-design)).
 
 ### 1.8 The "JS DSL is the sole migration source — no raw SQL / no Flyway" stance
 
-Both an authoring mandate and a security property. The platform's own schema has **no** hand-authored SQL/Liquibase — the JS DSL corpus (`db/migrations-ts/`) is the whole source (`AGENTS.md:42`). On the creator surface there is **no raw SQL** — no `Raw` type, no ``sql`` escape, no string fragments; every transform/predicate is a closed `Expr` AST and the engine owns rendering (`migrate-op-dsl.md:22-27`, "property A"). In the v2 redesign, raw is not removed entirely but demoted to a **P11 "debt instrument"** — a closed-island `raw({ sql, reason })` with a required `reason` that travels *inside the checksummed IR* and a ratchet counter against a committed baseline. Core reaches none of them.
+Both an authoring mandate and a security property. The platform's own schema has **no** hand-authored SQL/Liquibase — the JS DSL corpus (`db/migrations-ts/`) is the whole source (`AGENTS.md:42`). On the creator surface there is **no raw SQL** — no `Raw` type, no ``sql`` escape, no string fragments; every transform/predicate is a closed `Expr` AST and the engine owns rendering (`migrate-op-dsl.md:22-27`, "property A"). The gated `raw({ sql, reason })` escape is reserved for trusted platform use, carries its `reason` inside the checksummed IR, and is counted against a committed baseline.
 
-A migration module is a single default-exported `{ name?, up, down? }`. `up()` is required; `down()` is optional and **not auto-derived for DML or lossy DDL** — a `backfill`/`update`/`del` or a `dropColumn` yields no auto-inverse, so such a migration is `down: null` (irreversible) unless the author hand-writes a structured `down()` (itself op calls, never a raw string). This encodes "default to roll-forward; reserve true rollback for recent/failed deploys" (design §5).
+A migration module is a single default-exported `{ name?, up, down? }`. `up()` is required; `down()` is optional and **not auto-derived for DML or lossy DDL** — a `backfill`/`update`/`del` or a `dropColumn` yields no auto-inverse, so such a migration is `down: null` (irreversible) unless the author hand-writes a structured `down()` (itself op calls, never a raw string). This encodes "default to roll-forward; reserve true rollback for recent/failed deploys."
 
 ### 1.9 Summary — the "why" in one table
 
@@ -160,9 +129,9 @@ A migration module is a single default-exported `{ name?, up, down? }`. `up()` i
 | **Multi-dialect from one script** | dialect-specific SQL files | dialect-neutral canonical IR; engine owns 100% rendering; fail-closed off-target |
 | **Schema = source of truth for typed `env.db`** | no SDK/type integration | `gen-types` folds IR → `schema.runtime.json` + `env.db.ts` |
 | **Trust separation without tool separation** | separate installs | one engine, `OperatorCapability`-gated Platform profile vs hard-wired Confined creator ingress; `standalone-cli` feature-gated |
-| **No back-door SQL** | encourages raw SQL | closed op DSL is the sole source; raw is a P11-counted debt instrument only |
+| **No back-door SQL** | encourages raw SQL | closed op DSL is the sole creator source; trusted raw use requires `raw({ sql, reason })` and is counted |
 
-**Key files:** `lib.rs:1-101` (charter + security stance), `engine.rs:1-27` (public pipeline), `Cargo.toml:7-40` (feature gates + IR/parser rationale), `docs/proposals/2026-06-16-db-migration-engine-design.md` (the full design).
+**Key files:** `lib.rs:1-101` (charter + security stance), `engine.rs:1-27` (public pipeline), `Cargo.toml:7-40` (feature gates + IR/parser rationale), `guard/mod.rs` (parse-time deny-list), and `apply/role.rs` (least-privilege role).
 
 ---
 
@@ -278,7 +247,7 @@ default = []
 standalone-cli = []   # raw standalone apply/runner for user-owned DBs; server/control MUST NOT enable
 ```
 
-`standalone-cli` gates the raw standalone apply surface for user-owned databases; `resolver = "3"` prevents dev/test feature use from leaking into embedder binaries. At this commit:
+`standalone-cli` gates the raw standalone apply surface for user-owned databases; `resolver = "3"` prevents dev/test feature use from leaking into embedder binaries. The crate exposes these feature flags:
 
 - `apply_standalone` is only exported under the feature (`lib.rs:254-255`, `command/ir_apply.rs:408`). `lib.rs:84-101` asserts the *absence* via `compile_fail` doctests: in a default build, `zeroship_migrate::apply_standalone`, `command::runner::RunProfile::Trusted`, and `guard::GuardConfig::trusted` must **not** compile.
 - The `zeroship-migrate` operator CLI bin requires it (`required-features = ["standalone-cli"]`) — the only place a `PlatformCapability`/`OperatorCapability` token is minted.
@@ -389,7 +358,7 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 | `t.vector(opts)` | `{ dimensions, metric? }` **dims required** | `{ vector: { vector: n } }`; `vectorMetric` facet | pgvector / sqlite-vec; metric ∈ closed set |
 | `t.geoPoint()` | — | `geoPoint` | spatial point |
 | `t.smallInt()` | — | `smallInt` | int2 |
-| `t.int()` | — | `int` | int4 (canonical; `t.integer` deleted, P10) |
+| `t.int()` | — | `int` | int4 (canonical integer spelling) |
 | `t.bigInt()` | — | `bigInt` | int8 |
 | `t.real()` | — | `real` | float4 |
 | `t.double()` | — | `double` | float8 — **not** an alias of `t.real()` |
@@ -423,13 +392,13 @@ Two lowering rules: a column that is both `.unique()` and `.primaryKey()` emits 
 
 ```ts
 t.bigInt().default(0)            t.text().default("pending")      t.boolean().default(true)
-t.uuid().default(genRandomUuid())   t.timestamp().default(now())   // function defaults are EXPRESSIONS (the `{ fn: … }` carrier was deleted, P4)
+t.uuid().default(genRandomUuid())   t.timestamp().default(now())   // function defaults are expressions
 t.json().default({})   t.json().default([])   t.textArray().default([])   // empty-container defaults
 t.json().notNull().default({ max_sockets: 4, egress_ceiling_bytes: 10485760 })  // arbitrary jsonb VALUE — integers only in v1
 t.bigInt().notNull().default(nextval("orders_id_seq", { schema: "zeroship" }))   // sequence-backed (PG vendor)
 ```
 
-Scalars pass through `toIrScalar` (`ops.ts:949-967`): branded `decimal("...")` → `{decimal}`, `byteValue(...)`/`Uint8Array` → `{bytes:base64}`, a non-integer JS number → `{decimal}`, a `bigint` throws. JSON defaults accept integers only (`|v| < 2**53`). Column defaults are validated immutable/non-volatile by `validateDefaultExpr` ([§4.7](#4-authoring-the-expression-sublanguage)). Value constructors exported for defaults/expressions are top-level imports as of J3: `now()`, `genRandomUuid()`, `currentSetting(name, {missingOk?})`, `currentUser()`, `interval(duration)` (`ops.ts:1241-1273`), `nextval(name, {schema?})`, `decimal(str)`, `byteValue(bytes)`, `lit(value)`.
+Scalars pass through `toIrScalar` (`ops.ts:949-967`): branded `decimal("...")` → `{decimal}`, `byteValue(...)`/`Uint8Array` → `{bytes:base64}`, a non-integer JS number → `{decimal}`, a `bigint` throws. JSON defaults accept integers only (`|v| < 2**53`). Column defaults are validated immutable/non-volatile by `validateDefaultExpr` ([§4.7](#4-authoring-the-expression-sublanguage)). Value constructors exported for defaults/expressions are top-level imports: `now()`, `genRandomUuid()`, `currentSetting(name, {missingOk?})`, `currentUser()`, `interval(duration)` (`ops.ts:1241-1273`), `nextval(name, {schema?})`, `decimal(str)`, `byteValue(bytes)`, `lit(value)`.
 
 ### 3.7 The fluent `table()` handle grammar
 
@@ -643,15 +612,15 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 `lintDeterminism(source)` is a best-effort whole-source regex scan flagging `Date.now()` / `Math.random()` / `crypto.randomUUID()` / `new Date(...)` leaking into recorded values; returns `DeterminismFinding[]` (code `NONDETERMINISTIC_OP_ARG`), warnings only, never a hard reject (`ops.ts:4059-4091`). The bare native symbols (no parens) are the opt-in to DB-side evaluation.
 
-### 3.19 Doc drift (cookbook vs. code at `544eaada`)
+### 3.19 Companion examples
 
-`docs/reference/migrate-dsl-examples.md` is aspirational/stale in these concrete spots — the code is authoritative: (1) `t.numeric(12, 2)` / `t.char(3)` / `t.vector(1536, {...})` use positional args, but the factories take **options objects**; (2) `.softDelete()`/`.withVersioning()`/`.strictness()` don't exist — the real method is `.setOptions({...})`; (3) `table(...).del({...})` is wrong — the handle method **is** `.delete(args)` (wire tag still `"delete"`); (4) Postgres vendor helpers are documented from the JS-author side in [§3.15](#315-the-postgres-vendor-authoring-surface).
+`docs/reference/migrate-dsl-examples.md` is the cookbook companion for this reference. This guide is the normative source for argument shapes and method names: column-type factories use their documented options objects, table runtime options are set with `.setOptions({...})`, and row deletion is authored with `.delete(args)` (wire tag `"delete"`). Postgres vendor helpers are documented from the JS-author side in [§3.15](#315-the-postgres-vendor-authoring-surface).
 
 ---
 
 ## §4 Authoring: the expression sublanguage
 
-The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(col) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. This section documents the surface as refreshed through current HEAD `c0b97acf`; citations relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
+The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(col) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. Citations in this section are relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
 
 ### 4.1 The two authoring shapes
 
@@ -667,7 +636,7 @@ The injected handle is a **callable object** (`ExprBuilder`, `types.ts:652`; bui
 | `col("orders", "id")` | **qualified** column ref (the join-ON fix) | `{ node: "colRef", table, name }` | `ops.ts:1991` |
 | `col.case({ branches, else? })` | searched CASE | `{ node: "case", … }` | `ops.ts:1948` |
 
-Scalar functions, aggregate functions, regex/column-size operators, and extract fields are now chain methods on the returned `ExprChain` ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); receiver-less functions are top-level imports ([§4.8](#48-value-constructors--top-level-imports-done-j3)). The two-arg form was added because pre-redesign expressions couldn't table-qualify a column, making a view/trigger join's ON clause unwritable. **DONE (J4):** the injected authoring handle is spelled `col`; this is a callback parameter rename only and does not change the recorded IR.
+Scalar functions, aggregate functions, regex/column-size operators, and extract fields are chain methods on the returned `ExprChain` ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); receiver-less functions are top-level imports ([§4.8](#48-value-constructors--top-level-imports)). The two-arg form lets expression callbacks table-qualify a column, which is required for view and trigger join `ON` clauses. The injected authoring handle is conventionally spelled `col`; the callback parameter name does not affect the recorded IR.
 
 ### 4.3 Chain operators (`ExprChainImpl`, `ops.ts:1702`)
 
@@ -680,13 +649,13 @@ Every method returns a fresh `ExprChain`. Bare JS values auto-wrap to a `literal
 - **Null/bool tests** — `unaryOp`: `.isNull/.isNotNull/.isTrue/.isFalse`.
 - **Cast**: `.cast({ to })` → `{ node:"cast", operand, target }`; the closed target set (`castTargets`, `ops.ts:1626`) is **`text, int, real, boolean, bytes, uuid`**.
 - **Portable predicates**: `.between(low,high)` → `between`; `.like(pattern)` → `like`; `.in(values)`/`.notIn(values)` → `inList` (require a **homogeneous** `Scalar[]`; empty strings, NUL bytes, non-finite numbers rejected; PG renders `= ANY(ARRAY[...])`); `.distinctFrom(x)` → `distinctFrom` (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
-- **PG-first chain operators — DONE in this redesign (J2)**: `.regex(pattern)` → `{ node:"pgRegexMatch", expr, pattern }` (`~` on PG, `REGEXP` on MySQL, **error on SQLite**); `.columnSize()` → `{ node:"pgColumnSize", expr }` (`pg_column_size()` on PG, **error elsewhere**). Previously `c.pg.regex`/`c.pg.columnSize`; the dialect gate now lives in the Rust validator, fail-closed off-target (`ops.ts:1770-1774`, `types.ts:575-577`).
+- **PostgreSQL-first chain operators**: `.regex(pattern)` → `{ node:"pgRegexMatch", expr, pattern }` (`~` on PG, `REGEXP` on MySQL, **error on SQLite**); `.columnSize()` → `{ node:"pgColumnSize", expr }` (`pg_column_size()` on PG, **error elsewhere**). The dialect gate lives in the Rust validator and fails closed off-target (`ops.ts:1770-1774`, `types.ts:575-577`).
 - **Scalar functions**: `.lower/.upper/.trim/.length/.abs/.coalesce/.nullif/.mod/.round/.floor/.ceil/.substr/.replace/.extract/.splitPart` record `fnCall`, `extract`/`pgExtract`, or `fnSynth` nodes; see [§4.4](#44-scalar-functions-chain-methods).
 - **Aggregates**: `.count/.sum/.avg/.min/.max` record `agg` nodes with the receiver as `arg`; receiver-less `COUNT(*)` is `countStar()`. `.stringAgg(delimiter)`, `.arrayAgg()`, `.boolAnd()`, and `.boolOr()` are PostgreSQL-first chain methods that fail closed off-PG unless wrapped in `dialect({...})`; see [§4.5](#45-aggregate-functions-chain-methods).
 
 ### 4.4 Scalar functions (chain methods)
 
-The old scalar-function namespace was deleted in J2a. Receiver-ful scalar functions are now authored off the expression chain and build the same `fnCall`/`extract`/`fnSynth` nodes:
+Receiver-ful scalar functions are authored off the expression chain and build `fnCall`/`extract`/`fnSynth` nodes:
 
 | Member | Wire node | Notes |
 |---|---|---|
@@ -706,7 +675,7 @@ Portable `.extract(field)` fields are `year, month, day, hour, minute, dow`. PG-
 
 ### 4.5 Aggregate functions (chain methods)
 
-Aggregates were flattened in J2b and expanded in #268. Chain methods call `aggNode` → `{ node:"agg", func, arg?, delimiter?, distinct? }`:
+Aggregate chain methods call `aggNode` → `{ node:"agg", func, arg?, delimiter?, distinct? }`:
 
 | Member | Wire node | Notes |
 |---|---|---|
@@ -717,11 +686,11 @@ Aggregates were flattened in J2b and expanded in #268. Chain methods call `aggNo
 | `.boolAnd()` / `.boolOr()` | `{ node:"agg", func:"boolAnd"|"boolOr", arg:<receiver> }` | PostgreSQL `bool_and` / `bool_or`; fail-closed off-PG |
 | `countStar()` | `{ node:"agg", func:"count" }` | top-level import for receiver-less `COUNT(*)` |
 
-The standard five (`count/sum/avg/min/max`) render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate** for those variants. The long-tail PostgreSQL aggregates (`stringAgg/arrayAgg/boolAnd/boolOr`) are PG-first and validate as `DIALECT_UNSUPPORTED` on SQLite/MySQL unless the author supplies explicit alternatives with `dialect({...})`. The position check is enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)). Follow-ups intentionally not built here: `jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses.
+The standard five (`count/sum/avg/min/max`) render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate** for those variants. The long-tail PostgreSQL aggregates (`stringAgg/arrayAgg/boolAnd/boolOr`) are PG-first and validate as `DIALECT_UNSUPPORTED` on SQLite/MySQL unless the author supplies explicit alternatives with `dialect({...})`. The position check is enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)). `jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses are outside the current surface.
 
-### 4.6 PG extract fields and deleted vendor namespace
+### 4.6 PG extract fields and vendor-neutral spelling
 
-The old expression vendor namespace was deleted in J2a. `regex` and `columnSize` are core chain operators ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); PG EXTRACT fields are reached through the core `.extract(field)` chain method ([§4.4](#44-scalar-functions-chain-methods)). The design remains PostgreSQL-first: these nodes are authorable on the core surface and fail closed when the target dialect lacks a native realization and the author did not provide an explicit `dialect({...})` leg.
+`regex` and `columnSize` are core chain operators ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); PG EXTRACT fields are reached through the core `.extract(field)` chain method ([§4.4](#44-scalar-functions-chain-methods)). The surface is PostgreSQL-first: these nodes are authorable on the core surface and fail closed when the target dialect lacks a native realization and the author did not provide an explicit `dialect({...})` leg.
 
 ### 4.7 Context-typed builders — the immutable/mutable split
 
@@ -733,9 +702,9 @@ Rather than one polymorphic handle, the recorder hands out **different builder o
 
 The `DefaultBuilder` exposes only `{ case }` — deliberately no column accessor — so a default callback cannot reference columns by construction. Aggregates remain type-reachable through prebuilt chains/top-level imports and are rejected by Rust validation.
 
-### 4.8 Value constructors — top-level imports (DONE, J3)
+### 4.8 Value constructors — top-level imports
 
-Receiver-less value producers are **top-level named exports** (from `index.ts:29-40`). This is the headline J3 change: most defaults/values need no `(col) =>` callback at all.
+Receiver-less value producers are **top-level named exports** (from `index.ts:29-40`). Most defaults/values need no `(col) =>` callback at all.
 
 | Import | Wire node | Notes |
 |---|---|---|
@@ -749,35 +718,38 @@ Receiver-less value producers are **top-level named exports** (from `index.ts:29
 | `byteValue(bytes\|b64)` | branded → `{ bytes }` | |
 | `nextval(name, { schema? })` | branded default → `{ nextval: {...} }` | default-only carrier |
 
-`interval` takes a structured `Duration` (`types.ts:135`) with integer fields `years, months, days, hours, minutes, seconds`; `pgDuration` requires ≥1 field, rejects unknown/non-integer fields, canonicalizes order. This replaced the old string form (`interval("7 days")` used to throw). **Owned cost:** a top-level import can't know its position, so a volatile constructor placed in an *immutable* index/generated slot is caught at **validate time** (via `validateImmutableExpr` and its Rust backstop, [§7.6](#7-the-validate-gate--error-taxonomy)), not at tsc — accepted per P0's ergonomics-first stance. Native-symbol shorthand: passing the bare native identities `Date.now`/`Math.random`/`crypto.randomUUID` (no parens) in a DML/value slot still normalizes to `fnSynth now`/`genRandomUuid`; but in a **default** slot those bare symbols are now **rejected** (`rejectRemovedDefaultFunctionValue`, `ops.ts:1064`) with a message steering to `.default(now())`.
+`interval` takes a structured `Duration` (`types.ts:135`) with integer fields `years, months, days, hours, minutes, seconds`; `pgDuration` requires ≥1 field, rejects unknown/non-integer fields, canonicalizes order. A top-level import cannot know its final expression position, so a volatile constructor placed in an *immutable* index/generated slot is caught at **validate time** (via `validateImmutableExpr` and its Rust backstop, [§7.6](#7-the-validate-gate--error-taxonomy)), not at tsc. Native-symbol shorthand: passing the bare native identities `Date.now`/`Math.random`/`crypto.randomUUID` (no parens) in a DML/value slot still normalizes to `fnSynth now`/`genRandomUuid`; in a **default** slot those bare symbols are **rejected** (`rejectRemovedDefaultFunctionValue`, `ops.ts:1064`) with a message steering to `.default(now())`.
 
-Typical post-J3 usage:
+Typical usage:
 ```ts
 id:         t.uuid().primaryKey().default(genRandomUuid()),
 created_at: t.timestamp().notNull().default(now()),
 using:      (col) => col("app_id").eq(currentSetting("shop.tenant").cast({ to: "uuid" })),  // callback only where you must reference a column
 ```
 
-### 4.9 `dialect({...})` — the portability escape (`ops.ts:1894`)
+### 4.9 `dialect({...})` — the portability escape
 
-The single Layer-2 escape for a per-dialect **value** divergence. Each leg is itself an expression, wrapped by `exprArg`; the node records in canonical leg order `default, pg, sqlite, mysql` → `{ node:"dialect", default?, pg?, sqlite?, mysql? }`:
+`dialect(legs)` is the explicit escape for per-dialect value or op divergence.
+
+In expression/value position, each leg is itself an expression wrapped by `exprArg`; the node records in canonical leg order `default, pg, sqlite, mysql` → `{ node:"dialect", default?, pg?, sqlite?, mysql? }`:
 
 ```ts
 default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
 dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
 ```
 
-At least one leg must be present or it throws `OP_INVALID`. The engine's validate applies per-target scope math: a target with no own leg and no `default` is refused (`EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`). `validateDefaultExpr` **rejects** any `dialect` node in a default. **PLANNED (J1):** generalize `dialect()` from expression-only to a single context-aware generic usable at **op/spec granularity** (wrapping a whole `IndexSpec`/`ColumnDef`/op). At this commit `dialect()` is expression-only.
+At least one leg must be present or it throws `OP_INVALID`. The engine's validate applies per-target scope math: a target with no own leg and no `default` is refused (`EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`). `validateDefaultExpr` **rejects** any `dialect` node in a default.
 
-### 4.10 The P0 principle — "PostgreSQL is first-class"
+In statement/op position, legs are thunks. The recorder runs each present thunk in canonical order (`default`, `pg`, `sqlite`, `mysql`), captures the ops emitted by that thunk, removes those captured ops from the outer recorder, and emits one dialectal op containing the per-target op lists. A target with no own leg and no `default` leg skips the op entirely.
 
-The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets PostgreSQL first; the core surface **is** PG-shaped and is **not** bent toward a lowest-common-denominator portable core. PG constructs — `~` regex, `pg_column_size`, `current_setting`, RLS, roles/grants, PG EXTRACT fields, `hnsw`/`ivfflat`, `EXCLUDE`, `ON CONFLICT` — are directly usable on the core surface with no `/pg` import and no vendor-namespace casting. Portability to SQLite/MySQL is explicit and opt-in via `dialect({...})` at the exact value/op that diverges; anything with no native realization and no `dialect()` leg **fails closed** at that target.
+### 4.10 PostgreSQL is first-class
 
-### 4.11 Ambiguities I could not fully confirm
+The platform targets PostgreSQL first; the core surface **is** PG-shaped and is **not** bent toward a lowest-common-denominator portable core. PG constructs — `~` regex, `pg_column_size`, `current_setting`, RLS, roles/grants, PG EXTRACT fields, `hnsw`/`ivfflat`, `EXCLUDE`, `ON CONFLICT` — are directly usable on the core surface with no `/pg` import and no vendor-namespace casting. Portability to SQLite/MySQL is explicit and opt-in via `dialect({...})` at the exact value/op that diverges; anything with no native realization and no `dialect()` leg **fails closed** at that target.
 
-- Op-level `dialect()` (J1) is absent while J3 (value constructors) is landed — the jobs did not land in strict numeric order.
+### 4.11 Portability notes
+
 - Aggregate position enforcement is verified in the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts, while structured view projection and `having` are grouped SELECT contexts.
-- The Rust-side MySQL render of `.regex` (`REGEXP`) is asserted by the design + the `types.ts:574` comment, but the MySQL leg lives in the engine crate (J8 incremental) — I did not confirm it is implemented vs. still fail-closed.
+- `.regex()` renders as `~` on PostgreSQL and `REGEXP` on MySQL, and fails closed on SQLite.
 
 ---
 
@@ -787,10 +759,10 @@ The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets P
 
 ### 5.1 The declarative differ: desired snapshot → diff → generated migrations
 
-The platform's authoring layer holds a creator's **declared schema** — the per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel` (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). `render/declarative.rs` turns that into migrations in two phases (`declarative.rs:1-11`, re-exported at `lib.rs:137-141`):
+The platform's authoring layer holds a creator's **declared schema** — the per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel` (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). `render/declarative.rs` turns that into migrations in two passes (`declarative.rs:1-11`, re-exported at `lib.rs:137-141`):
 
-1. **`desired_snapshot(...)`** (approval/risk phase P0, not the PG-first P0 principle) — reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
-2. **`DeclarativeAuthor::diff(...)`** (approval/risk phase P1 additive + P2 destructive-gated) — introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
+1. **`desired_snapshot(...)`** reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
+2. **`DeclarativeAuthor::diff(...)`** introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
 
 **Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test (`tests/declarative_pg.rs`) guards the two copies against drift (`declarative.rs:28-45`).
 
@@ -802,7 +774,7 @@ The control-plane deploy path drives the same differ through `apply_declarative`
 
 ### 5.3 The migration-first fold: migration set → `env.db.ts` + `schema.runtime.json`
 
-The reverse direction makes the `op.*` migration set the **sole source of truth** for the typed `env.db` surface — the types are *generated from the fold*, never hand-declared (`docs/proposals/2026-06-25-migration-first-schema.md`; `frontend/gen_types.rs`). `zeroship-migrate-js gen-types` produces two artifacts in `generated/zeroship/` (the *committed* output dir, chosen so `env.db.ts` can be in tsconfig):
+The reverse direction makes the `op.*` migration set the **sole source of truth** for the typed `env.db` surface — the types are *generated from the fold*, never hand-declared (`frontend/gen_types.rs`). `zeroship-migrate-js gen-types` produces two artifacts in `generated/zeroship/` (the *committed* output dir, chosen so `env.db.ts` can be in tsconfig):
 
 1. **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`: `{ version: 1, collections: { [c]: { fields, options, indexes } } }` (`gen_types.rs:15-16,40`).
 2. **`env.db.ts`** — a real `.ts` **module** (not a `.d.ts`) reconstructing `const schema = { … t.text() … } as const` of `@zeroship/db` `t.*()` builder calls, wrapping collections in `defineSchema(...)` + runtime-metadata chains (`.softDelete()`, `.withVersioning()`, `.strictness(...)`, `.index(...)`), then `declare module "zeroship" { interface Env { db: Db<typeof schema> } }` (`gen_types.rs:493-548`). It **must** be a module because `t.*()` value expressions are illegal in a `.d.ts` ambient context, and the SDK's `InferFieldDef` inference keys only off `TypeBuilder` builder calls — so the emitter reconstructs builder calls rather than a hand-rolled interface (`gen_types.rs:42-51`).
@@ -936,11 +908,11 @@ sc.delete({ where: (col) => col("code").isNull(), limit: 100 });   // method del
 
 **TypeScript types for advanced callers.** `sdks/migrate/scripts/gen-ir-types.mjs` generates the closed string-enum tokens into `sdks/migrate/src/generated/enums.ts` from `op-ir.schema.json`. The **recursive structural types** (`MigrationIr`, `Op`, `Expr`, `ColType`, `IrConstraint`) are **hand-authored** in `sdks/migrate/src/generated/ir.ts` (codegen overflows the stack on the self-recursive `oneOf`); a drift test pins every enum token/`Op` tag/`Expr` tag against the schema. Both files stress: these are *ergonomics*; the golden `.ir.json` corpus + the `Checksum::of_ir` round-trip are the **contract source of truth**.
 
-### 6.9 The pre-launch "break every producer/consumer together" stance
+### 6.9 The pre-launch "update every producer/consumer together" stance
 
-The IR is a canonical example of the AGENTS.md wire-format discipline. `ir_version` exists so dev/test databases can re-interpret artifacts across engine versions (code-evolution discipline), not so deployed apps can be left alone (`ir.rs:85-90`). A shape change means, in one PR: bump `CURRENT_IR_VERSION`, update every `Op`/`Expr` node, regenerate `op-ir.schema.json` and every golden, update the hand-authored `ir.ts`, and let the drift + exhaustiveness + round-trip gates prove JS and Rust still agree.
+The IR is a canonical example of the AGENTS.md wire-format discipline. `ir_version` exists so dev/test databases can re-interpret artifacts across engine versions (code-evolution discipline), not so deployed apps can be left alone (`ir.rs:85-90`). A shape change means bumping `CURRENT_IR_VERSION`, updating every `Op`/`Expr` node, regenerating `op-ir.schema.json` and every golden, updating the hand-authored `ir.ts`, and letting the drift + exhaustiveness + round-trip gates prove JS and Rust still agree.
 
-**Ambiguities I could not fully confirm:** the "Wave C" lowering (`IrAuthor::lower`) and the structural validator are covered in [§7](#7-the-validate-gate--error-taxonomy)/[§8](#8-one-ir-three-dialects-render--portability); the ADR `2026-06-23-op-ir-serde-repr.md` is cited by the code but I documented only the code's paraphrase.
+`IrAuthor::lower` and the structural validator are covered in [§7](#7-the-validate-gate--error-taxonomy) and [§8](#8-one-ir-three-dialects-render--portability). The ADR `2026-06-23-op-ir-serde-repr.md` is cited by the code; this section documents the code-level contract.
 
 ---
 
@@ -997,14 +969,14 @@ Every `CODE_*` constant (`validate.rs:55-141`):
 | `VECTOR_METRIC_MISPLACED` | A `vector_metric` on a non-`Vector` column. `:95` |
 | `COLUMN_FACET_CONFLICT` | Mutually-exclusive facets (`default`+`generated`, `identity`+`generated`). `:98` |
 | `COLUMN_DEFAULT_TYPE` | A default invalid for the declared type (e.g. `{}` on `text[]`). `:101` |
-| `IMMUTABLE_CONTEXT_VOLATILE` | **(J3 backstop)** A volatile function (`now()`, `genRandomUuid()`) in an immutable context. `:104` |
+| `IMMUTABLE_CONTEXT_VOLATILE` | A volatile function (`now()`, `genRandomUuid()`) in an immutable context. `:104` |
 | `AGGREGATE_IN_SCALAR_CONTEXT` | An aggregate appeared in a scalar context (index expr/predicate, generated column, CHECK, or column DEFAULT). `:107` |
 | `SEQUENCE_OPTION_INVALID` | `increment = 0`, `cache < 1`, or `minValue > maxValue`. `:110` |
 | `VENDOR_OP_DENIED` | A privileged vendor op whose required `VendorCapability` isn't granted. `:116` |
 | `PGRAW_REASON_REQUIRED` | A `pgRaw` op with an empty audit `reason`. `:118` |
 | `PRIMARY_KEY_INVALID` | Resolved `primaryKey` empty/duplicated/absent-column. `:121` |
 | `TABLE_SHAPE_POLICY` | A `createTable` violating the active profile's table-shape policy. `:123` |
-| `DIALECT_UNSUPPORTED` | Target cannot realize a construct and no P12 affirmation authorizes a transparent-degradable leg. `:126` |
+| `DIALECT_UNSUPPORTED` | Target cannot realize a construct and no transparent-degradable leg applies. `:126` |
 | `PARTITION_KEY_COVERAGE` | Unique-enforcing entries must cover all partition-key columns. `:129` |
 | `PARTITION_BOUNDS_NOT_TOTAL` | Collapse-affirmed bound sets must be total. `:131` |
 | `PARTITION_COMPOSITE_KEY_UNSUPPORTED` | v1 range collapse supports a single partition key only. `:133` |
@@ -1022,9 +994,9 @@ The dispatch runs a fixed sequence BEFORE the per-op expression-slot walk (`vali
 
 **DoS guard:** `walk_depth` enforces `MAX_EXPR_DEPTH = 128` (`validate.rs:3866`), owned by the validator (an explicit counter), not left implicit to serde's `recursion_limit`.
 
-### 7.7 The immutable-context volatility backstop (J3)
+### 7.7 The immutable-context volatility backstop
 
-This is the gate J3 added. Moving `now()`/`genRandomUuid()` to top-level imports makes volatile nodes *type-reachable* in immutable slots — before this check, a `createIndex.where` containing `now()` passed validate cleanly. **The Rust validator is the authoritative backstop**. Three-function design:
+Top-level `now()`/`genRandomUuid()` imports make volatile nodes *type-reachable* in immutable slots. **The Rust validator is the authoritative backstop**. Three-function design:
 
 1. **Volatility classification** — `ExprVolatility { Immutable, Stable, Volatile }` (`validate.rs:326`). `scalar_fn_volatility`: `CurrentSetting`/`CurrentUser` are **Stable**; the rest are **Immutable**. `synth_fn_volatility`: `Now`/`GenRandomUuid` are **Volatile**; `ConcatWs`/`SplitPart` are **Immutable**.
 2. **The recursive walker** — `first_volatile_function(expr) -> Option<&'static str>` (`validate.rs:388-441`) descends the entire closed `Expr` AST and returns the name of the first volatile function.
@@ -1068,10 +1040,10 @@ Distinct from the hard `AuthoringError` gate above, `crates/zeroship-migrate/src
 
 `analyze(sql)` runs every analyzer over a parseable statement (unparseable SQL yields no advisories — the guard already denies it); `analyze_migration(&Migration)` runs it over a `Migration.up`, the seam the declarative differ uses to attach operational advisories to each generated migration. These advisories surface (never gate) in `GuardReport.advisories`, the `submit_migration` outcome ([§11.8](#11-platform-self-hosting--build-integration)), and the CLI `lint` verb ([§12.8](#12-testing--operating)).
 
-### 7.10 Confirmed but ambiguous
+### 7.10 Validation boundaries
 
 - Rule (c) at load is **skipped** for DML/`setColumnType`/`addConstraint`/`createIndex` — enforcement is deferred to the apply seam (by design). A load-time `validate_ir` does *not* fully guarantee column existence for those ops.
-- Qualified `ColRef` is accepted *structurally* at this slice; the full `QUALIFIED_REF_UNKNOWN_TABLE` FROM-set check, `AGG_POSITION_INVALID`, and the `Dialectal` per-leg budget ratchet are wired but deferred to the Phase-2 view/FROM builder.
+- Qualified `ColRef` is accepted *structurally*; the full `QUALIFIED_REF_UNKNOWN_TABLE` FROM-set check, `AGG_POSITION_INVALID`, and the `Dialectal` per-leg budget ratchet are enforced by the view/FROM builder.
 - `CODE_OP_OUTSIDE_RECORDER` is defined here but documented as emitted JS-side; no Rust emission site found (consistent).
 
 ---
@@ -1115,20 +1087,20 @@ Per-`(op-kind, variant)` dialect disposition is a **generated const table**, `DI
 ```rust
 pub enum Disposition {
     Portable,               // core construct that renders/validates here
-    TransparentDegradable,  // P12 — native where supported, absence-tolerable elsewhere; RESERVED
+    TransparentDegradable,  // native where supported, absence-tolerable elsewhere
     Vendor,                 // vendor-tier construct admitted on this dialect
     Unsupported,            // refused on this dialect
 }
 ```
 `Disposition::is_supported()` is "everything except `Unsupported`" (`support.rs:20-22`).
 
-> **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' crates/zeroship-migrate/src/model/dialect_table.rs` returns **90**, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself has **88 row literals**, and `grep -cE 'kind: "'` returns **88**, so it covers **88 `(kind, variant)` dispositions**. These 88 dispositions are **not** the same as the **53 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "88 disposition rows" and "53 op kinds" are different axes and must not be conflated.
+> **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' crates/zeroship-migrate/src/model/dialect_table.rs` returns **91**, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself has **89 row literals**, and `grep -cE 'kind: "'` returns **89**, so it covers **89 `(kind, variant)` dispositions**. These 89 dispositions are **not** the same as the **54 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "89 disposition rows" and "54 op kinds" are different axes and must not be conflated.
 
 **Generation & freshness gate.** The table is emitted from a hand-authored sidecar `dialect-support.toml` by `sdks/migrate/scripts/gen-dialect-table.mjs`, which writes **two** artifacts (the Rust const + the TS mirror `sdks/migrate/src/generated/dialect-table.ts`). Regenerate with `pnpm --filter @zeroship/migrate gen:dialect-table`. A regenerate-and-byte-diff CI gate pins both artifacts against the sidecar.
 
-**The table IS consumed (S0.2 has landed).** `Op::support()` **reads** `DIALECT_TABLE` at runtime keyed on `Op::op_kind_and_variant()` (`ir.rs:3412-3425`); `support_cell` maps `Unsupported → unsupported(CODE_UNSUPPORTED, reason)` and `Portable|Vendor|TransparentDegradable → supported(render_mode)`. Only the dialect gate is table-sourced; the *render strategy* (`RenderMode::Offline` vs `LiveResolved`) and diagnostic wording stay in Rust because they are not dialect truth.
+`Op::support()` **reads** `DIALECT_TABLE` at runtime keyed on `Op::op_kind_and_variant()` (`ir.rs:3412-3425`); `support_cell` maps `Unsupported → unsupported(CODE_UNSUPPORTED, reason)` and `Portable|Vendor|TransparentDegradable → supported(render_mode)`. Only the dialect gate is table-sourced; the *render strategy* (`RenderMode::Offline` vs `LiveResolved`) and diagnostic wording stay in Rust because they are not dialect truth.
 
-> **Doc-vs-code discrepancy (flagged):** the generated banner at `dialect_table.rs:9-10` still says *"S0.1 is ADDITIVE — no engine code consumes this table yet (that is S0.2)."* That comment is **stale**: `Op::support` reads the table (`ir.rs:3416`), and `tests/dialect_table_faithfulness.rs:6-8` confirms "S0.2 made `Op::support` READ the table … so that agreement is now tautological." Separately, that faithfulness test's own header comments (`:20,:123`) say "54-op" while its assertion (`:1099,1104-1105`) says the correct **53-op** wire contract — the comments are stale; the authoritative count everywhere else (`op_round_trip.rs:234-237`) is **53**.
+`tests/dialect_table_faithfulness.rs:6-8` pins that `Op::support` and the generated table agree.
 
 **Notable dispositions** (P=Portable, V=Vendor, U=Unsupported, TD=TransparentDegradable), `dialect_table.rs:59-146`:
 
@@ -1183,7 +1155,7 @@ pub enum DialectScope {
 }
 ```
 
-The default when lowering is `Both`. When an author uses a construct that is PG-renderable but not portable (an `insert … onConflict`, a raw fragment, an out-of-SQLite-envelope `split_part`), every diagnostic surfaces the remedy: restructure to stay in-envelope, **or mark the migration `dialect_scope=PgOnly`**. A `PgOnly` artifact then loads fine against a Postgres target and is refused with `DIALECT_SCOPE_PGONLY` against a SQLite target *at load* — the portability boundary is a hard error, never a silent mis-apply. `TransparentDegradable` (P12) is the *reserved* future disposition for "native on PG, absence-tolerable elsewhere"; its first live use is the `createTable.partitionedCollapse` / `createPartition` rows, where SQLite/MySQL collapse a partitioned parent into a single table + a no-DDL child leg, gated by `partitionBy.whenUnsupported: "collapse"`.
+The default when lowering is `Both`. When an author uses a construct that is PG-renderable but not portable (an `insert … onConflict`, a raw fragment, an out-of-SQLite-envelope `split_part`), every diagnostic surfaces the remedy: restructure to stay in-envelope, **or mark the migration `dialect_scope=PgOnly`**. A `PgOnly` artifact then loads fine against a Postgres target and is refused with `DIALECT_SCOPE_PGONLY` against a SQLite target *at load* — the portability boundary is a hard error, never a silent mis-apply. `TransparentDegradable` covers constructs that are native where supported and absence-tolerable elsewhere; `createTable.partitionedCollapse` / `createPartition` use it so SQLite/MySQL collapse a partitioned parent into a single table + a no-DDL child leg, gated by `partitionBy.whenUnsupported: "collapse"`.
 
 ### 8.7 Intentional Postgres ↔ SQLite (and MySQL) divergences
 
@@ -1223,7 +1195,7 @@ A migration's identity is `MigrationId` = `mig_<base62(UUIDv7)>` (`migration.rs:
 
 ### 9.3 Advisory-lock concurrency control & `LockMode`
 
-Every apply/rollback/baseline serializes on a per-project advisory lock computed server-side as `pg_advisory_lock(hashtext($project_id)::bigint)` (`executor.rs:460-467`), held for the whole operation and released on every exit path. **Known limitation (M2):** `hashtext` is 32-bit, so two unrelated projects can collide onto one lock key — liveness-only (they serialize), never a correctness/cross-tenant defect, because each apply operates strictly within its own schemas. A 64-bit revisit is flagged.
+Every apply/rollback/baseline serializes on a per-project advisory lock computed server-side as `pg_advisory_lock(hashtext($project_id)::bigint)` (`executor.rs:460-467`), held for the whole operation and released on every exit path. **Known limitation:** `hashtext` is 32-bit, so two unrelated projects can collide onto one lock key — liveness-only (they serialize), never a correctness/cross-tenant defect, because each apply operates strictly within its own schemas. A 64-bit lock key would reduce this collision risk.
 
 `LockMode` (`executor.rs:88-95`) handles the multi-sub-batch declarative deploy: the outer `apply_declarative` acquires the lock once and threads `LockMode::AlreadyHeld` into each inner `apply_with_lock`, so sub-batches skip the per-batch acquire/release — the lock is taken exactly once and freed exactly once, never freed between sub-batches where a second deploy could interleave. `AlreadyHeld` gates *only* the lock; per-sub-batch session hygiene still runs every time. **SQLite** achieves the same serialization structurally: a single migration connection, `BEGIN IMMEDIATE` taking the RESERVED write lock — "race-free by construction."
 
@@ -1231,7 +1203,7 @@ Every apply/rollback/baseline serializes on a per-project advisory lock computed
 
 `snapshot_session` captures the three GUCs (`search_path`/`statement_timeout`/`lock_timeout`) up front; on every exit it does an **unconditional** `RESET ROLE` (even if the snapshot failed — L1) followed by best-effort `restore_session` via `set_config(...)` with bound literals. The txn path uses `SET LOCAL` (auto-reverted at COMMIT/ROLLBACK) so it never mutates the session; only the non-txn path mutates it, and `restore_session` is the backstop.
 
-### 9.5 Least-privilege role bracketing (C1)
+### 9.5 Least-privilege role bracketing
 
 The migrator role's grant on the meta schema is revoked, so the journal must be written by the admin. Both paths bracket only the `<up>`/`<down>` under `SET [LOCAL] ROLE migrator` and `RESET ROLE` *before* the journal write, inside the same transaction (`executor.rs:2112-2141`, `2498-2519`, `3422-3447`). The `search_path` is pinned to the **project schema only** — the meta schema is off the migration-time path so an unqualified name in `up` can never resolve to the journal. Per-migration `timeout_ms`/`lock_timeout_ms` overrides exist; the lock-timeout default is a short 3s fail-fast envelope a single planned migration can raise for a maintenance window.
 
@@ -1256,10 +1228,10 @@ Only the *static* checks are all-or-nothing; a migration failing at *execution* 
 `apply_transactional` (`executor.rs:2010`):
 
 ```text
--- fail-closed identifier quoting rendered BEFORE BEGIN (PR13) so an IdentQuoteError leaves no dangling txn
+-- fail-closed identifier quoting rendered BEFORE BEGIN so an IdentQuoteError leaves no dangling txn
 BEGIN
 SET LOCAL search_path / statement_timeout / lock_timeout   -- txn-scoped, admin
-[existence-guard catalog probe under the held lock]        -- PR10 Part B, no TOCTOU
+[existence-guard catalog probe under the held lock]        -- no TOCTOU
 SET LOCAL ROLE migrator                                    -- brackets <up> only
 <up>
 RESET ROLE                                                 -- back to admin, mid-txn
@@ -1281,7 +1253,7 @@ SET ROLE migrator; <up>; RESET ROLE                -- the non-txn DDL self-commi
 record_completed(...) + clear inflight marker      -- phase 2: immutable row (admin)
 ```
 
-A crash between phase 1 and 2 leaves a **lone `started` marker with no `completed` row**. On the next apply, `applied()` returns it as a `Phase::Started` entry, `execute_pending` sees `had_inflight = true`, and `recover_non_transactional` runs *before* the `SET ROLE`. Recovery leans on the required idempotency of non-txn `up`s: it performs exactly one cleanup `IF NOT EXISTS` can't do itself — **drop the INVALID index residue** of an interrupted `CONCURRENTLY` build (an INVALID index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt), scoped to only the index name(s) this migration's `up` names and only if `pg_index.indisvalid = false` (so an out-of-band invalid index from a human is never collateral). It then clears the marker, **re-arms a fresh `started` marker**, and **re-runs the idempotent `up`** verbatim. This is safe for both crash cases: (a) failed mid-DDL — INVALID index dropped, `up` re-runs clean; (b) succeeded then crashed before recording — the object exists and valid, `IF NOT EXISTS` no-ops, `completed` finally lands. The re-arm is load-bearing (M2): without it, a *second* crash during recovery would observe `had_inflight = false` and permanently wedge a half-built index. `apply_non_transactional` returns `true` when it was a recovery (surfaced in `ApplyOutcome.recovered`). SQLite has *no* non-txn path — `transaction:false` is rejected with `NonTxnUnsupportedOnDialect`.
+A crash between phase 1 and 2 leaves a **lone `started` marker with no `completed` row**. On the next apply, `applied()` returns it as a `Phase::Started` entry, `execute_pending` sees `had_inflight = true`, and `recover_non_transactional` runs *before* the `SET ROLE`. Recovery leans on the required idempotency of non-txn `up`s: it performs exactly one cleanup `IF NOT EXISTS` can't do itself — **drop the INVALID index residue** of an interrupted `CONCURRENTLY` build (an INVALID index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt), scoped to only the index name(s) this migration's `up` names and only if `pg_index.indisvalid = false` (so an out-of-band invalid index from a human is never collateral). It then clears the marker, **re-arms a fresh `started` marker**, and **re-runs the idempotent `up`** verbatim. This is safe for both crash cases: (a) failed mid-DDL — INVALID index dropped, `up` re-runs clean; (b) succeeded then crashed before recording — the object exists and valid, `IF NOT EXISTS` no-ops, `completed` finally lands. The re-arm is load-bearing: without it, a *second* crash during recovery would observe `had_inflight = false` and permanently wedge a half-built index. `apply_non_transactional` returns `true` when it was a recovery (surfaced in `ApplyOutcome.recovered`). SQLite has *no* non-txn path — `transaction:false` is rejected with `NonTxnUnsupportedOnDialect`.
 
 ### 9.9 The immutable journal
 
@@ -1307,7 +1279,7 @@ A `schema_migrations_event_shape` constraint enforces per-`event_kind` shape (`a
 
 The coarse gate is `Approval` (`approval.rs:14-27`): `Approval::None` (runs only a non-destructive batch) vs `Approval::Approved` (a destructive batch — `DROP`/`TRUNCATE`/lossy-type-change `up`, or any rollback since a `down` is inherently destructive — may run). The AI never auto-applies destructive ops; it passes `None` and surfaces the approval-required error to a human. `Approval` lives in its own module (not `engine`) precisely because the **executor** is itself a public entry point a caller/retry-loop can drive directly, bypassing the engine gate — so the approval gate must live at the executor layer too, the same defense-in-depth pattern as re-running the guard + role (`approval.rs:1-12`).
 
-Layered *orthogonally* on top is **`ApprovalScope`** (`approval.rs:29-76`) — "*PR9b per-version approval scoping (anti-bypass).*" It answers "WHICH destructive ops did the operator individually review?" so approving one reviewed online rename can **never blanket-authorize** an unrelated co-bundled destructive op (a `dropColumn`/`dropTable`) the operator never saw:
+Layered *orthogonally* on top is **`ApprovalScope`** (`approval.rs:29-76`). It answers which destructive ops were individually reviewed, so approving one reviewed online rename can **never blanket-authorize** an unrelated co-bundled destructive op (a `dropColumn`/`dropTable`) that was not reviewed:
 
 ```rust
 pub enum ApprovalScope {
@@ -1321,7 +1293,7 @@ impl ApprovalScope {
 }
 ```
 
-The two compose: a destructive op runs iff `Approval::Approved` **AND** the scope admits its version-id. A NON-destructive op never reaches `admits` — scope only ever *further restricts* destruction, never widens it. `ApprovalScope::All` is fail-**open** by explicit operator intent at a trusted vector (dev CLI `--yes`, rollback, shadow dry-run, resolve-pending — today's default, preserving byte-identical behavior). `ApprovalScope::Versions` is fail-**closed** — an empty set authorizes NOTHING destructive **even under `Approved`**; there is no "unrecognized scope ⇒ allow" arm. This is the mechanism behind the platform's `migrations:approve` / per-version approval ([§11.3](#11-platform-self-hosting--build-integration)): the out-of-band approved-apply surface constructs `Versions` from the operator's reviewed version-id set.
+The two compose: a destructive op runs iff `Approval::Approved` **AND** the scope admits its version-id. A NON-destructive op never reaches `admits` — scope only ever *further restricts* destruction, never widens it. `ApprovalScope::All` is fail-**open** by explicit trusted intent (dev CLI `--yes`, rollback, shadow dry-run, resolve-pending). `ApprovalScope::Versions` is fail-**closed** — an empty set authorizes NOTHING destructive **even under `Approved`**; there is no "unrecognized scope ⇒ allow" arm. This is the mechanism behind the platform's `migrations:approve` / per-version approval ([§11.3](#11-platform-self-hosting--build-integration)): the out-of-band approved-apply surface constructs `Versions` from the reviewed version-id set.
 
 ### 9.12 Preconditions — state/data-conditional apply
 
@@ -1353,11 +1325,11 @@ Three PG-only online-migration mechanisms sit behind the `MigrationBackend::onli
 
 **`PgShadow` — throwaway-clone dry-run** (`apply/backend/postgres/shadow.rs`). A dry-run proves a migration batch applies cleanly — and, for a declarative deploy, that the resulting schema matches what was *desired* — **without ever touching the real project DB**. It is a throwaway **DATABASE** clone (not a shadow schema) because migration SQL hard-codes the `project_schema` name (`shadow.rs:1-12`). The control plane drives it before a destructive or AI-authored apply: preview the plan against a faithful copy, surface failures + advisories + resulting drift, then decide. Teardown is panic-safe via `FutureExt::catch_unwind`.
 
-**Cross-deploy pending contracts.** Because an expand and its contract can land in **separate deploys**, an outstanding online-rename obligation is journaled in the immutable `schema_pending_contracts` table (`journal.rs:237-263`, DDL at `journal.rs:524-537`). A `PendingContract` carries `{ table, from_col, to_col, ty, pending_version (the deep E2 trigger id), plan_version (the stable PLAN-GROUP id the supplied set carries), contract_versions }`. The `resolve-pending --apply|--abort <version>` CLI verb ([§12.8](#12-testing--operating)) discharges it: `--apply` journals the C1/C2 contract migrations; `--abort` re-authors the abort DDL (drop the dual-write trigger + `DROP COLUMN IF EXISTS` the shadow column) as plain phase-less `PlanStep::Ddl` steps (`build_abort_steps`, `online.rs:12-42`) and requires the distinct `--acknowledge-shadow-data-loss` flag. The `status` verb surfaces orphan/blocked contracts by keying on `plan_version` (the id the supplied set exposes), not the deep `pending_version`.
+**Cross-deploy pending contracts.** Because an expand and its contract can land in **separate deploys**, an outstanding online-rename obligation is journaled in the immutable `schema_pending_contracts` table (`journal.rs:237-263`, DDL at `journal.rs:524-537`). A `PendingContract` carries `{ table, from_col, to_col, ty, pending_version, plan_version, contract_versions }`. The `resolve-pending --apply|--abort <version>` CLI verb ([§12.8](#12-testing--operating)) discharges it: `--apply` journals the contract migrations; `--abort` re-authors the abort DDL (drop the dual-write trigger + `DROP COLUMN IF EXISTS` the shadow column) as plain phase-less `PlanStep::Ddl` steps (`build_abort_steps`, `online.rs:12-42`) and requires the distinct `--acknowledge-shadow-data-loss` flag. The `status` verb surfaces orphan/blocked contracts by keying on `plan_version`, not the deeper `pending_version`.
 
 ### 9.15 The integrity manifest (`atlas.sum`-style)
 
-`plan/manifest.rs` computes a single hash over the migration SET — folded in the **canonical executed order** (M2) — so a tampered/reordered/inserted/removed bundle is rejected BEFORE any apply (`manifest.rs:1-6`). It adds set-level integrity on top of the per-migration `Checksum` (which catches content **drift**): an **insertion**, a **removal**, a **content edit**, or a **`depends_on` reorder** that changes the EXECUTED order all change the `ManifestHash`. A pure cosmetic SLICE reorder of an additive set (no `depends_on`) is deliberately **INVARIANT** (M2) — the executor re-sorts by version, so both slice orders execute identically and yield the SAME manifest, so the control plane stamping one slice order and the bundle arriving in another does not false-mismatch.
+`plan/manifest.rs` computes a single hash over the migration SET — folded in the **canonical executed order** — so a tampered/reordered/inserted/removed bundle is rejected BEFORE any apply (`manifest.rs:1-6`). It adds set-level integrity on top of the per-migration `Checksum` (which catches content **drift**): an **insertion**, a **removal**, a **content edit**, or a **`depends_on` reorder** that changes the EXECUTED order all change the `ManifestHash`. A pure cosmetic file-order change of an additive set (no `depends_on`) is deliberately **INVARIANT** — the executor re-sorts by version, so both file orders execute identically and yield the SAME manifest, so the control plane stamping one file order and the bundle arriving in another does not false-mismatch.
 
 `compute_manifest` folds, in canonical executed order (sharing `topo_order_version_tiebroken` with the executor via `canonical_set_order`, §9.2):
 
@@ -1408,7 +1380,7 @@ The net guarantee is **exactly-once application per version**, enforced by three
 
 ## §10 Security-first design
 
-This is the canonical treatment of the security substrate; [§1.3](#1-overview--what--why) and [§2](#2-crate-architecture) cross-ref here rather than re-deriving. `zeroship-migrate` treats every migration as **untrusted input** — creator-authored SQL/op-DSL *and* prompt-injectable AI output flow through the same pipeline. The model is explicitly **defense-in-depth, untrusted-by-default** (`docs/proposals/2026-06-16-...:33-34`): confine by DB privilege *and* verify independently at parse time — "belt and suspenders." (Threat vectors enumerated in [§1.2](#1-overview--what--why).)
+This is the canonical treatment of the security substrate; [§1.3](#1-overview--what--why) and [§2](#2-crate-architecture) cross-ref here rather than re-deriving. `zeroship-migrate` treats every migration as **untrusted input** — creator-authored SQL/op-DSL *and* prompt-injectable AI output flow through the same pipeline. The model is explicitly **defense-in-depth, untrusted-by-default**: confine by DB privilege *and* verify independently at parse time — "belt and suspenders." (Threat vectors enumerated in [§1.2](#1-overview--what--why).)
 
 There are **two independent lines of defense** plus a set of orthogonal capability gates:
 
@@ -1460,9 +1432,9 @@ Stable rule ids (`denylist::rule`, `denylist.rs:239-284`): `copy_program_rce`, `
 
 **The grant set** (`role.rs:34-70`, `232-362`): `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS`; **owns** the project schema with `CREATE, USAGE`; `search_path` pinned to the project schema first then the extension schema(s) (default `public`) only so unqualified extension types resolve; `REVOKE ALL` then `GRANT USAGE` on the extension schema (resolution-only, no `CREATE`); **no grant whatsoever** on `control`/`auth`/`billing`/other project schemas — deny-by-absence.
 
-**Journal immutability the migrator can't drop (the C1 fix).** The migrator gets **no access whatsoever to the meta schema** (`role.rs:43-51`, `292-315`). A migration's `up` runs as the migrator, so if it could write the journal it could plant a forged `completed` row (silently suppressing a future migration, since `pending = set − completed`) or a bogus checksum (wedging apply on `ChecksumDrift`). All journal/inflight I/O is done by the **executor as admin**; the migrator has neither `USAGE` on the meta schema nor any grant on `schema_migrations`/`schema_migrations_inflight`. The journal is unforgeable by deny-by-absence, and because the migrator doesn't own the meta schema it "can never drop the journal's immutability trigger." That immutability is enforced *by construction* (the append-only UPDATE/DELETE/TRUNCATE triggers, [§9.9](#9-the-apply-engine--durability)), not by least-privilege alone. Provisioning is idempotent; `deprovision_migrator` cleanly `REASSIGN OWNED` + `DROP OWNED` + `DROP ROLE`.
+**Journal immutability the migrator can't drop.** The migrator gets **no access whatsoever to the meta schema** (`role.rs:43-51`, `292-315`). A migration's `up` runs as the migrator, so if it could write the journal it could plant a forged `completed` row (silently suppressing a future migration, since `pending = set − completed`) or a bogus checksum (wedging apply on `ChecksumDrift`). All journal/inflight I/O is done by the **executor as admin**; the migrator has neither `USAGE` on the meta schema nor any grant on `schema_migrations`/`schema_migrations_inflight`. The journal is unforgeable by deny-by-absence, and because the migrator doesn't own the meta schema it "can never drop the journal's immutability trigger." That immutability is enforced *by construction* (the append-only UPDATE/DELETE/TRUNCATE triggers, [§9.9](#9-the-apply-engine--durability)), not by least-privilege alone. Provisioning is idempotent; `deprovision_migrator` cleanly `REASSIGN OWNED` + `DROP OWNED` + `DROP ROLE`.
 
-**Known residuals (tracked, accepted)** (`role.rs:72-82`): **M2** — `CREATE FUNCTION … SET search_path` is guard-denied but not role-backstopped (harmless — migrator functions default to `INVOKER`, and `SECURITY DEFINER` is guard-denied); **M1** — the migrator can read `pg_roles` (accepted — role names aren't secrets).
+**Known limitations** (`role.rs:72-82`): `CREATE FUNCTION … SET search_path` is guard-denied but not role-backstopped (harmless — migrator functions default to `INVOKER`, and `SECURITY DEFINER` is guard-denied); the migrator can read `pg_roles` (role names are not treated as secrets).
 
 ### 10.4 The capability-composition model (VENDOR ops)
 
@@ -1486,11 +1458,11 @@ The privileged Postgres primitives exported from `@zeroship/migrate` are gated n
 
 **Two-gate enforcement** (`render/vendor.rs:16-20`): **Gate 1 — validate/load** (`validate_vendor_op`, `validate.rs:2373-2458`) derives `VendorCapabilities::from_scope(schema_scope)` and refuses each ungranted required capability fail-closed with `CODE_VENDOR_OP_DENIED`; **Gate 2 — lower/render** (`render_vendor_op`, `render/vendor.rs:218-579`) renders raw fields (function `body`, `pgRaw`) verbatim, and the whole rendered statement is then `pg_query`-parsed by the guard so the body is scanned by the same deny-list. Even `CREATE ROLE … SUPERUSER` renders verbatim precisely because the guard's deny-list catches it downstream.
 
-**The non-spoofable trust signal: `from_scope`** (`capability.rs:274-284`). The `SchemaScope` is produced only by the operator-gated `GuardConfig` constructors: `None`/`Single(_)` ⇒ `confined()`; `Allowlist(list)` ⇒ `operator()` with `schemas = list` (Platform); `Unconfined` ⇒ `operator()` with no validate-time cross-schema confinement (Trusted).
+**The non-spoofable trust signal: `from_scope`** (`capability.rs:274-284`). The `SchemaScope` is produced only by capability-gated `GuardConfig` constructors: `None`/`Single(_)` ⇒ `confined()`; `Allowlist(list)` ⇒ `operator()` with `schemas = list` (Platform); `Unconfined` ⇒ `operator()` with no validate-time cross-schema confinement (Trusted).
 
 ### 10.5 Confined creator vs operator/platform trusted capability
 
-The trust posture is set at the operator call site, never derived from SQL content (`model/policy.rs:3-4`). `TrustProfile` (`policy.rs:27-53`):
+The trust posture is set at the capability-bearing call site, never derived from SQL content (`model/policy.rs:3-4`). `TrustProfile` (`policy.rs:27-53`):
 
 | Profile | Line-1 behavior | Constructed by |
 | --- | --- | --- |
@@ -1513,10 +1485,9 @@ Four coordinated mechanisms, each closing the gap the previous one admits:
 
 Every layer is explicit about its own limits and names the next layer that covers the residual — the essence of "gate the execution surface, not a specific op."
 
-### 10.7 Snapshot notes
+### 10.7 Capability notes
 
-- The security substrate documented here (guard deny-list, `migrator` role, capability model, trust profiles, immutable journal) is **stable** at `544eaada`; only the authoring *surface* above it is in the P0 redesign flux.
-- The design doc (`2026-06-16-...:54`) still refers to a `PlatformCapability` token; the code generalized this to a single **`OperatorCapability`** shared across `Platform`/`Trusted` (both share the identical security model). Where the doc and code differ, the code is authoritative.
+- `Platform` and `Trusted` both require the same **`OperatorCapability`** token because both are trusted profiles; `Trusted` additionally skips the deny-list belt.
 - The `local()` capability preset exists (`capability.rs:227-244`) but is **not wired to any `TrustProfile`** — available for a caller composing a bespoke gate.
 
 ---
@@ -1555,7 +1526,7 @@ grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: 
 
 A confined creator writes `table("posts").create({…})` with **no** `{schema}` — their unqualified ops resolve against a default project schema at apply time (and `gen-types` folds them under the neutral literal `"public"`, [§5.3](#5-authoring-declarative-desired-state--the-fold)). The Platform corpus spans the shared `zeroship` schema and must name it explicitly on every op. The Platform profile is the only profile that permits `cross_schema` references and schema/extension/role/grant DDL at all ([§10.5](#10-security-first-design)).
 
-The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where even the DSL can't express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL can't express (`functions_triggers_comments.ts:27`, with a `// TODO(dsl-v2)`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
+The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL cannot express (`functions_triggers_comments.ts:27`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
 
 ### 11.3 The two trust profiles (Confined vs Platform)
 
@@ -1573,13 +1544,13 @@ The engine ships two embedded profiles, both `include_str!`'d TOML (`model/profi
 
 The most important *authoring* difference: **Confined injects a platform-managed system-column shape** (auto `id` text PK + `created_at`/`updated_at`/`created_by`/`updated_by`/`version`/`deleted_at` + indexes; author-supplied PKs *forbidden*, `TableSystemShapePolicy::confined()`, `profile.rs:188-241`), while **Platform injects nothing** (`author_primary_key: Allow`, `profile.rs:245-252`). That is why a creator never declares `id` (the platform owns it), and why `app_secrets` can be keyed `["app_id","key_name"]` with a `bytes` ciphertext column and no synthetic `id` — impossible under Confined.
 
-The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draft`, `profile.rs:137`): permission knobs boolean-AND / set-intersect / take the ordered minimum (a draft cannot exceed the operator ceiling — rejected `SealError::PolicyExceedsCeiling`), while obligation knobs (`require_rls`, `no_hard_delete`, `sensitive_columns`) union upward. A `SealedProfile` (HMAC-SHA256-MAC'd, `profile.rs:1155`) is the tamper-evident carrier for a future out-of-process apply path; today Platform is constructible only at the operator call site, and the creator-submission ingress is hard-wired to Confined with no API path to Platform.
+The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draft`, `profile.rs:137`): permission knobs boolean-AND / set-intersect / take the ordered minimum (a draft cannot exceed the trusted ceiling — rejected `SealError::PolicyExceedsCeiling`), while obligation knobs (`require_rls`, `no_hard_delete`, `sensitive_columns`) union upward. A `SealedProfile` (HMAC-SHA256-MAC'd, `profile.rs:1155`) is the tamper-evident carrier for an out-of-process apply path. Platform is constructible only with `OperatorCapability`, and the creator-submission ingress is hard-wired to Confined with no API path to Platform.
 
 ### 11.4 Applying the platform migrations (the build/boot wiring)
 
 Services **never migrate themselves** — `control`/`auth` connect to an already-migrated DB. Two apply vectors, both driving the same engine:
 
-**(a) Compose one-shot `migrate` service** (`docker-compose.yml:92-112`) invokes `zeroship-migrate migrate --dir=/db/migrations-ts --database-url=… --profile=platform --yes`, records each `.ts` to transient IR, applies under Platform, exits 0. `control`/`auth` `depends_on` it with `service_completed_successfully`. `--yes` is required because the platform set contains reviewed in-place evolutions (DROP CONSTRAINT/COLUMN) the engine flags DESTRUCTIVE (the operator's standing in-repo confirmation). `security_opt: [seccomp:unconfined]` because `io_uring_setup` needs it.
+**(a) Compose one-shot `migrate` service** (`docker-compose.yml:92-112`) invokes `zeroship-migrate migrate --dir=/db/migrations-ts --database-url=… --profile=platform --yes`, records each `.ts` to transient IR, applies under Platform, exits 0. `control`/`auth` `depends_on` it with `service_completed_successfully`. `--yes` is required because the platform set contains reviewed in-place evolutions (DROP CONSTRAINT/COLUMN) the engine flags DESTRUCTIVE. `security_opt: [seccomp:unconfined]` because `io_uring_setup` needs it.
 
 **(b) By-hand wrapper `ops/db-migrate.sh`** shells the bin (via `cargo run` or `ZEROSHIP_MIGRATE_BIN`), targeting compose Postgres on `localhost:5440`. Subcommands: `migrate` (apply pending platform `.ts`) plus generic `status`/`validate`/`rollback` that "do not yet load platform `.ts`". It wires the recorder child (`ZEROSHIP_RECORDER_CHILD`), since recording untrusted `.ts` happens in a kernel-sandboxed child.
 
@@ -1603,15 +1574,15 @@ The `gen-types` fold that turns a creator's migration set into `env.db.ts` + `sc
 
 **The whole point: the submitter cannot lie about danger.** `Submission` has **no** `destructive`/`requires_approval` field by construction. A `DROP`/`TRUNCATE`/`DROP COLUMN`/lossy-type-change is judged **server-side** by the `SqlGuard` and folded into `MigrationFlags` via `flags_for` — so a client can never mark a destructive migration "non-destructive" to auto-apply it; the gate decides on the SERVER-DERIVED flags (`submit.rs:11-19`).
 
-**Flow** (`submit.rs:21-41`): (1) **Ingest → `Migration`** — mint a fresh `MigrationId`, build `up`/`down`/`depends_on`/`owner_app`, **derive flags via the guard** (`SqlGuard::check(up)` → `flags_for` gives `destructive`/`transactional`/`requires_approval`, NOT from the submission), layer the submission's `repeatable`/`timeout_ms`, compute the `Checksum`; (2) **Guard** — re-check `up` (and `down`); a denial ⇒ `SubmissionOutcome::Denied` (NOTHING runs); (3) **Lint** — collect `analyze` advisories (carried, never gating); (4) **Dry-run on a live-seeded shadow** (`dry_run_incremental`); a failure ⇒ `DryRunFailed` (real DB untouched); (5) **Gate** — if the SERVER-DERIVED `flags.destructive`/`requires_approval` AND `approval != Approved` ⇒ `ApprovalRequired` (with advisories + `dry_run_ok: true` for the operator); (6) **Apply** — otherwise `MigrationEngine::apply` the single-migration set under the migrator role + journal ⇒ `Applied`.
+**Flow** (`submit.rs:21-41`): (1) **Ingest → `Migration`** — mint a fresh `MigrationId`, build `up`/`down`/`depends_on`/`owner_app`, **derive flags via the guard** (`SqlGuard::check(up)` → `flags_for` gives `destructive`/`transactional`/`requires_approval`, NOT from the submission), layer the submission's `repeatable`/`timeout_ms`, compute the `Checksum`; (2) **Guard** — re-check `up` (and `down`); a denial ⇒ `SubmissionOutcome::Denied` (NOTHING runs); (3) **Lint** — collect `analyze` advisories (carried, never gating); (4) **Dry-run on a live-seeded shadow** (`dry_run_incremental`); a failure ⇒ `DryRunFailed` (real DB untouched); (5) **Gate** — if the SERVER-DERIVED `flags.destructive`/`requires_approval` AND `approval != Approved` ⇒ `ApprovalRequired` (with advisories + `dry_run_ok: true` for review); (6) **Apply** — otherwise `MigrationEngine::apply` the single-migration set under the migrator role + journal ⇒ `Applied`.
 
 **Idempotency / dedup on the checksum** (`submit.rs:43-65`). A fresh `MigrationId` is minted every call, so version can't be the dedup key; dedup is on the migration's `Checksum` (folds the whole apply-relevant unit — `up`, `down`, `flags`, `owner_app`, `depends_on`, `supersedes`, `preconditions`; excludes `version` and `name`). Before applying, `submit_migration` reads the journal's **net-applied** checksums; if this checksum is already net-applied it returns `NoOp` without a second apply. Because the key is *net-applied*, resubmitting an identical script after a rollback **RE-APPLIES** it (MED-3) — the dedup answers "is this exact apply-relevant unit CURRENTLY live?", not "was it EVER applied?".
 
 This ingress is where the §11.3 seal machinery meets the effective-policy meet: the Confined ingress → `effective = ceiling ⊓ draft` (`PolicyProfile::meet_ceiling_draft`) → `SealedProfile` HMAC → journal. `ops/submit.rs` is ~1,047 lines.
 
-### 11.9 Ambiguities / caveats
+### 11.9 Caveats
 
-- **DSL-in-flux markers:** the corpus carries real `// TODO(dsl-v2)` gaps (e.g. `trigger().create` can't express `UPDATE OF <column>`, so it drops to `raw(...)`), expected given the mid-P0 redesign.
+- The corpus uses `raw({ sql, reason })` where the structured DSL cannot express a construct, such as `trigger().create` for `UPDATE OF <column>`.
 - The engine journal (meta schema `zeroship_migrations`) vs the `migrated_migrations` *content* table are different things (§11.4 vs §11.6). No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
 - `down()` bodies in the platform corpus are **empty** across all nine files — the platform relies on forward-only, additive-with-reviewed-destructive migrations under `--yes`, not programmatic rollback (the generic `rollback` verb "does not yet load platform `.ts`"). MEMORY notes elsewhere flag "platform-.ts rollback broken."
 
@@ -1623,13 +1594,13 @@ This section covers how the crate is *verified* (its golden/round-trip gates, li
 
 ### 12.1 The three-gate golden/round-trip model (`op_round_trip.rs`)
 
-The load-bearing anti-drift mechanism is `tests/op_round_trip.rs` — "the PR1 single-source-of-truth anti-drift gate (design §2.5)" — because the IR wire shape is consumed by **two independent implementations** (the JS `op.*` builder and the Rust engine/loader) that must never drift. A corpus of paired fixtures drives it: `tests/op_fixtures/<name>.mig.js` (authored source) + `<name>.golden.json` (committed canonical IR). **21 `.mig.js` fixtures** at this commit (`ddl_create`, `ddl_alter`, `fluent_ddl`, `fluent_dml`, `dml_upsert`, `enums_domains`, `partition`, `pg_vendor`, `sequences_exclusion`, `views`, `in_list_scalars`, `edge_scalars`, `runtime_options`, `p2a_facets`, …). Three gates:
+The load-bearing anti-drift mechanism is `tests/op_round_trip.rs` because the IR wire shape is consumed by **two independent implementations** (the JS `op.*` builder and the Rust engine/loader) that must never drift. A corpus of paired fixtures drives it: `tests/op_fixtures/<name>.mig.js` (authored source) + `<name>.golden.json` (committed canonical IR). The corpus includes fixtures such as `ddl_create`, `ddl_alter`, `fluent_ddl`, `fluent_dml`, `dml_upsert`, `enums_domains`, `partition`, `pg_vendor`, `sequences_exclusion`, `views`, `in_list_scalars`, `edge_scalars`, `runtime_options`, and `p2a_facets`. Three gates:
 
 - **Gate 1 — golden byte-stability** (`corpus_is_byte_stable_and_value_equal`, `:125-179`): each `.mig.js` is recorded through the REAL V8 recorder (`record_migration_to_json_unsandboxed`), run through `resolve_create_table_policy(ir, &PolicyProfile::confined())`, pretty-printed, and compared byte-for-byte against the golden.
 - **Gate 2 — JS↔Rust value-checksum round-trip** (`:169-177`): both the fresh IR and the golden are folded through the SAME `Checksum::of_ir(&CanonicalOpList(&ir.ops), &MigrationFlags::default(), &ir.owner_app, &[], &[], &ir.preconditions)` and asserted equal — the *authoritative* check, comparing typed **values**, invariant under JCS-formatting differences.
 - **Gate 3 — variant exhaustiveness** (`every_op_variant_has_a_fixture`, `:208-260`): reads `op-ir.schema.json`, extracts every `Op` discriminant, asserts the fixtures cover the whole set, and hard-codes the count: `assert_eq!(expected.len(), 53, "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition")` (`:235-236`). Adding an `Op` without a corpus fixture fails CI.
 
-Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` (`:127`), then review + commit.
+Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` (`:127`), then review the changed fixtures.
 
 ### 12.2 The IR-schema golden (`op_ir_schema.rs`)
 
@@ -1641,7 +1612,7 @@ Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip
 
 ### 12.4 The embedded-`.ts`/`.js`-in-Rust-string gotcha
 
-**The single most common way a surface rename breaks the build.** Many test files embed migration source *as Rust raw-string constants* rather than as separate `.mig.js` files (`full_surface.rs`, `ir_dml_pg.rs`, `ir_dml_sqlite.rs`, `build_new_generate_{pg,sqlite}.rs`, `gen_types_cli.rs`, `recorder_http_contract.rs`, `recorder_sandbox_e2e.rs`, `enums_domains.rs`, `vendor_pg.rs`, `doc_hero_apply.rs`, …). When you rename a DSL symbol (e.g. `t.string()` → `t.text()`, or move `now`/`genRandomUuid` off `c.fn`/`c.pg` to top-level imports as J3 did), you must grep the **whole `tests/` tree**, not just `op_fixtures/`. A missed import does NOT produce a clean compile error — it surfaces at runtime as an opaque V8 module-instantiation failure (`Failed to instantiate: op_recorder.js`). There is also a **platform `.ts` fixture tree** under `tests/platform_ts_fixtures/` split by outcome: `apply/`, `denied/` (`alter_system.ts`), `failure/` — feeding `platform_ts_apply_pg.rs`.
+**The single most common way a surface rename breaks the build.** Many test files embed migration source *as Rust raw-string constants* rather than as separate `.mig.js` files (`full_surface.rs`, `ir_dml_pg.rs`, `ir_dml_sqlite.rs`, `build_new_generate_{pg,sqlite}.rs`, `gen_types_cli.rs`, `recorder_http_contract.rs`, `recorder_sandbox_e2e.rs`, `enums_domains.rs`, `vendor_pg.rs`, `doc_hero_apply.rs`, …). When a DSL symbol changes, grep the **whole `tests/` tree**, not just `op_fixtures/`. A missed import does NOT produce a clean compile error — it surfaces at runtime as an opaque V8 module-instantiation failure (`Failed to instantiate: op_recorder.js`). There is also a **platform `.ts` fixture tree** under `tests/platform_ts_fixtures/` split by outcome: `apply/`, `denied/` (`alter_system.ts`), `failure/` — feeding `platform_ts_apply_pg.rs`.
 
 ### 12.5 Live-DB suites and how they are selected
 
@@ -1678,7 +1649,7 @@ The operator CLI (`src/bin/zeroship-migrate.rs`, `required-features = ["standalo
 | `load` / `setup` | yes | bootstrap a fresh DB by replaying `schema.sql` + reconstructing the journal from the trailer |
 | `resolve-pending [--apply\|--abort] <version>` | yes | discharge a cross-deploy online-rename pending contract ([§9.14](#9-the-apply-engine--durability)); PG-only; `--abort` needs `--acknowledge-shadow-data-loss` |
 
-`--profile` selects the guard posture (`trusted` — the binary DEFAULT, deny-list OFF; `platform` — widened, explicit opt-in with `--schema`/`--extension`/`--meta-schema`; `confined` — full creator deny-list, but reached via `submit_migration`, never this binary). Precedence for every setting: **CLI flag > env (`ZEROSHIP_MIGRATE_*` / `DATABASE_URL`) > `zeroship-migrate.toml` > built-in default**. Engine auto-detected from DSN unless `--engine` forces it. `new` produces raw `.sql` and is demoted to the operator/legacy path — creators author portable op.* `.ts` via `zeroship-migrate-js new`/`generate`.
+`--profile` selects the guard posture (`trusted` — the binary DEFAULT, deny-list OFF; `platform` — widened, explicit opt-in with `--schema`/`--extension`/`--meta-schema`; `confined` — full creator deny-list, but reached via `submit_migration`, never this binary). Precedence for every setting: **CLI flag > env (`ZEROSHIP_MIGRATE_*` / `DATABASE_URL`) > `zeroship-migrate.toml` > built-in default**. Engine auto-detected from DSN unless `--engine` forces it. `new` produces raw `.sql` and is demoted to the trusted/legacy path — creators author portable op.* `.ts` via `zeroship-migrate-js new`/`generate`.
 
 ### 12.9 The schema-dump / `pg_dump` path
 
@@ -1693,7 +1664,7 @@ cargo test -p zeroship-migrate --test op_ir_schema
 cargo test -p zeroship-migrate --test full_surface
 cargo test -p zeroship-migrate --test sql_preview
 
-# Regenerate goldens after an intentional shape change (then commit):
+# Regenerate goldens after an intentional shape change:
 UPDATE_CORPUS=1          cargo test -p zeroship-migrate --test op_round_trip
 UPDATE_SCHEMA=1          cargo test -p zeroship-migrate --test op_ir_schema
 UPDATE_PREVIEW_GOLDENS=1 cargo test -p zeroship-migrate --test sql_preview
@@ -1704,7 +1675,7 @@ cargo test -p zeroship-migrate --test declarative_pg -- --test-threads=1
 # Live MySQL JsDriver (soft-skips unless MIGRATE_REQUIRE_MYSQL=1):
 MIGRATE_REQUIRE_MYSQL=1 cargo test -p zeroship-migrate --test mysql_jsdriver_e2e
 
-# The operator CLI + its e2e suites:
+# The standalone CLI + its e2e suites:
 cargo test -p zeroship-migrate --features standalone-cli
 
 # JS/pnpm side of the authoring surface:
@@ -1714,8 +1685,8 @@ pnpm --filter @zeroship/migrate test
 ### 12.11 Caveats
 
 - `MIGRATE_REQUIRE_DB` is a documented CI/runner convention (referenced in test headers), not a universal in-test soft-skip: the PG helpers connect-or-`.expect()`-panic unconditionally, so PG suites hard-fail (not skip) when `:5440` is down. Only the MySQL suite has an explicit code-level `*_or_skip`.
-- Op-variant counts: `op_round_trip.rs:236` asserts **53**; the `op_ir_schema.rs` list (37 core + 16 vendor) is the authoritative enumeration. The `dialect_table_faithfulness.rs` *comments* saying "54-op" are stale — its assertion is 53 ([§8.3](#8-one-ir-three-dialects-render--portability)).
+- Op-variant counts: `op_round_trip.rs:236` and the `op_ir_schema.rs` list (37 core + 16 vendor) pin the authoritative enumeration ([§8.3](#8-one-ir-three-dialects-render--portability)).
 
 ---
 
-*End of the zeroship-migrate reference. Snapshot: commit `544eaada` (through job J3 of the PG-first fluent redesign). Where the authoring surface is in flux, the code at this commit is authoritative; the two proposals under `docs/proposals/` describe direction.*
+*End of the zeroship-migrate reference.*

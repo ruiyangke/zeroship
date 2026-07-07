@@ -155,7 +155,7 @@ t.bigInt().default(0)
 t.text().default("pending")
 t.boolean().default(true)
 
-// Function defaults are EXPRESSIONS (portable set) — the `{ fn: … }` carrier was deleted (P4)
+// Function defaults are expressions over the portable value-constructor set
 t.uuid().default(genRandomUuid())
 t.timestamp().default(now())
 
@@ -828,7 +828,7 @@ sequences, constraints, indexes, views).
 
 `raw` is the last resort for genuinely unrepresentable DDL (e.g. a `CREATE TRIGGER … BEFORE
 UPDATE OF <col>` the structured trigger surface can't yet express, or a PL/pgSQL construct). It
-**requires a `reason`** — the boundary is honest and counted, not aspirational.
+**requires a `reason`**; the reason travels with the checksummed IR.
 
 ```ts
 import { raw } from "@zeroship/migrate";
