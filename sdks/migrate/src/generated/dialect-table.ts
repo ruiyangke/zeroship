@@ -73,6 +73,7 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "createView", variant: "materializedReplace", postgres: "unsupported", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "delete", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "detachPartition", variant: "base", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },
+  { kind: "dialectal", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "dropColumn", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "dropColumnDefault", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "dropColumnNotNull", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },

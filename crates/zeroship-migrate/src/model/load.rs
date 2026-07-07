@@ -132,6 +132,21 @@ pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
     }
 }
 
+fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
+    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            for inner in leg {
+                collect_created_tables(inner, out);
+            }
+        }
+    } else if let Some(table) = op_created_table(op) {
+        out.push(table);
+    }
+}
+
 /// The single target table of an [`Op`] for the ownership check. Every op the IR
 /// admits operates on exactly one table (the closed `Op` enum carries a `name`
 /// for `createTable`, a `table` for every alter/DML op, and `DropIndex` carries
@@ -207,7 +222,23 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => None,
+        | Op::PgRaw { .. }
+        | Op::Dialectal { .. } => None,
+    }
+}
+
+fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
+    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            for inner in leg {
+                collect_target_tables(inner, out);
+            }
+        }
+    } else if let Some(table) = op_target_table(op) {
+        out.push(table);
     }
 }
 
@@ -252,22 +283,25 @@ pub fn enforce_ir_ownership(
     let mut owners: BTreeMap<&str, &str> =
         registry.iter().map(|(t, o)| (t.as_str(), o.as_str())).collect();
     for op in &ir.ops {
-        if let Some(table) = op_created_table(op) {
+        let mut created = Vec::new();
+        collect_created_tables(op, &mut created);
+        for table in created {
             owners.entry(table).or_insert(deploying_app);
         }
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
-        let Some(table) = op_target_table(op) else {
-            continue; // an op with no ownership-checkable target (DropIndex w/o table hint)
-        };
-        let owner = owners.get(table).copied().unwrap_or(UNKNOWN_OWNER);
-        if owner != deploying_app {
-            return Err(IrLoadError::NotTableOwner {
-                op_index,
-                table: table.to_string(),
-                owner: owner.to_string(),
-                deploying_app: deploying_app.to_string(),
-            });
+        let mut targets = Vec::new();
+        collect_target_tables(op, &mut targets);
+        for table in targets {
+            let owner = owners.get(table).copied().unwrap_or(UNKNOWN_OWNER);
+            if owner != deploying_app {
+                return Err(IrLoadError::NotTableOwner {
+                    op_index,
+                    table: table.to_string(),
+                    owner: owner.to_string(),
+                    deploying_app: deploying_app.to_string(),
+                });
+            }
         }
     }
     Ok(())

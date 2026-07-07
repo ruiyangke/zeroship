@@ -22,14 +22,14 @@ const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 
 /** The `const` tokens of a `oneOf` string-enum def. */
 function enumTokens(def: any): string[] {
-  return def.oneOf.map((b: any) => b.const).filter((c: any) => typeof c === "string").sort();
+  return def.oneOf.map((b: any) => b.const).filter((constant: any) => typeof constant === "string").sort();
 }
 /** The internally-tagged variant tags of an internally-tagged `oneOf` def
  *  (the const of the `tagField` property in each branch). */
 function variantTags(def: any, tagField: string): string[] {
   return def.oneOf
     .map((b: any) => b?.properties?.[tagField]?.const)
-    .filter((c: any) => typeof c === "string")
+    .filter((constant: any) => typeof constant === "string")
     .sort();
 }
 
@@ -57,7 +57,7 @@ const TS = {
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
     "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
-    "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
+    "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "dialectal", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
@@ -95,14 +95,14 @@ const TS = {
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
-  CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
+  CastTarget: ["text", "int", "real", "boolean", "bytes", "uuid"].sort(),
   ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
   PgExtractField: [
     "second", "doy", "epoch", "quarter", "week", "isodow", "isoyear",
     "century", "decade", "millennium", "microseconds", "milliseconds",
     "timezone", "timezone_hour", "timezone_minute",
   ].sort(),
-  AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
+  AggFunc: ["count", "sum", "avg", "min", "max", "stringAgg", "arrayAgg", "boolAnd", "boolOr"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
   IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),
@@ -163,9 +163,10 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
-  update: ["batch", "schema", "set", "table", "where"].sort(),
+  update: ["schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
+  dialectal: ["default", "mysql", "pg", "sqlite"].sort(),
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
   dropView: ["existenceGuard", "materialized", "name", "schema"].sort(),
   createEnum: ["name", "schema", "values"].sort(),

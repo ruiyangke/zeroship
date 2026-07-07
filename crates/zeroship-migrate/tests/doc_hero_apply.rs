@@ -240,7 +240,7 @@ fn doc_hero_ir_is_actually_extracted_and_well_formed() {
     assert_eq!(ops[3]["op"], "dropColumn");
     assert_eq!(
         ops[2]["set"]["first_name"]["fn"], "splitPart",
-        "the documented backfill must use the c.fn.splitPart helper"
+        "the documented backfill must use the .splitPart helper"
     );
     assert_eq!(ops[3]["table"], "people");
 }

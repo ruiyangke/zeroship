@@ -43,8 +43,8 @@ db/migrations-ts/
 ```
 
 The 14-digit filename prefix is the corpus order key. Platform migrations import
-the `@zeroship/migrate` JS DSL and, where needed, the platform-only helpers from
-`@zeroship/migrate/pg`. The platform runner rejects mixed corpora: a Platform
+the `@zeroship/migrate` JS DSL, including the platform-only Postgres helpers when
+needed. The platform runner rejects mixed corpora: a Platform
 directory is `.ts` source only, not `.sql` and not committed `.ir.json`.
 
 ## Running migrations
@@ -77,8 +77,8 @@ the regression gate for the platform corpus.
 
 1. Add a new `db/migrations-ts/<YYYYMMDDHHMMSS>_<name>.ts` file.
 2. Express the change with the `@zeroship/migrate` JS DSL. Use the platform-only
-   `@zeroship/migrate/pg` helpers only for platform schema objects that cannot be
-   represented portably.
+   Postgres helpers only for platform schema objects that cannot be represented
+   portably; they are capability-gated by the engine, not by the import path.
 3. Run the platform apply gate on a fresh Postgres database before relying on the
    change:
    `zeroship-migrate migrate --dir db/migrations-ts --profile platform --yes`.

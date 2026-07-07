@@ -1,0 +1,108 @@
+{
+  "ir_version": 6,
+  "name": "dialectal_ops",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "docs",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "embedding",
+          "type": {
+            "vector": {
+              "vector": 3
+            }
+          },
+          "vectorMetric": "cosine"
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "op": "dialectal",
+      "pg": [
+        {
+          "op": "createIndex",
+          "table": "docs",
+          "columns": [
+            {
+              "kind": "column",
+              "name": "embedding"
+            }
+          ],
+          "name": "docs_embedding_hnsw_idx",
+          "using": "hnsw"
+        }
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

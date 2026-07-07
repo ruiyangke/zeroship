@@ -75,10 +75,10 @@ export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
 export type EmptyContainerKind = "object" | "array";
 
 /**
- * The closed portable cast-target set (§3.3.1). A non-portable cast target is
- * rejected (`UNSUPPORTED { kind: "expr" }`).
+ * The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A
+ * non-portable cast target is rejected (`UNSUPPORTED { kind: "expr" }`).
  */
-export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
+export type CastTarget = "text" | "int" | "real" | "boolean" | "bytes" | "uuid";
 
 /**
  * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
@@ -119,7 +119,7 @@ export type PgExtractField =
  * SQLite, and MySQL (only the surrounding identifier quoting differs), so there
  * is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
  */
-export type AggFunc = "count" | "sum" | "avg" | "min" | "max";
+export type AggFunc = "count" | "sum" | "avg" | "min" | "max" | "stringAgg" | "arrayAgg" | "boolAnd" | "boolOr";
 
 /**
  * CLOSED per-column index sort-order set. Omitted means the SQL default

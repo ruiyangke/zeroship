@@ -379,6 +379,54 @@ fn rewrite_incoming_fk_targets(
     }
 }
 
+fn selected_dialectal_leg<'a>(
+    dialect: SqlDialect,
+    default: &'a Option<Vec<Op>>,
+    pg: &'a Option<Vec<Op>>,
+    sqlite: &'a Option<Vec<Op>>,
+    mysql: &'a Option<Vec<Op>>,
+) -> Option<&'a [Op]> {
+    let own = match dialect {
+        SqlDialect::Postgres => pg,
+        SqlDialect::Sqlite => sqlite,
+        SqlDialect::Mysql => mysql,
+    };
+    own.as_deref().or(default.as_deref())
+}
+
+fn push_fold_op<'a>(
+    out: &mut Vec<&'a Op>,
+    op: &'a Op,
+    dialect: SqlDialect,
+    inside_dialectal: bool,
+) -> Result<(), FoldError> {
+    match op {
+        Op::Dialectal { default, pg, sqlite, mysql } => {
+            if inside_dialectal {
+                return Err(FoldError::Unsupported("nested dialectal op reached fold"));
+            }
+            if let Some(leg) = selected_dialectal_leg(dialect, default, pg, sqlite, mysql) {
+                for inner in leg {
+                    push_fold_op(out, inner, dialect, true)?;
+                }
+            }
+            Ok(())
+        }
+        other => {
+            out.push(other);
+            Ok(())
+        }
+    }
+}
+
+fn flatten_dialectal_ops(ops: &[Op], dialect: SqlDialect) -> Result<Vec<&Op>, FoldError> {
+    let mut out = Vec::new();
+    for op in ops {
+        push_fold_op(&mut out, op, dialect, false)?;
+    }
+    Ok(out)
+}
+
 /// Replay an ordered [`Op`] list into the current logical [`SchemaSnapshot`].
 /// Pure, offline, NO DB I/O — the offline companion of the live
 /// [`snapshot_schema`](crate::apply::drift::snapshot_schema).
@@ -407,7 +455,8 @@ pub fn fold_ops(
     let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = BTreeMap::new();
     let mut extensions: BTreeMap<String, ExtensionSnapshot> = BTreeMap::new();
 
-    for op in ops {
+    let replay_ops = flatten_dialectal_ops(ops, dialect)?;
+    for op in replay_ops {
         match op {
             Op::CreateEnum { name, values, .. } => {
                 named_types
@@ -1243,6 +1292,7 @@ pub fn fold_ops(
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
             | Op::PgRaw { .. } => {}
+            Op::Dialectal { .. } => {}
         }
     }
 
@@ -2306,7 +2356,8 @@ pub fn fold_to_field_defs(
     // constraint here — the §2a "recover from the applied FK constraint" path.
     let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
 
-    for op in ops {
+    let replay_ops = flatten_dialectal_ops(ops, dialect)?;
+    for op in replay_ops {
         match op {
             Op::CreateTable { name, columns, constraints, .. } => {
                 let system_prefix_len = confined_resolved_system_prefix_len(columns);

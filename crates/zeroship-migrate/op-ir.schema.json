@@ -1282,7 +1282,7 @@
           ]
         },
         {
-          "description": "`UPDATE … SET … WHERE …` (optionally batched).",
+          "description": "`UPDATE … SET … WHERE …`.",
           "type": "object",
           "properties": {
             "table": {
@@ -1301,17 +1301,6 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/Expr"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "batch": {
-              "description": "Optional batching knob.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/IrBatch"
                 },
                 {
                   "type": "null"
@@ -1437,6 +1426,60 @@
             "batchSize",
             "set",
             "name"
+          ]
+        },
+        {
+          "description": "A per-dialect op sequence. The target's own leg wins; otherwise `default`\nwins; otherwise the wrapper emits nothing on that target.",
+          "type": "object",
+          "properties": {
+            "default": {
+              "description": "Fallback op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "pg": {
+              "description": "PostgreSQL op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "sqlite": {
+              "description": "SQLite op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "mysql": {
+              "description": "MySQL op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "dialectal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op"
           ]
         },
         {
@@ -3386,7 +3429,7 @@
           ]
         },
         {
-          "description": "A cast to a portable type (`.cast(\"integer\")`).",
+          "description": "A cast to a portable type (`.cast({ to: \"int\" })`).",
           "type": "object",
           "properties": {
             "operand": {
@@ -3505,6 +3548,17 @@
                 }
               ]
             },
+            "delimiter": {
+              "description": "Optional second argument for `StringAgg` only.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "distinct": {
               "description": "`DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the\nwire when `false` so the node serializes byte-minimally.",
               "type": "boolean"
@@ -3521,18 +3575,18 @@
           ]
         },
         {
-          "description": "A **portable** text-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite\nand MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
+          "description": "A **portable** scalar-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY[...])` / `<> ALL (ARRAY[...])` shape; text elements keep an\nexplicit `::text` cast. SQLite and MySQL render `IN (...)` / `NOT IN (...)`.\nEmpty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
           "type": "object",
           "properties": {
             "expr": {
-              "description": "The expression tested against the literal text list.",
+              "description": "The expression tested against the literal scalar list.",
               "$ref": "#/$defs/Expr"
             },
             "elems": {
-              "description": "Text elements. PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
+              "description": "Homogeneous scalar elements. Text elements serialize as plain JSON\nstrings and PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
               "type": "array",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/IrScalar"
               }
             },
             "negated": {
@@ -3947,7 +4001,7 @@
       ]
     },
     "CastTarget": {
-      "description": "The closed portable cast-target set (§3.3.1). A non-portable cast target is\nrejected (`UNSUPPORTED { kind: \"expr\" }`).",
+      "description": "The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A\nnon-portable cast target is rejected (`UNSUPPORTED { kind: \"expr\" }`).",
       "oneOf": [
         {
           "description": "`text`",
@@ -3955,9 +4009,9 @@
           "const": "text"
         },
         {
-          "description": "`integer`",
+          "description": "`int` (`INTEGER` on SQL backends)",
           "type": "string",
-          "const": "integer"
+          "const": "int"
         },
         {
           "description": "`real`",
@@ -3970,9 +4024,9 @@
           "const": "boolean"
         },
         {
-          "description": "`blob` (`BYTEA` on PG)",
+          "description": "`bytes` (`BYTEA` on PG)",
           "type": "string",
-          "const": "blob"
+          "const": "bytes"
         },
         {
           "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
@@ -4008,6 +4062,26 @@
           "description": "`max(<arg>)`.",
           "type": "string",
           "const": "max"
+        },
+        {
+          "description": "`string_agg(<arg>, <delimiter>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "stringAgg"
+        },
+        {
+          "description": "`array_agg(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "arrayAgg"
+        },
+        {
+          "description": "`bool_and(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "boolAnd"
+        },
+        {
+          "description": "`bool_or(<arg>)` (PostgreSQL-first).",
+          "type": "string",
+          "const": "boolOr"
         }
       ]
     },
@@ -5599,25 +5673,6 @@
         "columns"
       ]
     },
-    "IrBatch": {
-      "description": "A batched-backfill / batched-update knob.",
-      "type": "object",
-      "properties": {
-        "cursorColumn": {
-          "description": "The cursor column to page over.",
-          "type": "string"
-        },
-        "batchSize": {
-          "description": "Rows per batch (JS-safe-integer bounded).",
-          "$ref": "#/$defs/SafeU64"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "cursorColumn",
-        "batchSize"
-      ]
-    },
     "SafeU64": {
       "type": "integer",
       "format": "uint64",
@@ -5692,6 +5747,24 @@
         },
         "where": {
           "description": "Optional WHERE predicate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groupBy": {
+          "description": "Optional GROUP BY expressions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Expr"
+          }
+        },
+        "having": {
+          "description": "Optional HAVING predicate.",
           "anyOf": [
             {
               "$ref": "#/$defs/Expr"

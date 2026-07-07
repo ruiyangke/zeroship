@@ -1,22 +1,22 @@
-// op.* VENDOR fixture (`@zeroship/migrate/pg`) — the variant-exhaustiveness +
+// op.* VENDOR fixture (`@zeroship/migrate`) — the variant-exhaustiveness +
 // cross-impl round-trip gate for the privileged Postgres primitives (vendor spec
 // §4.5). Exercises EVERY vendor Op variant at least once, modelled on the
 // platform's own 0025_roles_rls / 0001_extensions_schemas / 0002_auth constructs,
 // so the JS recorder's vendor named exports + table-handle augmentations stay
 // byte-identical to the Rust `Op` wire shape.
-import { table } from "@zeroship/migrate";
 import {
+  table,
+  currentSetting,
   createFunction,
   dropFunction,
   dropOwnedBy,
   extension,
   grant,
-  pgTable,
   raw,
   revoke,
   role,
   schema,
-} from "@zeroship/migrate/pg";
+} from "@zeroship/migrate";
 
 export const name = "pg_vendor";
 
@@ -52,20 +52,20 @@ export function up() {
   });
 
   // ── partition attach (PG vendor; distinct from createPartition) ──
-  pgTable("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+  table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
     from: ["2026-11-01T00:00:00Z"],
     to: ["2026-12-01T00:00:00Z"],
   });
 
   // ── RLS + policies (0025) ──
-  const secrets = pgTable("app_secrets", { schema: "zeroship" });
+  const secrets = table("app_secrets", { schema: "zeroship" });
   secrets.setRls({ enabled: true, forced: true });
   secrets.policy("tenant_isolation").create({
     for: "all",
-    using: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
-    withCheck: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
+    using: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+    withCheck: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
   secrets.policy("tenant_isolation").drop({ ifExists: true });
   secrets.setRls({ enabled: false, forced: false });
@@ -87,7 +87,7 @@ export function up() {
     events: ["update", "delete"],
     forEach: "row",
     execute: "audit_events_block_tamper",
-    when: (c) => c("app_id").isNotNull(),
+    when: (col) => col("app_id").isNotNull(),
   });
   audit.trigger("audit_events_append_only").create({
     timing: "before",

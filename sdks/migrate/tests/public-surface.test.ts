@@ -48,12 +48,26 @@ function exportedNamesFromDts(fileName: string): Set<string> {
   return names;
 }
 
-test("public root .d.ts does not leak pg-only or recorder internals", async () => {
+test("public root .d.ts exposes vendor DDL and omits recorder internals", async () => {
   const coreExports = exportedNamesFromDts("index.d.ts");
-  const pgExports = exportedNamesFromDts("pg.d.ts");
 
-  const pgLeaks = [...pgExports].filter((name) => coreExports.has(name)).sort();
-  assert.deepEqual(pgLeaks, [], "pg-only symbols belong to @zeroship/migrate/pg, not the package root");
+  const rootedVendorExports = [
+    "createFunction",
+    "domain",
+    "dropFunction",
+    "dropOwnedBy",
+    "extension",
+    "grant",
+    "raw",
+    "revoke",
+    "role",
+    "schema",
+    "sequence",
+  ];
+  assert.equal(coreExports.has("table"), true, "table must be exported from @zeroship/migrate root declarations");
+  for (const name of rootedVendorExports) {
+    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
+  }
 
   const forbiddenInternalExports = [
     "__begin",
@@ -62,11 +76,11 @@ test("public root .d.ts does not leak pg-only or recorder internals", async () =
     "__pgPush",
     "__pgResolveExpr",
     "__pgSequence",
+    "cAgg",
     "cCase",
-    "cFn",
-    "cPg",
     "opProducers",
     "opProducerRegistry",
+    "pg" + "Table",
   ];
   for (const name of forbiddenInternalExports) {
     assert.equal(coreExports.has(name), false, `${name} must stay out of @zeroship/migrate root declarations`);
@@ -77,7 +91,10 @@ test("public root .d.ts does not leak pg-only or recorder internals", async () =
   assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
 
   const runtimeRoot = await import("@zeroship/migrate");
-  for (const name of [...pgExports, ...forbiddenInternalExports]) {
+  for (const name of rootedVendorExports) {
+    assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
+  }
+  for (const name of forbiddenInternalExports) {
     assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of @zeroship/migrate root runtime exports`);
   }
 });

@@ -1,4 +1,4 @@
-import { dropFunction, grant, revoke } from "@zeroship/migrate/pg";
+import { dropFunction, grant, revoke } from "@zeroship/migrate";
 
 export const name = "grants";
 

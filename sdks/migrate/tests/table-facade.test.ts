@@ -47,6 +47,17 @@ test("VAR-ASSIGN: a var-held handle is reusable across statements ({ schema } se
   for (const op of ops) assert.equal(op.schema, "app", `op ${op.op} carries the handle schema`);
 });
 
+test("B7 (L10): rename() rebinds the handle — chained ops target the NEW name", () => {
+  const ops = record(() => {
+    table("a").rename({ to: "b" }).column("x").add({ type: t.text() });
+  });
+  assert.equal(ops[0].op, "renameTable");
+  assert.equal(ops[1].op, "addColumn");
+  // pre-fix this was "a" (the dead name); the rebind makes chained ops target "b".
+  assert.equal(ops[1].table, "b");
+  assert.equal(ops[1].column, "x");
+});
+
 // ── §4 — the IMMUTABLE t.* chain ──
 
 test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
@@ -145,7 +156,7 @@ test("SELECTOR: a terminated selector records its op; all selectors terminated �
     u.column("a").add({ type: t.text() });
     u.foreignKey("fk").add({ columns: ["a"], references: { table: "o", columns: ["id"] } });
     u.unique("uq").add({ columns: ["a"] });
-    u.check("ck").add({ expr: (c) => c("a").isNotNull() });
+    u.check("ck").add({ expr: (col) => col("a").isNotNull() });
     u.index("ix").add({ on: ["a"] });
     u.constraint("cn").drop();
   });
@@ -226,9 +237,9 @@ test("SCHEMA: the table() default propagates onto every recorded op", () => {
     u.index("ix_a").add({ on: ["a"] });
     u.index("ix_b").drop();
     u.insert({ rows: [{ a: 1 }] });
-    u.update({ set: { a: (c) => c("a") } });
-    u.delete({ where: (c) => c("a").gt(0) });
-    u.backfill({ set: { a: (c) => c("a") } });
+    u.update({ set: { a: (col) => col("a") } });
+    u.delete({ where: (col) => col("a").gt(0) });
+    u.backfill({ set: { a: (col) => col("a") } });
   });
   for (const op of ops) assert.equal(op.schema, "app2", `op ${op.op} must carry the table default schema`);
 });
@@ -278,6 +289,17 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
   assert.equal(ops[3].existenceGuard, "ifExists");
   assert.equal(ops[4].existenceGuard, "ifNotExists");
   assert.equal(ops[5].existenceGuard, "ifExists");
+});
+
+test("INDEX: drop ignores author-declared uniqueness", () => {
+  const ops = record(() => {
+    table("users").index("users_email_uniq").drop({ unique: true } as any);
+  });
+  assert.deepEqual(ops[0], {
+    op: "dropIndex",
+    name: "users_email_uniq",
+    table: "users",
+  });
 });
 
 test("GUARD: no guard option ⇒ existenceGuard omitted", () => {

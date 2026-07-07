@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::analyze::Advisory;
-use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
+use crate::guard::{guard_for, GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use crate::model::expr::Expr;
 use crate::model::load::op_created_table;
 use crate::render::declarative::{
@@ -86,7 +86,7 @@ enum LoweredOp {
     Rename(Box<RenameStep>),
     /// **PR6a** — a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
     /// creator-DML assembler ([`crate::render::dml`]) into a [`PlanStep::Dml`]
-    /// (parameterized one-shot) or [`PlanStep::Backfill`] (PG batched). NOT
+    /// (parameterized one-shot) or [`PlanStep::Backfill`] (batched backfill). NOT
     /// fragment-guarded the way DDL is: a one-shot `Dml` step's values are NATIVE
     /// binds (never interpolated), so there is no rendered-literal fragment a guard
     /// would inspect, and the executor's `run_dml_step` re-runs the destructive
@@ -607,14 +607,14 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
-    /// **VENDOR** — a vendor (`@zeroship/migrate/pg`) op was lowered against a
+    /// **VENDOR** — a vendor (`@zeroship/migrate`) op was lowered against a
     /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
     /// functions/extensions/schemas/`pgRaw`) is `dialect_scope = PgOnly` and has no
     /// SQLite analogue (vendor spec §4.3) — refused fail-closed at lower (the
     /// validate gate already refuses it at load on a SQLite target). Carries the op
     /// kind tag.
     #[error(
-        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate/pg \
+        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate \
          vendor primitives have no SQLite analogue (PgOnly); a SQLite deploy of them is \
          refused fail-closed"
     )]
@@ -1560,28 +1560,90 @@ impl IrAuthor {
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
-        for (op_index, op) in ir.ops.iter().enumerate() {
-            // The whole-up step lowering discards the structural statement list (it
-            // is the §6.4 parity leg, which only compares the joined `up`); the
-            // guarded path ([`lower_guarded`]) consumes the list to guard true
-            // statements. `op_index` is the plan position the DML-step version folds
-            // in (so two byte-identical DML ops get distinct journal ids).
-            match self.lower_one_op(
-                op_index,
+        let mut plan_index = 0usize;
+        for op in &ir.ops {
+            self.lower_op_into_steps(
                 op,
+                &mut plan_index,
+                &mut out,
                 &mut live_tables,
                 &mut partition_state,
                 live,
                 &mut named_types,
-            )? {
-                LoweredOp::Ddl(units) => {
-                    out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
-                }
-                LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
-                LoweredOp::Dml(step) => out.push(step),
-            }
+            )?;
         }
         Ok(out)
+    }
+
+    fn selected_dialectal_leg<'a>(
+        &self,
+        default: &'a Option<Vec<Op>>,
+        pg: &'a Option<Vec<Op>>,
+        sqlite: &'a Option<Vec<Op>>,
+        mysql: &'a Option<Vec<Op>>,
+    ) -> Option<&'a [Op]> {
+        let own = match self.dialect {
+            SqlDialect::Postgres => pg.as_deref(),
+            SqlDialect::Sqlite => sqlite.as_deref(),
+            SqlDialect::Mysql => mysql.as_deref(),
+        };
+        own.or(default.as_deref())
+    }
+
+    fn lower_op_into_steps(
+        &self,
+        op: &Op,
+        plan_index: &mut usize,
+        out: &mut Vec<PlanStep>,
+        live_tables: &mut BTreeSet<String>,
+        partition_state: &mut PartitionLowerState,
+        live: &LiveSchema,
+        named_types: &mut NamedTypeRegistry,
+    ) -> Result<(), IrLowerError> {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+                for inner in leg {
+                    if matches!(inner, Op::Dialectal { .. }) {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "nested dialectal op reached lower",
+                        ));
+                    }
+                    self.lower_op_into_steps(
+                        inner,
+                        plan_index,
+                        out,
+                        live_tables,
+                        partition_state,
+                        live,
+                        named_types,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        // The whole-up step lowering discards the structural statement list (it is
+        // the §6.4 parity leg, which only compares the joined `up`); the guarded
+        // path ([`lower_guarded`]) consumes the list to guard true statements.
+        // `plan_index` is the flattened plan position the DML-step version folds
+        // in (so two byte-identical DML ops get distinct journal ids).
+        let op_index = *plan_index;
+        *plan_index += 1;
+        match self.lower_one_op(
+            op_index,
+            op,
+            live_tables,
+            partition_state,
+            live,
+            named_types,
+        )? {
+            LoweredOp::Ddl(units) => {
+                out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
+            }
+            LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
+            LoweredOp::Dml(step) => out.push(step),
+        }
+        Ok(())
     }
 
     /// Lower a SINGLE op, advancing the working `live` table set when the op creates
@@ -1679,6 +1741,11 @@ impl IrAuthor {
         let guard = op.existence_guard();
         let mut probe: Option<crate::model::probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
+            Op::Dialectal { .. } => {
+                return Err(IrLowerError::UnsupportedOp(
+                    "dialectal op must be expanded before lower_one_op",
+                ));
+            }
             Op::CreateEnum { name, values, .. } => {
                 named_types.create_enum(name, &eff_schema, values)?;
                 if self.dialect.supports(Capability::MaterializedEnumType) {
@@ -2514,7 +2581,7 @@ impl IrAuthor {
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
                 self.lower_trigger_op(op, &eff_schema, &decl)?
             }
-            // VENDOR (`@zeroship/migrate/pg`) — render the privileged primitive to
+            // VENDOR (`@zeroship/migrate`) — render the privileged primitive to
             // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
             // SQLite target is refused fail-closed here (the validate gate already
             // refuses it at load on SQLite, §4.3 — this is defense in depth). The
@@ -2853,7 +2920,7 @@ impl IrAuthor {
     /// Portability boundaries (§9), all HARD errors (never silent):
     /// - `insert { onConflict }` on **SQLite** → [`crate::render::dml::DmlError::OnConflictNotPortable`].
     ///
-    /// A **batched** `backfill` / `update { batch }` is PORTABLE on BOTH backends
+    /// A **batched** `backfill` is PORTABLE on BOTH backends
     /// since PR6b (PG `backfill.rs`, SQLite `apply::backend::sqlite::backfill_sql`) — it is
     /// no longer a SQLite hard error.
     ///
@@ -2911,23 +2978,7 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "insert", asm, false))
             }
-            Op::Update { table, set, r#where, batch, .. } => {
-                if batch.is_some() {
-                    // A batched update is a backfill in disguise (resumable, paged):
-                    // route it through the backfill path so its SQLite leg hits the
-                    // PR6b boundary, never a silent one-shot UPDATE.
-                    let b = batch.as_ref().expect("batch is_some");
-                    return self.lower_backfill(
-                        eff_schema,
-                        table,
-                        &b.cursor_column,
-                        b.batch_size.get(),
-                        set,
-                        r#where.as_ref(),
-                        // A batched update has no separate name; derive a stable one.
-                        &format!("batched_update_{table}"),
-                    );
-                }
+            Op::Update { table, set, r#where, .. } => {
                 let asm = crate::render::dml::assemble_update(
                     eff_schema,
                     dialect,
@@ -3014,7 +3065,7 @@ impl IrAuthor {
         }
     }
 
-    /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
+    /// Lower a `backfill` into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::render::dml::assemble_backfill_clauses`])
     /// the [`crate::model::backfill::BackfillSpec`] executor consumes (it guard-checks /
     /// authorizer-vets the assembled `UPDATE` before any batch).
@@ -3027,7 +3078,7 @@ impl IrAuthor {
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
     /// **#149** — the backfill EXECUTOR ([`crate::model::backfill::BackfillSpec`]) now
-    /// carries a per-spec `schema`, so a schema-qualified batched backfill/update
+    /// carries a per-spec `schema`, so a schema-qualified batched backfill
     /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
     /// `eff_schema` (§2.7), which the cross-schema scope gate (`permits`) has
     /// ALREADY vetted: under Confined `eff == project_schema` (a foreign qualifier
@@ -3044,7 +3095,7 @@ impl IrAuthor {
     // `Op::Backfill` IR variant (schema/table/cursor/batch/set/filter/name); a
     // params struct would just re-wrap the variant's own fields with no gain and
     // risks the behavior change this hygiene pass forbids. Private method, 2
-    // in-crate callers.
+    // in-crate caller.
     #[allow(clippy::too_many_arguments)]
     fn lower_backfill(
         &self,
@@ -3141,126 +3192,184 @@ impl IrAuthor {
             }
         })?;
 
-        for (op_index, op) in ir.ops.iter().enumerate() {
-            let op_kind = op_kind_tag(op);
-            enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
-            // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
-            // lower failure aborts before any guarding — nothing applied. Each unit
-            // carries its STRUCTURAL per-statement list (the exact statements the
-            // renderer built, NOT a textual re-split of `up`).
-            let op_units = match self.lower_one_op(
-                op_index,
+        let mut plan_index = 0usize;
+        for op in &ir.ops {
+            self.lower_op_guarded(
                 op,
+                &mut plan_index,
+                &mut steps,
+                &mut fragments,
                 &mut live_tables,
                 &mut partition_state,
                 live,
                 &mut named_types,
-            )? {
-                LoweredOp::Ddl(units) => units,
-                LoweredOp::Rename(step) => {
-                    // §2.6.1 — one online-rename plan step, carried verbatim. NOT
-                    // fragment-guarded (the producer is trusted; `apply_plan`
-                    // re-guards at execution). It produces no `GuardedFragment` row.
-                    steps.push(PlanStep::OnlineRename(*step));
-                    continue;
-                }
-                LoweredOp::Dml(step) => {
-                    // §PR6a — a DML step is NOT fragment-guarded the way DDL is. A
-                    // one-shot `Dml` carries its values as NATIVE binds (`$n`/`?n`),
-                    // so there is no rendered-literal fragment a deny-list guard
-                    // would inspect; the executor's `run_dml_step` re-runs the
-                    // destructive approval gate. A `Backfill`'s assembled `UPDATE` is
-                    // guard-checked by the backfill executor before any batch runs
-                    // (`backfill.rs`). The op's expression AST was already gated by
-                    // the structural validator in `lower_dml_op`. So it produces no
-                    // `GuardedFragment` row, exactly like an online rename.
-                    steps.push(step);
-                    continue;
-                }
-            };
-
-            for (mig, statements) in op_units {
-                // Guard EACH true statement individually so a denial is attributed
-                // to THIS op (§6.1.1) — not buried in a concatenated blob. The
-                // statements come STRUCTURALLY from the renderer (the CREATE/ALTER,
-                // its `COMMENT ON COLUMN` side output, follow-on system indexes),
-                // never from a textual `;\n` split — so a string-literal column
-                // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
-                // is one whole statement, never broken mid-literal.
-                for stmt in &statements {
-                    let mut advisories = Vec::new();
-                    if guard_cfg.trust() == TrustProfile::Trusted {
-                        match op {
-                            Op::PgRaw { .. } => raw_island_guard
-                                .check_raw_island_sql_backstop(stmt)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                                .and_then(|()| {
-                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                        op_index,
-                                        op_kind,
-                                        source,
-                                    })
-                                })
-                                .map(|outcome| advisories.extend(outcome.advisories))?,
-                            Op::CreateFunction { body, .. } => raw_island_guard
-                                .check_raw_island_body_backstop(body, stmt)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                                .and_then(|()| {
-                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                        op_index,
-                                        op_kind,
-                                        source,
-                                    })
-                                })
-                                .map(|outcome| advisories.extend(outcome.advisories))?,
-                            _ => {
-                                let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })?;
-                                advisories.extend(outcome.advisories);
-                            }
-                        }
-                    } else {
-                        let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                            op_index,
-                            op_kind,
-                            source,
-                        })?;
-                        advisories.extend(outcome.advisories);
-                    }
-                    fragments.push(GuardedFragment {
-                        op_index,
-                        op_kind,
-                        sql: stmt.clone(),
-                        advisories,
-                    });
-                }
-                // Byte-identity invariant: the step's `up` MUST be exactly the join
-                // of the structural statements we just guarded — nothing inserted,
-                // rewritten, or re-quoted between guarding and concatenation
-                // (§6.1.1). With structural fragments this is the renderer's own
-                // `join(";\n")` round-tripping, so it holds by construction; the
-                // assertion remains a fail-closed engine-bug tripwire.
-                let reassembled = statements.join(";\n");
-                if reassembled != mig.up {
-                    return Err(IrGuardedLowerError::ReassemblyMismatch {
-                        name: mig.name.clone(),
-                    });
-                }
-                steps.push(PlanStep::Ddl(mig));
-            }
+                guard_scope.as_ref(),
+                guard.as_ref(),
+                &raw_island_guard,
+                guard_cfg.trust(),
+            )?;
         }
         Ok((steps, fragments))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_op_guarded(
+        &self,
+        op: &Op,
+        plan_index: &mut usize,
+        steps: &mut Vec<PlanStep>,
+        fragments: &mut Vec<GuardedFragment>,
+        live_tables: &mut BTreeSet<String>,
+        partition_state: &mut PartitionLowerState,
+        live: &LiveSchema,
+        named_types: &mut NamedTypeRegistry,
+        guard_scope: Option<&crate::model::policy::SchemaScope>,
+        guard: &dyn MigrationGuard,
+        raw_island_guard: &SqlGuard,
+        trust: TrustProfile,
+    ) -> Result<(), IrGuardedLowerError> {
+        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+                for inner in leg {
+                    if matches!(inner, Op::Dialectal { .. }) {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "nested dialectal op reached lower",
+                        )
+                        .into());
+                    }
+                    self.lower_op_guarded(
+                        inner,
+                        plan_index,
+                        steps,
+                        fragments,
+                        live_tables,
+                        partition_state,
+                        live,
+                        named_types,
+                        guard_scope,
+                        guard,
+                        raw_island_guard,
+                        trust,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        let op_index = *plan_index;
+        *plan_index += 1;
+        let op_kind = op_kind_tag(op);
+        enforce_vendor_capability_at_lower(op, guard_scope)?;
+        // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
+        // lower failure aborts before any guarding — nothing applied. Each unit
+        // carries its STRUCTURAL per-statement list (the exact statements the
+        // renderer built, NOT a textual re-split of `up`).
+        let op_units = match self.lower_one_op(
+            op_index,
+            op,
+            live_tables,
+            partition_state,
+            live,
+            named_types,
+        )? {
+            LoweredOp::Ddl(units) => units,
+            LoweredOp::Rename(step) => {
+                // §2.6.1 — one online-rename plan step, carried verbatim. NOT
+                // fragment-guarded (the producer is trusted; `apply_plan`
+                // re-guards at execution). It produces no `GuardedFragment` row.
+                steps.push(PlanStep::OnlineRename(*step));
+                return Ok(());
+            }
+            LoweredOp::Dml(step) => {
+                // §PR6a — a DML step is NOT fragment-guarded the way DDL is. A
+                // one-shot `Dml` carries its values as NATIVE binds (`$n`/`?n`),
+                // so there is no rendered-literal fragment a deny-list guard
+                // would inspect; the executor's `run_dml_step` re-runs the
+                // destructive approval gate. A `Backfill`'s assembled `UPDATE` is
+                // guard-checked by the backfill executor before any batch runs
+                // (`backfill.rs`). The op's expression AST was already gated by
+                // the structural validator in `lower_dml_op`. So it produces no
+                // `GuardedFragment` row, exactly like an online rename.
+                steps.push(step);
+                return Ok(());
+            }
+        };
+
+        for (mig, statements) in op_units {
+            // Guard EACH true statement individually so a denial is attributed to
+            // THIS op (§6.1.1) — not buried in a concatenated blob.
+            for stmt in &statements {
+                let mut advisories = Vec::new();
+                if trust == TrustProfile::Trusted {
+                    match op {
+                        Op::PgRaw { .. } => raw_island_guard
+                            .check_raw_island_sql_backstop(stmt)
+                            .map_err(|source| FragmentGuardDenied {
+                                op_index,
+                                op_kind,
+                                source,
+                            })
+                            .and_then(|()| {
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                            })
+                            .map(|outcome| advisories.extend(outcome.advisories))?,
+                        Op::CreateFunction { body, .. } => raw_island_guard
+                            .check_raw_island_body_backstop(body, stmt)
+                            .map_err(|source| FragmentGuardDenied {
+                                op_index,
+                                op_kind,
+                                source,
+                            })
+                            .and_then(|()| {
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })
+                            })
+                            .map(|outcome| advisories.extend(outcome.advisories))?,
+                        _ => {
+                            let outcome = guard.check(stmt).map_err(|source| {
+                                FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                }
+                            })?;
+                            advisories.extend(outcome.advisories);
+                        }
+                    }
+                } else {
+                    let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                        op_index,
+                        op_kind,
+                        source,
+                    })?;
+                    advisories.extend(outcome.advisories);
+                }
+                fragments.push(GuardedFragment {
+                    op_index,
+                    op_kind,
+                    sql: stmt.clone(),
+                    advisories,
+                });
+            }
+            // Byte-identity invariant: the step's `up` MUST be exactly the join of
+            // the structural statements we just guarded — nothing inserted,
+            // rewritten, or re-quoted between guarding and concatenation (§6.1.1).
+            let reassembled = statements.join(";\n");
+            if reassembled != mig.up {
+                return Err(IrGuardedLowerError::ReassemblyMismatch {
+                    name: mig.name.clone(),
+                });
+            }
+            steps.push(PlanStep::Ddl(mig));
+        }
+        Ok(())
     }
 
     /// Map an IR `createTable` op to the [`CollectionDescriptor`] the shared
@@ -4474,6 +4583,19 @@ fn render_select_ast(
         sql.push_str(" WHERE ");
         sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
     }
+    if !select.group_by.is_empty() {
+        let items: Result<Vec<_>, _> = select
+            .group_by
+            .iter()
+            .map(|expr| crate::render::dml::render_expr_inline(expr, dialect))
+            .collect();
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&items?.join(", "));
+    }
+    if let Some(pred) = &select.having {
+        sql.push_str(" HAVING ");
+        sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
+    }
     if let Some(order_by) = &select.order_by {
         if !order_by.is_empty() {
             let items: Result<Vec<_>, _> =
@@ -5062,6 +5184,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
         Op::Backfill { .. } => "backfill",
+        Op::Dialectal { .. } => "dialectal",
         Op::CreateView { .. } => "createView",
         Op::DropView { .. } => "dropView",
         Op::CreateEnum { .. } => "createEnum",
@@ -5072,7 +5195,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::AlterSequence { .. } => "alterSequence",
         Op::DropSequence { .. } => "dropSequence",
         Op::Comment { .. } => "comment",
-        // VENDOR (`@zeroship/migrate/pg`).
+        // VENDOR (`@zeroship/migrate`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
         Op::CreateExtension { .. } => "createExtension",
@@ -5327,6 +5450,10 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
+        // The shared descriptor kernel reserves `date` for timestamp fields; its
+        // civil-date token is `calendarDate`, which renders PostgreSQL `date`,
+        // MySQL `DATE`, and SQLite `TEXT`. The migration-facing IR spelling stays
+        // `ColType::Date` / `t.date()`.
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
@@ -5643,9 +5770,12 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                 collect_col_refs(left, out);
                 collect_col_refs(right, out);
             }
-            Expr::Agg { arg, .. } => {
+            Expr::Agg { arg, delimiter, .. } => {
                 if let Some(arg) = arg {
                     collect_col_refs(arg, out);
+                }
+                if let Some(delimiter) = delimiter {
+                    collect_col_refs(delimiter, out);
                 }
             }
             Expr::PgInterval { .. } => {}
@@ -5830,6 +5960,45 @@ mod tests {
             supersedes: vec![],
             preconditions: vec![],
             checksum: None,
+        }
+    }
+
+    #[test]
+    fn date_columns_render_as_native_date_on_pg_mysql_and_text_on_sqlite() {
+        let ir = create_table_ir(
+            "events",
+            vec![TIrColumn {
+                name: "business_day".into(),
+                ty: ColType::Date,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+
+        for (dialect, expected) in [
+            (SqlDialect::Postgres, "\"business_day\" date NOT NULL"),
+            (SqlDialect::Mysql, "`business_day` DATE NOT NULL"),
+            (SqlDialect::Sqlite, "\"business_day\" TEXT NOT NULL"),
+        ] {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|err| panic!("{dialect:?} date column should lower: {err}"));
+            let create = migrations
+                .iter()
+                .find(|m| m.up.contains("CREATE TABLE"))
+                .unwrap_or_else(|| panic!("{dialect:?} should emit CREATE TABLE: {migrations:#?}"));
+            assert!(
+                create.up.contains(expected),
+                "{dialect:?} date column should render {expected:?}; got:\n{}",
+                create.up
+            );
         }
     }
 
@@ -6526,33 +6695,34 @@ mod tests {
         );
     }
 
-    /// **#149 (was PR10 review F5)** — a batched `update {{ batch }}` (a backfill in
-    /// disguise) with a gate-approved foreign schema runs cross-schema identically to
-    /// `backfill` — the resumable path is uniform. RED before #149 (it failed closed).
+    /// **#149 (was PR10 review F5)** — a backfill with a gate-approved foreign
+    /// schema runs cross-schema through the resumable path. RED before #149 (it
+    /// failed closed).
     #[test]
-    fn schema_qualified_batched_update_runs_cross_schema_pg() {
+    fn schema_qualified_backfill_runs_cross_schema_pg_regression() {
         let json = r#"{"ir_version":1,"name":"u","owner_app":"app_a","ops":[
-            {"op":"update","table":"t","schema":"app2",
+            {"op":"backfill","table":"t","schema":"app2",
+             "cursorColumn":"id","batchSize":500,"name":"bf_t",
              "set":{"v":{"node":"colRef","name":"v"}},
-             "batch":{"cursorColumn":"id","batchSize":500}}
+             "filter":{"node":"colRef","name":"v"}}
         ]}"#;
-        let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
+        let ir: MigrationIr = serde_json::from_str(json).expect("backfill IR parses");
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
             crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
-            .expect("a gate-approved cross-schema batched update lowers");
+            .expect("a gate-approved cross-schema backfill lowers");
         let spec = steps
             .iter()
             .find_map(|s| match s {
                 PlanStep::Backfill(spec) => Some(spec),
                 _ => None,
             })
-            .expect("the batched update produced a PlanStep::Backfill");
+            .expect("the backfill produced a PlanStep::Backfill");
         assert_eq!(
             spec.schema, "app2",
-            "the batched-update backfill spec carries the foreign schema; got {:?}",
+            "the backfill spec carries the foreign schema; got {:?}",
             spec.schema
         );
     }

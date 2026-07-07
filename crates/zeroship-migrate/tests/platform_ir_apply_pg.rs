@@ -210,8 +210,8 @@ const CONFINED_GRANT_IR: &str = r#"{
 }
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
-import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { createFunction, schema } from "@zeroship/migrate";
 
 export const name = "platform_attach";
 
@@ -220,8 +220,8 @@ export function up() {
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      id: t.uuid().notNull().default(genRandomUuid()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -232,28 +232,28 @@ export function up() {
       route: t.text().notNull(),
       target: t.text().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "route"],
     checks: [
-      { name: "platform_registry_target_nonempty", expr: (c) => c("target").ne("") },
+      { name: "platform_registry_target_nonempty", expr: (col) => col("target").ne("") },
     ],
   });
 
-  const registry = pgTable("platform_registry", { schema: "zeroship" });
+  const registry = table("platform_registry", { schema: "zeroship" });
   registry.foreignKey("platform_registry_app_fk").add({
     columns: ["app_id"],
     references: { table: "platform_apps", columns: ["id"] },
   });
   registry.check("platform_registry_status_check").add({
-    expr: (c) => c("status").in(["active", "paused"]),
+    expr: (col) => col("status").in(["active", "paused"]),
   });
   registry.index("platform_registry_target_idx").add({ on: ["target"] });
   registry.setRls({ enabled: true, forced: true });
   registry.policy("tenant_isolation").create({
     for: "all",
-    using: (c) => c("app_id").isNotNull(),
-    withCheck: (c) => c("app_id").isNotNull(),
+    using: (col) => col("app_id").isNotNull(),
+    withCheck: (col) => col("app_id").isNotNull(),
   });
   registry.comment("Platform route registry");
 
@@ -275,7 +275,7 @@ export function up() {
 "#;
 const PLATFORM_COMPOSITE_FK_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate/pg";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_composite_fk";
 
@@ -328,8 +328,8 @@ export function up() {
 }
 "#;
 const PLATFORM_SYNTH_DEFAULT_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_synth_defaults";
 
@@ -338,8 +338,8 @@ export function up() {
 
   table("platform_events", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
-      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      id: t.uuid().notNull().default(genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default(now()),
       kind: t.text().notNull(),
       payload: t.json().notNull(),
       items: t.json().notNull(),
@@ -354,15 +354,16 @@ import {
   table,
   t,
   check,
+  interval,
 } from "@zeroship/migrate";
-import { pgTable, schema } from "@zeroship/migrate/pg";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_expr_surface";
 
 export function up() {
   schema("zeroship").create({ ifNotExists: true });
 
-  pgTable("expr_surface", { schema: "zeroship" }).create({
+  table("expr_surface", { schema: "zeroship" }).create({
     columns: {
       pkce_method: t.text().notNull(),
       amount_cents: t.int().notNull(),
@@ -383,35 +384,35 @@ export function up() {
       snapshot_ch_version: t.text(),
     },
     checks: [
-      check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
-      check("expr_user_id_fmt", (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$")),
-      check("expr_kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-      check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
-      check("expr_data_size", (c) => c.pg.pgColumnSize(c("data")).lt(262144)),
-      check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-      check("expr_floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
-      check("expr_active_visible", (c) => c("active").and(c("visible"))),
-      { name: "expr_expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
+      check("expr_pkce_method_check", (col) => col("pkce_method").eq("S256")),
+      check("expr_user_id_fmt", (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$")),
+      check("expr_kind_ok", (col) => col("kind").in(["a", "b", "c"])),
+      check("expr_kind_not_reserved", (col) => col("kind").notIn(["x", "y"])),
+      check("expr_data_size", (col) => col("data").columnSize().lt(262144)),
+      check("expr_total_matches", (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")))),
+      check("expr_floor_nonneg_or_null", (col) => col("floor_cents").isNull().or(col("floor_cents").ge(0))),
+      check("expr_active_visible", (col) => col("active").and(col("visible"))),
+      { name: "expr_expires_window", expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) },
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
       // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
-      check("expr_snapshot_consistency", (c) =>
-        c("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
-          c("snapshot_artifact_path").isNotNull()
-            .and(c("snapshot_sha256").isNotNull())
-            .and(c("snapshot_ch_version").isNotNull()),
+      check("expr_snapshot_consistency", (col) =>
+        col("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
+          col("snapshot_artifact_path").isNotNull()
+            .and(col("snapshot_sha256").isNotNull())
+            .and(col("snapshot_ch_version").isNotNull()),
         )),
     ],
   });
 
   table("expr_surface", { schema: "zeroship" }).check("expr_amount_nonnegative").add({
-    expr: (c) => c("amount_cents").ge(0),
+    expr: (col) => col("amount_cents").ge(0),
   });
 
   // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
-  pgTable("expr_surface", { schema: "zeroship" })
+  table("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
-    .add({ on: ["status"], where: (c) => c("status").notIn(["snapshotted", "snapshotted_suspect"]) });
+    .add({ on: ["status"], where: (col) => col("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_created_desc_idx")
@@ -423,8 +424,8 @@ export function up() {
 }
 "#;
 const PLATFORM_SCALAR_TYPES_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { table, t, genRandomUuid } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
 
 export const name = "platform_scalar_types";
 
@@ -433,11 +434,12 @@ export function up() {
 
   table("platform_scalar_types", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),
       scopes: t.textArray().notNull(),
+      business_day: t.date().notNull(),
       currency: t.char({ length: 3 }).notNull().default("usd"),
     },
     primaryKey: ["id"],
@@ -446,7 +448,7 @@ export function up() {
 "#;
 const PLATFORM_DOMAIN_COLUMN_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { domain, schema } from "@zeroship/migrate/pg";
+import { domain, schema } from "@zeroship/migrate";
 
 export const name = "platform_domain_column";
 
@@ -465,6 +467,70 @@ export function up() {
       state: t.domain("myd").notNull(),
     },
     primaryKey: ["id"],
+  });
+}
+"#;
+const PLATFORM_GROUPED_VIEW_TS: &str = r#"
+import { countStar, table, t, view } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
+
+export const name = "platform_grouped_view";
+
+export function up() {
+  schema("zeroship").create({ ifNotExists: true });
+
+  table("orders", { schema: "zeroship" }).create({
+    columns: {
+      id: t.int().notNull(),
+      customer_id: t.text().notNull(),
+      amount: t.int().notNull(),
+      status: t.text().notNull(),
+    },
+  });
+
+  view("order_totals", { schema: "zeroship" }).create({
+    as: (q) => q
+      .from("orders")
+      .select([
+        "customer_id",
+        { kind: "expr", alias: "n", expr: () => countStar() },
+        { kind: "expr", alias: "revenue", expr: (col) => col("amount").sum() },
+      ])
+      .where((col) => col("status").eq("paid"))
+      .groupBy(["customer_id"])
+      .having((col) => col("id").count().gt(5)),
+  });
+}
+"#;
+const PLATFORM_PG_AGGREGATES_TS: &str = r#"
+import { table, t, view } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
+
+export const name = "platform_pg_aggregates";
+
+export function up() {
+  schema("zeroship").create({ ifNotExists: true });
+
+  table("order_events", { schema: "zeroship" }).create({
+    columns: {
+      id: t.int().notNull(),
+      customer_id: t.text().notNull(),
+      item_name: t.text().notNull(),
+      fulfilled: t.boolean().notNull(),
+    },
+  });
+
+  view("order_rollups", { schema: "zeroship" }).create({
+    as: (q) => q
+      .from("order_events")
+      .select([
+        "customer_id",
+        { kind: "expr", alias: "item_names", expr: (col) => col("item_name").stringAgg(", ") },
+        { kind: "expr", alias: "order_ids", expr: (col) => col("id").arrayAgg() },
+        { kind: "expr", alias: "all_fulfilled", expr: (col) => col("fulfilled").boolAnd() },
+      ])
+      .groupBy(["customer_id"])
+      .having((col) => col("id").count().gt(1)),
   });
 }
 "#;
@@ -1268,6 +1334,13 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
         "t.inet() renders as Postgres inet"
     );
     assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "business_day")
+            .await
+            .as_deref(),
+        Some("date"),
+        "t.date() renders as Postgres date"
+    );
+    assert_eq!(
         column_information_schema_type(&conn, "zeroship", "platform_scalar_types", "scopes")
             .await
             .as_ref()
@@ -1349,6 +1422,116 @@ async fn platform_ts_domain_column_round_trips_on_live_pg() {
         Some(("zeroship", "myd")),
         "pg_catalog must show the column's physical type as zeroship.myd"
     );
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_grouped_view_applies_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_grouped_view_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_grouped_view",
+        "20260707000000_platform_grouped_view.ts",
+        PLATFORM_GROUPED_VIEW_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with grouped structured view applies");
+
+    conn.batch_execute(
+        "INSERT INTO zeroship.orders (id, customer_id, amount, status) VALUES \
+         (1, 'cust_a', 10, 'paid'), \
+         (2, 'cust_a', 20, 'paid'), \
+         (3, 'cust_a', 30, 'paid'), \
+         (4, 'cust_a', 40, 'paid'), \
+         (5, 'cust_a', 50, 'paid'), \
+         (6, 'cust_a', 60, 'paid'), \
+         (7, 'cust_b', 70, 'paid'), \
+         (8, 'cust_b', 80, 'paid'), \
+         (9, 'cust_c', 90, 'open');",
+    )
+    .await
+    .expect("seed grouped-view source rows");
+
+    let rows = conn
+        .query(
+            "SELECT customer_id, n, revenue FROM zeroship.order_totals ORDER BY customer_id",
+            &[],
+        )
+        .await
+        .expect("query grouped structured view");
+    assert_eq!(rows.len(), 1, "HAVING count(id) > 5 keeps only cust_a");
+    let row = &rows[0];
+    assert_eq!(row.get::<_, String>(0), "cust_a");
+    assert_eq!(row.get::<_, i64>(1), 6);
+    assert_eq!(row.get::<_, i64>(2), 210);
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_pg_first_aggregates_apply_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_pg_aggregates_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_pg_aggregates",
+        "20260707000000_platform_pg_aggregates.ts",
+        PLATFORM_PG_AGGREGATES_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with PG-first aggregates applies");
+
+    conn.batch_execute(
+        "INSERT INTO zeroship.order_events (id, customer_id, item_name, fulfilled) VALUES \
+         (1, 'cust_a', 'alpha', true), \
+         (2, 'cust_a', 'beta', true), \
+         (3, 'cust_b', 'gamma', true), \
+         (4, 'cust_b', 'delta', false), \
+         (5, 'cust_c', 'epsilon', true);",
+    )
+    .await
+    .expect("seed PG aggregate source rows");
+
+    let rows = conn
+        .query(
+            "SELECT customer_id, \
+                    string_to_array(item_names, ', ') @> ARRAY['alpha','beta'] \
+                      AND ARRAY['alpha','beta'] @> string_to_array(item_names, ', ') AS cust_a_names, \
+                    order_ids @> ARRAY[1,2] AND ARRAY[1,2] @> order_ids AS cust_a_ids, \
+                    all_fulfilled \
+             FROM zeroship.order_rollups \
+             ORDER BY customer_id",
+            &[],
+        )
+        .await
+        .expect("query PG aggregate structured view");
+    assert_eq!(rows.len(), 2, "HAVING count(id) > 1 keeps cust_a and cust_b");
+
+    assert_eq!(rows[0].get::<_, String>(0), "cust_a");
+    assert!(rows[0].get::<_, bool>(1), "stringAgg should contain alpha/beta");
+    assert!(rows[0].get::<_, bool>(2), "arrayAgg should contain ids 1/2");
+    assert!(rows[0].get::<_, bool>(3), "boolAnd should be true for cust_a");
+
+    assert_eq!(rows[1].get::<_, String>(0), "cust_b");
+    assert!(!rows[1].get::<_, bool>(3), "boolAnd should be false for cust_b");
 
     reset(&conn, &meta).await;
     global_lock.release().await;

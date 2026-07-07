@@ -14,7 +14,7 @@
 //     up() {
 //       table("users")
 //         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//         .backfill({ set: { first_name: c => c("name").splitPart(" ", 1) } });
 //     },
 //   };
 
@@ -24,15 +24,33 @@ export {
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
   enumType,
+  domain,
+  schema,
+  extension,
+  role,
+  sequence,
   comment,
   check,
   lit,
   decimal,
   byteValue,
   dialect,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+  concatWs,
+  countStar,
   minValue,
   maxValue,
   nextval,
+  dropOwnedBy,
+  grant,
+  revoke,
+  createFunction,
+  dropFunction,
+  raw,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -40,6 +58,15 @@ export {
   fromDb,
   // the determinism lint (best-effort source scan)
   lintDeterminism,
+} from "./ops.js";
+
+export type {
+  CreateFunctionArgs,
+  DropFunctionArgs,
+  DropOwnedByArgs,
+  GrantArgs,
+  PgRawArgs,
+  RevokeArgs,
 } from "./ops.js";
 
 // The single-source `@zeroship/db` field → migration `ColType` reduction (PR5
@@ -57,15 +84,16 @@ export type {
   ExprChain,
   ExprFn,
   ExtractField,
+  PgExtractField,
   CheckBuilder,
   CheckDef,
   CheckExprFn,
-  FnNamespace,
-  AggNamespace,
   Duration,
+  Scalar,
   ScalarValue,
   DecimalValue,
   BytesValue,
+  CurrentSettingOptions,
   EmptyContainerDefault,
   JsonDefaultValue,
   JsonDefaultObject,
@@ -91,6 +119,9 @@ export type {
   IndexRef,
   IndexAddArgs,
   IndexDropArgs,
+  PolicyCreateArgs,
+  PolicyDropArgs,
+  PolicyRef,
   CreateTableArgs,
   TableRuntimeOptions,
   TableStrictness,
@@ -106,6 +137,29 @@ export type {
   EnumHandle,
   CreateEnumArgs,
   DropEnumArgs,
+  AlterSequenceArgs,
+  CreateDomainArgs,
+  CreateSequenceArgs,
+  DomainCheckFn,
+  DomainHandle,
+  DomainValueBuilder,
+  DroppedExtensionHandle,
+  DroppedRoleHandle,
+  DroppedSchemaHandle,
+  DropDomainArgs,
+  DropSequenceArgs,
+  ExtensionCreateArgs,
+  ExtensionDropArgs,
+  ExtensionHandle,
+  RoleCreateArgs,
+  RoleDropArgs,
+  RoleHandle,
+  RoleSetOptionsArgs,
+  SchemaCreateArgs,
+  SchemaDropArgs,
+  SchemaHandle,
+  SequenceHandle,
+  SequenceOwnedBy,
   // op-arg shapes
   InsertArgs,
   UpdateArgs,
@@ -114,6 +168,7 @@ export type {
   CreateViewArgs,
   DropViewArgs,
   ViewQueryBuilder,
+  GroupByItem,
   IndexMethod,
   IndexStorageParams,
   IndexStorageParamsArg,
@@ -161,6 +216,16 @@ export type {
   OrderItem,
   OrderDir,
 } from "./types.js";
+
+export type {
+  FuncArg,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
+  GrantTarget,
+  PolicyCmd,
+  Privilege,
+} from "./generated/ir.js";
 
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
 // `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported
