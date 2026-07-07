@@ -32,9 +32,9 @@ export function up() {
       data: t.json().notNull(),
     },
     checks: [
-      { name: "status_ne_all", expr: (c) => c("status").notIn(["x"]) },
-      { name: "name_shape", expr: (c) => c("name").regex("^[a-z]+$") },
-      { name: "data_size", expr: (c) => c("data").columnSize().le(8192) },
+      { name: "status_ne_all", expr: (col) => col("status").notIn(["x"]) },
+      { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
+      { name: "data_size", expr: (col) => col("data").columnSize().le(8192) },
     ],
   });
 

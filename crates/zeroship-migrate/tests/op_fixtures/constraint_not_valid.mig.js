@@ -19,7 +19,7 @@ export function up() {
   });
   // CHECK added NOT VALID via the selector form.
   lineItems.check("line_items_qty_positive").add({
-    expr: (c) => c("qty").gt(0),
+    expr: (col) => col("qty").gt(0),
     notValid: true,
   });
   // …then validate both later under a weaker lock.
