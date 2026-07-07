@@ -47,6 +47,17 @@ test("VAR-ASSIGN: a var-held handle is reusable across statements ({ schema } se
   for (const op of ops) assert.equal(op.schema, "app", `op ${op.op} carries the handle schema`);
 });
 
+test("B7 (L10): rename() rebinds the handle — chained ops target the NEW name", () => {
+  const ops = record(() => {
+    table("a").rename({ to: "b" }).column("x").add({ type: t.text() });
+  });
+  assert.equal(ops[0].op, "renameTable");
+  assert.equal(ops[1].op, "addColumn");
+  // pre-fix this was "a" (the dead name); the rebind makes chained ops target "b".
+  assert.equal(ops[1].table, "b");
+  assert.equal(ops[1].column, "x");
+});
+
 // ── §4 — the IMMUTABLE t.* chain ──
 
 test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
