@@ -7077,11 +7077,15 @@ dependencies = [
 name = "zeroship-plugin-workflow"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "compio",
  "compio-postgres",
  "cyper",
  "ntex",
  "percent-encoding",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

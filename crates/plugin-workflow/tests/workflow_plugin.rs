@@ -10,7 +10,7 @@ use compio_postgres::{connect, NoTls};
 use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore, WorkflowBlobStore};
 use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
@@ -130,6 +130,8 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
+        Arc::new(LocalWorkflowBlobStore::new(blob_root.clone()).expect("workflow blob store"));
     let control_pg = Arc::new(pg(db_url).await);
 
     Fixture {
@@ -138,6 +140,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             env_store,
             stripe_store,
             blob_store,
+            workflow_blob_store,
             control_key: SecretString::new(TEST_CONTROL_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
@@ -273,6 +276,58 @@ async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u
     }
 }
 
+async fn run_dev_workflow_app(
+    db_path: &std::path::Path,
+    app_id: Uuid,
+    source: &str,
+) -> (u16, String) {
+    init_v8();
+    let mut env_vars = HashMap::new();
+    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    let plugin: Arc<dyn NativePlugin> = Arc::new(
+        WorkflowPlugin::dev_sqlite(db_path, modules(source), env_vars.clone(), Vec::new())
+            .expect("dev workflow plugin"),
+    );
+    let runtime = Runtime::builder()
+        .modules(modules(source))
+        .env_vars(env_vars)
+        .plugins(vec![plugin])
+        .build();
+    runtime.start_pump();
+
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+    match outcome {
+        FetchOutcome::Response { status, body, .. } => {
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+        FetchOutcome::Pending { rx, cancel: _ } => {
+            let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("workflow dev fetch timed out")
+                .expect("workflow dev pending dispatch failed");
+            match settled {
+                SettledFetch::Response { status, body, .. } => {
+                    (status, String::from_utf8_lossy(&body).into_owned())
+                }
+                other => {
+                    let name = match other {
+                        SettledFetch::Stream { .. } => "Stream",
+                        SettledFetch::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                        SettledFetch::Response { .. } => unreachable!(),
+                    };
+                    panic!("workflow dev: expected response, got {name}");
+                }
+            }
+        }
+        FetchOutcome::Stream { .. } => panic!("workflow dev: unexpected stream"),
+        FetchOutcome::WebSocketUpgrade { .. } => {
+            panic!("workflow dev: unexpected websocket upgrade")
+        }
+    }
+}
+
 #[test]
 fn derives_the_app_scoped_token_with_the_shared_core_helper() {
     let app_id = Uuid::new_v4().to_string();
@@ -369,6 +424,77 @@ fn getter_exclusion_list_matches_the_binding_contract() {
         assert!(is_excluded_workflow_property(name), "{name} must be excluded");
     }
     assert!(!is_excluded_workflow_property("Checkout"));
+}
+
+#[compio::test]
+async fn dev_sqlite_engine_runs_sleep_signal_core_loop_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflows.sqlite");
+    let app_id = Uuid::new_v4();
+    let source = r#"
+        const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        export class LocalApproval {
+          async run(trigger, step) {
+            const first = await step.run("record", () => ({ orderId: trigger.input.orderId }));
+            await step.sleep("cooldown", "20ms");
+            const signal = await step.waitForSignal("approved", { type: "approved" });
+            return { first, approved: signal.payload };
+          }
+        }
+
+        export default {
+          async fetch(_req, env) {
+            const run = await env.workflows.LocalApproval.start({ input: { orderId: "ord_1" } });
+            let beforeSignal = null;
+            for (let i = 0; i < 30; i += 1) {
+              beforeSignal = await run.status();
+              if (beforeSignal.state === "waiting") break;
+              await delay(20);
+            }
+            const signal = await run.signal({ type: "approved", payload: { by: "local" } });
+            let finalStatus = null;
+            for (let i = 0; i < 30; i += 1) {
+              finalStatus = await run.status();
+              if (finalStatus.state === "completed") break;
+              await delay(20);
+            }
+            return Response.json({ runId: run.id, beforeSignal, signal, finalStatus });
+          }
+        };
+    "#;
+
+    let (status, body) = run_dev_workflow_app(&db_path, app_id, source).await;
+    assert_eq!(status, 200, "body: {body}");
+    let value: Value = serde_json::from_str(&body).expect("body json");
+    assert_eq!(value["beforeSignal"]["state"], "waiting", "body: {body}");
+    assert_eq!(value["finalStatus"]["state"], "completed", "body: {body}");
+    assert_eq!(
+        value["finalStatus"]["output"],
+        json!({
+            "first": { "orderId": "ord_1" },
+            "approved": { "by": "local" }
+        }),
+        "body: {body}"
+    );
+    let run_id = value["runId"].as_str().expect("run id");
+    let sqlite = rusqlite::Connection::open(&db_path).expect("open workflow db");
+    let step_count: i64 = sqlite
+        .query_row(
+            "SELECT COUNT(*) FROM workflow_steps WHERE run_id = ?1 AND name = 'record' AND kind = 'run'",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .expect("step count");
+    assert_eq!(step_count, 1, "step.run must execute exactly once");
+    let completed_wait: i64 = sqlite
+        .query_row(
+            "SELECT COUNT(*) FROM workflow_steps WHERE run_id = ?1 AND name = 'approved' AND kind = 'wait_signal' AND state = 'completed'",
+            rusqlite::params![run_id],
+            |row| row.get(0),
+        )
+        .expect("wait count");
+    assert_eq!(completed_wait, 1, "signal wait should complete once");
 }
 
 #[compio::test]

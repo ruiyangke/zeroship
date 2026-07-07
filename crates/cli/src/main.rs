@@ -230,25 +230,42 @@ fn cmd_serve(args: &[String]) {
     };
     plugins.push(Arc::new(kv_plugin));
 
-    let workflow_control_url = std::env::var("ZEROSHIP_CONTROL_URL")
-        .or_else(|_| std::env::var("CONTROL_URL"))
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "http://localhost:9090".to_string());
-    let workflow_control_key = std::env::var("ZEROSHIP_CONTROL_KEY")
-        .or_else(|_| std::env::var("CONTROL_KEY"))
-        .unwrap_or_default();
-    plugins.push(Arc::new(zeroship_plugin_workflow::WorkflowPlugin::new(
-        workflow_control_url,
-        workflow_control_key,
-    )));
-    eprintln!("[zeroship] workflows plugin registered");
-
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
-    // in the spawned child env, and user apps expect access to OPENAI_API_KEY
-    // etc. Without this, `process.env` in V8 is empty.
+    // in the spawned child env. Without this, `process.env` in V8 is empty.
     let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+
+    let workflow_db_path: PathBuf = std::env::var_os("ZEROSHIP_WORKFLOW_SQLITE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".zeroship/workflows.sqlite"));
+    if let Some(parent) = workflow_db_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "[zeroship] workflows: failed to create dir '{}': {e}",
+                parent.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    let workflow_peer_plugins = plugins.clone();
+    let workflow_plugin = zeroship_plugin_workflow::WorkflowPlugin::dev_sqlite(
+        &workflow_db_path,
+        modules.clone(),
+        env_vars.clone(),
+        workflow_peer_plugins,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "[zeroship] workflows: failed to open sqlite at '{}': {e}",
+            workflow_db_path.display()
+        );
+        std::process::exit(1);
+    });
+    plugins.push(Arc::new(workflow_plugin));
+    eprintln!(
+        "[zeroship] workflows plugin registered (sqlite; path={})",
+        workflow_db_path.display()
+    );
 
     zeroship_runtime::serve::start_server(
         modules,
