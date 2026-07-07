@@ -1337,10 +1337,11 @@ test("dialect() rejects an empty leg set at record time", () => {
   assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
 });
 
-test("aggregate chain methods and countStar record the portable aggregate node", () => {
-  // §3.4/§3.6 portable aggregate nodes. count()/sum/avg/min/max render identically
-  // on all three dialects; countStar() is COUNT(*); { distinct: true } sets the
-  // flag for receiver aggregates. `distinct` is skipped on the wire when false.
+test("aggregate chain methods and countStar record aggregate nodes", () => {
+  // §3.4/§3.6 aggregate nodes. count()/sum/avg/min/max render on all three
+  // dialects; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
+  // off-PG in Rust validate. countStar() is COUNT(*); { distinct: true } sets
+  // the flag for receiver aggregates. `distinct` is skipped on the wire when false.
   const ops = record(() =>
     table("t").update({
       set: {
@@ -1350,6 +1351,10 @@ test("aggregate chain methods and countStar record the portable aggregate node",
         a: (col) => col("x").avg(),
         lo: (col) => col("x").min(),
         hi: (col) => col("x").max(),
+        names: (col) => col("name").stringAgg(", "),
+        ids: (col) => col("id").arrayAgg(),
+        all_ok: (col) => col("ok").boolAnd(),
+        any_ok: (col) => col("ok").boolOr(),
       },
     }),
   );
@@ -1381,6 +1386,27 @@ test("aggregate chain methods and countStar record the portable aggregate node",
     node: "agg",
     func: "max",
     arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.names, {
+    node: "agg",
+    func: "stringAgg",
+    arg: { node: "colRef", name: "name" },
+    delimiter: { node: "literal", value: ", " },
+  });
+  assert.deepEqual(set.ids, {
+    node: "agg",
+    func: "arrayAgg",
+    arg: { node: "colRef", name: "id" },
+  });
+  assert.deepEqual(set.all_ok, {
+    node: "agg",
+    func: "boolAnd",
+    arg: { node: "colRef", name: "ok" },
+  });
+  assert.deepEqual(set.any_ok, {
+    node: "agg",
+    func: "boolOr",
+    arg: { node: "colRef", name: "ok" },
   });
 });
 

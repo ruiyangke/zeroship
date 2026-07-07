@@ -78,6 +78,7 @@ fn count_star() -> Expr {
     Expr::Agg {
         func: AggFunc::Count,
         arg: None,
+        delimiter: None,
         distinct: false,
     }
 }
@@ -86,6 +87,7 @@ fn count(expr: Expr) -> Expr {
     Expr::Agg {
         func: AggFunc::Count,
         arg: Some(Box::new(expr)),
+        delimiter: None,
         distinct: false,
     }
 }
@@ -94,6 +96,34 @@ fn sum(expr: Expr) -> Expr {
     Expr::Agg {
         func: AggFunc::Sum,
         arg: Some(Box::new(expr)),
+        delimiter: None,
+        distinct: false,
+    }
+}
+
+fn string_agg(expr: Expr, delimiter: Expr) -> Expr {
+    Expr::Agg {
+        func: AggFunc::StringAgg,
+        arg: Some(Box::new(expr)),
+        delimiter: Some(Box::new(delimiter)),
+        distinct: false,
+    }
+}
+
+fn array_agg(expr: Expr) -> Expr {
+    Expr::Agg {
+        func: AggFunc::ArrayAgg,
+        arg: Some(Box::new(expr)),
+        delimiter: None,
+        distinct: false,
+    }
+}
+
+fn bool_and(expr: Expr) -> Expr {
+    Expr::Agg {
+        func: AggFunc::BoolAnd,
+        arg: Some(Box::new(expr)),
+        delimiter: None,
         distinct: false,
     }
 }
@@ -143,6 +173,57 @@ fn grouped_order_totals_view() -> Op {
                     dir: Some(OrderDir::Asc),
                 }]),
                 limit: Some(SafeU64::new(10).unwrap()),
+            },
+        },
+        replace: None,
+        materialized: None,
+    }
+}
+
+fn pg_first_aggregate_rollup_view() -> Op {
+    Op::CreateView {
+        name: "order_rollups".to_string(),
+        schema: None,
+        columns: None,
+        query: ViewQuery::Structured {
+            select: SelectAst {
+                from: TableRef {
+                    name: "orders".to_string(),
+                    schema: None,
+                    alias: None,
+                },
+                projection: vec![
+                    SelectItem::ColRef {
+                        table: None,
+                        name: "customer_id".to_string(),
+                        alias: None,
+                    },
+                    SelectItem::Expr {
+                        expr: string_agg(
+                            Expr::col("item_name"),
+                            Expr::lit(IrScalar::Str(", ".to_string())),
+                        ),
+                        alias: Some("item_names".to_string()),
+                    },
+                    SelectItem::Expr {
+                        expr: array_agg(Expr::col("id")),
+                        alias: Some("order_ids".to_string()),
+                    },
+                    SelectItem::Expr {
+                        expr: bool_and(Expr::col("fulfilled")),
+                        alias: Some("all_fulfilled".to_string()),
+                    },
+                ],
+                joins: Vec::new(),
+                r#where: None,
+                group_by: vec![Expr::col("customer_id")],
+                having: Some(Expr::BinOp {
+                    op: BinaryOp::Gt,
+                    lhs: Box::new(count(Expr::col("id"))),
+                    rhs: Box::new(Expr::lit(IrScalar::Int(1))),
+                }),
+                order_by: None,
+                limit: None,
             },
         },
         replace: None,
@@ -205,6 +286,29 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
         &PolicyProfile::platform(),
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
+}
+
+#[test]
+fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
+    let pg = lower_up(SqlDialect::Postgres, pg_first_aggregate_rollup_view()).unwrap();
+    assert_eq!(
+        pg,
+        "CREATE VIEW \"app\".\"order_rollups\" AS SELECT \"customer_id\", string_agg(\"item_name\", ', ') AS \"item_names\", array_agg(\"id\") AS \"order_ids\", bool_and(\"fulfilled\") AS \"all_fulfilled\" FROM \"app\".\"orders\" GROUP BY \"customer_id\" HAVING (count(\"id\") > 1)"
+    );
+
+    let trusted = SchemaScope::Unconfined;
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir_scoped(
+            &ir(pg_first_aggregate_rollup_view()),
+            dialect,
+            &[],
+            Some(&trusted),
+            &PolicyProfile::platform(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, zeroship_migrate::model::validate::CODE_DIALECT_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+    }
 }
 
 #[test]

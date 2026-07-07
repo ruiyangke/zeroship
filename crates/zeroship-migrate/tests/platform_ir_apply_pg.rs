@@ -501,6 +501,38 @@ export function up() {
   });
 }
 "#;
+const PLATFORM_PG_AGGREGATES_TS: &str = r#"
+import { table, t, view } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate";
+
+export const name = "platform_pg_aggregates";
+
+export function up() {
+  schema("zeroship").create({ ifNotExists: true });
+
+  table("order_events", { schema: "zeroship" }).create({
+    columns: {
+      id: t.int().notNull(),
+      customer_id: t.text().notNull(),
+      item_name: t.text().notNull(),
+      fulfilled: t.boolean().notNull(),
+    },
+  });
+
+  view("order_rollups", { schema: "zeroship" }).create({
+    as: (q) => q
+      .from("order_events")
+      .select([
+        "customer_id",
+        { kind: "expr", alias: "item_names", expr: (col) => col("item_name").stringAgg(", ") },
+        { kind: "expr", alias: "order_ids", expr: (col) => col("id").arrayAgg() },
+        { kind: "expr", alias: "all_fulfilled", expr: (col) => col("fulfilled").boolAnd() },
+      ])
+      .groupBy(["customer_id"])
+      .having((col) => col("id").count().gt(1)),
+  });
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -1434,6 +1466,64 @@ async fn platform_ts_grouped_view_applies_on_live_pg() {
     assert_eq!(row.get::<_, String>(0), "cust_a");
     assert_eq!(row.get::<_, i64>(1), 6);
     assert_eq!(row.get::<_, i64>(2), 210);
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_pg_first_aggregates_apply_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_pg_aggregates_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_pg_aggregates",
+        "20260707000000_platform_pg_aggregates.ts",
+        PLATFORM_PG_AGGREGATES_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with PG-first aggregates applies");
+
+    conn.batch_execute(
+        "INSERT INTO zeroship.order_events (id, customer_id, item_name, fulfilled) VALUES \
+         (1, 'cust_a', 'alpha', true), \
+         (2, 'cust_a', 'beta', true), \
+         (3, 'cust_b', 'gamma', true), \
+         (4, 'cust_b', 'delta', false), \
+         (5, 'cust_c', 'epsilon', true);",
+    )
+    .await
+    .expect("seed PG aggregate source rows");
+
+    let rows = conn
+        .query(
+            "SELECT customer_id, \
+                    string_to_array(item_names, ', ') @> ARRAY['alpha','beta'] \
+                      AND ARRAY['alpha','beta'] @> string_to_array(item_names, ', ') AS cust_a_names, \
+                    order_ids @> ARRAY[1,2] AND ARRAY[1,2] @> order_ids AS cust_a_ids, \
+                    all_fulfilled \
+             FROM zeroship.order_rollups \
+             ORDER BY customer_id",
+            &[],
+        )
+        .await
+        .expect("query PG aggregate structured view");
+    assert_eq!(rows.len(), 2, "HAVING count(id) > 1 keeps cust_a and cust_b");
+
+    assert_eq!(rows[0].get::<_, String>(0), "cust_a");
+    assert!(rows[0].get::<_, bool>(1), "stringAgg should contain alpha/beta");
+    assert!(rows[0].get::<_, bool>(2), "arrayAgg should contain ids 1/2");
+    assert!(rows[0].get::<_, bool>(3), "boolAnd should be true for cust_a");
+
+    assert_eq!(rows[1].get::<_, String>(0), "cust_b");
+    assert!(!rows[1].get::<_, bool>(3), "boolAnd should be false for cust_b");
 
     reset(&conn, &meta).await;
     global_lock.release().await;

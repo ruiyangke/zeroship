@@ -98,6 +98,18 @@ export function antiRotMigration(): void {
       .groupBy(["customer_id"])
       .having((col) => col("id").count().gt(5)),
   });
+  view("phantom_rollups").create({
+    as: (q) => q
+      .from("phantom_orders")
+      .select([
+        "customer_id",
+        (col) => col("name").stringAgg(", "),
+        (col) => col("id").arrayAgg(),
+        (col) => col("ok").boolAnd(),
+        (col) => col("ok").boolOr(),
+      ])
+      .groupBy(["customer_id"]),
+  });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
