@@ -439,6 +439,7 @@ export function up() {
       ratio: t.real().notNull(),
       source_ip: t.inet(),
       scopes: t.textArray().notNull(),
+      business_day: t.date().notNull(),
       currency: t.char({ length: 3 }).notNull().default("usd"),
     },
     primaryKey: ["id"],
@@ -1331,6 +1332,13 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .as_deref(),
         Some("inet"),
         "t.inet() renders as Postgres inet"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "business_day")
+            .await
+            .as_deref(),
+        Some("date"),
+        "t.date() renders as Postgres date"
     );
     assert_eq!(
         column_information_schema_type(&conn, "zeroship", "platform_scalar_types", "scopes")
