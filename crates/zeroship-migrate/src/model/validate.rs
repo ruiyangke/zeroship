@@ -3665,20 +3665,12 @@ fn validate_column_facets(
 fn validate_col_type_position(
     ty: &crate::model::ir::ColType,
     position: &'static str,
-    allow_pg_domain_date_base: bool,
+    _allow_pg_domain_date_base: bool,
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::ColType;
-
-    fn contains_date(ty: &ColType) -> bool {
-        match ty {
-            ColType::Date => true,
-            ColType::Encrypted { of } => contains_date(of),
-            _ => false,
-        }
-    }
 
     if matches!(ty, ColType::Char { length: 0 }) {
         return Err(AuthoringError {
@@ -3692,29 +3684,7 @@ fn validate_col_type_position(
         });
     }
 
-    if !contains_date(ty) {
-        return Ok(());
-    }
-    if allow_pg_domain_date_base && target_dialect == Dialect::Postgres && matches!(ty, ColType::Date)
-    {
-        return Ok(());
-    }
-    Err(AuthoringError {
-        code: CODE_UNSUPPORTED.to_string(),
-        kind: Some(UnsupportedKind::Op),
-        op_index,
-        ts_location: ts_location.map(str::to_string),
-        dialect: target_dialect,
-        reason: format!(
-            "{position} uses the narrow `date` type token, which Slice C admits only \
-             as a PostgreSQL createDomain base type"
-        ),
-        suggested_fix: Some(
-            "use `timestamp` for ordinary columns, or use `date` only as \
-             domain(name).create({ as: \"date\", ... }) on PostgreSQL"
-                .to_string(),
-        ),
-    })
+    Ok(())
 }
 
 fn validate_identity_placement(
@@ -5814,6 +5784,20 @@ mod tests {
         }
     }
 
+    fn create_with_column(name: &str, ty: ColType) -> Op {
+        Op::CreateTable {
+            name: "typed_columns".into(),
+            columns: vec![part_col(name, ty, true)],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
     fn idx_col(name: &str) -> IndexElement {
         IndexElement::Column {
             name: name.into(),
@@ -6692,6 +6676,15 @@ mod tests {
         ]);
         assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
         assert!(validate_ir_platform(&ir, Dialect::Sqlite).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_accepts_date_columns_on_all_dialects() {
+        let ir = ir_with(vec![create_with_column("business_day", ColType::Date)]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_ir_platform(&ir, dialect)
+                .unwrap_or_else(|err| panic!("{dialect:?} should accept date columns: {err:?}"));
+        }
     }
 
     #[test]
