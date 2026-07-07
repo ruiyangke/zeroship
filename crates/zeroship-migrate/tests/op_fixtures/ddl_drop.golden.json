@@ -6,8 +6,7 @@
     {
       "op": "dropIndex",
       "name": "orders_total_idx",
-      "table": "orders",
-      "unique": false
+      "table": "orders"
     },
     {
       "op": "dropColumn",

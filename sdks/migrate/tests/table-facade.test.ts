@@ -280,6 +280,17 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
   assert.equal(ops[5].existenceGuard, "ifExists");
 });
 
+test("INDEX: drop ignores author-declared uniqueness", () => {
+  const ops = record(() => {
+    table("users").index("users_email_uniq").drop({ unique: true } as any);
+  });
+  assert.deepEqual(ops[0], {
+    op: "dropIndex",
+    name: "users_email_uniq",
+    table: "users",
+  });
+});
+
 test("GUARD: no guard option ⇒ existenceGuard omitted", () => {
   const ops = record(() => table("users").column("a").add({ type: t.int() }));
   assert.ok(!("existenceGuard" in ops[0]), "absent guard ⇒ existenceGuard key omitted");
