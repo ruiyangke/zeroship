@@ -29,11 +29,11 @@ use zeroship_migrate::PolicyProfile;
 const OWNER: &str = "app_paths";
 
 const MIG_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, genRandomUuid } from "@zeroship/migrate";
 export function up() {
   table("widgets").create({
     columns: {
-      id: t.uuid().notNull().primaryKey().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().primaryKey().default(genRandomUuid()),
       title: t.text().notNull(),
     },
   });
@@ -170,7 +170,7 @@ fn platform_transient_recording_keeps_author_columns_and_primary_key() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_memberships";
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           table("memberships").create({
             columns: {
@@ -272,7 +272,7 @@ fn build_allows_date_now_call_with_soft_warning() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_date_now_call";
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           table("events").insert({ rows: [ { created_at: Date.now() } ] });
         }
@@ -300,7 +300,7 @@ fn date_now_inside_comment_or_string_is_not_a_false_reject() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_comment_string";
     let clean = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, genRandomUuid } from "@zeroship/migrate";
         // Audit note: Date.now() and Math.random() are mentioned here only as text.
         export function up() {
           table("events").insert({
@@ -325,7 +325,7 @@ fn math_random_calls_evaluate_and_do_not_hard_fail() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_random_calls";
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           const random = Math["random"];
           const collapsed = Math.random() - Math.random();
@@ -357,7 +357,7 @@ fn date_now_arithmetic_call_evaluates_and_does_not_hard_fail() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_folded_date_now";
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           table("events").insert({ rows: [ { ms: Date.now() % 1000000 } ] });
         }

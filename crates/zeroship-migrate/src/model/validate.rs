@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Duration, Expr, ScalarFn, SynthFn};
+use crate::model::expr::{AggFunc, CaseBranch, Duration, Expr, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -99,10 +99,16 @@ pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
 /// A column/domain default is structurally valid but invalid for the declared
 /// column type (for example `{}` on `text[]`).
 pub const CODE_COLUMN_DEFAULT_TYPE: &str = "COLUMN_DEFAULT_TYPE";
+/// A volatile expression node appeared in a SQL context that requires immutable
+/// expressions (index expression/predicate, generated column, or CHECK).
+pub const CODE_IMMUTABLE_CONTEXT_VOLATILE: &str = "IMMUTABLE_CONTEXT_VOLATILE";
+/// An aggregate expression appeared in a scalar context (index expression/
+/// predicate, generated column, CHECK, or column DEFAULT).
+pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT";
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
-/// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
+/// **VENDOR (`@zeroship/migrate`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pgRaw`) whose required
 /// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
 /// active capability set (vendor spec §3.2). The Confined creator/AI posture
@@ -318,6 +324,245 @@ pub fn validate_expr(
 ) -> Result<(), AuthoringError> {
     let ctx = Ctx { target_dialect, scope, op_index, ts_location };
     ctx.walk(expr)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExprVolatility {
+    Immutable,
+    Stable,
+    Volatile,
+}
+
+fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
+    match f {
+        ScalarFn::CurrentSetting | ScalarFn::CurrentUser => ExprVolatility::Stable,
+        ScalarFn::Coalesce
+        | ScalarFn::Nullif
+        | ScalarFn::Lower
+        | ScalarFn::Upper
+        | ScalarFn::Trim
+        | ScalarFn::Length
+        | ScalarFn::Abs
+        | ScalarFn::Mod
+        | ScalarFn::Round
+        | ScalarFn::Floor
+        | ScalarFn::Ceil
+        | ScalarFn::Substr
+        | ScalarFn::Replace => ExprVolatility::Immutable,
+    }
+}
+
+fn synth_fn_volatility(f: SynthFn) -> ExprVolatility {
+    match f {
+        SynthFn::Now | SynthFn::GenRandomUuid => ExprVolatility::Volatile,
+        SynthFn::ConcatWs | SynthFn::SplitPart => ExprVolatility::Immutable,
+    }
+}
+
+fn scalar_fn_name(f: ScalarFn) -> &'static str {
+    match f {
+        ScalarFn::Coalesce => "coalesce",
+        ScalarFn::Nullif => "nullif",
+        ScalarFn::Lower => "lower",
+        ScalarFn::Upper => "upper",
+        ScalarFn::Trim => "trim",
+        ScalarFn::Length => "length",
+        ScalarFn::Abs => "abs",
+        ScalarFn::Mod => "mod",
+        ScalarFn::Round => "round",
+        ScalarFn::Floor => "floor",
+        ScalarFn::Ceil => "ceil",
+        ScalarFn::Substr => "substr",
+        ScalarFn::Replace => "replace",
+        ScalarFn::CurrentSetting => "currentSetting",
+        ScalarFn::CurrentUser => "currentUser",
+    }
+}
+
+fn synth_fn_name(f: SynthFn) -> &'static str {
+    match f {
+        SynthFn::ConcatWs => "concatWs",
+        SynthFn::SplitPart => "splitPart",
+        SynthFn::Now => "now",
+        SynthFn::GenRandomUuid => "genRandomUuid",
+    }
+}
+
+fn agg_func_name(f: AggFunc) -> &'static str {
+    match f {
+        AggFunc::Count => "count",
+        AggFunc::Sum => "sum",
+        AggFunc::Avg => "avg",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+        AggFunc::StringAgg => "stringAgg",
+        AggFunc::ArrayAgg => "arrayAgg",
+        AggFunc::BoolAnd => "boolAnd",
+        AggFunc::BoolOr => "boolOr",
+    }
+}
+
+fn agg_func_is_pg_first(f: AggFunc) -> bool {
+    matches!(
+        f,
+        AggFunc::StringAgg | AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr
+    )
+}
+
+fn first_aggregate(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::BinOp { lhs, rhs, .. } => first_aggregate(lhs).or_else(|| first_aggregate(rhs)),
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. } => first_aggregate(operand),
+        Expr::Case { branches, r#else } => branches
+            .iter()
+            .find_map(|CaseBranch { when, then }| {
+                first_aggregate(when).or_else(|| first_aggregate(then))
+            })
+            .or_else(|| r#else.as_deref().and_then(first_aggregate)),
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            args.iter().find_map(first_aggregate)
+        }
+        Expr::Between { operand, low, high } => first_aggregate(operand)
+            .or_else(|| first_aggregate(low))
+            .or_else(|| first_aggregate(high)),
+        Expr::Like { operand, pattern } => {
+            first_aggregate(operand).or_else(|| first_aggregate(pattern))
+        }
+        Expr::DistinctFrom { left, right } => {
+            first_aggregate(left).or_else(|| first_aggregate(right))
+        }
+        Expr::Agg { func, arg, delimiter, .. } => arg
+            .as_deref()
+            .and_then(first_aggregate)
+            .or_else(|| delimiter.as_deref().and_then(first_aggregate))
+            .or(Some(agg_func_name(*func))),
+        Expr::InList { expr, .. } => first_aggregate(expr),
+        Expr::Dialectal { default, pg, sqlite, mysql } => [
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(first_aggregate),
+    }
+}
+
+fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::BinOp { lhs, rhs, .. } => {
+            first_volatile_function(lhs).or_else(|| first_volatile_function(rhs))
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. } => first_volatile_function(operand),
+        Expr::Case { branches, r#else } => branches
+            .iter()
+            .find_map(|CaseBranch { when, then }| {
+                first_volatile_function(when).or_else(|| first_volatile_function(then))
+            })
+            .or_else(|| r#else.as_deref().and_then(first_volatile_function)),
+        Expr::FnCall { r#fn, args } => {
+            if scalar_fn_volatility(*r#fn) == ExprVolatility::Volatile {
+                return Some(scalar_fn_name(*r#fn));
+            }
+            args.iter().find_map(first_volatile_function)
+        }
+        Expr::FnSynth { r#fn, args } => {
+            if synth_fn_volatility(*r#fn) == ExprVolatility::Volatile {
+                return Some(synth_fn_name(*r#fn));
+            }
+            args.iter().find_map(first_volatile_function)
+        }
+        Expr::Between { operand, low, high } => first_volatile_function(operand)
+            .or_else(|| first_volatile_function(low))
+            .or_else(|| first_volatile_function(high)),
+        Expr::Like { operand, pattern } => {
+            first_volatile_function(operand).or_else(|| first_volatile_function(pattern))
+        }
+        Expr::DistinctFrom { left, right } => {
+            first_volatile_function(left).or_else(|| first_volatile_function(right))
+        }
+        Expr::Agg { arg, delimiter, .. } => arg
+            .as_deref()
+            .and_then(first_volatile_function)
+            .or_else(|| delimiter.as_deref().and_then(first_volatile_function)),
+        Expr::InList { expr, .. } => first_volatile_function(expr),
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            [
+                default.as_deref(),
+                pg.as_deref(),
+                sqlite.as_deref(),
+                mysql.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(first_volatile_function)
+        }
+    }
+}
+
+fn validate_immutable_expr_context(
+    expr: &Expr,
+    context: &str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    validate_no_aggregate_expr_context(expr, context, target_dialect, op_index, ts_location)?;
+    let Some(function_name) = first_volatile_function(expr) else {
+        return Ok(());
+    };
+    Err(AuthoringError {
+        code: CODE_IMMUTABLE_CONTEXT_VOLATILE.to_string(),
+        kind: Some(UnsupportedKind::Expr),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{context} requires an immutable expression, but contains volatile function {function_name}()"
+        ),
+        suggested_fix: Some(format!(
+            "remove {function_name}() from the {context}; use it only in defaults, DML values, or another non-immutable expression context"
+        )),
+    })
+}
+
+fn validate_no_aggregate_expr_context(
+    expr: &Expr,
+    context: &str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let Some(aggregate_name) = first_aggregate(expr) else {
+        return Ok(());
+    };
+    Err(AuthoringError {
+        code: CODE_AGGREGATE_IN_SCALAR_CONTEXT.to_string(),
+        kind: Some(UnsupportedKind::Expr),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{context} requires a scalar expression, but contains aggregate {aggregate_name}()"
+        ),
+        suggested_fix: Some(format!(
+            "remove {aggregate_name}() from the {context}; use aggregates only in \
+             grouped SELECT/HAVING expression contexts"
+        )),
+    })
 }
 
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
@@ -1099,6 +1344,118 @@ pub fn validate_op(
     )
 }
 
+fn validate_dialectal_op(
+    default: Option<&[crate::model::ir::Op]>,
+    pg: Option<&[crate::model::ir::Op]>,
+    sqlite: Option<&[crate::model::ir::Op]>,
+    mysql: Option<&[crate::model::ir::Op]>,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
+    policy_profile: &PolicyProfile,
+) -> Result<(), AuthoringError> {
+    fn mk(
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+        reason: impl Into<String>,
+        suggested_fix: impl Into<String>,
+    ) -> AuthoringError {
+        AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: reason.into(),
+            suggested_fix: Some(suggested_fix.into()),
+        }
+    }
+
+    let legs = [
+        ("default", default),
+        ("pg", pg),
+        ("sqlite", sqlite),
+        ("mysql", mysql),
+    ];
+    if legs.iter().all(|(_, leg)| leg.is_none()) {
+        return Err(mk(
+            target_dialect,
+            op_index,
+            ts_location,
+            "dialectal op carries no legs; at least one of default/pg/sqlite/mysql must be present",
+            "supply at least one dialectal op leg, or remove the dialect() statement",
+        ));
+    }
+    for (label, leg) in legs {
+        let Some(ops) = leg else {
+            continue;
+        };
+        if ops.iter().any(|op| matches!(op, crate::model::ir::Op::Dialectal { .. })) {
+            return Err(mk(
+                target_dialect,
+                op_index,
+                ts_location,
+                format!("dialectal op leg {label:?} contains a nested dialectal op"),
+                "flatten the inner dialect() into the outer leg; nested op-level dialect() is not supported",
+            ));
+        }
+    }
+
+    if let Some(ops) = default {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            for op in ops {
+                validate_op_scoped(
+                    op,
+                    dialect,
+                    op_index,
+                    ts_location,
+                    schema_scope,
+                    policy_profile,
+                )?;
+            }
+        }
+    }
+    if let Some(ops) = pg {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Postgres,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    if let Some(ops) = sqlite {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Sqlite,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    if let Some(ops) = mysql {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Mysql,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// **PR10** — [`validate_op`] threaded with the active
 /// [`SchemaScope`](crate::model::policy::SchemaScope) (§2.7). Runs the schema/guard gate
 /// FIRST, then the per-op expression-slot checks.
@@ -1117,11 +1474,25 @@ pub fn validate_op_scoped(
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
     };
 
+    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        return validate_dialectal_op(
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+            target_dialect,
+            op_index,
+            ts_location,
+            schema_scope,
+            policy_profile,
+        );
+    }
+
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
-    // **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+    // **VENDOR (`@zeroship/migrate`)** — the capability-composition gate (vendor
     // spec §3.2 gate 1), BEFORE any expression walk. A privileged vendor op is
     // refused fail-closed when (a) the target is SQLite (every vendor op is
     // `PgOnly`, §4.3), or (b) the active capability set — derived from the threaded
@@ -1146,6 +1517,13 @@ pub fn validate_op_scoped(
             match kind {
                 IrConstraintKind::Check { expr, .. } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        expr,
+                        "CHECK constraint",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
                 IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
                     for element in elements {
@@ -1180,6 +1558,13 @@ pub fn validate_op_scoped(
                 }
                 IndexElement::Expr { expr } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        expr,
+                        "index expression",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             Ok(())
@@ -1198,6 +1583,13 @@ pub fn validate_op_scoped(
                 }
                 if let Some(pred) = &ix.r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        pred,
+                        "index predicate",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             for c in constraints {
@@ -1215,6 +1607,13 @@ pub fn validate_op_scoped(
                         &generated.expr,
                         target_dialect,
                         &scope,
+                        op_index,
+                        ts_location,
+                    )?;
+                    validate_immutable_expr_context(
+                        &generated.expr,
+                        "generated column expression",
+                        target_dialect,
                         op_index,
                         ts_location,
                     )?;
@@ -1241,6 +1640,13 @@ pub fn validate_op_scoped(
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                validate_immutable_expr_context(
+                    pred,
+                    "index predicate",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -1286,6 +1692,13 @@ pub fn validate_op_scoped(
                 let cols = vec!["VALUE".to_string()];
                 let scope = TargetScope::new("domain", &cols);
                 validate_expr(check, target_dialect, &scope, op_index, ts_location)?;
+                validate_immutable_expr_context(
+                    check,
+                    "CHECK constraint",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -1400,6 +1813,13 @@ pub fn validate_op_scoped(
                     &generated.expr,
                     target_dialect,
                     &scope,
+                    op_index,
+                    ts_location,
+                )?;
+                validate_immutable_expr_context(
+                    &generated.expr,
+                    "generated column expression",
+                    target_dialect,
                     op_index,
                     ts_location,
                 )?;
@@ -1605,7 +2025,8 @@ pub fn validate_op_scoped(
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => Ok(()),
+        | Op::PgRaw { .. }
+        | Op::Dialectal { .. } => Ok(()),
     }
 }
 
@@ -2161,7 +2582,7 @@ fn validate_op_support(
     Ok(())
 }
 
-/// **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
+/// **VENDOR (`@zeroship/migrate`)** — the capability-composition gate (vendor
 /// spec §3.2 gate 1). For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
 /// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
@@ -2211,13 +2632,13 @@ fn validate_vendor_op(
         } else {
             (
                 format!(
-                    "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
+                    "the @zeroship/migrate vendor op (capability {:?}) is Postgres-only — \
                      roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have \
                      no SQLite analogue (PgOnly)",
                     cap.as_token()
                 ),
                 "vendor primitives target Postgres only — deploy this migration against a \
-                 Postgres backend, or remove the @zeroship/migrate/pg op"
+                 Postgres backend, or remove the privileged Postgres op"
                     .to_string(),
             )
         };
@@ -2247,7 +2668,7 @@ fn validate_vendor_op(
                 reason: format!(
                     "vendor PG primitive (op capability {:?}) requires the {} capability, which \
                      the active (Confined creator) capability set does not grant — the privileged \
-                     @zeroship/migrate/pg primitives are unreachable from a confined migration by \
+                     @zeroship/migrate primitives are unreachable from a confined migration by \
                      construction (vendor spec §3.2)",
                     cap.as_token(),
                     cap.flag_name(),
@@ -2468,6 +2889,19 @@ fn validate_select_ast(
         validate_expr(&join.on, target_dialect, &scope, op_index, ts_location)?;
     }
     if let Some(pred) = &select.r#where {
+        validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+    }
+    for expr in &select.group_by {
+        validate_no_aggregate_expr_context(
+            expr,
+            "view SELECT GROUP BY item",
+            target_dialect,
+            op_index,
+            ts_location,
+        )?;
+        validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+    }
+    if let Some(pred) = &select.having {
         validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
     }
     if let Some(order_by) = &select.order_by {
@@ -3042,6 +3476,7 @@ fn validate_default_expr(
 ) -> Result<(), AuthoringError> {
     let scope = TargetScope::structural_only(position);
     validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+    validate_no_aggregate_expr_context(expr, position, target_dialect, op_index, ts_location)?;
 
     fn mk_err(
         reason: String,
@@ -3057,7 +3492,7 @@ fn validate_default_expr(
             dialect: target_dialect,
             reason,
             suggested_fix: Some(
-                "use only literals, CASE, immutable scalar helpers, and c.fn.now()/c.fn.genRandomUuid() in column defaults"
+                "use only literals, CASE, immutable scalar helpers, and now()/genRandomUuid() in column defaults"
                     .to_string(),
             ),
         }
@@ -3357,20 +3792,12 @@ fn validate_column_facets(
 fn validate_col_type_position(
     ty: &crate::model::ir::ColType,
     position: &'static str,
-    allow_pg_domain_date_base: bool,
+    _allow_pg_domain_date_base: bool,
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::ColType;
-
-    fn contains_date(ty: &ColType) -> bool {
-        match ty {
-            ColType::Date => true,
-            ColType::Encrypted { of } => contains_date(of),
-            _ => false,
-        }
-    }
 
     if matches!(ty, ColType::Char { length: 0 }) {
         return Err(AuthoringError {
@@ -3384,29 +3811,7 @@ fn validate_col_type_position(
         });
     }
 
-    if !contains_date(ty) {
-        return Ok(());
-    }
-    if allow_pg_domain_date_base && target_dialect == Dialect::Postgres && matches!(ty, ColType::Date)
-    {
-        return Ok(());
-    }
-    Err(AuthoringError {
-        code: CODE_UNSUPPORTED.to_string(),
-        kind: Some(UnsupportedKind::Op),
-        op_index,
-        ts_location: ts_location.map(str::to_string),
-        dialect: target_dialect,
-        reason: format!(
-            "{position} uses the narrow `date` type token, which Slice C admits only \
-             as a PostgreSQL createDomain base type"
-        ),
-        suggested_fix: Some(
-            "use `timestamp` for ordinary columns, or use `date` only as \
-             domain(name).create({ as: \"date\", ... }) on PostgreSQL"
-                .to_string(),
-        ),
-    })
+    Ok(())
 }
 
 fn validate_identity_placement(
@@ -3752,16 +4157,12 @@ impl Ctx<'_> {
                 self.walk_depth(left, d)?;
                 self.walk_depth(right, d)
             }
-            // Portable aggregate node (§3.4/§3.6): count/sum/avg/min/max render
-            // identically on all three dialects, so there is NO dialect gate. The
-            // "aggregate only valid in a grouped/SELECT context" check
-            // (`AGG_POSITION_INVALID`) is coupled with the Phase-2 view/select
-            // builder — this additive slice accepts the node STRUCTURALLY, just
-            // recursing into the optional argument (`count(*)` has none).
-            Expr::Agg { func: _, arg, distinct: _ } => match arg {
-                Some(e) => self.walk_depth(e, d),
-                None => Ok(()),
-            },
+            // Aggregate node (§3.4/§3.6): count/sum/avg/min/max render on all three
+            // dialects. The long-tail aggregate variants are PostgreSQL-first and
+            // fail closed off-PG unless wrapped in dialect({...}).
+            Expr::Agg { func, arg, delimiter, distinct: _ } => {
+                self.check_agg(*func, arg.as_deref(), delimiter.as_deref(), d)
+            }
             Expr::InList { expr, elems, negated: _ } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
@@ -4127,6 +4528,85 @@ impl Ctx<'_> {
         ))
     }
 
+    fn check_pg_or_mysql_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
+        if matches!(self.target_dialect, Dialect::Postgres | Dialect::Mysql) {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_DIALECT_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"
+            ),
+            Some(
+                "use dialect({ pg: ..., sqlite: ..., mysql: ... }) to provide an explicit \
+                 SQLite leg, or avoid regex on SQLite"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    fn check_pg_first_aggregate(&self, name: &'static str) -> Result<(), AuthoringError> {
+        if crate::model::support::pg_only_expr_disposition(self.target_dialect).is_supported() {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_DIALECT_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"
+            ),
+            Some(
+                "wrap this aggregate in dialect({ pg: ..., sqlite: ..., mysql: ... }) with \
+                 explicit non-Postgres legs, or target Postgres only"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    fn check_agg(
+        &self,
+        func: AggFunc,
+        arg: Option<&Expr>,
+        delimiter: Option<&Expr>,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        if agg_func_is_pg_first(func) {
+            self.check_pg_first_aggregate(agg_func_name(func))?;
+        }
+        if let Some(arg) = arg {
+            self.walk_depth(arg, depth)?;
+        } else if !matches!(func, AggFunc::Count) {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!("{} aggregate requires an argument", agg_func_name(func)),
+                Some("call the aggregate as a receiver chain method, e.g. col(\"x\").arrayAgg()".to_string()),
+            ));
+        }
+        match (func, delimiter) {
+            (AggFunc::StringAgg, Some(delimiter)) => self.walk_depth(delimiter, depth),
+            (AggFunc::StringAgg, None) => Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "stringAgg aggregate requires a delimiter".to_string(),
+                Some("call col(\"x\").stringAgg(delimiter) with a string or expression delimiter".to_string()),
+            )),
+            (_, Some(_)) => Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "aggregate delimiter is only valid for stringAgg".to_string(),
+                Some("remove delimiter unless func is stringAgg".to_string()),
+            )),
+            (_, None) => Ok(()),
+        }
+    }
+
     fn check_pg_text_literal(&self, value: &str, what: &str) -> Result<(), AuthoringError> {
         if value.is_empty() {
             return Err(self.err(
@@ -4152,12 +4632,58 @@ impl Ctx<'_> {
     fn check_in_list(
         &self,
         expr: &Expr,
-        elems: &[String],
+        elems: &[crate::model::ir::IrScalar],
         depth: u32,
     ) -> Result<(), AuthoringError> {
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum ElemKind {
+            Text,
+            Number,
+            Bool,
+            Null,
+        }
+
         self.walk_depth(expr, depth)?;
-        for elem in elems {
-            self.check_pg_text_literal(elem, "inList element")?;
+        let mut first_kind = None;
+        for (idx, elem) in elems.iter().enumerate() {
+            let kind = match elem {
+                crate::model::ir::IrScalar::Str(s) => {
+                    self.check_pg_text_literal(s, "inList element")?;
+                    ElemKind::Text
+                }
+                crate::model::ir::IrScalar::Int(_) | crate::model::ir::IrScalar::Decimal(_) => {
+                    ElemKind::Number
+                }
+                crate::model::ir::IrScalar::Bool(_) => ElemKind::Bool,
+                crate::model::ir::IrScalar::Null => ElemKind::Null,
+                crate::model::ir::IrScalar::Bytes(_) => {
+                    return Err(self.err(
+                        CODE_UNSUPPORTED,
+                        Some(UnsupportedKind::Expr),
+                        self.target_dialect,
+                        format!(
+                            "inList element {idx} must be string, number, boolean, or null; bytes are not allowed"
+                        ),
+                        Some("remove byte values from the in() / notIn() list".to_string()),
+                    ));
+                }
+            };
+            if let Some(first) = first_kind {
+                if kind != first {
+                    return Err(self.err(
+                        CODE_UNSUPPORTED,
+                        Some(UnsupportedKind::Expr),
+                        self.target_dialect,
+                        "inList elements must be homogeneous".to_string(),
+                        Some(
+                            "use one scalar kind per in() / notIn() list, or split the predicate"
+                                .to_string(),
+                        ),
+                    ));
+                }
+            } else {
+                first_kind = Some(kind);
+            }
         }
         Ok(())
     }
@@ -4168,7 +4694,7 @@ impl Ctx<'_> {
         pattern: &str,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.check_pg_only_expr("PG regex match")?;
+        self.check_pg_or_mysql_expr("regex match")?;
         self.walk_depth(expr, depth)?;
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
@@ -4278,7 +4804,7 @@ mod tests {
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
 
     fn cols() -> Vec<String> {
-        vec!["name".into(), "first".into(), "last".into(), "total".into()]
+        vec!["name".into(), "first".into(), "last".into(), "total".into(), "active".into()]
     }
 
     fn scope<'a>(table: &'a str, cols: &'a [String]) -> TargetScope<'a> {
@@ -4375,7 +4901,7 @@ mod tests {
                         r#fn: ScalarFn::Length,
                         args: vec![Expr::col("name")],
                     }),
-                    target: CastTarget::Integer,
+                    target: CastTarget::Int,
                 }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(0))),
             }),
@@ -4402,7 +4928,7 @@ mod tests {
     fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(str::to_string).collect(),
+            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
             negated: false,
         }
     }
@@ -4410,20 +4936,24 @@ mod tests {
     fn not_in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(str::to_string).collect(),
+            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
             negated: true,
         }
     }
 
     #[test]
-    fn pg_only_expr_nodes_validate_on_pg() {
+    fn pg_only_and_pg_mysql_expr_nodes_validate_on_supported_dialects() {
         let c = cols();
         let sc = scope("users", &c);
+        let regex = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^[a-z]+$".to_string(),
+        };
+        for d in [Dialect::Postgres, Dialect::Mysql] {
+            validate_expr(&regex, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("regex expression must validate on {d:?}: {err}"));
+        }
         for e in [
-            Expr::PgRegexMatch {
-                expr: Box::new(Expr::col("name")),
-                pattern: "^[a-z]+$".to_string(),
-            },
             Expr::BinOp {
                 op: BinaryOp::Le,
                 lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
@@ -4464,6 +4994,16 @@ mod tests {
             in_list(Expr::col("name"), vec!["active", "past_due"]),
             not_in_list(Expr::col("name"), vec!["suspended"]),
             in_list(Expr::col("name"), vec![]),
+            Expr::InList {
+                expr: Box::new(Expr::col("total")),
+                elems: vec![IrScalar::Int(200), IrScalar::Int(404), IrScalar::Int(500)],
+                negated: false,
+            },
+            Expr::InList {
+                expr: Box::new(Expr::col("active")),
+                elems: vec![IrScalar::Bool(true), IrScalar::Bool(false)],
+                negated: false,
+            },
             Expr::Extract { field: ExtractField::Year, from: Box::new(Expr::col("total")) },
             Expr::Extract { field: ExtractField::Month, from: Box::new(Expr::col("total")) },
             Expr::Extract { field: ExtractField::Day, from: Box::new(Expr::col("total")) },
@@ -4483,23 +5023,48 @@ mod tests {
     #[test]
     fn portable_aggregate_nodes_validate_on_all_three_dialects() {
         use crate::model::expr::AggFunc;
-        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are PORTABLE (§3.4/
-        // §3.6): byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with
-        // NO dialect gate. (The grouped/SELECT position check is a Phase-2 concern;
-        // this slice accepts the node structurally, recursing into the arg.)
+        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are portable:
+        // byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with NO
+        // dialect gate. PG-first aggregate variants are covered by the next test.
         let c = cols();
         let sc = scope("users", &c);
         let nodes = [
-            Expr::Agg { func: AggFunc::Count, arg: None, distinct: false },
+            Expr::Agg {
+                func: AggFunc::Count,
+                arg: None,
+                delimiter: None,
+                distinct: false,
+            },
             Expr::Agg {
                 func: AggFunc::Count,
                 arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
                 distinct: true,
             },
-            Expr::Agg { func: AggFunc::Sum, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Avg, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Min, arg: Some(Box::new(Expr::col("total"))), distinct: false },
-            Expr::Agg { func: AggFunc::Max, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg {
+                func: AggFunc::Sum,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Avg,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Min,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::Max,
+                arg: Some(Box::new(Expr::col("total"))),
+                delimiter: None,
+                distinct: false,
+            },
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
@@ -4512,12 +5077,57 @@ mod tests {
         let bad = Expr::Agg {
             func: AggFunc::Sum,
             arg: Some(Box::new(Expr::col("does_not_exist"))),
+            delimiter: None,
             distinct: false,
         };
         assert!(
             validate_expr(&bad, Dialect::Postgres, &sc, 0, None).is_err(),
             "aggregate must still validate its argument's column ref"
         );
+    }
+
+    #[test]
+    fn pg_first_aggregate_nodes_validate_only_on_postgres() {
+        use crate::model::expr::AggFunc;
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Agg {
+                func: AggFunc::StringAgg,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: Some(Box::new(Expr::lit(IrScalar::Str(", ".to_string())))),
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::ArrayAgg,
+                arg: Some(Box::new(Expr::col("name"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::BoolAnd,
+                arg: Some(Box::new(Expr::col("active"))),
+                delimiter: None,
+                distinct: false,
+            },
+            Expr::Agg {
+                func: AggFunc::BoolOr,
+                arg: Some(Box::new(Expr::col("active"))),
+                delimiter: None,
+                distinct: false,
+            },
+        ];
+
+        for e in &nodes {
+            validate_expr(e, Dialect::Postgres, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("PG-first aggregate must validate on Postgres: {err}"));
+            for d in [Dialect::Sqlite, Dialect::Mysql] {
+                let err = validate_expr(e, d, &sc, 0, None)
+                    .expect_err("PG-first aggregate must fail closed off Postgres");
+                assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{d:?}: {err}");
+                assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+            }
+        }
     }
 
     #[test]
@@ -4571,10 +5181,6 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            Expr::PgRegexMatch {
-                expr: Box::new(Expr::col("name")),
-                pattern: "^[a-z]+$".to_string(),
-            },
             Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
             Expr::PgExtract {
                 field: PgExtractField::Epoch,
@@ -4593,6 +5199,26 @@ mod tests {
     }
 
     #[test]
+    fn regex_match_rejects_only_on_sqlite() {
+        let c = cols();
+        let sc = scope("users", &c);
+        let expr = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^[a-z]+$".to_string(),
+        };
+        for d in [Dialect::Postgres, Dialect::Mysql] {
+            validate_expr(&expr, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("regex match must validate on {d:?}: {err}"));
+        }
+        let err = validate_expr(&expr, Dialect::Sqlite, &sc, 0, None)
+            .expect_err("regex match must fail closed on SQLite");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.dialect, Dialect::Sqlite);
+        assert!(err.reason.contains("SQLite"), "got: {err}");
+    }
+
+    #[test]
     fn text_literal_shapes_are_checked() {
         let c = cols();
         let sc = scope("users", &c);
@@ -4606,6 +5232,24 @@ mod tests {
         let err = validate_expr(&nul_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("NUL"));
+
+        let mixed_elem = Expr::InList {
+            expr: Box::new(Expr::col("name")),
+            elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
+            negated: false,
+        };
+        let err = validate_expr(&mixed_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("homogeneous"));
+
+        let bytes_elem = Expr::InList {
+            expr: Box::new(Expr::col("name")),
+            elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
+            negated: false,
+        };
+        let err = validate_expr(&bytes_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("bytes are not allowed"));
 
         let empty_pattern = Expr::PgRegexMatch {
             expr: Box::new(Expr::col("name")),
@@ -5303,6 +5947,20 @@ mod tests {
             mask: None,
             generated: None,
             identity: None,
+        }
+    }
+
+    fn create_with_column(name: &str, ty: ColType) -> Op {
+        Op::CreateTable {
+            name: "typed_columns".into(),
+            columns: vec![part_col(name, ty, true)],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
         }
     }
 
@@ -6071,7 +6729,6 @@ mod tests {
                 .into_iter()
                 .collect(),
             r#where: None,
-            batch: None,
             schema: None,
         }]);
 
@@ -6129,7 +6786,6 @@ mod tests {
                 .into_iter()
                 .collect(),
             r#where: None,
-            batch: None,
             schema: None,
         }]);
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -6186,6 +6842,15 @@ mod tests {
         ]);
         assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
         assert!(validate_ir_platform(&ir, Dialect::Sqlite).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_accepts_date_columns_on_all_dialects() {
+        let ir = ir_with(vec![create_with_column("business_day", ColType::Date)]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_ir_platform(&ir, dialect)
+                .unwrap_or_else(|err| panic!("{dialect:?} should accept date columns: {err:?}"));
+        }
     }
 
     #[test]
@@ -6405,7 +7070,7 @@ mod tests {
                 schema: None,
                 existence_guard: None,
             },
-            Op::Update { table: "users".into(), set, r#where: None, batch: None, schema: None },
+            Op::Update { table: "users".into(), set, r#where: None, schema: None },
         ]);
         let ts = vec![None, Some("m.ts:9".to_string())];
         let err = validate_ir(&ir, Dialect::Sqlite, &ts).unwrap_err();
@@ -6442,6 +7107,92 @@ mod tests {
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_rejects_aggregate_count_in_index_predicate() {
+        // J2b regression: moving aggregates to ExprChain methods makes aggregate
+        // nodes type-reachable in immutable/scalar slots. The Rust validator is
+        // the authoritative backstop; before this check, this createIndex.where
+        // node passed validate cleanly.
+        let ir = ir_with(vec![Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![IndexElement::Column {
+                name: "a".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            name: None,
+            unique: None,
+            using: None,
+            r#where: Some(Expr::Agg {
+                func: AggFunc::Count,
+                arg: None,
+                delimiter: None,
+                distinct: false,
+            }),
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 0);
+        assert!(
+            err.reason.contains("count()"),
+            "reason names offending aggregate: {err}"
+        );
+        assert!(
+            err.reason.contains("index predicate"),
+            "reason names scalar context: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_ir_rejects_volatile_now_in_index_predicate() {
+        // J3 regression: moving now()/genRandomUuid() to top-level imports makes
+        // volatile nodes type-reachable in immutable slots. The Rust validator is
+        // the authoritative backstop; before this check, this createIndex.where
+        // node passed validate cleanly.
+        let ir = ir_with(vec![Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![IndexElement::Column {
+                name: "a".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            name: None,
+            unique: None,
+            using: None,
+            r#where: Some(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            }),
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+        concurrently: None,
+            schema: None,
+            existence_guard: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 0);
+        assert!(err.reason.contains("now()"), "reason names offending function: {err}");
+        assert!(
+            err.reason.contains("index predicate"),
+            "reason names immutable context: {err}"
+        );
     }
 
     #[test]
@@ -6512,7 +7263,6 @@ mod tests {
                 lhs: Box::new(Expr::col("column_that_was_dropped")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(1))),
             }),
-            batch: None,
             schema: None,
         }]);
 

@@ -17,7 +17,7 @@ const IR_ADAPTER_JS: &str = include_str!("ir_adapter.js");
 ///
 /// The ONE compiled recorder artifact (DSL redesign S0.5): the SDK recorder and
 /// this engine-embedded recorder are the same `tsup` build output of
-/// `sdks/migrate/src/{ops,pg}.ts` (via the `src/embedded-recorder.ts` entry).
+/// `sdks/migrate/src/ops.ts` (via the `src/embedded-recorder.ts` entry).
 /// The former hand-kept `migrate_ops.js` twin is deleted; there is no byte-parity
 /// to maintain, only build provenance. `pnpm build` MUST run before
 /// `cargo build -p zeroship-migrate` (root `pnpm build` emits this dist file in
@@ -30,24 +30,6 @@ const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.j
 
 /// The vendored `mysql2/promise` bundle for the Trusted JS-driver isolate.
 const MYSQL2_PROMISE_BUNDLE_JS: &str = include_str!("vendor/mysql2-3.14.1.bundle.mjs");
-
-/// `@zeroship/migrate/pg` is a subpath shim over the same recorder-state module.
-const MIGRATE_PG_SHIM_JS: &str = r#"
-export {
-  schema,
-  extension,
-  role,
-  dropOwnedBy,
-  grant,
-  revoke,
-  pgTable,
-  createFunction,
-  dropFunction,
-  raw,
-  __pgDomain as domain,
-  __pgSequence as sequence,
-} from "@zeroship/migrate";
-"#;
 
 /// Minimal `zeroship` facade required by the `@zeroship/db` bundle.
 const ZEROSHIP_FACADE_STUB_JS: &str = r#"
@@ -127,7 +109,6 @@ pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
     }
 
     modules.push(module("@zeroship/migrate", MIGRATE_OPS_JS));
-    modules.push(module("@zeroship/migrate/pg", MIGRATE_PG_SHIM_JS));
     modules.push(module("@zeroship/db", ZEROSHIP_DB_DIST_JS));
     modules.push(module("zeroship", ZEROSHIP_FACADE_STUB_JS));
 

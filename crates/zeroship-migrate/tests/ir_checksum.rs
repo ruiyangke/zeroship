@@ -370,7 +370,7 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
     );
 
     // Two `update` ops differing ONLY in an in-AST `Literal` threshold value
-    // (`c("total").gt(0)` vs `c("total").gt(5)`) must have different of_ir —
+    // (`col("total").gt(0)` vs `col("total").gt(5)`) must have different of_ir —
     // the "changing a threshold value is drift" guarantee for AST-embedded
     // params (§2.3.2).
     let mk_update = |threshold: i64| {
@@ -387,7 +387,6 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
                 lhs: Box::new(Expr::col("total")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(threshold))),
             }),
-            batch: None,
             schema: None,
         }
     };

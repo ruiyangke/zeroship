@@ -3,7 +3,7 @@
 //! portable-expression grammar a creator authors against. So a creator-authored
 //! raw `instr` / `substr` / `split_part` named function is REJECTED at IR load
 //! (the closed `ScalarFn` enum has no such variant — there is no raw escape,
-//! property A), while the engine-synthesized in-envelope `c.fn.splitPart`
+//! property A), while the engine-synthesized in-envelope `.splitPart`
 //! (`FnSynth(splitPart)`) is accepted. The boundary is precise: the authorizer
 //! gates which builtins the migrator role may EXECUTE; the grammar gates which
 //! functions an author may BUILD; they are distinct lists.
@@ -18,7 +18,7 @@ use zeroship_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";
 
-/// A `c.fn.splitPart(col, delim, n)` synth node for the render-path probes.
+/// A `.splitPart` synth node for the render-path probes.
 fn split(col: &str, delim: &str, n: i64) -> Expr {
     Expr::FnSynth {
         r#fn: SynthFn::SplitPart,
@@ -64,7 +64,7 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
     }
 }
 
-/// The engine-synthesized in-envelope `c.fn.splitPart` (`FnSynth(splitPart)`) IS
+/// The engine-synthesized in-envelope `.splitPart` (`FnSynth(splitPart)`) IS
 /// accepted — it loads on both dialects (the SQLite leg is PG-renderable + in the
 /// pinned envelope). This is the ONLY split surface; it contrasts with the raw
 /// rejection above.
@@ -77,7 +77,7 @@ fn in_envelope_split_part_helper_accepted() {
     ]}"#;
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
         load_ir_document(ir, APP, dialect, &registry(), None, None)
-            .unwrap_or_else(|e| panic!("in-envelope c.fn.splitPart must load on {dialect:?}: {e}"));
+            .unwrap_or_else(|e| panic!("in-envelope .splitPart must load on {dialect:?}: {e}"));
     }
 }
 

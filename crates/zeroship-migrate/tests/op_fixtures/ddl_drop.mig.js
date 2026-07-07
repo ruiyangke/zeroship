@@ -12,7 +12,7 @@ import { table } from "@zeroship/migrate";
 export const name = "ddl_drop";
 
 export function up() {
-  table("orders").index("orders_total_idx").drop({ unique: false });
+  table("orders").index("orders_total_idx").drop();
   // `schema` PRESENT alongside the `ifExists` existence-guard token, so the corpus
   // of_ir parity asserts the JS recorder and the Rust loader fold BOTH new fields
   // identically.
