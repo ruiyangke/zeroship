@@ -1,0 +1,698 @@
+# `@zeroship/workflows`
+
+`@zeroship/workflows` is the creator-facing SDK for durable workflows. A
+workflow is a named TypeScript class whose `run(trigger, step)` body can pause,
+wait for signals, call child workflows, and survive process restarts because all
+durable progress is recorded in the control-plane journal.
+
+The SDK types live in `sdks/workflows/`. The native `env.workflows` binding
+starts and controls runs from app code, and the control client exposes the
+token and topic broadcast helpers used by systems outside the app.
+
+## Model
+
+A workflow is a class extending `Workflow<Params, Output>`:
+
+```ts
+import { Workflow, type Step, type WorkflowTrigger } from "@zeroship/workflows";
+
+export class Checkout extends Workflow<{ orderId: string }, { charged: boolean }> {
+  async run(
+    trigger: WorkflowTrigger<{ orderId: string }>,
+    step: Step,
+  ): Promise<{ charged: boolean }> {
+    const order = await step.run("load-order", () => loadOrder(trigger.input.orderId));
+    await step.run("charge", () => chargeOrder(order));
+    return { charged: true };
+  }
+}
+```
+
+`trigger` is:
+
+```ts
+interface WorkflowTrigger<Params = unknown> {
+  input: Params;
+  startedAt: Date;
+  runId: string;
+  workflowName: string;
+}
+```
+
+The platform runs `run()` once per dispatch against the run's journal. Completed
+steps are memoized: on replay, the SDK returns the journaled value instead of
+calling the step body again. Sleeps, waits, child calls, failed steps, large
+output refs, and compensator progress are all journal rows.
+
+Durability is the journal plus the deploy pin. A run survives crashes, worker
+eviction, process restarts, and redeploys because replay uses the deploy that
+created the retained journal prefix. One dispatch executes on one node, but a
+run can move across nodes between dispatches because state lives in the journal,
+not in process memory.
+
+Workflow classes can be exported by name:
+
+```ts
+export class Checkout extends Workflow<{ orderId: string }, { ok: boolean }> {
+  async run(trigger: WorkflowTrigger<{ orderId: string }>, step: Step) {
+    await step.run("work", () => doWork(trigger.input.orderId));
+    return { ok: true };
+  }
+}
+```
+
+Raw JavaScript deploys can also expose a workflow namespace on the default
+export:
+
+```ts
+export default {
+  workflows: { Checkout },
+};
+```
+
+The active deploy manifest must declare the workflow name before
+`env.workflows.<Name>.start(...)` can create a run.
+
+## Determinism
+
+The workflow body may only observe the outside world through journaled
+`step.run(...)` or `step.sideEffect(...)` output. Live I/O, timers, random
+values, dates, and request-scoped runtime calls in the body can produce a
+different result on replay. The runtime fails closed with
+`NondeterministicError`.
+
+Wrong:
+
+```ts
+export class SyncOrder extends Workflow<{ id: string }, unknown> {
+  async run(trigger: WorkflowTrigger<{ id: string }>, _step: Step) {
+    const response = await fetch(`/api/orders/${trigger.input.id}`);
+    return response.json();
+  }
+}
+```
+
+Right:
+
+```ts
+export class SyncOrder extends Workflow<{ id: string }, unknown> {
+  async run(trigger: WorkflowTrigger<{ id: string }>, step: Step) {
+    return step.run("fetch-order", async () => {
+      const response = await fetch(`/api/orders/${trigger.input.id}`);
+      return response.json();
+    });
+  }
+}
+```
+
+`fetch(...)` inside `step.run` runs when the step is first reached. On later
+dispatches, the recorded output is replayed and the fetch body does not run.
+
+Use `step.sideEffect(name, fn)` for small inline non-deterministic values that
+do not need retries, timeout, compensation, or blob output:
+
+```ts
+const createdAt = await step.sideEffect("created-at", () => Date.now());
+const nonce = await step.sideEffect("nonce", () => crypto.randomUUID());
+```
+
+The value is computed once, frozen into the journal, and returned unchanged on
+replay.
+
+Supported concurrency is the durable frontier formed by issuing several
+`step.*` calls before awaiting them, usually with `Promise.all`. `Promise.race`,
+`Promise.any`, and `Promise.allSettled` over step promises are unsupported.
+Calling another `step.*` method from inside a step body is also unsupported.
+
+## Step Surface
+
+The public `Step` type is:
+
+```ts
+interface WorkflowStep {
+  run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(
+    name: string,
+    config: StepConfig<T> & {
+      output:
+        | "ref"
+        | "blob"
+        | "stream"
+        | { as: "ref" | "blob" | "stream"; contentType?: string };
+    },
+    fn: () => T | Promise<T>,
+  ): Promise<StepOutputRef>;
+  run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
+
+  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  sleep(name: string, duration: string): Promise<void>;
+  sleepUntil(name: string, when: Date | number): Promise<void>;
+  waitForSignal<P = unknown>(
+    name: string,
+    opts?: WaitForSignalOptions,
+  ): Promise<SignalEnvelope<P> | null>;
+  call<P, O>(
+    WorkflowClass: new () => Workflow<P, O>,
+    input: P,
+    opts?: ChildWorkflowOptions,
+  ): Promise<O>;
+  startMany<P, O>(
+    WorkflowClass: new () => Workflow<P, O>,
+    items: readonly StartManyItem<P>[],
+    opts?: ChildWorkflowOptions,
+  ): Promise<O[]>;
+}
+```
+
+### `step.run`
+
+`step.run(name, config?, fn)` is the general durable effect boundary. The body
+may perform I/O, use timers, call `env.*`, compute output, and throw errors.
+
+```ts
+interface RetryConfig {
+  maxAttempts?: number;
+}
+
+interface BackoffConfig {
+  base?: string;
+  max?: string;
+  factor?: number;
+}
+
+interface StepConfig<T = unknown> {
+  retries?: RetryConfig;
+  backoff?: BackoffConfig;
+  timeout?: string;
+  output?:
+    | "auto"
+    | "inline"
+    | "ref"
+    | "blob"
+    | "stream"
+    | { as: "ref" | "blob" | "stream"; contentType?: string };
+  compensate?: Compensator<T>;
+}
+```
+
+Semantics:
+
+- The first miss runs `fn`, records the result or failure, and suspends the
+  dispatch so the control plane can commit the journal row.
+- A replay hit returns the recorded result and does not call `fn`.
+- `timeout` bounds the step body. Timeout failures surface as the step timeout
+  error class.
+- `retries` and `backoff` are step execution policy, not workflow-body control
+  flow.
+- `output` controls how the step output is represented. Explicit `"ref"`,
+  `"blob"`, or `"stream"` returns a `StepOutputRef`.
+- `compensate` attaches a rollback function for terminal failure.
+
+Duration strings accepted by workflow sleeps and timeouts include suffixes such
+as `ms`, `s`, `m`, `h`, and `d`; plain positive numbers are milliseconds.
+
+### `step.sideEffect`
+
+`step.sideEffect(name, fn)` computes a small value once and journals it inline.
+It has no retry, timeout, output mode, child, or compensation behavior.
+
+Use it for values such as timestamps, UUIDs, random choices, and small
+configuration reads whose value must be stable across replay.
+
+### `step.sleep` and `step.sleepUntil`
+
+`step.sleep(name, duration)` suspends the run until `now + duration`. The worker
+does not stay attached while the run sleeps.
+
+`step.sleepUntil(name, when)` suspends until an absolute instant. `when` can be a
+`Date` or epoch milliseconds. A past instant behaves like a zero-length sleep.
+
+Both methods journal a sleep frontier. On replay after the wake time, they
+resolve without re-sleeping.
+
+### `step.waitForSignal`
+
+`step.waitForSignal(name, opts?)` suspends until a matching signal is available:
+
+```ts
+interface WaitForSignalOptions {
+  type?: string;
+  timeout?: string;
+  maxSignalAge?: string;
+  topic?: string;
+}
+
+interface SignalEnvelope<P = unknown> {
+  readonly id: string;
+  readonly type: string;
+  readonly payload: P;
+  readonly createdAt: Date;
+  readonly origin?: "app" | "ingress" | "system";
+  readonly delivery?: "direct" | "topic";
+  readonly topic?: string;
+  readonly provider?: string;
+}
+```
+
+`type` defaults to `name`. `timeout` resolves the wait to `null` when no
+matching signal arrives in time. `maxSignalAge` rejects stale signals at bind
+time. `topic` subscribes this wait to a broadcast topic instead of the run's
+direct mailbox.
+
+```ts
+const approval = await step.waitForSignal<{ approved: boolean }>("approved", {
+  type: "order.approved",
+  timeout: "1h",
+  maxSignalAge: "10m",
+});
+
+if (!approval?.payload.approved) {
+  throw new PermanentError("order approval window elapsed");
+}
+```
+
+### `step.call` and `step.startMany`
+
+`step.call(WorkflowClass, input, opts?)` starts a child workflow and waits for
+its typed output.
+
+```ts
+interface ChildWorkflowOptions {
+  key?: string;
+  cascade?: boolean;
+  timeout?: string;
+}
+
+const risk = await step.call(RiskReview, {
+  orderId: trigger.input.orderId,
+}, {
+  key: `risk:${trigger.input.orderId}`,
+  cascade: true,
+  timeout: "5m",
+});
+```
+
+The child is an ordinary run. Its output is journaled into the parent step. If
+the child is cancelled, the parent receives `ChildCancelledError`. If the child
+does not finish before `timeout`, the parent receives `ChildTimeoutError`.
+
+`cascade: true` means cancelling the parent also requests cancellation of a live
+child. Without it, the child remains independent.
+
+`step.startMany(WorkflowClass, items, opts?)` is the in-workflow fan-out helper:
+
+```ts
+interface StartManyItem<P = unknown> {
+  input: P;
+  key?: string;
+  options?: ChildWorkflowOptions;
+}
+
+const outputs = await step.startMany(SendReceipt, [
+  { input: { userId: "usr_1" }, key: "receipt:usr_1" },
+  { input: { userId: "usr_2" }, key: "receipt:usr_2", options: { timeout: "1m" } },
+], {
+  cascade: true,
+});
+```
+
+Results are returned in issue order. The shipped batch cap is 1,000 items; over
+the cap throws `LimitExceededError`.
+
+## Instances
+
+App handlers start and control runs through `env.workflows`:
+
+```ts
+import { env } from "zeroship";
+
+const run = await env.workflows.Checkout.start({
+  input: { orderId },
+  key: `checkout:${orderId}`,
+  onConflict: "join",
+});
+
+await run.signal({ type: "approved", payload: { by: "system" } });
+const status = await run.status();
+```
+
+`start({ input, key, onConflict })` creates a run and returns a `WorkflowRun`.
+`key` is optional. When present, it deduplicates starts for the same app,
+workflow, and key.
+
+`onConflict` accepts:
+
+- `"join"`: return the existing run for the key. This is the default.
+- `"reject"`: fail when a live run already owns the key.
+- `"replace"`: cancel the incumbent run, clear its key, and create a new run.
+- `{ policy: "join" | "reject" | "replace" }`: object form of the same policy.
+
+The native binding exposes a typed handle per workflow name. Rehydrate a known
+run with:
+
+```ts
+const run = env.workflows.Checkout.get(runId);
+```
+
+The SDK `WorkflowRun` interface is:
+
+```ts
+type WorkflowRunState =
+  | "queued"
+  | "running"
+  | "sleeping"
+  | "waiting"
+  | "paused"
+  | "stalled"
+  | "compensating"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+interface WorkflowRun<Output = unknown> {
+  readonly id: string;
+  signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
+  status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
+  restart(opts?: RestartOptions): Promise<WorkflowRun<Output>>;
+  createSignalToken(opts: { types: string[]; ttl: string }): Promise<string>;
+}
+```
+
+`pause()` stops dispatching until `resume()`. `cancel()` defaults to
+`{ mode: "abort" }`, which does not run compensators. `cancel({ mode:
+"compensate" })` runs rollback for completed compensable steps, then ends as
+`cancelled`.
+
+`restart(opts?)` requeues the same run ID:
+
+```ts
+interface RestartTarget {
+  name: string;
+  occurrence?: number;
+}
+
+interface RestartOptions {
+  from?: RestartTarget;
+  deploy?: "started" | "latest" | { pin: "started" | "latest" };
+}
+
+await run.restart({ from: { name: "charge" } });
+await run.restart();
+await run.restart({ deploy: "started" });
+```
+
+With `from`, the journal prefix before the named step is retained and the target
+step plus everything after it is dropped. Without `from`, the full journal is
+dropped. The run input is retained; use a new `start()` to change input.
+
+## Schedules
+
+Schedules start fresh runs at deploy-reconciled times. Use `schedule(...)` with
+the fluent `every(...)` DSL, `cronExpr(...)`, or a raw 5-field cron string.
+
+```ts
+import { Workflow } from "@zeroship/workflows";
+import { every, cronExpr, schedule } from "@zeroship/workflows/schedule";
+
+class NightlyReport extends Workflow<{ region: string }, void> {
+  async run(trigger, step) {
+    await step.run("report", () => buildReport(trigger.input.region));
+  }
+}
+
+schedule({
+  name: "nightly-report-us",
+  schedule: every.day.at("03:00", "America/New_York"),
+  workflow: NightlyReport,
+  input: { region: "us" },
+  overlap: "skipIfRunning",
+  catchUp: { mode: "backfill", max: 3 },
+});
+
+schedule({ name: "poll", schedule: every(15, "minutes"), workflow: PollInbox });
+schedule({ name: "heartbeat", schedule: cronExpr("*/5 * * * *"), workflow: Heartbeat });
+```
+
+Schedule registrations are discovered at build time and stored in the deploy
+manifest. The engine sweeps the normalized schedule rows and starts ordinary
+workflow runs.
+
+Supported schedule forms:
+
+- `every(15, "minutes")`, `every(5).minutes()`, `every(2).hours()`,
+  `every(1).days()` for fixed intervals.
+- `every.minute()`, `every.hour()`, `every.hour().at(30)`.
+- `every.day.at("03:00", tz?)` and `every().day().at("03:00", tz?)`.
+- `every.monday.at("09:00", tz?)` and the other weekday properties.
+- `every.month.on(day).at("00:00", tz?)`, with day 1 through 28.
+- raw 5-field cron strings, using UTC.
+- `cronExpr(expr, tz?)` for raw cron with a timezone.
+
+Defaults:
+
+```ts
+type ScheduleOverlap = "allow" | "skipIfRunning";
+type ScheduleCatchUp =
+  | { readonly mode: "skip" }
+  | { readonly mode: "backfill"; readonly max: number };
+```
+
+`overlap` defaults to `"allow"`. `catchUp` defaults to `{ mode: "skip" }`.
+`skipIfRunning` suppresses a fire while an earlier scheduled run is still live.
+`backfill` starts up to `max` missed fires after downtime.
+
+Cron schedules carry an IANA timezone and follow local clock time, including
+daylight-saving transitions. Fixed intervals are duration based and do not
+shift for daylight saving time. Use cron forms for "at this local time" and
+interval forms for "every N units".
+
+Invalid schedules throw `InvalidScheduleError` during build/deploy
+compilation, not at fire time. Sub-minute cron, unknown timezones, and
+unsupported cron tokens are rejected.
+
+## External Signals And Broadcast
+
+There are three signal producers:
+
+- `run.signal({ type, payload, idempotencyKey? })` from app code.
+- A public signal route for systems outside the app.
+- Topic broadcast, which fans one signal out to all matching topic waits.
+
+A run-addressed public signal uses:
+
+```text
+POST https://{app}.zeroship.ai/__zeroship/signals/v1/run/{runId}
+Authorization: Bearer <signal-token>
+Content-Type: application/json
+Idempotency-Key: <event-id>
+
+{ "type": "payment.approved", "payload": { "approved": true } }
+```
+
+A topic signal uses:
+
+```text
+POST https://{app}.zeroship.ai/__zeroship/signals/v1/topic/{topic}
+Authorization: Bearer <signal-token>
+Content-Type: application/json
+Idempotency-Key: <event-id>
+
+{ "type": "price.updated", "payload": { "price": 42 } }
+```
+
+Public route handling verifies the token, checks the allowed signal types, and
+writes journal rows. It does not run app code on the ingress path. The matching
+workflow dispatch happens later.
+
+Mint a narrow per-run token through the run handle where that helper is
+available:
+
+```ts
+const token = await run.createSignalToken({
+  types: ["payment.approved", "payment.failed"],
+  ttl: "48h",
+});
+```
+
+The control client exposes the concrete token and broadcast helpers:
+
+```ts
+import { createControlClient } from "@zeroship/control";
+
+const control = createControlClient({ baseUrl, token });
+
+const runToken = await control.workflows.createSignalToken(runId, {
+  appId,
+  types: ["payment.approved"],
+  ttl: "48h",
+});
+
+await control.workflows.publishTopic(`order:${orderId}`, {
+  appId,
+  type: "payment.approved",
+  payload: { approved: true },
+  idempotencyKey: eventId,
+});
+```
+
+Inside a workflow, subscribe to a topic by passing `topic`:
+
+```ts
+const signal = await step.waitForSignal("market-tick", {
+  type: "price.updated",
+  topic: `market:${trigger.input.symbol}`,
+  timeout: "1h",
+});
+```
+
+## Large Outputs
+
+Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
+an explicit by-reference mode, are stored as workflow blobs and replayed as
+`StepOutputRef`.
+
+```ts
+interface StepOutputRef {
+  readonly kind: "workflow-step-output-ref";
+  readonly ref: string;
+  readonly hash: string;
+  readonly size: number;
+  readonly contentType?: string;
+  json<T = unknown>(): Promise<T>;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+  bytes(): Promise<Uint8Array>;
+  stream(): ReadableStream<Uint8Array>;
+}
+```
+
+Examples:
+
+```ts
+const ref = await step.run(
+  "render-report",
+  { output: { as: "blob", contentType: "application/json" } },
+  () => renderReport(trigger.input.reportId),
+);
+
+const report = await ref.json<{ rows: unknown[] }>();
+```
+
+`"blob"` and `"ref"` use the same by-reference representation. `"stream"` also
+returns a `StepOutputRef`; use `ref.stream()` to read it. `run.status()` returns
+a ref for a blob-backed final output instead of inlining it into the status JSON.
+
+If an output exceeds the platform blob cap, the run fails with
+`LimitExceededError`.
+
+## Compensation
+
+A compensator is attached to a `step.run` with `config.compensate`. It is a
+function, reconstructed from the deploy-pinned workflow code during rollback:
+
+```ts
+interface CompensationContext {
+  readonly idempotencyKey: string;
+  readonly trigger: WorkflowTrigger<unknown>;
+  readonly cause?: unknown;
+}
+
+type Compensator<T> = (
+  output: T,
+  ctx: CompensationContext,
+) => unknown | Promise<unknown>;
+```
+
+Example:
+
+```ts
+const reservation = await step.run(
+  "reserve-inventory",
+  {
+    retries: { maxAttempts: 3 },
+    compensate: (out: { reservationId: string }, ctx) =>
+      releaseReservation(out.reservationId, ctx.idempotencyKey),
+  },
+  () => reserveInventory(trigger.input.orderId),
+);
+```
+
+When the run reaches terminal failure, the engine walks completed compensable
+steps in reverse journal order and runs their compensators. A compensator may
+run more than once after crash, retry, or lease handoff. Make the undo effect
+idempotent by using `ctx.idempotencyKey` with the external system or durable
+record that performs the undo.
+
+Only completed `step.run` steps with a compensator are rolled back. Sleeps,
+signals, child waits, incomplete steps, and steps whose errors were caught and
+handled are not compensated.
+
+`run.cancel({ mode: "compensate" })` uses the same reverse-order rollback and
+then ends as `cancelled`. Plain `run.cancel()` is a hard abort and does not run
+compensators.
+
+`NondeterministicError` and `StalledError` fail closed and do not enter
+rollback. They indicate the engine cannot trust replay enough to safely rebuild
+the compensator registry.
+
+## Errors
+
+The SDK exports these workflow error classes:
+
+| Error | When it fires | Catchable? |
+| --- | --- | --- |
+| `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
+| `StepTimeoutError` | A step exceeds its configured timeout. The replay shim may serialize the internal step-timeout name in stored errors. | Yes around `step.run`; if uncaught, normal failure handling applies. |
+| `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
+| `StalledError` | The engine detects repeated dispatches with no durable progress. | Terminal engine error. No rollback. |
+| `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
+| `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
+| `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over 1,000 items or output over the blob cap. | Sometimes. Local `step.startMany` cap is catchable; committed cap failures are terminal. |
+| `RestartError` | A run restart request is invalid or cannot be applied. | Outside `run()` only, around `run.restart(...)`. |
+
+The package also exports compatibility classes for stored wait timeouts and
+definition/runtime misuse. Prefer the specific classes above and branch on
+structured status/error fields for run monitoring.
+
+## Dos And Donts
+
+Do:
+
+- Put all I/O in `step.run`.
+- Put inline clocks, random values, and UUIDs in `step.sideEffect`.
+- Use stable step names. If a name appears in a loop, `occurrence` identifies
+  which issuance restart should target.
+- Use `Promise.all` for durable fan-out over step promises.
+- Use idempotency keys in forward steps and compensators. Step bodies and
+  compensators can run more than once even though their recorded result is used
+  once.
+- Keep signal types explicit and small. Use `maxSignalAge` for buffered public
+  signals that should expire.
+
+Dont:
+
+- Do not call `fetch`, timers, `Date.now`, random, or `env.workflows.*` directly
+  in the workflow body unless the value is captured by a step.
+- Do not call `step.*` from inside a step body or compensator.
+- Do not reorder or rename already-journaled steps for a live run unless you are
+  deliberately restarting from before the changed point.
+- Do not use `Promise.race`, `Promise.any`, or `Promise.allSettled` over step
+  promises.
+- Do not catch `NondeterministicError` to keep going. Fix the workflow body.
+
+## Gotchas
+
+- `waitForSignal` returns `null` on normal timeout; it does not need an error
+  branch for the common timeout path.
+- A run can replay many times. Module-level mutable state is not workflow state.
+- `step.sideEffect` is not a cheaper `step.run` for I/O. It is for small values
+  that are safe to compute inline once.
+- `step.call` joins the child. Use top-level starts from handlers for detached
+  work.
+- Blob-backed outputs are read lazily through `StepOutputRef`; `status()` will
+  not inline them.
+- A compensator receives the original step output. Use that output to undo the
+  exact effect the forward step produced.
