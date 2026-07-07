@@ -277,6 +277,33 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     }
   }
 
+  class ChildCancelledError extends Error {
+    readonly retryable = false;
+
+    constructor(message = "child workflow was cancelled") {
+      super(message);
+      this.name = "ChildCancelledError";
+    }
+  }
+
+  class ChildTimeoutError extends Error {
+    readonly retryable = false;
+
+    constructor(message = "child workflow timed out") {
+      super(message);
+      this.name = "ChildTimeoutError";
+    }
+  }
+
+  class LimitExceededError extends Error {
+    readonly retryable = false;
+
+    constructor(message = "workflow limit exceeded") {
+      super(message);
+      this.name = "LimitExceededError";
+    }
+  }
+
   class NondeterministicError extends Error {
     readonly retryable = false;
 
@@ -290,6 +317,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
   const WORKFLOW_BODY_TIMER_ERROR =
     "workflow bodies may not use timers directly — use step.sleep(...) instead";
+  const MAX_START_MANY_BATCH = 1_000;
   const workflowRealFetch = (globalScope as typeof globalThis & {
     fetch?: (...args: unknown[]) => Promise<Response>;
   }).fetch;
@@ -365,7 +393,13 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       ? new WorkflowTimeoutError(error?.message)
       : error?.type === "NondeterministicError"
         ? new NondeterministicError(error?.message)
-        : new Error(error?.message ?? "workflow step failed");
+        : error?.type === "ChildCancelledError"
+          ? new ChildCancelledError(error?.message)
+          : error?.type === "ChildTimeoutError"
+            ? new ChildTimeoutError(error?.message)
+            : error?.type === "LimitExceededError"
+              ? new LimitExceededError(error?.message)
+              : new Error(error?.message ?? "workflow step failed");
     e.name = error?.type ?? e.name;
     if (error?.stack) e.stack = error.stack;
     return e;
@@ -736,6 +770,28 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         input,
         options,
       });
+    }
+
+    startMany(WorkflowClass: { new(): unknown; name?: string }, items: unknown[], options?: unknown): Promise<unknown[]> {
+      this.#assertNotNested();
+      const materialized = Array.from(items);
+      if (materialized.length > MAX_START_MANY_BATCH) {
+        return brandStepPromise(Promise.reject(new LimitExceededError(
+          `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${MAX_START_MANY_BATCH})`,
+        )));
+      }
+      return brandStepPromise(Promise.all(materialized.map((raw) => {
+        const item = raw as { input?: unknown; key?: unknown; options?: unknown };
+        const itemOptions = item.options && typeof item.options === "object"
+          ? item.options as Record<string, unknown>
+          : {};
+        const mergedOptions = {
+          ...(options && typeof options === "object" ? options as Record<string, unknown> : {}),
+          ...itemOptions,
+          ...(typeof item.key === "string" ? { key: item.key } : {}),
+        };
+        return this.call(WorkflowClass, item.input, mergedOptions);
+      })));
     }
 
     async #runFrontier<T>(
@@ -1137,7 +1193,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     if (outcome.kind === "child") {
       return {
         ...base,
-        kind: "Wait",
+        kind: "Child",
         childWorkflowName: outcome.workflowName,
         input: outcome.input,
         options: outcome.options,

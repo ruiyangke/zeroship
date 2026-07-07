@@ -471,6 +471,9 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         claim_ttl_ms: 1_000,
         heartbeat_ms: 60_000,
         stuck_strike_limit: 3,
+        max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
+        max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
+        max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
         owner_id: owner.to_string(),
     }
 }
@@ -963,6 +966,560 @@ fn batch_step_result(run_id: &str, dispatch_nonce: &str, outcomes: serde_json::V
         "outcomes": outcomes,
     }))
     .expect("batch StepResult JSON")
+}
+
+fn child_outcome(name: &str, input: serde_json::Value, cascade: bool) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "Child",
+        "ordinal": 0,
+        "name": name,
+        "nameOccurrence": 0,
+        "childWorkflowName": "TestWorkflow",
+        "input": input,
+        "options": { "cascade": cascade }
+    })
+}
+
+#[test]
+fn child_dedup_key_is_parent_and_ordinal_deterministic() {
+    assert_eq!(
+        workflow_engine::child_dedup_key("run_parent", 7),
+        "child:run_parent:7"
+    );
+    assert_eq!(
+        workflow_engine::child_dedup_key("run_parent", 7),
+        workflow_engine::child_dedup_key("run_parent", 7)
+    );
+    assert_ne!(
+        workflow_engine::child_dedup_key("run_parent", 7),
+        workflow_engine::child_dedup_key("run_parent", 8)
+    );
+}
+
+#[compio::test]
+async fn claim_journal_preserves_same_name_child_occurrences() {
+    let Some(fx) = isolated_fixture("child-journal-occurrence").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-journal-occurrence").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    for ordinal in 0..3 {
+        let signal_type = workflow_engine::child_signal_type(ordinal);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_steps \
+                    (run_id, ordinal, name, name_occurrence, kind, state, signal_type, batch_id, batch_width) \
+                 VALUES ($1, $2, 'ChildEchoWorkflow', $3, 'child', 'running', $4, 'wfd_seed_children', 3)",
+                &[&run_id, &ordinal, &ordinal, &signal_type],
+            )
+            .await
+            .expect("insert same-name child journal row");
+    }
+
+    let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::new(dispatcher.clone()),
+        config("owner-child-journal-occurrence"),
+    )
+    .await
+    .expect("claim child replay journal");
+    assert_eq!(claimed, 1);
+    wait_for_requests(&dispatcher, 1).await;
+
+    let requests = dispatcher.requests();
+    let journal = &requests[0].journal;
+    assert_eq!(
+        journal
+            .iter()
+            .map(|step| (step.ordinal, step.name.clone(), step.name_occurrence))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, "ChildEchoWorkflow".to_string(), 0),
+            (1, "ChildEchoWorkflow".to_string(), 1),
+            (2, "ChildEchoWorkflow".to_string(), 2),
+        ]
+    );
+    let journal_json = serde_json::to_value(journal).expect("journal serializes");
+    assert_eq!(journal_json[1]["nameOccurrence"], 1);
+    assert_eq!(journal_json[2]["nameOccurrence"], 2);
+
+    for release in releases {
+        let _ = release.send(());
+    }
+    wait_for_completed(&fx, &[run_id]).await;
+}
+
+#[compio::test]
+async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
+    let Some(fx) = isolated_fixture("child-spawn-idempotent").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-spawn-idempotent").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "running",
+        -1_000,
+        None,
+        Some("owner-child"),
+        Some(60_000),
+        Some("wfd_child"),
+    )
+    .await;
+    let result = batch_step_result(
+        &parent,
+        "wfd_child",
+        serde_json::json!([child_outcome("ChildOnce", serde_json::json!({"n": 1}), true)]),
+    );
+
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-child", result.clone())
+            .await
+            .expect("first child spawn apply")
+    );
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT r.state, r.waiting_step_key, s.child_run_id, s.kind, s.state AS step_state \
+               FROM zeroship.workflow_runs r \
+               JOIN zeroship.workflow_steps s ON s.run_id = r.id \
+              WHERE r.id = $1 AND s.ordinal = 0",
+            &[&parent],
+        )
+        .await
+        .expect("parent child step");
+    assert_eq!(row.get::<_, String>("state"), "waiting");
+    assert_eq!(
+        row.get::<_, Option<String>>("waiting_step_key"),
+        Some("child:0:ChildOnce".to_string())
+    );
+    assert_eq!(row.get::<_, String>("kind"), "child");
+    assert_eq!(row.get::<_, String>("step_state"), "running");
+    let child_id: String = row.get::<_, Option<String>>("child_run_id").expect("child id");
+
+    let child_row = fx
+        .pg
+        .query_one(
+            "SELECT dedup_key, parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, state, input \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&child_id],
+        )
+        .await
+        .expect("child run");
+    assert_eq!(
+        child_row.get::<_, Option<String>>("dedup_key"),
+        Some(workflow_engine::child_dedup_key(&parent, 0))
+    );
+    assert_eq!(child_row.get::<_, Option<String>>("parent_run_id"), Some(parent.clone()));
+    assert_eq!(
+        child_row.get::<_, Option<String>>("parent_wait_step_key"),
+        Some(workflow_engine::child_signal_type(0))
+    );
+    assert!(child_row.get::<_, bool>("parent_cascade"));
+    assert_eq!(child_row.get::<_, i16>("tree_depth"), 1);
+    assert_eq!(child_row.get::<_, String>("state"), "queued");
+    assert_eq!(
+        child_row.get::<_, serde_json::Value>("input"),
+        serde_json::json!({"n": 1})
+    );
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+              WHERE id=$4",
+            &[
+                &"owner-child",
+                &"wfd_child",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &parent,
+            ],
+        )
+        .await
+        .expect("reclaim parent for child replay");
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-child", result)
+            .await
+            .expect("replayed child spawn apply")
+    );
+    let child_count = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("count children");
+    assert_eq!(child_count.get::<_, i64>("n"), 1, "replay must not double-spawn");
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+              WHERE id=$4",
+            &[
+                &"owner-child-terminal",
+                &"wfd_child_terminal",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &child_id,
+            ],
+        )
+        .await
+        .expect("claim child for terminal apply");
+    let child_terminal = StepResult::from_checkpoints(
+        child_id.clone(),
+        "wfd_child_terminal".to_string(),
+        Vec::new(),
+        RunUpdate::Completed {
+            output: Some(serde_json::json!({"child": "ok"})),
+            output_ref: None,
+        },
+    );
+    assert!(
+        workflow_engine::apply_step_result(
+            &fx.state,
+            "owner-child-terminal",
+            child_terminal.clone(),
+        )
+        .await
+        .expect("child terminal apply")
+    );
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+              WHERE id=$4",
+            &[
+                &"owner-child-terminal",
+                &"wfd_child_terminal",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &child_id,
+            ],
+        )
+        .await
+        .expect("reclaim child to exercise duplicate terminal hook");
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-child-terminal", child_terminal)
+            .await
+            .expect("idempotent child terminal reapply")
+    );
+    let signals = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_signals \
+              WHERE run_id = $1 AND type = $2",
+            &[&parent, &workflow_engine::child_signal_type(0)],
+        )
+        .await
+        .expect("count child join signals");
+    assert_eq!(signals.get::<_, i64>("n"), 1, "terminal hook must be idempotent");
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("simulate lost parent wake");
+
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::new(CompleteDispatcher),
+        config("owner-child-rearm"),
+    )
+    .await
+    .expect("parent rearm tick");
+    assert_eq!(claimed, 1, "safety-net rearm should wake the parent");
+    let parent_step = fx
+        .pg
+        .query_one(
+            "SELECT state, output \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = 0",
+            &[&parent],
+        )
+        .await
+        .expect("resolved child step");
+    assert_eq!(parent_step.get::<_, String>("state"), "completed");
+    assert_eq!(
+        parent_step.get::<_, Option<serde_json::Value>>("output"),
+        Some(serde_json::json!({"child": "ok"}))
+    );
+}
+
+#[compio::test]
+async fn parent_cancel_cascades_cooperatively_to_descendants() {
+    let Some(fx) = isolated_fixture("child-cascade").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade").await;
+    let parent = seed_run(&fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None).await;
+    let child = zeroship_core::typed_id::new_workflow_run_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_runs \
+                (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                 parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, started_at) \
+             VALUES ($1, 'TestWorkflow', $2, $3, 'queued', $4, $5, now(), $6, $7, true, 1, now())",
+            &[
+                &child,
+                &app_id,
+                &deploy_id,
+                &serde_json::json!({}),
+                &workflow_engine::child_dedup_key(&parent, 0),
+                &parent,
+                &workflow_engine::child_signal_type(0),
+            ],
+        )
+        .await
+        .expect("insert child run");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+    let req = authed(
+        test::TestRequest::post().uri(&format!("/internal/workflows/runs/{parent}/cancel")),
+        app_id,
+    )
+    .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    let child_after_cancel = fx
+        .pg
+        .query_one(
+            "SELECT state, cancel_requested FROM zeroship.workflow_runs WHERE id = $1",
+            &[&child],
+        )
+        .await
+        .expect("child cancel requested");
+    assert_eq!(child_after_cancel.get::<_, String>("state"), "queued");
+    assert!(child_after_cancel.get::<_, bool>("cancel_requested"));
+
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::new(CompleteDispatcher),
+        config("owner-child-cascade"),
+    )
+    .await
+    .expect("cooperative child cancel tick");
+    assert_eq!(claimed, 0, "cancel pickup should not dispatch child code");
+    let child_terminal = fx
+        .pg
+        .query_one(
+            "SELECT state, cancel_requested, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&child],
+        )
+        .await
+        .expect("child terminal");
+    assert_eq!(child_terminal.get::<_, String>("state"), "cancelled");
+    assert!(!child_terminal.get::<_, bool>("cancel_requested"));
+    assert_eq!(child_terminal.get::<_, Option<String>>("claimed_by"), None);
+    assert_eq!(child_terminal.get::<_, Option<String>>("dispatch_nonce"), None);
+}
+
+#[compio::test]
+async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_dispatch() {
+    let Some(fx) = isolated_fixture("child-cascade-sleep").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "cancelled",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let child = zeroship_core::typed_id::new_workflow_run_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_runs \
+                (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                 parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, started_at, \
+                 claimed_by, lease_expires, dispatch_nonce) \
+             VALUES ($1, 'TestWorkflow', $2, $3, 'running', $4, $5, now(), \
+                     $6, $7, true, 1, now(), $8, $9, $10)",
+            &[
+                &child,
+                &app_id,
+                &deploy_id,
+                &serde_json::json!({}),
+                &workflow_engine::child_dedup_key(&parent, 0),
+                &parent,
+                &workflow_engine::child_signal_type(0),
+                &"owner-child-sleep",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &"wfd_child_sleep",
+            ],
+        )
+        .await
+        .expect("insert running child run");
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET cancel_requested = true, wake_at = now() \
+              WHERE parent_run_id = $1 \
+                AND parent_cascade \
+                AND state NOT IN ('completed','failed','cancelled','stalled')",
+            &[&parent],
+        )
+        .await
+        .expect("cascade child cancel");
+    let future_wake = Utc::now() + ChronoDuration::seconds(60);
+    let sleep_result = batch_step_result(
+        &child,
+        "wfd_child_sleep",
+        serde_json::json!([
+            {
+                "kind": "Sleep",
+                "ordinal": 0,
+                "name": "child-block",
+                "nameOccurrence": 0,
+                "wakeAt": future_wake.to_rfc3339()
+            }
+        ]),
+    );
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-child-sleep", sleep_result)
+            .await
+            .expect("apply in-flight child sleep")
+    );
+    let parked = fx
+        .pg
+        .query_one(
+            "SELECT state, wake_at, cancel_requested, claimed_by \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&child],
+        )
+        .await
+        .expect("load parked child");
+    assert_eq!(parked.get::<_, String>("state"), "sleeping");
+    assert!(parked.get::<_, bool>("cancel_requested"));
+    assert!(parked.get::<_, Option<String>>("claimed_by").is_none());
+    assert!(
+        parked
+            .get::<_, Option<DateTime<Utc>>>("wake_at")
+            .expect("future child wake")
+            > Utc::now()
+    );
+
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::new(CompleteDispatcher),
+        config("owner-child-cascade-sleep"),
+    )
+    .await
+    .expect("cooperative sleeping child cancel tick");
+    assert_eq!(claimed, 0, "cancel reap must not dispatch child code");
+    let child_terminal = fx
+        .pg
+        .query_one(
+            "SELECT state, cancel_requested, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&child],
+        )
+        .await
+        .expect("child terminal");
+    assert_eq!(child_terminal.get::<_, String>("state"), "cancelled");
+    assert!(!child_terminal.get::<_, bool>("cancel_requested"));
+    assert!(child_terminal
+        .get::<_, Option<DateTime<Utc>>>("wake_at")
+        .is_none());
+    assert_eq!(child_terminal.get::<_, Option<String>>("claimed_by"), None);
+    assert_eq!(child_terminal.get::<_, Option<String>>("dispatch_nonce"), None);
+}
+
+#[compio::test]
+async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
+    let Some(fx) = isolated_fixture("child-live-cap").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-live-cap").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "running",
+        -1_000,
+        None,
+        Some("owner-child-cap"),
+        Some(60_000),
+        Some("wfd_child_cap"),
+    )
+    .await;
+    let mut cfg = config("owner-child-cap");
+    cfg.max_live_descendants = 0;
+    let result = batch_step_result(
+        &parent,
+        "wfd_child_cap",
+        serde_json::json!([child_outcome("ChildOverCap", serde_json::json!({}), false)]),
+    );
+    assert!(
+        workflow_engine::apply_step_result_with_config(&fx.state, cfg, result)
+            .await
+            .expect("apply child over live cap")
+    );
+    let step = fx
+        .pg
+        .query_one(
+            "SELECT state, error \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = 0",
+            &[&parent],
+        )
+        .await
+        .expect("failed child step");
+    assert_eq!(step.get::<_, String>("state"), "failed");
+    let error: Option<serde_json::Value> = step.get("error");
+    assert_eq!(
+        error.as_ref().and_then(|value| value.get("type")).and_then(serde_json::Value::as_str),
+        Some("LimitExceededError")
+    );
+    let run = fx
+        .pg
+        .query_one(
+            "SELECT state FROM zeroship.workflow_runs WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("parent queued after catchable child cap");
+    assert_eq!(run.get::<_, String>("state"), "queued");
+    let child_count = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE parent_run_id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("child count after cap");
+    assert_eq!(child_count.get::<_, i64>("n"), 0);
 }
 
 #[compio::test]

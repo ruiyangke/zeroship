@@ -92,6 +92,12 @@ export interface ChildWorkflowOptions {
   timeout?: string;
 }
 
+export interface StartManyItem<P = unknown> {
+  input: P;
+  key?: string;
+  options?: ChildWorkflowOptions;
+}
+
 export interface WorkflowStep {
   run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
   run<T>(
@@ -116,6 +122,11 @@ export interface WorkflowStep {
     input: P,
     opts?: ChildWorkflowOptions,
   ): Promise<O>;
+  startMany<P, O>(
+    WorkflowClass: new () => Workflow<P, O>,
+    items: readonly StartManyItem<P>[],
+    opts?: ChildWorkflowOptions,
+  ): Promise<O[]>;
 }
 
 export type Step = WorkflowStep;
@@ -185,6 +196,33 @@ export class WorkflowTimeoutError extends Error {
   constructor(message = "workflow signal wait timed out") {
     super(message);
     this.name = "WorkflowTimeoutError";
+  }
+}
+
+export class ChildCancelledError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "child workflow was cancelled") {
+    super(message);
+    this.name = "ChildCancelledError";
+  }
+}
+
+export class ChildTimeoutError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "child workflow timed out") {
+    super(message);
+    this.name = "ChildTimeoutError";
+  }
+}
+
+export class LimitExceededError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow limit exceeded") {
+    super(message);
+    this.name = "LimitExceededError";
   }
 }
 

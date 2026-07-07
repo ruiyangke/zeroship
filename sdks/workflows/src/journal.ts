@@ -1,6 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
+  ChildCancelledError,
+  ChildTimeoutError,
+  LimitExceededError,
   NondeterministicError,
   PermanentError,
   StalledError,
@@ -10,6 +13,7 @@ import {
   WorkflowUnsupportedError,
   type ChildWorkflowOptions,
   type SignalEnvelope,
+  type StartManyItem,
   type StepConfig,
   type StepOutputRef,
   type WaitForSignalOptions,
@@ -25,6 +29,7 @@ const WORKFLOW_BODY_FETCH_ERROR =
   "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
 const WORKFLOW_BODY_TIMER_ERROR =
   "workflow bodies may not use timers directly — use step.sleep(...) instead";
+const MAX_START_MANY_BATCH = 1_000;
 const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
 const workflowRealSetTimeout = globalThis.setTimeout;
 const workflowRealClearTimeout = globalThis.clearTimeout;
@@ -471,6 +476,28 @@ class JournalBackedStep implements WorkflowStep {
     });
   }
 
+  startMany<P, O>(
+    WorkflowClass: new () => Workflow<P, O>,
+    items: readonly StartManyItem<P>[],
+    opts?: ChildWorkflowOptions,
+  ): Promise<O[]> {
+    this.#assertNotNested();
+    const materialized = Array.from(items);
+    if (materialized.length > MAX_START_MANY_BATCH) {
+      return brandStepPromise(Promise.reject(new LimitExceededError(
+        `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${MAX_START_MANY_BATCH})`,
+      )));
+    }
+    return brandStepPromise(Promise.all(materialized.map((item) => {
+      const itemOptions = item.options ?? {};
+      return this.call(WorkflowClass, item.input, {
+        ...opts,
+        ...itemOptions,
+        ...(item.key !== undefined ? { key: item.key } : {}),
+      });
+    })));
+  }
+
   async #runFrontier<T>(
     issued: { ordinal: number; nameOccurrence: number },
     name: string,
@@ -859,15 +886,21 @@ function deserializeError(error: JournalStepRecord["error"]): Error {
       ? new NondeterministicError(message)
       : error?.type === "StalledError"
         ? new StalledError(message)
-        : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
-          ? new WorkflowStepTimeoutError(message)
-          : error?.type === "WorkflowTimeoutError"
-            ? new WorkflowTimeoutError(message)
-            : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
-              ? new WorkflowNestedStepError(message)
-              : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
-                ? new WorkflowUnsupportedError(message)
-                : new Error(message);
+        : error?.type === "ChildCancelledError"
+          ? new ChildCancelledError(message)
+          : error?.type === "ChildTimeoutError"
+            ? new ChildTimeoutError(message)
+            : error?.type === "LimitExceededError"
+              ? new LimitExceededError(message)
+              : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
+                ? new WorkflowStepTimeoutError(message)
+                : error?.type === "WorkflowTimeoutError"
+                  ? new WorkflowTimeoutError(message)
+                  : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
+                    ? new WorkflowNestedStepError(message)
+                    : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
+                      ? new WorkflowUnsupportedError(message)
+                      : new Error(message);
   e.name = error?.type ?? e.name;
   if (error?.stack) e.stack = error.stack;
   return e;
