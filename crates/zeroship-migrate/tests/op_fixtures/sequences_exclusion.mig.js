@@ -30,7 +30,7 @@ export function up() {
       { target: "room", operator: "=" },
       { target: "during", operator: "&&" },
     ],
-    where: (c) => c("cancelled").eq(false),
+    where: (col) => col("cancelled").eq(false),
     deferrable: true,
   });
 }

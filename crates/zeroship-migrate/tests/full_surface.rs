@@ -1,7 +1,7 @@
 //! PR3 — the FULL `@zeroship/migrate` JS op-builder surface (§3.2/§3.3.1),
 //! exercised through the REAL V8 `op.*` recorder. Each test pins one PR3 behavior
 //! and would FAIL against the PR1 skeletal builder (which had no `t.*` lexicon, no
-//! fluent `(c) => Expr` builder, no `(table, spec)` adders, no determinism lint,
+//! fluent `(col) => Expr` builder, no `(table, spec)` adders, no determinism lint,
 //! and no `OP_OUTSIDE_RECORDER` guard).
 //!
 //! These complement `op_round_trip.rs` (the golden-corpus value-equality gate over
@@ -67,7 +67,7 @@ fn t_text_nullable_by_default_notnull_opts_in() {
     );
 }
 
-/// `concatWs(" ", c("a"), c("b"))` records a `fnSynth(concatWs)` node — the
+/// `concatWs(" ", col("a"), col("b"))` records a `fnSynth(concatWs)` node — the
 /// NULL-skipping safe-join helper (§3.3.1) that renders byte-identically on PG/
 /// SQLite. Pinning the node shape here (the apply-identity is in the engine's
 /// `ir_dml_*` PG/SQLite suites).
@@ -76,7 +76,7 @@ fn concatws_records_fnsynth_node() {
     let src = r#"
         import { table, now, genRandomUuid, concatWs } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("u").update({ set: { full: (c) => concatWs(" ", c("a"), c("b")) } });
+            table("u").update({ set: { full: (col) => concatWs(" ", col("a"), col("b")) } });
         }};
     "#;
     let ir = record(src, "concatws");
@@ -543,7 +543,7 @@ fn same_source_records_same_json() {
             const u = table("u");
             u.create({ columns: { id: t.id(), email: t.text().notNull() } });
             u.column("status").add({ type: t.text().default("new") });
-            u.update({ set: { email: (c) => c("email").lower() }, where: (c) => c("id").isNotNull() });
+            u.update({ set: { email: (col) => col("email").lower() }, where: (col) => col("id").isNotNull() });
         }};
     "#;
     let a =
@@ -553,7 +553,7 @@ fn same_source_records_same_json() {
     assert_eq!(a, b, "the same source must record byte-identical .ir.json");
 }
 
-/// The fluent `(c) => Expr` builder constructs the closed AST for every operator
+/// The fluent `(col) => Expr` builder constructs the closed AST for every operator
 /// family (comparison/boolean/arithmetic/cast/unary), proving the headline §3.3.1
 /// surface records the same closed-AST nodes the Rust validator/lowerer expect.
 #[test]
@@ -563,10 +563,10 @@ fn fluent_expr_builder_constructs_closed_ast() {
         export default { name: "n", up() {
             table("t").update({
                 set: {
-                    a: (c) => c("x").add(1).cast({ to: "int" }),
-                    b: (c) => c("y").isNull().not(),
+                    a: (col) => col("x").add(1).cast({ to: "int" }),
+                    b: (col) => col("y").isNull().not(),
                 },
-                where: (c) => c("x").gt(0).and(c("y").le(10)),
+                where: (col) => col("x").gt(0).and(col("y").le(10)),
             });
         }};
     "#;
@@ -648,7 +648,7 @@ fn update_has_no_batch_knob() {
         export default { name: "n", up() {
             table("t").update({
                 set: { x: now() },
-                where: (c) => c("id").isNotNull(),
+                where: (col) => col("id").isNotNull(),
             });
         }};
     "#;
@@ -957,7 +957,7 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     let ck = r#"
         import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").check("t_a_chk").add({ expr: (c) => c("a").gt(0), schema: "app2", ifNotExists: true });
+            table("t").check("t_a_chk").add({ expr: (col) => col("a").gt(0), schema: "app2", ifNotExists: true });
         }};
     "#;
     let ck_ir = record(ck, "ck_schema_guard");
@@ -1008,7 +1008,7 @@ fn sequences_and_exclusion_constraints_record_canonical_ir() {
   { target: "during",
   operator: "&&" },
   ],
-  where: (c) => c("cancelled").eq(false),
+  where: (col) => col("cancelled").eq(false),
   deferrable: true,
   ifNotExists: true,
   });
@@ -1222,7 +1222,7 @@ fn twin_dml_ops_carry_schema() {
     let upd = r#"
         import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").update({ set: { a: (c) => c("a") }, schema: "app2" });
+            table("t").update({ set: { a: (col) => col("a") }, schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(upd, "update_schema"), "update"), "app2");
@@ -1230,7 +1230,7 @@ fn twin_dml_ops_carry_schema() {
     let del = r#"
         import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").delete({ where: (c) => c("a").gt(0), schema: "app2" });
+            table("t").delete({ where: (col) => col("a").gt(0), schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
@@ -1238,7 +1238,7 @@ fn twin_dml_ops_carry_schema() {
     let bf = r#"
         import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").backfill({ set: { a: (c) => c("a") }, schema: "app2" });
+            table("t").backfill({ set: { a: (col) => col("a") }, schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(bf, "backfill_schema"), "backfill"), "app2");
@@ -1266,14 +1266,14 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.column("status").setNotNull();
             u.foreignKey("u_team_fk").add({ columns: ["team"], references: { table: "teams", columns: ["name"] } });
             u.unique("u_email_uq").add({ columns: ["email"] });
-            u.check("u_status_chk").add({ expr: (c) => c("status").isNotNull() });
+            u.check("u_status_chk").add({ expr: (col) => col("status").isNotNull() });
             u.constraint("u_legacy_chk").drop({ ifExists: true });
             u.index("u_email_idx").add({ on: ["email"], unique: true });
             u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
-            u.update({ set: { status: (c) => c("status").lower() }, where: (c) => c("id").isNotNull() });
-            u.delete({ where: (c) => c("status").isNull(), limit: 10 });
-            u.backfill({ set: { status: (c) => c("status").coalesce("new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
+            u.update({ set: { status: (col) => col("status").lower() }, where: (col) => col("id").isNotNull() });
+            u.delete({ where: (col) => col("status").isNull(), limit: 10 });
+            u.backfill({ set: { status: (col) => col("status").coalesce("new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
         }};
     "#;
     let ir = record(src, "fluent_full");
@@ -1452,11 +1452,11 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
                 id: t.bigInt().identity({ always: true }).primaryKey(),
                 qty: t.int(),
                 unit_cents: t.int(),
-                total_cents: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
-                virtual_total: t.int().generated((c) => c("qty").mul(c("unit_cents")), { virtual: true }),
+                total_cents: t.int().generated((col) => col("qty").mul(col("unit_cents"))),
+                virtual_total: t.int().generated((col) => col("qty").mul(col("unit_cents")), { virtual: true }),
             }});
             table("line_items").column("added_total").add({
-                type: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
+                type: t.int().generated((col) => col("qty").mul(col("unit_cents"))),
             });
             table("line_items").column("seq").add({ type: t.bigInt().identity() });
         }};

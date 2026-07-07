@@ -22,14 +22,14 @@ const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 
 /** The `const` tokens of a `oneOf` string-enum def. */
 function enumTokens(def: any): string[] {
-  return def.oneOf.map((b: any) => b.const).filter((c: any) => typeof c === "string").sort();
+  return def.oneOf.map((b: any) => b.const).filter((constant: any) => typeof constant === "string").sort();
 }
 /** The internally-tagged variant tags of an internally-tagged `oneOf` def
  *  (the const of the `tagField` property in each branch). */
 function variantTags(def: any, tagField: string): string[] {
   return def.oneOf
     .map((b: any) => b?.properties?.[tagField]?.const)
-    .filter((c: any) => typeof c === "string")
+    .filter((constant: any) => typeof constant === "string")
     .sort();
 }
 

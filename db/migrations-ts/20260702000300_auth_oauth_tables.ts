@@ -63,7 +63,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  table("authz_decisions", { schema: "zeroship" }).check("authz_decisions_decision_check").add({ expr: (c) => c("decision").in(["allow", "deny"]) });
+  table("authz_decisions", { schema: "zeroship" }).check("authz_decisions_decision_check").add({ expr: (col) => col("decision").in(["allow", "deny"]) });
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
@@ -91,8 +91,8 @@ export function up() {
     },
     primaryKey: ["device_code_hash"],
   });
-  table("device_grants", { schema: "zeroship" }).check("device_grants_poll_interval_secs_check").add({ expr: (c) => c("poll_interval_secs").gt(0) });
-  table("device_grants", { schema: "zeroship" }).check("device_grants_status_check").add({ expr: (c) => c("status").in(["pending", "approved", "denied"]) });
+  table("device_grants", { schema: "zeroship" }).check("device_grants_poll_interval_secs_check").add({ expr: (col) => col("poll_interval_secs").gt(0) });
+  table("device_grants", { schema: "zeroship" }).check("device_grants_status_check").add({ expr: (col) => col("status").in(["pending", "approved", "denied"]) });
   table("dpop_jti", { schema: "zeroship" }).create({
     columns: {
       jti: t.text().notNull(),
@@ -233,8 +233,8 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) });
-  table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (c) => c("pkce_method").eq("S256") });
+  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) });
+  table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (col) => col("pkce_method").eq("S256") });
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),
@@ -254,8 +254,8 @@ export function up() {
     },
     primaryKey: ["client_id"],
   });
-  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (c) => c("brokered").eq(false).or(c("token_endpoint_auth_method").eq("client_secret_basic")) });
-  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (c) => c("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
+  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (col) => col("brokered").eq(false).or(col("token_endpoint_auth_method").eq("client_secret_basic")) });
+  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (col) => col("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
   table("oauth_grants", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
@@ -290,7 +290,7 @@ export function up() {
     },
     primaryKey: ["token_hash"],
   });
-  table("oauth_refresh_tokens", { schema: "zeroship" }).check("oauth_refresh_tokens_idle_le_ceiling").add({ expr: (c) => c("expires_at").le(c("family_absolute_expires_at")) });
+  table("oauth_refresh_tokens", { schema: "zeroship" }).check("oauth_refresh_tokens_idle_le_ceiling").add({ expr: (col) => col("expires_at").le(col("family_absolute_expires_at")) });
   table("oidc_session_clients", { schema: "zeroship" }).create({
     columns: {
       idp_session_id: t.uuid().notNull(),
@@ -331,8 +331,8 @@ export function up() {
     },
     primaryKey: ["kid"],
   });
-  table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (c) => c("alg").eq("EdDSA") });
-  table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (c) => c("status").in(["active", "next", "retiring"]) });
+  table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (col) => col("alg").eq("EdDSA") });
+  table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring"]) });
   table("token_revocations", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),

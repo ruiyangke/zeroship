@@ -21,7 +21,7 @@ handle: it records nothing until `.create({ values, schema? })`, `.drop(...)`, o
 
 There is **no raw SQL** anywhere on this surface — no `Raw` type, no `sql\`\``
 escape, no string fragments. Every transform and predicate is a fluent
-`(c) => Expr` callback over a closed expression AST, and the engine owns 100%
+`(col) => Expr` callback over a closed expression AST, and the engine owns 100%
 of per-dialect rendering. This is a deliberate boundary (property A): a
 transform the closed surface cannot express is a hard, structured error, not a
 back door to hand-written SQL.
@@ -46,10 +46,10 @@ export default {
     users.column("last_name").add({ type: t.text() });
     users.backfill({
       set: {
-        first_name: (c) => c("name").splitPart(" ", 1),
-        last_name: (c) => c("name").splitPart(" ", 2),
+        first_name: (col) => col("name").splitPart(" ", 1),
+        last_name: (col) => col("name").splitPart(" ", 2),
       },
-      where: (c) => c("first_name").isNull(),
+      where: (col) => col("first_name").isNull(),
     });
     users.column("name").drop();
   },
@@ -59,7 +59,7 @@ export default {
     users.column("name").add({ type: t.text() });
     users.backfill({
       // concatWs is NULL-skipping — the safe join; copy this, not `.concat`
-      set: { name: (c) => concatWs(" ", c("first_name"), c("last_name")) },
+      set: { name: (col) => concatWs(" ", col("first_name"), col("last_name")) },
     });
     users.column("first_name").drop();
     users.column("last_name").drop();
@@ -148,7 +148,7 @@ across statements ([Var-assign + reuse](#var-assign--reuse)).
 There is **no scalar-function namespace**: scalar functions with a natural receiver are
 chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
 The one receiver-less scalar helper is the top-level `concatWs(...)` import.
-Aggregates follow the same receiver-first shape (`c("x").sum()`, `c("x").count({ distinct: true })`);
+Aggregates follow the same receiver-first shape (`col("x").sum()`, `col("x").count({ distinct: true })`);
 receiver-less `COUNT(*)` is the top-level `countStar()` import.
 
 ## Names are strings (and why)
@@ -157,7 +157,7 @@ receiver-less `COUNT(*)` is the top-level `countStar()` import.
 `S extends Schema` parameter, no `TableName<S>` / `keyof RowOf<S,T>` binding to
 the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
 `cursorColumn`, every `set` key, every `where`-referenced column, and every
-`c("…")` argument are strings whose existence is validated at **apply time
+`col("…")` argument are strings whose existence is validated at **apply time
 against the real DB**, never at `tsc` time (the typing-stance prose lives in the
 module header, `sdks/migrate/src/types.ts:1-11`, "§3.3 — names are plain
 `string`, NOT live-schema-bound", and on the `Row`/`ScalarValue` types,
@@ -365,7 +365,7 @@ table("audit_log").create({
   },
   primaryKey: ["org_id", "email"], // composite PK (else a single PK via t.id()/.primaryKey())
   uniques: [{ name: "members_org_email_uq", columns: ["org_id", "email"] }],
-  checks: [{ name: "members_role_nonempty", expr: (c) => c("role").ne("") }],
+  checks: [{ name: "members_role_nonempty", expr: (col) => col("role").ne("") }],
   foreignKeys: [
     {
       name: "members_org_fk",
@@ -413,7 +413,7 @@ const orders = table("orders");
 orders.column("status").add({ type: t.text().notNull().default("new") });
 orders.column("legacy").drop({ ifExists: true });
 orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
-orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (c) => c("total").cast({ to: "real" }) });
+orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (col) => col("total").cast({ to: "real" }) });
 orders.column("note").dropNotNull();
 orders.column("note").setDefault("memo");
 orders.column("note").dropDefault();
@@ -433,7 +433,7 @@ members.foreignKey("members_org_fk").add({
   onDelete: "cascade",
 });
 members.unique("members_org_email_uq").add({ columns: ["org_id", "email"] });
-table("orders").check("orders_total_nonneg").add({ expr: (c) => c("total").ge(0) });
+table("orders").check("orders_total_nonneg").add({ expr: (col) => col("total").ge(0) });
 table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // kind-agnostic drop
 ```
 
@@ -452,7 +452,7 @@ members.index("members_email_idx").drop({ unique: true });
 
 pgTable("members").index("members_active_email_idx").add({
   on: ["email"],
-  where: (c) => c("active").isTrue(),
+  where: (col) => col("active").isTrue(),
   include: ["id"],
   using: "btree",
 });
@@ -485,14 +485,14 @@ plans.insert({
 });
 
 table("orders").update({
-  set: { status: (c) => c("status").upper() },
-  where: (c) => c("status").eq("pending"),
+  set: { status: (col) => col("status").upper() },
+  where: (col) => col("status").eq("pending"),
 });
 
-table("sessions").delete({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
+table("sessions").delete({ where: (col) => col("expires_at").lt("2026-01-01T00:00:00Z") });
 
 table("orders").backfill({
-  set: { total_norm: (c) => c("total").coalesce(0) },
+  set: { total_norm: (col) => col("total").coalesce(0) },
   cursorColumn: "id", // defaults to the single-column PK ("id")
   batchSize: 1000, // defaults to the engine's chosen size
 });
@@ -801,15 +801,15 @@ export default {
 ## The fluent expression surface
 
 Every expression position — a DML `set` value, a `where`, a `check(name).add` body, a
-partial-index `where:` — is a callback `(c) => Expr` with a **single injected
+partial-index `where:` — is a callback `(col) => Expr` with a **single injected
 builder handle** `c`. It is never a raw string; it constructs a node of a closed
 AST via an all-strings fluent builder
 (`sdks/migrate/src/ops.ts:281-366`, `sdks/migrate/src/types.ts:95-156`).
 
-**`c` is both a column accessor and the function namespace.** `c("first")`
-returns an unqualified `ColRef` chain; `c("table", "col")` returns a qualified
+**`c` is both a column accessor and the function namespace.** `col("first")`
+returns an unqualified `ColRef` chain; `col("table", "col")` returns a qualified
 `ColRef`. Arguments are plain strings; there is no dotted-string form like
-`c("other.col")` (cross-table references remain limited by
+`col("other.col")` (cross-table references remain limited by
 [the portability boundary](#the-dml-portability-boundary)).
 
 **Chainable operator methods** (each builds one closed-AST node; a bare JS value
@@ -835,7 +835,7 @@ interpolated):
   for joining first+last name. Engine-synthesized to be byte-identical across PG
   (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
   join use `concatWs("", …)`.
-- `c.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
+- `col.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
 - `e.splitPart(delim, n)` — the engine-synthesized portable split helper,
   within its pinned envelope (see below)
 
@@ -889,7 +889,7 @@ transform only through the closed fluent AST, never raw SQL.
 - `del` with a `where`.
 - One-shot `update` / `backfill` whose `set` / `where` use only the closed
   fluent AST: column refs, auto-wrapped literals, arithmetic,
-  comparison/boolean operators, `c.case`, the allow-listed
+  comparison/boolean operators, `col.case`, the allow-listed
   provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
   `length`, `abs`, `.cast({ to })`, `.concat`), and `concatWs`.
 - The engine-synthesized `.splitPart` helper **within its pinned envelope**.

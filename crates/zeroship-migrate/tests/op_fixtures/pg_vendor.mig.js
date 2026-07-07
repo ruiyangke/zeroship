@@ -62,10 +62,10 @@ export function up() {
   secrets.setRls({ enabled: true, forced: true });
   secrets.policy("tenant_isolation").create({
     for: "all",
-    using: (c) =>
-      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
-    withCheck: (c) =>
-      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+    using: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+    withCheck: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
   secrets.policy("tenant_isolation").drop({ ifExists: true });
   secrets.setRls({ enabled: false, forced: false });
@@ -87,7 +87,7 @@ export function up() {
     events: ["update", "delete"],
     forEach: "row",
     execute: "audit_events_block_tamper",
-    when: (c) => c("app_id").isNotNull(),
+    when: (col) => col("app_id").isNotNull(),
   });
   audit.trigger("audit_events_append_only").create({
     timing: "before",

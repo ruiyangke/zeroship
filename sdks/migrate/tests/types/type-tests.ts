@@ -78,16 +78,16 @@ export function antiRotMigration(): void {
     references: { schema: "ghost", table: "another_missing_table", columns: ["tenant_id", "author_id"] },
   });
   table("nonexistent_table").update({
-    set: { legacy_col: (c) => c("a_column_no_schema_declares").concat(" suffix") },
-    where: (c) => c("yet_another_missing_column").isNull(),
+    set: { legacy_col: (col) => col("a_column_no_schema_declares").concat(" suffix") },
+    where: (col) => col("yet_another_missing_column").isNull(),
   });
-  table("nonexistent_table").delete({ where: (c) => c("phantom_col").eq(1) });
-  // L5 (M19): update/delete/backfill `where` accept a built ExprChain / Expr, not just a `(c) => …` callback.
+  table("nonexistent_table").delete({ where: (col) => col("phantom_col").eq(1) });
+  // L5 (M19): update/delete/backfill `where` accept a built ExprChain / Expr, not just a `(col) => …` callback.
   table("nonexistent_table").update({ set: { legacy_col: 1 }, where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").delete({ where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").backfill({
-    set: { legacy_col: (c) => c("phantom_col").splitPart(" ", 1) },
-    where: (c) => c("phantom_col").isNotNull(),
+    set: { legacy_col: (col) => col("phantom_col").splitPart(" ", 1) },
+    where: (col) => col("phantom_col").isNotNull(),
   });
   table("nonexistent_table").insert({ rows: { phantom_col: "ok", another_phantom: 42 } });
 }
@@ -123,7 +123,7 @@ export function badOpShapes(): void {
 
   table("users").update({
     set: { name: "x" },
-    where: (c) => c("id").isNotNull(),
+    where: (col) => col("id").isNotNull(),
     // @ts-expect-error — batched writes are spelled backfill({ cursorColumn, batchSize }), not update({ batch }).
     batch: { cursorColumn: "id", batchSize: 500 },
   });
@@ -137,7 +137,7 @@ export function badOpShapes(): void {
 
 export function pgTableBoundary(): void {
   // @ts-expect-error — PG table policies are only reachable through `pgTable()`.
-  table("secrets").policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() });
+  table("secrets").policy("tenant_only").create({ using: (col) => col("tenant_id").isNotNull() });
 
   // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).create(...)`.
   table("audit_events").createTrigger({ name: "audit_events_trg", timing: "before", events: ["insert"], forEach: "row", execute: "audit_events_fn" });
@@ -169,14 +169,14 @@ export function pgTableBoundary(): void {
   table("audit_events").trigger("audit_events_trg").drop({ ifExists: true });
 
   // @ts-expect-error — deleted direct PG policy method; use `.policy(name).create(...)`.
-  pgTable("secrets").createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() });
+  pgTable("secrets").createPolicy({ name: "tenant_only", using: (col) => col("tenant_id").isNotNull() });
 
   // @ts-expect-error — deleted direct PG policy method; use `.policy(name).drop(...)`.
   pgTable("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
 
   pgTable("secrets")
     .setRls({ enabled: true, forced: true })
-    .policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() })
+    .policy("tenant_only").create({ using: (col) => col("tenant_id").isNotNull() })
     .policy("tenant_only").drop({ ifExists: true })
     .setRls({ enabled: false, forced: false });
   // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: true })`.
@@ -248,7 +248,7 @@ export function indexGrammar(): void {
     on: [
       "email",
       { column: "created_at", order: "desc" },
-      { expr: (c) => c("email").lower() },
+      { expr: (col) => col("email").lower() },
     ],
     unique: true,
   });
@@ -257,10 +257,10 @@ export function indexGrammar(): void {
     on: [
       "email",
       { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
-      { expr: (c) => c("email").lower() },
+      { expr: (col) => col("email").lower() },
     ],
     using: "gin",
-    where: (c) => c("active").isTrue(),
+    where: (col) => col("active").isTrue(),
     include: ["id"],
     with: { fillfactor: 90 },
     only: true,
@@ -284,10 +284,10 @@ export function indexGrammar(): void {
   const oldKindKey = "kind";
   const oldExprKind = "expr";
   // @ts-expect-error — tagged expression elements are not part of the authored grammar.
-  table("users").index("bad_tagged_expr").add({ on: [{ [oldKindKey]: oldExprKind, expr: (c) => c("email") }] });
+  table("users").index("bad_tagged_expr").add({ on: [{ [oldKindKey]: oldExprKind, expr: (col) => col("email") }] });
 
   // @ts-expect-error — bare expression elements must be wrapped as `{ expr }`.
-  table("users").index("bad_bare_expr").add({ on: [(c) => c("email")] });
+  table("users").index("bad_bare_expr").add({ on: [(col) => col("email")] });
 
   const oldColumnKind = "column";
   // @ts-expect-error — column object elements use `{ column }`, not `{ kind, name }`.
@@ -297,7 +297,7 @@ export function indexGrammar(): void {
   table("users").index("bad_using").add({ on: ["email"], using: "gin" });
 
   // @ts-expect-error — partial-index `where` is PG-vendor and only reachable through `pgTable().index()`.
-  table("users").index("bad_where").add({ on: ["email"], where: (c) => c("active").isTrue() });
+  table("users").index("bad_where").add({ on: ["email"], where: (col) => col("active").isTrue() });
 
   // @ts-expect-error — covering `include` is PG-vendor and only reachable through `pgTable().index()`.
   table("users").index("bad_include").add({ on: ["email"], include: ["id"] });
@@ -319,10 +319,10 @@ export function indexGrammar(): void {
 }
 
 export function immutableOnlyBuilderSlots(): void {
-  t.text().generated((c) => c("email").lower());
+  t.text().generated((col) => col("email").lower());
   pgTable("users").index("users_email_lower_idx").add({
-    on: [{ expr: (c) => c("email").lower() }],
-    where: (c) => c("active").isTrue(),
+    on: [{ expr: (col) => col("email").lower() }],
+    where: (col) => col("active").isTrue(),
   });
 
   t.timestamp().generated(() => now());
@@ -420,43 +420,43 @@ export function badColTypes(): void {
 export function badExprShapes(): void {
   table("users").update({
     // @ts-expect-error — there is no `.frobnicate()` operator on the expr chain.
-    set: { name: (c) => c("name").frobnicate() },
+    set: { name: (col) => col("name").frobnicate() },
   });
 
   table("users").update({
     // @ts-expect-error — there is no `.notARealFn()` operator on the expr chain.
-    set: { name: (c) => c("name").notARealFn() },
+    set: { name: (col) => col("name").notARealFn() },
   });
 
   table("users").update({
     // @ts-expect-error — `.cast(...)` takes a named `{ to }` args object.
-    set: { name: (c) => c("name").cast("text") },
+    set: { name: (col) => col("name").cast("text") },
   });
 
   table("users").update({
     // @ts-expect-error — `.cast({ to })` only accepts the closed scalar ColType target set.
-    set: { name: (c) => c("name").cast({ to: "blob" }) },
+    set: { name: (col) => col("name").cast({ to: "blob" }) },
   });
 
   table("users").update({
-    set: { name: (c) => c("name").coalesce("x") },
+    set: { name: (col) => col("name").coalesce("x") },
   });
 
   table("users").update({
     set: {
-      http_status: (c) => c("http_status").in([200, 404, 500]),
-      enabled: (c) => c("enabled").notIn([true, false]),
+      http_status: (col) => col("http_status").in([200, 404, 500]),
+      enabled: (col) => col("enabled").notIn([true, false]),
     },
   });
 
   table("users").update({
     // @ts-expect-error — `.in` accepts only the pinned Scalar set, not bytes.
-    set: { payload: (c) => c("payload").in([byteValue("AQID")]) },
+    set: { payload: (col) => col("payload").in([byteValue("AQID")]) },
   });
 
   table("users").update({
     // @ts-expect-error — `.notIn` accepts only the pinned Scalar set, not objects.
-    set: { kind: (c) => c("kind").notIn([{ value: "admin" }]) },
+    set: { kind: (col) => col("kind").notIn([{ value: "admin" }]) },
   });
 
   table("users").create({
@@ -469,7 +469,7 @@ export function badExprShapes(): void {
 }
 
 export function checkExpressionSurfaceTypechecks(): void {
-  const pkceCheck: CheckDef = check("pkce_method_check", (c) => c("pkce_method").eq("S256"));
+  const pkceCheck: CheckDef = check("pkce_method_check", (col) => col("pkce_method").eq("S256"));
   table("oauth_authorization_codes").create({
     columns: {
       pkce_method: t.text().notNull(),
@@ -484,9 +484,9 @@ export function checkExpressionSurfaceTypechecks(): void {
     },
     checks: [
       pkceCheck,
-      check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-      check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(lit(0)))),
-      check("visible_when_active", (c) => c("active").and(c("visible").isNull().not())),
+      check("kind_ok", (col) => col("kind").in(["a", "b", "c"])),
+      check("floor_nonneg_or_null", (col) => col("floor_cents").isNull().or(col("floor_cents").ge(lit(0)))),
+      check("visible_when_active", (col) => col("active").and(col("visible").isNull().not())),
     ],
   });
 
@@ -496,54 +496,54 @@ export function checkExpressionSurfaceTypechecks(): void {
 
   // P0: `regex` is a first-class chain operator on the CORE check builder
   // (PostgreSQL-first; fails closed off-PG at validate-time, not tsc).
-  table("oauth_authorization_codes").check("core_regex").add({ expr: (c) => c("user_id").regex("^usr_") });
+  table("oauth_authorization_codes").check("core_regex").add({ expr: (col) => col("user_id").regex("^usr_") });
 
   // PG-only extract fields typecheck on the core surface and fail closed off-PG at validate time.
-  table("oauth_authorization_codes").check("pg_extract_field_validate_gated").add({ expr: (c) => c("created_at").extract("epoch").gt(0) });
+  table("oauth_authorization_codes").check("pg_extract_field_validate_gated").add({ expr: (col) => col("created_at").extract("epoch").gt(0) });
 
   pgTable("oauth_authorization_codes").check("max_ttl").add({
-    expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))),
+    expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))),
   });
-  table("oauth_authorization_codes").check("no_core_interval").add({ expr: (c) => c("expires_at").le(interval({ minutes: 1 })) });
+  table("oauth_authorization_codes").check("no_core_interval").add({ expr: (col) => col("expires_at").le(interval({ minutes: 1 })) });
   // @ts-expect-error — interval takes a structured Duration, not HH:MM:SS text.
-  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))) });
+  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval("00:01:00"))) });
   pgTable("oauth_authorization_codes").check("epoch_positive").add({
-    expr: (c) => c("created_at").extract("epoch").gt(0),
+    expr: (col) => col("created_at").extract("epoch").gt(0),
   });
   pgTable("oauth_authorization_codes").check("user_id_fmt").add({
-    expr: (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
+    expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
   });
   pgTable("oauth_authorization_codes").check("data_size").add({
-    expr: (c) => c("data").columnSize().lt(1000),
+    expr: (col) => col("data").columnSize().lt(1000),
   });
   table("oauth_authorization_codes").check("active_is_bool").add({
-    expr: (c) => c("active").isNotNull(),
+    expr: (col) => col("active").isNotNull(),
     ifNotExists: true,
   });
 }
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
   pgTable("app_secrets").policy("tenant_only").create({
-    using: (c) => c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
-    withCheck: (c) => c("owner").eq(currentUser()),
+    using: (col) => col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
+    withCheck: (col) => col("owner").eq(currentUser()),
   });
 
   // P0: `regex` is a first-class chain operator (PG-first). It typechecks.
-  table("exprs").update({ set: { x: (c) => c("x").regex("^a$") } });
+  table("exprs").update({ set: { x: (col) => col("x").regex("^a$") } });
   // @ts-expect-error — `matches` was renamed to `regex` (S1); the old name is gone.
-  table("exprs").update({ set: { x: (c) => c("x")["matches"]("^a$") } });
+  table("exprs").update({ set: { x: (col) => col("x")["matches"]("^a$") } });
 
   // P0: `columnSize` is a first-class chain operator (PG-first). It typechecks.
-  table("exprs").update({ set: { x: (c) => c("x").columnSize() } });
+  table("exprs").update({ set: { x: (col) => col("x").columnSize() } });
 
   // @ts-expect-error — currentSetting is a top-level import, not a chain member.
-  table("exprs").update({ set: { x: (c) => c("x")["currentSetting"]("zeroship.tenant_app", true) } });
+  table("exprs").update({ set: { x: (col) => col("x")["currentSetting"]("zeroship.tenant_app", true) } });
 
   // @ts-expect-error — currentUser is a top-level import, not a chain member.
-  table("exprs").update({ set: { x: (c) => c("x")["currentUser"]() } });
+  table("exprs").update({ set: { x: (col) => col("x")["currentUser"]() } });
 
-  // @ts-expect-error — the expression builder is callable; `c.col(...)` is removed.
-  table("exprs").update({ set: { x: (c) => c.col("x") } });
+  // @ts-expect-error — the expression builder is callable; `col.col(...)` is removed.
+  table("exprs").update({ set: { x: (col) => col.col("x") } });
 }
 
 export function domainValueCheckSurfaceTypechecks(): void {
@@ -627,7 +627,7 @@ export function insertValueShapes(): void {
   table("users").create({ columns: { created_at: t.timestamp().default({ fn: "now" }) } });
 
   // @ts-expect-error — DefaultBuilder is not callable; defaults cannot reference columns.
-  table("users").create({ columns: { name_copy: t.text().default((c) => c("name")) } });
+  table("users").create({ columns: { name_copy: t.text().default((col) => col("name")) } });
 
   table("users").create({ columns: { n: t.int().default(() => countStar()) } });
 

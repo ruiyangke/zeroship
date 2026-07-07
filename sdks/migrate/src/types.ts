@@ -3,7 +3,7 @@
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
-// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, default-expression
+// `ColumnDef` (`t.*`), the `(col) => Expr` `ExprBuilder`, default-expression
 // `DefaultBuilder`, immutable index/generated expression builders, and the all-strings
 // typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
@@ -485,7 +485,7 @@ export type DbSynthSymbol =
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
 /** A DML assignment RHS accepts the same scalar/expression values as insert rows,
- *  plus the `(c) => Expr` callback shorthand. */
+ *  plus the `(col) => Expr` callback shorthand. */
 export type DmlSetValue = DmlValue | ExprFn;
 
 /** Empty object/array defaults admitted for JSON/text-array columns. */
@@ -526,9 +526,9 @@ export declare function countStar(): ExprChain;
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
 export type Row = Record<string, DmlValue>;
 
-// ── The fluent expression builder (§3.6 / `(c) => Expr`) ──
+// ── The fluent expression builder (§3.6 / `(col) => Expr`) ──
 
-/** The chainable expression value `c("…")` / every built sub-expression carries.
+/** The chainable expression value `col("…")` / every built sub-expression carries.
  *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`. */
 export interface ExprChain {
   // comparison
@@ -567,7 +567,7 @@ export interface ExprChain {
   notIn(values: readonly Scalar[]): ExprChain;
   distinctFrom(x: unknown): ExprChain;
   // PostgreSQL-first chain operators (P0). First-class on the core surface — no
-  // `/pg` import, no `c.pg.` cast. The Rust validator fails closed on targets
+  // `/pg` import, no `col.pg.` cast. The Rust validator fails closed on targets
   // that lack a native form (`regex`: `~` on PG, `REGEXP` on MySQL, error on
   // SQLite; `columnSize`: `pg_column_size` on PG, error elsewhere); use
   // `dialect({...})` to supply a portable leg.
@@ -614,22 +614,22 @@ export interface ExprChain {
  *  methods / `countStar()` and rejected by Rust validation. Receiver-less value
  *  constructors are top-level imports (`now()`, `genRandomUuid()`). */
 export interface DefaultBuilder {
-  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  /** The searched `CASE` form: `col.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
 
 /** A column default expression callback. */
-export type DefaultExprFn = (c: DefaultBuilder) => ExprChain | Expr;
+export type DefaultExprFn = (col: DefaultBuilder) => ExprChain | Expr;
 
 interface ImmutableExprBuilderBase {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
-  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  /** The searched `CASE` form: `col.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
 
 /** Builder for index expressions and predicates. Column refs, expression chain
- *  methods, and `c.case(...)` are available; volatile functions and aggregates
+ *  methods, and `col.case(...)` are available; volatile functions and aggregates
  *  are rejected by Rust validation in these scalar contexts. Trigger OLD/NEW
  *  state is not exposed. */
 export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
@@ -642,23 +642,23 @@ export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
  *  non-aggregate at validate time. PG-only expression nodes fail closed off-PG. */
 export interface CheckBuilder extends ImmutableExprBuilderBase {}
 
-export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
-export type GeneratedColumnExprFn = (c: GeneratedColumnBuilder) => ExprChain | Expr;
-export type CheckExprFn = (c: CheckBuilder) => ExprChain | Expr;
+export type IndexExprFn = (col: IndexExprBuilder) => ExprChain | Expr;
+export type GeneratedColumnExprFn = (col: GeneratedColumnBuilder) => ExprChain | Expr;
+export type CheckExprFn = (col: CheckBuilder) => ExprChain | Expr;
 
-/** The single injected builder handle: a column-accessor function `c("name")`
+/** The single injected builder handle: a column-accessor function `col("name")`
  *  carrying only `case`. A two-arg form
- *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
+ *  `col("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
-  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  /** The searched `CASE` form: `col.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
 
-/** An expression position — a `(c) => Expr` callback (the all-strings fluent
+/** An expression position — a `(col) => Expr` callback (the all-strings fluent
  *  form). NEVER a raw string (property A). */
-export type ExprFn = (c: ExprBuilder) => ExprChain;
+export type ExprFn = (col: ExprBuilder) => ExprChain;
 
 /** A named table-level CHECK constraint authored inside `table().create({ checks })`. */
 export interface CheckDef {
@@ -669,7 +669,7 @@ export interface CheckDef {
 /** PostgreSQL-vendor CHECK builder: immutable core plus PG immutable value nodes. */
 export interface CheckBuilderWithPg extends CheckBuilder {}
 
-export type PgCheckExprFn = (c: CheckBuilderWithPg) => ExprChain | Expr;
+export type PgCheckExprFn = (col: CheckBuilderWithPg) => ExprChain | Expr;
 
 export interface PgCheckDef {
   name: string;

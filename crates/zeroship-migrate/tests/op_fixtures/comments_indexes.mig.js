@@ -23,15 +23,15 @@ export function up() {
   });
 
   pgTable("users").index("users_email_lower_idx").add({
-    on: ["email", { expr: (c) => c("email").lower() }],
-    where: (c) => c("active").isTrue(),
+    on: ["email", { expr: (col) => col("email").lower() }],
+    where: (col) => col("active").isTrue(),
   });
 
   view("active_users", { columns: ["id", "email"] }).create({
     as: (q) => q
       .from("users")
       .select(["id", "email"])
-      .where((c) => c("active").isTrue()),
+      .where((col) => col("active").isTrue()),
   });
 
   table("users").comment("End-user accounts");

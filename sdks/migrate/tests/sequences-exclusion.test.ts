@@ -83,7 +83,7 @@ function authorWith({ begin, drain, pgTable, sequence, t, table }: Rec): any[] {
         { target: "room", operator: "=" },
         { target: "during", operator: "&&" },
       ],
-      where: (c: any) => c("cancelled").eq(false),
+      where: (col: any) => col("cancelled").eq(false),
       deferrable: true,
     }],
   });
@@ -93,7 +93,7 @@ function authorWith({ begin, drain, pgTable, sequence, t, table }: Rec): any[] {
       { target: "room", operator: "=" },
       { target: "during", operator: "&&" },
     ],
-    where: (c: any) => c("cancelled").eq(false),
+    where: (col: any) => col("cancelled").eq(false),
     deferrable: true,
     ifNotExists: true,
   });

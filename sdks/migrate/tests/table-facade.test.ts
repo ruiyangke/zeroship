@@ -145,7 +145,7 @@ test("SELECTOR: a terminated selector records its op; all selectors terminated â
     u.column("a").add({ type: t.text() });
     u.foreignKey("fk").add({ columns: ["a"], references: { table: "o", columns: ["id"] } });
     u.unique("uq").add({ columns: ["a"] });
-    u.check("ck").add({ expr: (c) => c("a").isNotNull() });
+    u.check("ck").add({ expr: (col) => col("a").isNotNull() });
     u.index("ix").add({ on: ["a"] });
     u.constraint("cn").drop();
   });
@@ -226,9 +226,9 @@ test("SCHEMA: the table() default propagates onto every recorded op", () => {
     u.index("ix_a").add({ on: ["a"] });
     u.index("ix_b").drop();
     u.insert({ rows: [{ a: 1 }] });
-    u.update({ set: { a: (c) => c("a") } });
-    u.delete({ where: (c) => c("a").gt(0) });
-    u.backfill({ set: { a: (c) => c("a") } });
+    u.update({ set: { a: (col) => col("a") } });
+    u.delete({ where: (col) => col("a").gt(0) });
+    u.backfill({ set: { a: (col) => col("a") } });
   });
   for (const op of ops) assert.equal(op.schema, "app2", `op ${op.op} must carry the table default schema`);
 });

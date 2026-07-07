@@ -6,7 +6,7 @@
 //!   through `IrAuthor::load_and_lower` + `engine.apply` on a real SQLite temp-file
 //!   backend (LOCAL record path).
 //! - The scaffold is deterministic by construction: it contains `now()` /
-//!   `(c) => now()` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
+//!   `(col) => now()` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
 //!   `crypto.randomUUID()`, and recording it has ZERO determinism findings.
 //!
 //! Faithful: the REAL sandboxed recorder child + the REAL engine apply on SQLite.

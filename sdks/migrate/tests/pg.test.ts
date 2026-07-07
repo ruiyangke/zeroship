@@ -68,7 +68,7 @@ test("pgTable().policy().create requires using and rejects an explicit empty to[
   assert.throws(
     () =>
       record(() =>
-        pgTable("u").policy("p").create({ to: [], using: (c: any) => c("x").isNotNull() } as any),
+        pgTable("u").policy("p").create({ to: [], using: (col: any) => col("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
@@ -108,8 +108,8 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
     pgTable("users", { schema: "zs" }).policy("tenant_only").create({
       for: "select",
       to: ["app_role"],
-      using: (c) => c("app_id").eq("app_demo"),
-      withCheck: (c) => c("app_id").isNotNull(),
+      using: (col) => col("app_id").eq("app_demo"),
+      withCheck: (col) => col("app_id").isNotNull(),
     });
     pgTable("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
     createFunction({
@@ -219,7 +219,7 @@ test("table-scoped pg methods record setRls and legacy policy op payloads", () =
     pgTable("secrets", { schema: "zs" })
       .setRls({ enabled: true, forced: true })
       .policy("tenant_only").create({
-        using: (c) => c("tenant_id").eq(currentSetting("tenant.id", { missingOk: true })),
+        using: (col) => col("tenant_id").eq(currentSetting("tenant.id", { missingOk: true })),
       })
       .policy("tenant_only").drop({ ifExists: true })
       .setRls({ enabled: false, forced: false });

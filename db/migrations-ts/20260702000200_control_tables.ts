@@ -36,7 +36,7 @@ export function up() {
     },
     primaryKey: ["app_id", "user_id"],
   });
-  table("app_members", { schema: "zeroship" }).check("app_members_role_check").add({ expr: (c) => c("role").in(["owner", "editor", "viewer"]) });
+  table("app_members", { schema: "zeroship" }).check("app_members_role_check").add({ expr: (col) => col("role").in(["owner", "editor", "viewer"]) });
   table("app_net_grants", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -48,7 +48,7 @@ export function up() {
     },
     primaryKey: ["app_id", "host", "port"],
   });
-  table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (c) => c("port").ge(1).and(c("port").le(65535)) });
+  table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
   table("app_oauth_clients", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -157,8 +157,8 @@ export function up() {
     },
     primaryKey: ["app_id", "version"],
   });
-  table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_ceiling_version_check").add({ expr: (c) => c("ceiling_version").gt(0) });
-  table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_version_check").add({ expr: (c) => c("version").gt(0) });
+  table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
+  table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_version_check").add({ expr: (col) => col("version").gt(0) });
   table("migrated_migration_audit", { schema: "zeroship" }).create({
     columns: {
       audit_id: t.uuid().notNull().default(genRandomUuid()),
@@ -177,8 +177,8 @@ export function up() {
     },
     primaryKey: ["audit_id"],
   });
-  table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_action_check").add({ expr: (c) => c("action").in(["submit", "reject_pending", "approve", "apply"]) });
-  table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_ceiling_version_check").add({ expr: (c) => c("ceiling_version").gt(0) });
+  table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_action_check").add({ expr: (col) => col("action").in(["submit", "reject_pending", "approve", "apply"]) });
+  table("migrated_migration_audit", { schema: "zeroship" }).check("migrated_migration_audit_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
   table("migrated_migrations", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -198,8 +198,8 @@ export function up() {
     },
     primaryKey: ["app_id", "migration_id"],
   });
-  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_ceiling_version_check").add({ expr: (c) => c("ceiling_version").gt(0) });
-  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_status_check").add({ expr: (c) => c("status").in(["submitted", "pending_approval", "approved", "applied", "failed"]) });
+  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
+  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_status_check").add({ expr: (col) => col("status").in(["submitted", "pending_approval", "approved", "applied", "failed"]) });
   table("net_policy_catalog", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
@@ -225,12 +225,12 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  pgTable("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (c) => c("currency").regex("^[a-z]{3}$") });
-  table("payouts", { schema: "zeroship" }).check("control_payouts_fee_lte_gross").add({ expr: (c) => c("platform_fee").le(c("gross_amount")) });
-  table("payouts", { schema: "zeroship" }).check("control_payouts_fee_nonnegative").add({ expr: (c) => c("platform_fee").ge(0) });
-  table("payouts", { schema: "zeroship" }).check("control_payouts_gross_nonnegative").add({ expr: (c) => c("gross_amount").ge(0) });
-  table("payouts", { schema: "zeroship" }).check("control_payouts_net_matches_amounts").add({ expr: (c) => c("net_amount").eq(c("gross_amount").sub(c("platform_fee"))) });
-  table("payouts", { schema: "zeroship" }).check("control_payouts_net_nonnegative").add({ expr: (c) => c("net_amount").ge(0) });
+  pgTable("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_fee_lte_gross").add({ expr: (col) => col("platform_fee").le(col("gross_amount")) });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_fee_nonnegative").add({ expr: (col) => col("platform_fee").ge(0) });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_gross_nonnegative").add({ expr: (col) => col("gross_amount").ge(0) });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_net_matches_amounts").add({ expr: (col) => col("net_amount").eq(col("gross_amount").sub(col("platform_fee"))) });
+  table("payouts", { schema: "zeroship" }).check("control_payouts_net_nonnegative").add({ expr: (col) => col("net_amount").ge(0) });
   table("permission_tokens", { schema: "zeroship" }).create({
     columns: {
       id: t.uuid().notNull(),
@@ -247,7 +247,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  table("permission_tokens", { schema: "zeroship" }).check("permission_tokens_kind_check").add({ expr: (c) => c("kind").in(["pat", "oauth_grant"]) });
+  table("permission_tokens", { schema: "zeroship" }).check("permission_tokens_kind_check").add({ expr: (col) => col("kind").in(["pat", "oauth_grant"]) });
   table("platform_admin_roles", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
@@ -257,7 +257,7 @@ export function up() {
     },
     primaryKey: ["user_id"],
   });
-  table("platform_admin_roles", { schema: "zeroship" }).check("platform_admin_roles_role_check").add({ expr: (c) => c("role").in(["admin", "support", "billing", "readonly"]) });
+  table("platform_admin_roles", { schema: "zeroship" }).check("platform_admin_roles_role_check").add({ expr: (col) => col("role").in(["admin", "support", "billing", "readonly"]) });
   table("platform_policies", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),

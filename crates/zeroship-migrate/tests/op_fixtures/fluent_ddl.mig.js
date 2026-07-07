@@ -43,7 +43,7 @@ export default {
     table("memberships").create({
       columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
-      checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
+      checks: [{ name: "memberships_team_chk", expr: (col) => col("team").isNotNull() }],
       foreignKeys: [
         {
           name: "memberships_account_fk",
@@ -61,7 +61,7 @@ export default {
       references: { table: "teams", columns: ["name"] },
     });
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
-    table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
+    table("accounts").check("accounts_balance_chk").add({ expr: (col) => col("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
 
     table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
@@ -72,7 +72,7 @@ export default {
     pgTable("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
-      where: (c) => c("active").isTrue(),
+      where: (col) => col("active").isTrue(),
     });
 
     table("accounts").column("nickname").add({ type: t.text() });

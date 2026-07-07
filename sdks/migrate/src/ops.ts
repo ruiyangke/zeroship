@@ -8,7 +8,7 @@
 //     up() {
 //       table("users")
 //         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c("name").splitPart(" ", 1) } });
+//         .backfill({ set: { first_name: col => col("name").splitPart(" ", 1) } });
 //     },
 //   };
 //
@@ -1524,7 +1524,7 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   return def;
 }
 
-// ── (B) The fluent `(c) => Expr` builder (§3.6) ──
+// ── (B) The fluent `(col) => Expr` builder (§3.6) ──
 
 function chain(node: Node): ExprChainImpl {
   return new ExprChainImpl(node);
@@ -1856,7 +1856,7 @@ class ExprChainImpl implements ExprChainType {
 export function check(name: string, expr: CheckExprFn): CheckDef {
   requireString(name, "check(name, expr)");
   if (typeof expr !== "function") {
-    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
+    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (col) => Expr callback");
   }
   return { name, expr };
 }
@@ -1875,14 +1875,14 @@ export function countStar(): ExprChainType {
 
 /**
  * The one Layer-2 portability escape (design §3.4): a per-dialect VALUE
- * divergence in an expression position. Each leg is an expression (a `(c) =>
+ * divergence in an expression position. Each leg is an expression (a `(col) =>
  * Expr` chain node, another combinator, or a bare scalar), and the engine
  * renders the leg matching the target dialect — the dialect's own leg if
  * present, else `default`:
  *
  * ```ts
  * default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
- * dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
+ * dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
  * ```
  *
  * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
@@ -1941,7 +1941,7 @@ type CaseExprArgs = {
 };
 
 function caseExpr(args: CaseExprArgs): ExprChainType {
-  const shape = "c.case({ branches: [{ when, then }], else? })";
+  const shape = "col.case({ branches: [{ when, then }], else? })";
   if (!isPlainObject(args)) {
     throw structuredError("OP_INVALID", `${shape}: args must be an object`);
   }
@@ -1973,16 +1973,16 @@ function caseExpr(args: CaseExprArgs): ExprChainType {
 }
 
 function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
-  // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
-  // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
+  // One-arg `col("col")` → unqualified colRef (byte-identical to the pre-
+  // qualification wire shape). Two-arg `col("table", "col")` → qualified colRef
   // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
   return ((first: string, second?: string) => {
     if (second === undefined) {
-      requireString(first, 'c("name")');
+      requireString(first, 'col("name")');
       return chain({ node: "colRef", name: first });
     }
-    requireString(first, 'c("table", "col")');
-    requireString(second, 'c("table", "col")');
+    requireString(first, 'col("table", "col")');
+    requireString(second, 'col("table", "col")');
     return chain({ node: "colRef", table: first, name: second });
   });
 }
@@ -2011,7 +2011,7 @@ function makeBuilder(): ExprBuilder {
   return c;
 }
 
-// The standalone `c.case` builder surfaced at a value position (`cCase(...)`) is
+// The standalone `col.case` builder surfaced at a value position (`cCase(...)`) is
 // exported for the engine-embedded recorder bundle (`src/embedded-recorder.ts`,
 // the `include_str!`'d artifact), which requires the full engine-consumed
 // surface. Not re-exported through the SDK public `.` entry (`index.ts`).
@@ -2022,7 +2022,7 @@ function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | un
   if (typeof slot === "function") return exprArg(slot(makeBuilder()));
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
-  throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
+  throw structuredError("OP_INVALID", "expression slot must be a (col) => Expr callback or a built expression");
 }
 
 type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | CheckExprFn | ExprChainType | Node | undefined;
@@ -2031,13 +2031,13 @@ function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node |
   if (slot === undefined || slot === null) return undefined;
   let resolved: Node;
   if (typeof slot === "function") {
-    resolved = exprArg((slot as (c: IndexExprBuilder) => unknown)(immutableExprBuilder()));
+    resolved = exprArg((slot as (col: IndexExprBuilder) => unknown)(immutableExprBuilder()));
   } else if (slot instanceof ExprChainImpl) {
     resolved = slot.__node;
   } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
     resolved = slot as Node;
   } else {
-    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position);
   return resolved;
@@ -2050,13 +2050,13 @@ function resolveCheckWithPg(
   if (slot === undefined || slot === null) return undefined;
   let resolved: Node;
   if (typeof slot === "function") {
-    resolved = exprArg((slot as (c: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
+    resolved = exprArg((slot as (col: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
   } else if (slot instanceof ExprChainImpl) {
     resolved = slot.__node;
   } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
     resolved = slot as Node;
   } else {
-    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position, { allowPgImmutable: true });
   return resolved;
@@ -3032,7 +3032,7 @@ function recordAddCheck(
   checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
 ): void {
   if (!args || args.expr === undefined) {
-    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
+    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (col) => Expr }");
   }
   emitAddCheck({
     table,

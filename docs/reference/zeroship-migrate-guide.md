@@ -48,11 +48,11 @@ The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
 | Scalar `c.fn.*` functions → chain methods | **DONE** (J2a, `37dced6a`) | chain methods on `ExprChain` (`types.ts:579-601`; `ops.ts:1776-1837`); `c.fn` deleted |
 | `c.pg.extract` → core; retire `c.pg` namespace | **DONE** (J2a, `37dced6a`) | `.extract(field)` accepts portable + PG fields (`types.ts:599`; `ops.ts:1823-1829`); `c.pg` deleted |
 | Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b, `e858cc15`) | `.count/.sum/.avg/.min/.max` (`types.ts:604-608`; `ops.ts:1839-1853`), `countStar()` import (`ops.ts:1872`), `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
-| Rename builder handle `c` → `col` (context-typed generic) | **PLANNED** (J4) | still `c` |
+| Rename builder handle `c` → `col` (context-typed generic) | **DONE** (J4) | `(col) => col("x")` across the authoring surface; zero wire churn |
 | `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
 | Retire `@zeroship/migrate/pg` subpath | **PLANNED** (J5) | `pg.ts` still exports `pgTable`/`domain`/`grant`/… |
 
-> **Caveat for readers.** `docs/reference/migrate-op-dsl.md` and `docs/reference/migrate-dsl-examples.md` still document the pre-J4 `(c) => Expr` callback param and the `@zeroship/migrate/pg` split, because J7 (the docs rewrite) has not run. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3 (value constructors) is landed.
+> **Caveat for readers.** The reference docs now reflect the J4 `(col) => Expr` callback param while the `@zeroship/migrate/pg` split remains pending J5/J7 cleanup. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3/J4 are landed.
 
 Because the wire format did not churn across J1–J3 ("zero wire churn"), the **Rust crate structure, the IR shape, the `MigrationBackend` seam, and the dependency graph are stable across the redesign** — what moves is the JS ergonomics and one validate-time backstop (the immutable-context volatility gate, [§7](#7-the-validate-gate--error-taxonomy)).
 
@@ -312,7 +312,7 @@ The crate root's compressed form is `author -> plan (lint) -> gate (approval) ->
 
 ## §3 Authoring: schema-structure DSL
 
-This section documents the TypeScript authoring surface a creator imports to describe schema changes: the migration-module shape, the fluent `table()`/`view()` handles, the `t.*` column lexicon, facets/defaults, constraints, indexes, enums/domains/sequences/schemas/extensions/roles, views, triggers, and partitions. Verified against `sdks/migrate/src/types.ts` (manual authoring types) and `sdks/migrate/src/ops.ts` (recorder implementation), cross-checked against `docs/reference/migrate-dsl-examples.md`. The **expression sublanguage** (`(c) => Expr`) is owned by [§4](#4-authoring-the-expression-sublanguage); this section shows only which builder tier each slot receives and cross-refs §4 for node-level detail.
+This section documents the TypeScript authoring surface a creator imports to describe schema changes: the migration-module shape, the fluent `table()`/`view()` handles, the `t.*` column lexicon, facets/defaults, constraints, indexes, enums/domains/sequences/schemas/extensions/roles, views, triggers, and partitions. Verified against `sdks/migrate/src/types.ts` (manual authoring types) and `sdks/migrate/src/ops.ts` (recorder implementation), cross-checked against `docs/reference/migrate-dsl-examples.md`. The **expression sublanguage** (`(col) => Expr`) is owned by [§4](#4-authoring-the-expression-sublanguage); this section shows only which builder tier each slot receives and cross-refs §4 for node-level detail.
 
 ### 3.1 Architecture in one paragraph
 
@@ -484,7 +484,7 @@ table("users").column("email").comment("primary contact");                   // 
 
 ```ts
 table("users").column("first_name").add({ type: t.text() })
-  .backfill({ set: { first_name: (c) => c("name").splitPart(" ", 1) } });
+  .backfill({ set: { first_name: (col) => col("name").splitPart(" ", 1) } });
 ```
 
 ### 3.9 Constraints
@@ -493,7 +493,7 @@ All named constraints use the **selector form as the sole grammar** — the old 
 
 ```ts
 table("users").unique("users_email_key").add({ columns: ["email"] });
-table("orders").check("orders_qty_positive").add({ expr: (c) => c("qty").gt(0) });
+table("orders").check("orders_qty_positive").add({ expr: (col) => col("qty").gt(0) });
 table("posts").foreignKey("posts_author_fkey")
   .add({ columns: ["author_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
 table("line_items").foreignKey("line_items_order_fkey").add({
@@ -517,10 +517,10 @@ Select with `.index(name)`; `.add({...})` takes target elements plus modifiers. 
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 table("posts").index("posts_created_desc").add({ on: [{ column: "created_at", order: "desc" }] });  // only "desc" serialized
-table("users").index("users_lower_email").add({ on: [{ expr: (c) => c("email").lower() }] });
+table("users").index("users_lower_email").add({ on: [{ expr: (col) => col("email").lower() }] });
 pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
 pgTable("app_session_anchors").index("app_session_anchors_user_idx")
-  .add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
+  .add({ on: ["app_id", "global_user_id"], where: (col) => col("revoked_at").isNull() });
 pgTable("orders").index("orders_customer_idx")
   .add({ on: ["customer_id"], include: ["total", "status"], with: { fillfactor: 90 }, only: true });
 table("orders").index("orders_customer_idx").drop({ ifExists: true });   // PgIndexDropArgs adds concurrently
@@ -538,7 +538,7 @@ enumType("order_status").comment("lifecycle of an order");   enumType("order_sta
 // empty values array throws OP_INVALID (ops.ts:2430-2435)
 
 domain("account_state").create({ as: t.text(),                       // /pg
-  check: (c) => c("VALUE").in(["active","past_due","suspended"]), schema: "zeroship" });
+  check: (col) => col("VALUE").in(["active","past_due","suspended"]), schema: "zeroship" });
 // domain CHECK may reference only the VALUE pseudo-column (ops.ts:2084-2103)
 
 sequence("orders_id_seq").create({ schema: "zeroship", start: 1, increment: 1 });  // as ∈ {int, bigInt}
@@ -556,7 +556,7 @@ Handle interfaces: `EnumHandle` (`types.ts:286-291`), `DomainHandle` (`types.ts:
 
 ```ts
 view("active_users").create({ as: (q) => q.from("users").select(["id","email"])
-  .where((c) => c("deleted_at").isNull()).orderBy(["created_at"]).limit(100) });
+  .where((col) => col("deleted_at").isNull()).orderBy(["created_at"]).limit(100) });
 view("legacy_report").create({ materialized: true,
   as: { raw: "SELECT a.id, count(b.*) FROM a JOIN b USING (id) GROUP BY 1" } });
 ```
@@ -614,9 +614,9 @@ Available on any table handle (no existence guard — DML is unguardable):
 ```ts
 table("plans").insert({ rows: [{ id:"free", name:"Free" }, { id:"pro", name:"Pro" }],
   onConflict: { columns: ["id"], doUpdate: { name: "Pro" } } });   // PG-only; SQLite target => hard build error
-table("plans").update({ set: { name: (c) => lit("Professional") }, where: (c) => c("id").eq("pro") });
-table("plans").delete({ where: (c) => c("id").eq("legacy") });  // where mandatory (no unfiltered delete)
-table("users").backfill({ set: { display_name: (c) => c("nickname").coalesce(c("name")) },
+table("plans").update({ set: { name: (col) => lit("Professional") }, where: (col) => col("id").eq("pro") });
+table("plans").delete({ where: (col) => col("id").eq("legacy") });  // where mandatory (no unfiltered delete)
+table("users").backfill({ set: { display_name: (col) => col("nickname").coalesce(col("name")) },
   cursorColumn: "id" });    // defaults "id"; batchSize defaults 1000
 ```
 
@@ -647,23 +647,23 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 ## §4 Authoring: the expression sublanguage
 
-The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(c) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. This section documents the surface as refreshed through current HEAD `c0b97acf`; citations relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
+The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(col) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. This section documents the surface as refreshed through current HEAD `c0b97acf`; citations relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
 
 ### 4.1 The two authoring shapes
 
-An expression slot accepts three JS forms, resolved by `resolveExpr` (`ops.ts:2039`) / `resolveImmutableExpr` (`ops.ts:2049`): (1) a **`(c) => Expr` callback** (`c` is the injected `ExprBuilder`; `resolveExpr` calls `slot(makeBuilder())` and unwraps via `exprArg`); (2) a **pre-built `ExprChain`** (e.g. `now()` or a saved chain value passed directly → `slot.__node`); (3) a **raw closed `Expr` node** (an object with a string `node` field — the escape for machine-generated IR). `ExprChainImpl` (`ops.ts:1702`) is the sole runtime class; it wraps `__node` and every method returns a fresh `chain(...)`, so chains are immutable and reusable.
+An expression slot accepts three JS forms, resolved by `resolveExpr` (`ops.ts:2039`) / `resolveImmutableExpr` (`ops.ts:2049`): (1) a **`(col) => Expr` callback** (`col` is the injected `ExprBuilder`; `resolveExpr` calls `slot(makeBuilder())` and unwraps via `exprArg`); (2) a **pre-built `ExprChain`** (e.g. `now()` or a saved chain value passed directly → `slot.__node`); (3) a **raw closed `Expr` node** (an object with a string `node` field — the escape for machine-generated IR). `ExprChainImpl` (`ops.ts:1702`) is the sole runtime class; it wraps `__node` and every method returns a fresh `chain(...)`, so chains are immutable and reusable.
 
-### 4.2 The builder handle `c` — column-reference maker
+### 4.2 The builder handle `col` — column-reference maker
 
 The injected handle is a **callable object** (`ExprBuilder`, `types.ts:652`; built by `makeBuilder`, `ops.ts:2008`), invoked to make a column ref and carrying only `case` as a property:
 
 | Form | Produces | Wire node | Source |
 |---|---|---|---|
-| `c("status")` | unqualified column ref | `{ node: "colRef", name }` | `ops.ts:1987` |
-| `c("orders", "id")` | **qualified** column ref (the join-ON fix) | `{ node: "colRef", table, name }` | `ops.ts:1991` |
-| `c.case({ branches, else? })` | searched CASE | `{ node: "case", … }` | `ops.ts:1948` |
+| `col("status")` | unqualified column ref | `{ node: "colRef", name }` | `ops.ts:1987` |
+| `col("orders", "id")` | **qualified** column ref (the join-ON fix) | `{ node: "colRef", table, name }` | `ops.ts:1991` |
+| `col.case({ branches, else? })` | searched CASE | `{ node: "case", … }` | `ops.ts:1948` |
 
-Scalar functions, aggregate functions, regex/column-size operators, and extract fields are now chain methods on the returned `ExprChain` ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); receiver-less functions are top-level imports ([§4.8](#48-value-constructors--top-level-imports-done-j3)). The two-arg form was added because pre-redesign expressions couldn't table-qualify a column, making a view/trigger join's ON clause unwritable. **PLANNED (J4):** the handle is renamed `c` → `col` and becomes context-typed; at current HEAD it is still `c` everywhere.
+Scalar functions, aggregate functions, regex/column-size operators, and extract fields are now chain methods on the returned `ExprChain` ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); receiver-less functions are top-level imports ([§4.8](#48-value-constructors--top-level-imports-done-j3)). The two-arg form was added because pre-redesign expressions couldn't table-qualify a column, making a view/trigger join's ON clause unwritable. **DONE (J4):** the injected authoring handle is spelled `col`; this is a callback parameter rename only and does not change the recorded IR.
 
 ### 4.3 Chain operators (`ExprChainImpl`, `ops.ts:1702`)
 
@@ -686,8 +686,8 @@ The old scalar-function namespace was deleted in J2a. Receiver-ful scalar functi
 
 | Member | Wire node | Notes |
 |---|---|---|
-| `.lower()` / `.upper()` / `.trim()` / `.length()` / `.abs()` | `fnCall` | receiver-first: `c("email").lower()` |
-| `.coalesce(...rest)` | `fnCall fn:"coalesce"` | variadic after the receiver: `c("nickname").coalesce(c("name"), "unknown")` |
+| `.lower()` / `.upper()` / `.trim()` / `.length()` / `.abs()` | `fnCall` | receiver-first: `col("email").lower()` |
+| `.coalesce(...rest)` | `fnCall fn:"coalesce"` | variadic after the receiver: `col("nickname").coalesce(col("name"), "unknown")` |
 | `.nullif(b)` | `fnCall fn:"nullif"` | |
 | `.mod(b)` | `fnCall fn:"mod"` | portable `%` |
 | `.round(n?)` | `fnCall fn:"round"` | optional precision |
@@ -707,7 +707,7 @@ Aggregates were flattened in J2b. Chain methods call `aggNode` → `{ node:"agg"
 | Member | Wire node | Notes |
 |---|---|---|
 | `.count(opts?)` | `{ node:"agg", func:"count", arg:<receiver>, distinct? }` | `opts` is `{ distinct?: boolean }` |
-| `.sum(opts?)` / `.avg(opts?)` / `.min(opts?)` / `.max(opts?)` | `agg` | receiver-first: `c("total").sum({ distinct: true })` |
+| `.sum(opts?)` / `.avg(opts?)` / `.min(opts?)` / `.max(opts?)` | `agg` | receiver-first: `col("total").sum({ distinct: true })` |
 | `countStar()` | `{ node:"agg", func:"count" }` | top-level import for receiver-less `COUNT(*)` |
 
 All five render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate**. The position check is now enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)).
@@ -728,7 +728,7 @@ The `DefaultBuilder` exposes only `{ case }` — deliberately no column accessor
 
 ### 4.8 Value constructors — top-level imports (DONE, J3)
 
-Receiver-less value producers are **top-level named exports** (from `index.ts:29-40`). This is the headline J3 change: most defaults/values need no `(c) =>` callback at all.
+Receiver-less value producers are **top-level named exports** (from `index.ts:29-40`). This is the headline J3 change: most defaults/values need no `(col) =>` callback at all.
 
 | Import | Wire node | Notes |
 |---|---|---|
@@ -748,7 +748,7 @@ Typical post-J3 usage:
 ```ts
 id:         t.uuid().primaryKey().default(genRandomUuid()),
 created_at: t.timestamp().notNull().default(now()),
-using:      (c) => c("app_id").eq(currentSetting("shop.tenant").cast({ to: "uuid" })),  // callback only where you must reference a column
+using:      (col) => col("app_id").eq(currentSetting("shop.tenant").cast({ to: "uuid" })),  // callback only where you must reference a column
 ```
 
 ### 4.9 `dialect({...})` — the portability escape (`ops.ts:1894`)
@@ -757,7 +757,7 @@ The single Layer-2 escape for a per-dialect **value** divergence. Each leg is it
 
 ```ts
 default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
-dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
+dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
 ```
 
 At least one leg must be present or it throws `OP_INVALID`. The engine's validate applies per-target scope math: a target with no own leg and no `default` is refused (`EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`). `validateDefaultExpr` **rejects** any `dialect` node in a default. **PLANNED (J1):** generalize `dialect()` from expression-only to a single context-aware generic usable at **op/spec granularity** (wrapping a whole `IndexSpec`/`ColumnDef`/op). At this commit `dialect()` is expression-only.
@@ -852,7 +852,7 @@ The expression AST (`expr.rs`) is **closed** and **never parsed from text** — 
 
 | `"node"` | Variant @ line | Fields |
 | --- | --- | --- |
-| `colRef` | `ColRef@288` | `name`, `table: Option<String>` (qualified `c("t","col")` sets `table`) |
+| `colRef` | `ColRef@288` | `name`, `table: Option<String>` (qualified `col("t","col")` sets `table`) |
 | `literal` | `Literal@302` | `value: IrScalar` |
 | `binOp` | `BinOp@307` | `op: BinaryOp`, `lhs`, `rhs` (`Box<Expr>`) |
 | `unaryOp` | `UnaryOp@316` | `op: UnaryOp`, `operand` |
@@ -913,9 +913,9 @@ Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--oper
 The mapping is direct and mechanical. From `dml.mig.js` → `dml.golden.json`:
 
 ```javascript
-sc.update({ set: { label: (c) => c("label").coalesce("unknown"), marker: "fixed" },
-            where: (c) => c("code").gt(0) });
-sc.delete({ where: (c) => c("code").isNull(), limit: 100 });   // method del/delete → op "delete"
+sc.update({ set: { label: (col) => col("label").coalesce("unknown"), marker: "fixed" },
+            where: (col) => col("code").gt(0) });
+sc.delete({ where: (col) => col("code").isNull(), limit: 100 });   // method del/delete → op "delete"
 ```
 ```json
 { "op": "update", "table": "status_codes",

@@ -31,9 +31,9 @@ export function up() {
   accounts.setRls({ enabled: true, forced: true });
   accounts.policy("tenant_isolation").create({
     for: "all",
-    using: (c) =>
-      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
-    withCheck: (c) =>
-      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+    using: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+    withCheck: (col) =>
+      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
 }

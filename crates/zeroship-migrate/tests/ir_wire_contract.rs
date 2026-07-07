@@ -494,7 +494,7 @@ fn invalid_base64_bytes_is_rejected() {
 fn expr_ast_is_camel_case_and_round_trips() {
     use zeroship_migrate::model::expr::{BinaryOp, Expr};
     use zeroship_migrate::model::ir::IrScalar;
-    // c("total").gt(0)
+    // col("total").gt(0)
     let e = Expr::BinOp {
         op: BinaryOp::Gt,
         lhs: Box::new(Expr::col("total")),
@@ -545,7 +545,7 @@ fn expr_node_with_unknown_field_is_rejected() {
 fn create_index_where_is_a_closed_expr_not_raw_sql() {
     use zeroship_migrate::model::expr::{BinaryOp, Expr};
     // A `createIndex` with a partial-index predicate authored as the closed AST
-    // the JS `createIndex({where:(c)=>Expr})` emits — it MUST round-trip into a
+    // the JS `createIndex({where:(col)=>Expr})` emits — it MUST round-trip into a
     // typed `Expr`, exactly like IrIndex.where inside createTable.
     let json = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],
         "where":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
