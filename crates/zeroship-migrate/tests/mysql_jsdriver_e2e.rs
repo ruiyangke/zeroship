@@ -524,6 +524,7 @@ fn fixture_ir() -> MigrationIr {
                 { "name": "id", "type": "bigInt", "nullable": false, "identity": { "always": false } },
                 { "name": "email", "type": "string", "nullable": false },
                 { "name": "active", "type": "boolean", "nullable": false },
+                { "name": "business_day", "type": "date", "nullable": false },
                 { "name": "profile", "type": "json", "nullable": true }
             ],
             "primaryKey": ["id"],
@@ -3149,6 +3150,7 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
             types,
             vec![
                 ("active", "boolean", false),
+                ("business_day", "date", false),
                 ("email", "text", false),
                 ("id", "bigint", false),
                 ("profile", "jsonb", true),

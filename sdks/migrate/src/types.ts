@@ -240,7 +240,7 @@ export interface TypeLexicon {
   /** Fixed-length character string (`character(n)` / `CHAR(n)`). */
   char(opts: CharOptions): ColumnDef;
   timestamp(): ColumnDef;
-  /** Narrow SQL DATE token. Validates only as a PostgreSQL domain base type. */
+  /** Portable SQL DATE: PostgreSQL `date`, MySQL `DATE`, SQLite `TEXT` date affinity. */
   date(): ColumnDef;
   uuid(): ColumnDef;
   bytes(): ColumnDef;

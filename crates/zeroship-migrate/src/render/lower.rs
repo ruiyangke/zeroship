@@ -5324,6 +5324,10 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
+        // The shared descriptor kernel reserves `date` for timestamp fields; its
+        // civil-date token is `calendarDate`, which renders PostgreSQL `date`,
+        // MySQL `DATE`, and SQLite `TEXT`. The migration-facing IR spelling stays
+        // `ColType::Date` / `t.date()`.
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
@@ -5830,6 +5834,45 @@ mod tests {
             supersedes: vec![],
             preconditions: vec![],
             checksum: None,
+        }
+    }
+
+    #[test]
+    fn date_columns_render_as_native_date_on_pg_mysql_and_text_on_sqlite() {
+        let ir = create_table_ir(
+            "events",
+            vec![TIrColumn {
+                name: "business_day".into(),
+                ty: ColType::Date,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+
+        for (dialect, expected) in [
+            (SqlDialect::Postgres, "\"business_day\" date NOT NULL"),
+            (SqlDialect::Mysql, "`business_day` DATE NOT NULL"),
+            (SqlDialect::Sqlite, "\"business_day\" TEXT NOT NULL"),
+        ] {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|err| panic!("{dialect:?} date column should lower: {err}"));
+            let create = migrations
+                .iter()
+                .find(|m| m.up.contains("CREATE TABLE"))
+                .unwrap_or_else(|| panic!("{dialect:?} should emit CREATE TABLE: {migrations:#?}"));
+            assert!(
+                create.up.contains(expected),
+                "{dialect:?} date column should render {expected:?}; got:\n{}",
+                create.up
+            );
         }
     }
 
