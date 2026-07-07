@@ -4,9 +4,9 @@
 
 **Who it's for:** engineers modifying the crate, authors writing platform/creator migrations, and reviewers auditing the security substrate.
 
-**Snapshot:** commit `544eaada` (through job J3 of the "PG-first fluent redesign"). The engine core is stable; the authoring *surface* is mid-redesign — where they diverge, the code at this commit is authoritative and the two proposals (`docs/proposals/2026-07-04-dsl-surface-redesign-design.md`, `docs/proposals/2026-07-06-pg-first-fluent-redesign-design.md`) describe direction. See [§0 Status & in-flight redesign](#0-status--in-flight-redesign) for the exact DONE/IN-PROGRESS/PLANNED breakdown.
+**Snapshot:** originally generated at commit `544eaada` (through job J3 of the "PG-first fluent redesign"). The authoring-surface sections have been refreshed through current HEAD `c0b97acf` for J2a/J2b, where scalar functions and aggregates moved off `c.fn`/`c.agg` into chain methods and `c.pg` was deleted. The engine core is stable; where docs/proposals diverge, the code at current HEAD is authoritative and the two proposals (`docs/proposals/2026-07-04-dsl-surface-redesign-design.md`, `docs/proposals/2026-07-06-pg-first-fluent-redesign-design.md`) describe direction. See [§0 Status & in-flight redesign](#0-status--in-flight-redesign) for the exact DONE/PLANNED breakdown.
 
-All file:line citations are relative to the repo root and were read from the source tree at this commit so every claim is checkable.
+All file:line citations are relative to the repo root and were read from the source tree for this guide so every claim is checkable.
 
 ---
 
@@ -30,25 +30,24 @@ All file:line citations are relative to the repo root and were read from the sou
 
 ## §0 Status & in-flight redesign
 
-> **Since-snapshot note (added at landing).** This guide was generated against snapshot `544eaada` (through **J3**). Two further surface jobs have since landed on `refactor/migrate-longtail`: **J2a** (`37dced6a` — the scalar `c.fn.*` functions + `c.pg.extract` became chain methods; `concatWs` an import; **`c.fn`/`c.pg` deleted**) and **J2b** (`e858cc15` — aggregates `c.agg.*` became chain methods `col("x").sum()`, `COUNT(*)` is the `countStar()` import; **`AggNamespace` deleted**, so the builder handle now carries only `case`; plus the `AGGREGATE_IN_SCALAR_CONTEXT` validate backstop). So the `§3`/`§4` examples that still show `c.fn.*`/`c.agg.*`/`c.pg.*` reflect the J3 snapshot and are pending the J7 docs refresh. The **engine** content below is unaffected (zero wire churn across all these jobs).
-
-This snapshot is at commit `544eaada` — *"refactor(migrate): value constructors → top-level imports (J3, P0)"*. The **engine core** (guard, journal, executor, IR, the `MigrationBackend` seam, the validate gate, the trust profiles, the immutable journal) is **stable**. The **authoring grammar** on top of it is mid two nested redesigns:
+This guide was generated at commit `544eaada` — *"refactor(migrate): value constructors → top-level imports (J3, P0)"* — and its authoring-surface notes/examples are refreshed through current HEAD `c0b97acf`, which includes **J2a** (`37dced6a`) and **J2b** (`e858cc15`). The **engine core** (guard, journal, executor, IR, the `MigrationBackend` seam, the validate gate, the trust profiles, the immutable journal) is **stable**. The **authoring grammar** on top of it is mid two nested redesigns:
 
 1. **The v2 DSL constitution** (`docs/proposals/2026-07-04-dsl-surface-redesign-design.md`) — twelve principles P1–P12 reshaping the shipped surface (one grammar/one spelling; one grammatical subject per object; values-are-values; a complete algebra before any escape hatch; raw-is-a-debt-instrument; best-effort native realization with transparent degradation). No back-compat (pre-launch).
 2. **The PG-first re-redesign** (`docs/proposals/2026-07-06-pg-first-fluent-redesign-design.md`), governed by **P0 — "PostgreSQL is first-class."** The core surface *is* PG-shaped, not bent toward a lowest-common-denominator portable core; portability to SQLite/MySQL is explicit, opt-in `dialect({ pg, sqlite, mysql })`, and anything with no native realization and no `dialect()` leg **fails closed** at that target. Sequenced as jobs **J1–J8**.
 
-The crate at `544eaada` is **through J3**:
+The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
 
 | Change | State | Evidence |
 |---|---|---|
 | `dialect()` op/spec generalization | landed (J1 partial) — see caveat | design `2026-07-06:79-90` |
-| `.regex()` / `.columnSize()` core chain methods (off `c.pg`) | **DONE** (J2 part) | `sdks/migrate/src/ops.ts:1783,1786` |
-| Value constructors `now/genRandomUuid/currentSetting/currentUser/interval` as top-level imports | **DONE** (J3) | `ops.ts:1241-1273`; `index.ts:33-37` |
+| `.regex()` / `.columnSize()` core chain methods (off `c.pg`) | **DONE** (J2 part) | `sdks/migrate/src/ops.ts:1770,1773` |
+| Value constructors `now/genRandomUuid/currentSetting/currentUser/interval` as top-level imports | **DONE** (J3) | `ops.ts:1238-1273`; `index.ts:33-37` |
 | Structured `interval(Duration)` (string form removed) | **DONE** | `ops.ts:1268,1668` |
-| `dialect({...})` at expression position | **DONE** | `ops.ts:1821` |
+| `dialect({...})` at expression position | **DONE** | `ops.ts:1894` |
 | Bare-symbol / `{ fn }` **default** forms removed | **DONE** | `ops.ts:1055-1072` |
-| Scalar `c.fn.*` functions → chain methods | **IN PROGRESS / PLANNED** (J2) | still on `c.fn` (`ops.ts:1852`) |
-| `c.pg.extract` → core; retire `c.pg` namespace | **PLANNED** (J2/J5) | `c.pg` present `types.ts:694,710` |
+| Scalar `c.fn.*` functions → chain methods | **DONE** (J2a, `37dced6a`) | chain methods on `ExprChain` (`types.ts:579-601`; `ops.ts:1776-1837`); `c.fn` deleted |
+| `c.pg.extract` → core; retire `c.pg` namespace | **DONE** (J2a, `37dced6a`) | `.extract(field)` accepts portable + PG fields (`types.ts:599`; `ops.ts:1823-1829`); `c.pg` deleted |
+| Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b, `e858cc15`) | `.count/.sum/.avg/.min/.max` (`types.ts:604-608`; `ops.ts:1839-1853`), `countStar()` import (`ops.ts:1872`), `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
 | Rename builder handle `c` → `col` (context-typed generic) | **PLANNED** (J4) | still `c` |
 | `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
 | Retire `@zeroship/migrate/pg` subpath | **PLANNED** (J5) | `pg.ts` still exports `pgTable`/`domain`/`grant`/… |
@@ -366,7 +365,7 @@ The build evaluator drives the recorder: `__begin(phase)` opens a fresh buffer (
 1. **Recording outside a recorder throws `OP_OUTSIDE_RECORDER`** — a `table()` handle may only be used synchronously inside `up()`/`down()` (`ops.ts:327-337`).
 2. A selector handed out but never terminated is a hard `SELECTOR_NOT_TERMINATED` at drain (not eagerly, so a var-held selector terminated on a later line is fine) (`ops.ts:305-324`); terminating twice throws `SELECTOR_ALREADY_TERMINATED` (`ops.ts:476-490`).
 
-Author-facing structured error codes emitted by this surface: `OP_INVALID` (any arg/shape failure), `OP_OUTSIDE_RECORDER`, `SELECTOR_NOT_TERMINATED`, `SELECTOR_ALREADY_TERMINATED`, `EXPR_NOT_PORTABLE` (`c.fn.splitPart` grammar), `NONDETERMINISTIC_OP_ARG` (a lint finding, not a throw). Engine-side codes (`VENDOR_OP_DENIED`, off-target `EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`) fire in the Rust validator ([§7](#7-the-validate-gate--error-taxonomy)).
+Author-facing structured error codes emitted by this surface: `OP_INVALID` (any arg/shape failure), `OP_OUTSIDE_RECORDER`, `SELECTOR_NOT_TERMINATED`, `SELECTOR_ALREADY_TERMINATED`, `EXPR_NOT_PORTABLE` (`.splitPart()` grammar), `NONDETERMINISTIC_OP_ARG` (a lint finding, not a throw). Engine-side codes (`VENDOR_OP_DENIED`, off-target `EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`) fire in the Rust validator ([§7](#7-the-validate-gate--error-taxonomy)).
 
 The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.ts:358-465`) is a discipline mechanism asserting one-producer-per-op-kind. The one multi-producer kind is `addConstraint`, minted five times (`addColumn.unique`, `foreignKey`, `unique`, `check`, `exclusion`).
 
@@ -485,7 +484,7 @@ table("users").column("email").comment("primary contact");                   // 
 
 ```ts
 table("users").column("first_name").add({ type: t.text() })
-  .backfill({ set: { first_name: (c) => c.fn.splitPart(c("name"), " ", 1) } });
+  .backfill({ set: { first_name: (c) => c("name").splitPart(" ", 1) } });
 ```
 
 ### 3.9 Constraints
@@ -518,7 +517,7 @@ Select with `.index(name)`; `.add({...})` takes target elements plus modifiers. 
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 table("posts").index("posts_created_desc").add({ on: [{ column: "created_at", order: "desc" }] });  // only "desc" serialized
-table("users").index("users_lower_email").add({ on: [{ expr: (c) => c.fn.lower(c("email")) }] });
+table("users").index("users_lower_email").add({ on: [{ expr: (c) => c("email").lower() }] });
 pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
 pgTable("app_session_anchors").index("app_session_anchors_user_idx")
   .add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
@@ -617,7 +616,7 @@ table("plans").insert({ rows: [{ id:"free", name:"Free" }, { id:"pro", name:"Pro
   onConflict: { columns: ["id"], doUpdate: { name: "Pro" } } });   // PG-only; SQLite target => hard build error
 table("plans").update({ set: { name: (c) => lit("Professional") }, where: (c) => c("id").eq("pro") });
 table("plans").delete({ where: (c) => c("id").eq("legacy") });  // where mandatory (no unfiltered delete)
-table("users").backfill({ set: { display_name: (c) => c.fn.coalesce(c("nickname"), c("name")) },
+table("users").backfill({ set: { display_name: (c) => c("nickname").coalesce(c("name")) },
   cursorColumn: "id" });    // defaults "id"; batchSize defaults 1000
 ```
 
@@ -625,16 +624,16 @@ table("users").backfill({ set: { display_name: (c) => c.fn.coalesce(c("nickname"
 
 ### 3.17 The builder-tier map (which slot gets which restricted builder)
 
-Every predicate/value position uses a closed portable expression builder, but the *tier* differs by position — deliberately, so a default cannot reference a column, an index predicate cannot use volatile functions, etc. The node-level enumeration of each builder (operators, `c.fn.*`, `c.agg.*`, `dialect()`) is [§4](#4-authoring-the-expression-sublanguage); the tier map:
+Every predicate/value position uses a closed expression builder, but the *tier* differs by position — deliberately, so a default cannot reference a column, an index predicate cannot use volatile functions, etc. The node-level enumeration of chain operators, top-level value constructors, and validate backstops is [§4](#4-authoring-the-expression-sublanguage); the tier map:
 
-| Builder | Where | Column refs? | `c.fn` | `c.agg` | `c.pg` | source |
+| Builder | Where | Column refs? | Scalar chain methods | Aggregates | PG-first nodes | source |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ExprBuilder` | DML where/set, policy, view, trigger | yes | full | yes | yes | `types.ts:703-711` |
-| `DefaultBuilder` | column defaults | **no** | validated immutable | no | no | `types.ts:639-643` |
-| `IndexExprBuilder` | index expr/predicate | yes | immutable | no | no | `types.ts:659` |
-| `GeneratedColumnBuilder` | generated columns | yes | immutable | no | no | `types.ts:663` |
-| `CheckBuilder` / `CheckBuilderWithPg` | table CHECK / PG CHECK | yes | immutable / +`c.pg` | no | core: no / pg: yes | `types.ts:667,724-726` |
-| `DomainValueBuilder` | domain CHECK | VALUE only | immutable | no | yes | `types.ts:738-743` |
+| `ExprBuilder` | DML where/set, policy, view, trigger | yes | yes | yes (`.count`/`.sum`/… plus `countStar()`) | yes; fail-closed off-target | `types.ts:652-656` |
+| `DefaultBuilder` | column defaults | **no** | default-safe subset | no by Rust backstop | no | `types.ts:624-628`, `ops.ts:1085-1175` |
+| `IndexExprBuilder` | index expr/predicate | yes | immutable subset | no by Rust backstop | no, except PG CHECK variants below | `types.ts:624-635` |
+| `GeneratedColumnBuilder` | generated columns | yes | immutable subset | no by Rust backstop | no | `types.ts:638-639` |
+| `CheckBuilder` / `CheckBuilderWithPg` | table CHECK / PG CHECK | yes | immutable subset | no by Rust backstop | core: fail-closed / PG CHECK: allowed on PG | `types.ts:643,669-674` |
+| `DomainValueBuilder` | domain CHECK | VALUE only | immutable subset | no by Rust backstop | allowed on PG | `types.ts:676-685` |
 
 ### 3.18 Determinism lint
 
@@ -648,26 +647,23 @@ Every predicate/value position uses a closed portable expression builder, but th
 
 ## §4 Authoring: the expression sublanguage
 
-The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(c) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. This section documents the whole surface **as it exists at commit `544eaada`**; citations relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
+The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(c) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. This section documents the surface as refreshed through current HEAD `c0b97acf`; citations relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
 
 ### 4.1 The two authoring shapes
 
-An expression slot accepts three JS forms, resolved by `resolveExpr` (`ops.ts:2039`) / `resolveImmutableExpr` (`ops.ts:2049`): (1) a **`(c) => Expr` callback** (`c` is the injected `ExprBuilder`; `resolveExpr` calls `slot(makeBuilder())` and unwraps via `exprArg`); (2) a **pre-built `ExprChain`** (e.g. `now()` or `col.eq(...)` passed directly → `slot.__node`); (3) a **raw closed `Expr` node** (an object with a string `node` field — the escape for machine-generated IR). `ExprChainImpl` (`ops.ts:1702`) is the sole runtime class; it wraps `__node` and every method returns a fresh `chain(...)`, so chains are immutable and reusable.
+An expression slot accepts three JS forms, resolved by `resolveExpr` (`ops.ts:2039`) / `resolveImmutableExpr` (`ops.ts:2049`): (1) a **`(c) => Expr` callback** (`c` is the injected `ExprBuilder`; `resolveExpr` calls `slot(makeBuilder())` and unwraps via `exprArg`); (2) a **pre-built `ExprChain`** (e.g. `now()` or a saved chain value passed directly → `slot.__node`); (3) a **raw closed `Expr` node** (an object with a string `node` field — the escape for machine-generated IR). `ExprChainImpl` (`ops.ts:1702`) is the sole runtime class; it wraps `__node` and every method returns a fresh `chain(...)`, so chains are immutable and reusable.
 
 ### 4.2 The builder handle `c` — column-reference maker
 
-The injected handle is a **callable object** (`ExprBuilder`, `types.ts:703`; built by `makeBuilder`, `ops.ts:2018`), invoked to make a column ref and carrying namespaces as properties:
+The injected handle is a **callable object** (`ExprBuilder`, `types.ts:652`; built by `makeBuilder`, `ops.ts:2008`), invoked to make a column ref and carrying only `case` as a property:
 
 | Form | Produces | Wire node | Source |
 |---|---|---|---|
 | `c("status")` | unqualified column ref | `{ node: "colRef", name }` | `ops.ts:1987` |
 | `c("orders", "id")` | **qualified** column ref (the join-ON fix) | `{ node: "colRef", table, name }` | `ops.ts:1991` |
 | `c.case({ branches, else? })` | searched CASE | `{ node: "case", … }` | `ops.ts:1948` |
-| `c.fn.*` | scalar-function namespace | §4.4 | `ops.ts:1852` |
-| `c.agg.*` | aggregate namespace | §4.5 | `ops.ts:1924` |
-| `c.pg.*` | PG vendor namespace (only `extract` remains) | §4.6 | `ops.ts:1932` |
 
-The two-arg form was added because pre-redesign expressions couldn't table-qualify a column, making a view/trigger join's ON clause unwritable. **PLANNED (J4):** the handle is renamed `c` → `col` and becomes context-typed; at this commit it is still `c` everywhere.
+Scalar functions, aggregate functions, regex/column-size operators, and extract fields are now chain methods on the returned `ExprChain` ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); receiver-less functions are top-level imports ([§4.8](#48-value-constructors--top-level-imports-done-j3)). The two-arg form was added because pre-redesign expressions couldn't table-qualify a column, making a view/trigger join's ON clause unwritable. **PLANNED (J4):** the handle is renamed `c` → `col` and becomes context-typed; at current HEAD it is still `c` everywhere.
 
 ### 4.3 Chain operators (`ExprChainImpl`, `ops.ts:1702`)
 
@@ -676,48 +672,59 @@ Every method returns a fresh `ExprChain`. Bare JS values auto-wrap to a `literal
 - **Comparison** — `bin(op, x)` → `{ node:"binOp", op, lhs, rhs }` (`ops.ts:1707`): `.eq/.ne/.lt/.le/.gt/.ge`. `eq(null)`/`ne(null)` **throw** — "always UNKNOWN in SQL — use isNull()".
 - **Boolean**: `.and(...)`/`.or(...)` left-folded `binOp`; `.not()` → `unaryOp op:"not"`.
 - **Arithmetic** — `binOp`: `.add/.sub/.mul/.div`.
-- **String**: `.concat(...parts)` → left-folded `binOp op:"concat"` (raw `||`; NULL-**skipping** joins are `c.fn.concatWs`).
+- **String**: `.concat(...parts)` → left-folded `binOp op:"concat"` (raw `||`; NULL-**skipping** joins are the top-level `concatWs(sep, ...parts)` import).
 - **Null/bool tests** — `unaryOp`: `.isNull/.isNotNull/.isTrue/.isFalse`.
 - **Cast**: `.cast({ to })` → `{ node:"cast", operand, target }`; the closed target set (`castTargets`, `ops.ts:1626`) is **`text, int, real, boolean, bytes, uuid`**.
 - **Portable predicates**: `.between(low,high)` → `between`; `.like(pattern)` → `like`; `.in(values)`/`.notIn(values)` → `inList` (require a **homogeneous** `Scalar[]`; empty strings, NUL bytes, non-finite numbers rejected; PG renders `= ANY(ARRAY[...])`); `.distinctFrom(x)` → `distinctFrom` (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
-- **PG-first chain operators — DONE in this redesign (J2)**: `.regex(pattern)` → `{ node:"pgRegexMatch", expr, pattern }` (`~` on PG, `REGEXP` on MySQL, **error on SQLite**); `.columnSize()` → `{ node:"pgColumnSize", expr }` (`pg_column_size()` on PG, **error elsewhere**). Previously `c.pg.regex`/`c.pg.columnSize`; the dialect gate now lives in the Rust validator, fail-closed off-target (`ops.ts:1781-1788`, `types.ts:570-577`).
+- **PG-first chain operators — DONE in this redesign (J2)**: `.regex(pattern)` → `{ node:"pgRegexMatch", expr, pattern }` (`~` on PG, `REGEXP` on MySQL, **error on SQLite**); `.columnSize()` → `{ node:"pgColumnSize", expr }` (`pg_column_size()` on PG, **error elsewhere**). Previously `c.pg.regex`/`c.pg.columnSize`; the dialect gate now lives in the Rust validator, fail-closed off-target (`ops.ts:1770-1774`, `types.ts:575-577`).
+- **Scalar functions**: `.lower/.upper/.trim/.length/.abs/.coalesce/.nullif/.mod/.round/.floor/.ceil/.substr/.replace/.extract/.splitPart` record `fnCall`, `extract`/`pgExtract`, or `fnSynth` nodes; see [§4.4](#44-scalar-functions-chain-methods).
+- **Aggregates**: `.count/.sum/.avg/.min/.max` record `agg` nodes with the receiver as `arg`; receiver-less `COUNT(*)` is `countStar()`; see [§4.5](#45-aggregate-functions-chain-methods).
 
-### 4.4 The `c.fn.*` scalar namespace (`FnNamespace`, `types.ts:583`; impl `ops.ts:1852`)
+### 4.4 Scalar functions (chain methods)
 
-Reached only off the handle; there is no importable `fn`. Members build a `fnCall`/`extract`/`fnSynth` node:
+The old scalar-function namespace was deleted in J2a. Receiver-ful scalar functions are now authored off the expression chain and build the same `fnCall`/`extract`/`fnSynth` nodes:
 
 | Member | Wire node | Notes |
 |---|---|---|
-| `lower/upper/trim/length/abs(e)` | `fnCall` | |
-| `coalesce(...args)` | `fnCall fn:"coalesce"` | variadic; **only here, not on the chain** |
-| `nullif(a,b)` | `fnCall fn:"nullif"` | |
-| `mod(a,b)` | `fnCall fn:"mod"` | portable `%` |
-| `round(x, n?)` | `fnCall fn:"round"` | optional precision |
-| `floor(x)` / `ceil(x)` | `fnCall` | |
-| `substr(s, start, len?)` | `fnCall` | 1-based |
-| `replace(s, from, to)` | `fnCall` | |
-| `extract(field, expr)` | `{ node:"extract", field, from }` | portable fields only: `year, month, day, hour, minute, dow` |
-| `concatWs(sep, ...parts)` | `{ node:"fnSynth", fn:"concatWs" }` | NULL-skipping safe join |
-| `splitPart(col, delim, n)` | `{ node:"fnSynth", fn:"splitPart" }` | engine-synthesized portable helper; `splitPartGrammarLint` guards the literal `delim`/`n` |
+| `.lower()` / `.upper()` / `.trim()` / `.length()` / `.abs()` | `fnCall` | receiver-first: `c("email").lower()` |
+| `.coalesce(...rest)` | `fnCall fn:"coalesce"` | variadic after the receiver: `c("nickname").coalesce(c("name"), "unknown")` |
+| `.nullif(b)` | `fnCall fn:"nullif"` | |
+| `.mod(b)` | `fnCall fn:"mod"` | portable `%` |
+| `.round(n?)` | `fnCall fn:"round"` | optional precision |
+| `.floor()` / `.ceil()` | `fnCall` | |
+| `.substr(start, len?)` | `fnCall` | 1-based |
+| `.replace(from, to)` | `fnCall` | |
+| `.extract(field)` | `{ node:"extract", field, from }` or `{ node:"pgExtract", ... }` | portable fields record `extract`; PG-only fields record `pgExtract` and fail closed off-PG |
+| `.splitPart(delim, n)` | `{ node:"fnSynth", fn:"splitPart" }` | engine-synthesized portable helper; `splitPartGrammarLint` guards literal `delim`/`n` |
+| `concatWs(sep, ...parts)` | `{ node:"fnSynth", fn:"concatWs" }` | NULL-skipping safe join; this is a top-level import, not a chain method |
 
-`ImmutableFnNamespace` is the same minus volatiles. **IN PROGRESS (J2):** the redesign flips receiver-ful scalar functions into chain methods (`col("x").lower()`); at this commit they are **still on `c.fn`**.
+Portable `.extract(field)` fields are `year, month, day, hour, minute, dow`. PG-only fields are accepted by the same chain method and recorded as `pgExtract`: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`. The Rust validator rejects a `pgExtract` node on SQLite/MySQL unless the author supplies a dialect leg.
 
-### 4.5 The `c.agg.*` aggregate namespace (`AggNamespace`, `types.ts:678`; impl `ops.ts:1924`)
+### 4.5 Aggregate functions (chain methods)
 
-`aggNode` → `{ node:"agg", func, arg?, distinct? }`: `count(expr?, { distinct? })` (no-arg ⇒ `COUNT(*)`), `sum/avg/min/max(expr, { distinct? })`. All five render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate**. The "aggregate only valid in a grouped/SELECT/HAVING context" position check is deferred to a Phase-2 engine obligation — the recorder builds the node structurally regardless.
+Aggregates were flattened in J2b. Chain methods call `aggNode` → `{ node:"agg", func, arg?, distinct? }`:
 
-### 4.6 The `c.pg.*` vendor namespace (`PgExprNamespace`, `types.ts:694`; impl `ops.ts:1932`)
+| Member | Wire node | Notes |
+|---|---|---|
+| `.count(opts?)` | `{ node:"agg", func:"count", arg:<receiver>, distinct? }` | `opts` is `{ distinct?: boolean }` |
+| `.sum(opts?)` / `.avg(opts?)` / `.min(opts?)` / `.max(opts?)` | `agg` | receiver-first: `c("total").sum({ distinct: true })` |
+| `countStar()` | `{ node:"agg", func:"count" }` | top-level import for receiver-less `COUNT(*)` |
 
-At this commit `c.pg` carries **only `extract`** (regex/columnSize already moved to the core chain). `pgExpr.extract` renders a portable field as `extract` and a PG-only field as `pgExtract`. The PG-only field set: `second, doy, epoch, quarter, week, isodow, isoyear, century, decade, millennium, microseconds, milliseconds, timezone, timezone_hour, timezone_minute`. **PLANNED (J2/J5):** retire `c.pg`, make PG EXTRACT fields first-class on core.
+All five render byte-identically on all three dialects (only quoting differs) so there is **no dialect gate**. The position check is now enforced by the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts such as index expressions/predicates, generated columns, CHECK constraints, and column defaults ([§7.4](#74-the-full-structured-error-code-taxonomy)).
+
+### 4.6 PG extract fields and deleted vendor namespace
+
+The old expression vendor namespace was deleted in J2a. `regex` and `columnSize` are core chain operators ([§4.3](#43-chain-operators-exprchainimpl-opsts1702)); PG EXTRACT fields are reached through the core `.extract(field)` chain method ([§4.4](#44-scalar-functions-chain-methods)). The design remains PostgreSQL-first: these nodes are authorable on the core surface and fail closed when the target dialect lacks a native realization and the author did not provide an explicit `dialect({...})` leg.
 
 ### 4.7 Context-typed builders — the immutable/mutable split
 
-Rather than one polymorphic handle, the recorder hands out **different frozen builder objects** per position (see the tier map in [§3.17](#317-the-builder-tier-map-which-slot-gets-which-restricted-builder)): `makeBuilder()` (full), `immutableExprBuilder()` (no `.agg`/`.pg`, `ops.ts:1995`), `checkWithPgBuilder()` (immutable `.fn` + `.pg`), `domainValueBuilder()` (only `VALUE` refs). Two **runtime validators** back this up by walking the resolved AST:
+Rather than one polymorphic handle, the recorder hands out **different builder objects** per position (see the tier map in [§3.17](#317-the-builder-tier-map-which-slot-gets-which-restricted-builder)): `makeBuilder()` (full column accessor + `case`), `immutableExprBuilder()` (same handle shape, then validated for immutable scalar contexts), `checkWithPgBuilder()` (same, but allows PG-immutable nodes for PG checks), `domainValueBuilder()` (only the `VALUE` chain plus `case`), and `defaultBuilder()` (only `case`). There are no builder namespaces. Two JS-side walkers and two Rust backstops enforce the contexts:
 
-- **`validateImmutableExpr`** (`ops.ts:2142`): rejects `agg`, volatile `fnSynth` (`now`/`genRandomUuid`), `currentSetting`/`currentUser`, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. Allowed scalar fns `IMMUTABLE_SCALAR_FNS`; allowed synth `concatWs`, `splitPart`.
-- **`validateDefaultExpr`** (`ops.ts:1089`): the strictest walk — rejects `colRef` ("a column default cannot reference a column"), `agg`, `extract`, and all `dialect`/`pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `genRandomUuid`, `concatWs`, `splitPart` — so `now()`/`genRandomUuid()` **are** permitted in a default despite being volatile, but a column ref is not.
+- **`validateImmutableExpr`** (`ops.ts:2123`): rejects volatile `fnSynth` (`now`/`genRandomUuid`), `currentSetting`/`currentUser`, non-immutable scalar/synth helpers, and — unless `allowPgImmutable` — the PG nodes `pgRegexMatch`/`pgColumnSize`/`pgExtract`/`pgInterval`. It walks aggregate arguments but does not reject the aggregate node itself; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop is authoritative for aggregate placement.
+- **`validateDefaultExpr`** (`ops.ts:1085`): rejects `colRef` ("a column default cannot reference a column"), `extract`, `dialect`, and all `pg*` nodes. Allowed synth `DEFAULT_SYNTH_FNS` = `now`, `genRandomUuid`, `concatWs`, `splitPart` — so `now()`/`genRandomUuid()` **are** permitted in a default despite being volatile, but a column ref is not. It also walks aggregate arguments; the Rust `AGGREGATE_IN_SCALAR_CONTEXT` backstop rejects aggregates in defaults.
+- **Rust backstops**: `IMMUTABLE_CONTEXT_VOLATILE` rejects volatile functions in immutable SQL contexts, and `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts. These are the fail-closed gates for artifacts that bypass or outpace the TS/JS surface.
 
-The `DefaultBuilder` exposes only `{ fn, case }` — deliberately no `col`/`agg`/`pg`, so a default cannot reference columns/aggregates by construction.
+The `DefaultBuilder` exposes only `{ case }` — deliberately no column accessor — so a default callback cannot reference columns by construction. Aggregates remain type-reachable through prebuilt chains/top-level imports and are rejected by Rust validation.
 
 ### 4.8 Value constructors — top-level imports (DONE, J3)
 
@@ -744,7 +751,7 @@ created_at: t.timestamp().notNull().default(now()),
 using:      (c) => c("app_id").eq(currentSetting("shop.tenant").cast({ to: "uuid" })),  // callback only where you must reference a column
 ```
 
-### 4.9 `dialect({...})` — the portability escape (`ops.ts:1821`)
+### 4.9 `dialect({...})` — the portability escape (`ops.ts:1894`)
 
 The single Layer-2 escape for a per-dialect **value** divergence. Each leg is itself an expression, wrapped by `exprArg`; the node records in canonical leg order `default, pg, sqlite, mysql` → `{ node:"dialect", default?, pg?, sqlite?, mysql? }`:
 
@@ -757,12 +764,12 @@ At least one leg must be present or it throws `OP_INVALID`. The engine's validat
 
 ### 4.10 The P0 principle — "PostgreSQL is first-class"
 
-The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets PostgreSQL first; the core surface **is** PG-shaped and is **not** bent toward a lowest-common-denominator portable core. PG constructs — `~` regex, `pg_column_size`, `current_setting`, RLS, roles/grants, PG EXTRACT fields, `hnsw`/`ivfflat`, `EXCLUDE`, `ON CONFLICT` — are directly usable on the core surface with no `/pg` import and no `c.pg.` casting. Portability to SQLite/MySQL is explicit and opt-in via `dialect({...})` at the exact value/op that diverges; anything with no native realization and no `dialect()` leg **fails closed** at that target.
+The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets PostgreSQL first; the core surface **is** PG-shaped and is **not** bent toward a lowest-common-denominator portable core. PG constructs — `~` regex, `pg_column_size`, `current_setting`, RLS, roles/grants, PG EXTRACT fields, `hnsw`/`ivfflat`, `EXCLUDE`, `ON CONFLICT` — are directly usable on the core surface with no `/pg` import and no vendor-namespace casting. Portability to SQLite/MySQL is explicit and opt-in via `dialect({...})` at the exact value/op that diverges; anything with no native realization and no `dialect()` leg **fails closed** at that target.
 
 ### 4.11 Ambiguities I could not fully confirm
 
 - Op-level `dialect()` (J1) is absent while J3 (value constructors) is landed — the jobs did not land in strict numeric order.
-- `c.agg` position enforcement is explicitly a deferred Phase-2 obligation (`ops.ts:1915`); an aggregate authored in a `where` builds structurally and would (presumably) be rejected downstream — I did not verify the engine leg.
+- Aggregate position enforcement is now verified in the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts. Grouped/SELECT/HAVING ergonomics are still not fully documented here.
 - The Rust-side MySQL render of `.regex` (`REGEXP`) is asserted by the design + the `types.ts:574` comment, but the MySQL leg lives in the engine crate (J8 incremental) — I did not confirm it is implemented vs. still fail-closed.
 
 ---
@@ -775,8 +782,8 @@ The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets P
 
 The platform's authoring layer holds a creator's **declared schema** — the per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel` (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). `render/declarative.rs` turns that into migrations in two phases (`declarative.rs:1-11`, re-exported at `lib.rs:137-141`):
 
-1. **`desired_snapshot(...)`** (P0) — reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
-2. **`DeclarativeAuthor::diff(...)`** (P1 additive + P2 destructive-gated) — introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
+1. **`desired_snapshot(...)`** (approval/risk phase P0, not the PG-first P0 principle) — reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
+2. **`DeclarativeAuthor::diff(...)`** (approval/risk phase P1 additive + P2 destructive-gated) — introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
 
 **Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test (`tests/declarative_pg.rs`) guards the two copies against drift (`declarative.rs:28-45`).
 
@@ -906,7 +913,7 @@ Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--oper
 The mapping is direct and mechanical. From `dml.mig.js` → `dml.golden.json`:
 
 ```javascript
-sc.update({ set: { label: (c) => c.fn.coalesce(c("label"), "unknown"), marker: "fixed" },
+sc.update({ set: { label: (c) => c("label").coalesce("unknown"), marker: "fixed" },
             where: (c) => c("code").gt(0) });
 sc.delete({ where: (c) => c("code").isNull(), limit: 100 });   // method del/delete → op "delete"
 ```
@@ -984,7 +991,8 @@ Every `CODE_*` constant (`validate.rs:55-141`):
 | `COLUMN_FACET_CONFLICT` | Mutually-exclusive facets (`default`+`generated`, `identity`+`generated`). `:98` |
 | `COLUMN_DEFAULT_TYPE` | A default invalid for the declared type (e.g. `{}` on `text[]`). `:101` |
 | `IMMUTABLE_CONTEXT_VOLATILE` | **(J3 backstop)** A volatile function (`now()`, `genRandomUuid()`) in an immutable context. `:104` |
-| `SEQUENCE_OPTION_INVALID` | `increment = 0`, `cache < 1`, or `minValue > maxValue`. `:107` |
+| `AGGREGATE_IN_SCALAR_CONTEXT` | An aggregate appeared in a scalar context (index expr/predicate, generated column, CHECK, or column DEFAULT). `:107` |
+| `SEQUENCE_OPTION_INVALID` | `increment = 0`, `cache < 1`, or `minValue > maxValue`. `:110` |
 | `VENDOR_OP_DENIED` | A privileged vendor op whose required `VendorCapability` isn't granted. `:116` |
 | `PGRAW_REASON_REQUIRED` | A `pgRaw` op with an empty audit `reason`. `:118` |
 | `PRIMARY_KEY_INVALID` | Resolved `primaryKey` empty/duplicated/absent-column. `:121` |
@@ -1003,7 +1011,7 @@ The dispatch runs a fixed sequence BEFORE the per-op expression-slot walk (`vali
 
 ### 7.6 The `Ctx` structural walker — rules (a)/(b)/(c)/(d)
 
-`validate_expr` builds `Ctx { target_dialect, scope, op_index, ts_location }` and calls `walk` → `walk_depth`. The four allow-list rules (`validate.rs:8-24`): **(a)** every node is allow-listed; **(b)** `c.fn.splitPart` args are in-envelope — `delim` a single ASCII-`<0x80` byte `Literal`, `n` a positive integer `Literal` with `1 ≤ n ≤ 8` (`SPLIT_PART_MAX_N = 8`, the O(2ⁿ) inline-unroll bound); **(c)** every `ColRef` resolves to a column on the enclosing target table (cross-table refs impossible by construction; unknown column → `UNSUPPORTED{expr}`); **(d)** a `Cast` target is portable by the closed `CastTarget` enum. `TargetScope::structural_only` **skips (c)** when the caller couldn't resolve the live schema yet — the apply/render seam re-runs (`validate_ir_resolved`). A self-contained `createTable` DOES resolve (c) against its own declared columns at load.
+`validate_expr` builds `Ctx { target_dialect, scope, op_index, ts_location }` and calls `walk` → `walk_depth`. The four allow-list rules (`validate.rs:8-24`): **(a)** every node is allow-listed; **(b)** `.splitPart()` args are in-envelope — `delim` a single ASCII-`<0x80` byte `Literal`, `n` a positive integer `Literal` with `1 ≤ n ≤ 8` (`SPLIT_PART_MAX_N = 8`, the O(2ⁿ) inline-unroll bound); **(c)** every `ColRef` resolves to a column on the enclosing target table (cross-table refs impossible by construction; unknown column → `UNSUPPORTED{expr}`); **(d)** a `Cast` target is portable by the closed `CastTarget` enum. `TargetScope::structural_only` **skips (c)** when the caller couldn't resolve the live schema yet — the apply/render seam re-runs (`validate_ir_resolved`). A self-contained `createTable` DOES resolve (c) against its own declared columns at load.
 
 **DoS guard:** `walk_depth` enforces `MAX_EXPR_DEPTH = 128` (`validate.rs:3866`), owned by the validator (an explicit counter), not left implicit to serde's `recursion_limit`.
 
@@ -1107,7 +1115,7 @@ pub enum Disposition {
 ```
 `Disposition::is_supported()` is "everything except `Unsupported`" (`support.rs:20-22`).
 
-> **Counts — read carefully.** The table has **88 `(kind, variant)` disposition rows** (grep `kind: "` over `dialect_table.rs` → 88; the raw `DispositionRow` literal count is 93 because a handful are in-doc examples). These 88 rows are **not** the same as the **53 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "88 disposition rows" and "53 op kinds" are different axes and must not be conflated.
+> **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' crates/zeroship-migrate/src/model/dialect_table.rs` returns **90**, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself has **88 row literals**, and `grep -cE 'kind: "'` returns **88**, so it covers **88 `(kind, variant)` dispositions**. These 88 dispositions are **not** the same as the **53 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "88 disposition rows" and "53 op kinds" are different axes and must not be conflated.
 
 **Generation & freshness gate.** The table is emitted from a hand-authored sidecar `dialect-support.toml` by `sdks/migrate/scripts/gen-dialect-table.mjs`, which writes **two** artifacts (the Rust const + the TS mirror `sdks/migrate/src/generated/dialect-table.ts`). Regenerate with `pnpm --filter @zeroship/migrate gen:dialect-table`. A regenerate-and-byte-diff CI gate pins both artifacts against the sidecar.
 
@@ -1622,7 +1630,7 @@ Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip
 
 ### 12.3 The full-surface behavioral suite (`full_surface.rs`)
 
-`tests/full_surface.rs` (63 KB) pins individual DSL semantics that would silently regress (where `op_round_trip.rs` proves whole-fixture bytes/checksums). It records inline sources via `record_migration_to_ir_unsandboxed` and asserts on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `c.fn.concatWs(...)` records a `fnSynth(concatWs)` node. This is the file to read to learn what the fluent surface does op-by-op.
+`tests/full_surface.rs` (63 KB) pins individual DSL semantics that would silently regress (where `op_round_trip.rs` proves whole-fixture bytes/checksums). It records inline sources via `record_migration_to_ir_unsandboxed` and asserts on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `concatWs(...)` records a `fnSynth(concatWs)` node. This is the file to read to learn what the fluent surface does op-by-op.
 
 ### 12.4 The embedded-`.ts`/`.js`-in-Rust-string gotcha
 
