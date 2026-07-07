@@ -4401,6 +4401,25 @@ impl Ctx<'_> {
         ))
     }
 
+    fn check_pg_or_mysql_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
+        if matches!(self.target_dialect, Dialect::Postgres | Dialect::Mysql) {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_DIALECT_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"
+            ),
+            Some(
+                "use dialect({ pg: ..., sqlite: ..., mysql: ... }) to provide an explicit \
+                 SQLite leg, or avoid regex on SQLite"
+                    .to_string(),
+            ),
+        ))
+    }
+
     fn check_pg_first_aggregate(&self, name: &'static str) -> Result<(), AuthoringError> {
         if crate::model::support::pg_only_expr_disposition(self.target_dialect).is_supported() {
             return Ok(());
@@ -4548,7 +4567,7 @@ impl Ctx<'_> {
         pattern: &str,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.check_pg_only_expr("PG regex match")?;
+        self.check_pg_or_mysql_expr("regex match")?;
         self.walk_depth(expr, depth)?;
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
@@ -4796,14 +4815,18 @@ mod tests {
     }
 
     #[test]
-    fn pg_only_expr_nodes_validate_on_pg() {
+    fn pg_only_and_pg_mysql_expr_nodes_validate_on_supported_dialects() {
         let c = cols();
         let sc = scope("users", &c);
+        let regex = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^[a-z]+$".to_string(),
+        };
+        for d in [Dialect::Postgres, Dialect::Mysql] {
+            validate_expr(&regex, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("regex expression must validate on {d:?}: {err}"));
+        }
         for e in [
-            Expr::PgRegexMatch {
-                expr: Box::new(Expr::col("name")),
-                pattern: "^[a-z]+$".to_string(),
-            },
             Expr::BinOp {
                 op: BinaryOp::Le,
                 lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
@@ -5031,10 +5054,6 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            Expr::PgRegexMatch {
-                expr: Box::new(Expr::col("name")),
-                pattern: "^[a-z]+$".to_string(),
-            },
             Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
             Expr::PgExtract {
                 field: PgExtractField::Epoch,
@@ -5050,6 +5069,26 @@ mod tests {
                 assert!(err.reason.contains("PostgreSQL-only"), "got: {err}");
             }
         }
+    }
+
+    #[test]
+    fn regex_match_rejects_only_on_sqlite() {
+        let c = cols();
+        let sc = scope("users", &c);
+        let expr = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: "^[a-z]+$".to_string(),
+        };
+        for d in [Dialect::Postgres, Dialect::Mysql] {
+            validate_expr(&expr, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("regex match must validate on {d:?}: {err}"));
+        }
+        let err = validate_expr(&expr, Dialect::Sqlite, &sc, 0, None)
+            .expect_err("regex match must fail closed on SQLite");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.dialect, Dialect::Sqlite);
+        assert!(err.reason.contains("SQLite"), "got: {err}");
     }
 
     #[test]
