@@ -1344,6 +1344,118 @@ pub fn validate_op(
     )
 }
 
+fn validate_dialectal_op(
+    default: Option<&[crate::model::ir::Op]>,
+    pg: Option<&[crate::model::ir::Op]>,
+    sqlite: Option<&[crate::model::ir::Op]>,
+    mysql: Option<&[crate::model::ir::Op]>,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    schema_scope: Option<&crate::model::policy::SchemaScope>,
+    policy_profile: &PolicyProfile,
+) -> Result<(), AuthoringError> {
+    fn mk(
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+        reason: impl Into<String>,
+        suggested_fix: impl Into<String>,
+    ) -> AuthoringError {
+        AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: reason.into(),
+            suggested_fix: Some(suggested_fix.into()),
+        }
+    }
+
+    let legs = [
+        ("default", default),
+        ("pg", pg),
+        ("sqlite", sqlite),
+        ("mysql", mysql),
+    ];
+    if legs.iter().all(|(_, leg)| leg.is_none()) {
+        return Err(mk(
+            target_dialect,
+            op_index,
+            ts_location,
+            "dialectal op carries no legs; at least one of default/pg/sqlite/mysql must be present",
+            "supply at least one dialectal op leg, or remove the dialect() statement",
+        ));
+    }
+    for (label, leg) in legs {
+        let Some(ops) = leg else {
+            continue;
+        };
+        if ops.iter().any(|op| matches!(op, crate::model::ir::Op::Dialectal { .. })) {
+            return Err(mk(
+                target_dialect,
+                op_index,
+                ts_location,
+                format!("dialectal op leg {label:?} contains a nested dialectal op"),
+                "flatten the inner dialect() into the outer leg; nested op-level dialect() is not supported",
+            ));
+        }
+    }
+
+    if let Some(ops) = default {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            for op in ops {
+                validate_op_scoped(
+                    op,
+                    dialect,
+                    op_index,
+                    ts_location,
+                    schema_scope,
+                    policy_profile,
+                )?;
+            }
+        }
+    }
+    if let Some(ops) = pg {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Postgres,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    if let Some(ops) = sqlite {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Sqlite,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    if let Some(ops) = mysql {
+        for op in ops {
+            validate_op_scoped(
+                op,
+                Dialect::Mysql,
+                op_index,
+                ts_location,
+                schema_scope,
+                policy_profile,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// **PR10** — [`validate_op`] threaded with the active
 /// [`SchemaScope`](crate::model::policy::SchemaScope) (§2.7). Runs the schema/guard gate
 /// FIRST, then the per-op expression-slot checks.
@@ -1361,6 +1473,20 @@ pub fn validate_op_scoped(
     use crate::model::ir::{
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
     };
+
+    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        return validate_dialectal_op(
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+            target_dialect,
+            op_index,
+            ts_location,
+            schema_scope,
+            policy_profile,
+        );
+    }
 
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
@@ -1899,7 +2025,8 @@ pub fn validate_op_scoped(
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => Ok(()),
+        | Op::PgRaw { .. }
+        | Op::Dialectal { .. } => Ok(()),
     }
 }
 

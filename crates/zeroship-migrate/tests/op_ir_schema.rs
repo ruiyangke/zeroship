@@ -81,6 +81,7 @@ fn op_variant_names_from_schema() {
     found.sort();
 
     let mut expected: Vec<String> = [
+        "dialectal",
         "createTable",
         "dropTable",
         "createPartition",

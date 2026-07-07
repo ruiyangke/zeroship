@@ -123,6 +123,13 @@ sqlite = "portable"
 mysql = "portable"
 
 [[row]]
+kind = "dialectal"
+variant = "base"
+pg = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
 kind = "createEnum"
 variant = "base"
 pg = "portable"

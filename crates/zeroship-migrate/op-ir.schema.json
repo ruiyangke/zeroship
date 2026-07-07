@@ -1429,6 +1429,60 @@
           ]
         },
         {
+          "description": "A per-dialect op sequence. The target's own leg wins; otherwise `default`\nwins; otherwise the wrapper emits nothing on that target.",
+          "type": "object",
+          "properties": {
+            "default": {
+              "description": "Fallback op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "pg": {
+              "description": "PostgreSQL op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "sqlite": {
+              "description": "SQLite op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "mysql": {
+              "description": "MySQL op sequence.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/Op"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "dialectal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op"
+          ]
+        },
+        {
           "description": "`CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.",
           "type": "object",
           "properties": {
