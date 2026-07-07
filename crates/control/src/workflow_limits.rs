@@ -10,6 +10,18 @@ const PAID_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 const RUN_JOURNAL_LIMIT_FIELD: &str = "workflow_journal_max_bytes";
 const APP_JOURNAL_LIMIT_FIELD: &str = "workflow_app_journal_max_bytes";
 
+#[allow(dead_code)]
+pub(crate) mod operator_pending_g3_workflow_capacity {
+    // operator-pending (G3): placeholder from a single-machine dev bench — operator must re-measure + sign off before GA.
+    //
+    // Documentation-only seed, not a certified GA limit. DW-23 measured a
+    // 128-run backlog at concurrency 32: 10.237 dispatch claims/sec,
+    // 10.054 checkpoint writes/sec, and 281.657 ms replay p95.
+    pub(crate) const MAX_CONCURRENT_RUNS_PER_APP_PLACEHOLDER: i64 = 4;
+    pub(crate) const MAX_DISPATCHES_PER_APP_PER_SEC_PLACEHOLDER: i64 = 2;
+    pub(crate) const MAX_CHECKPOINT_WRITES_PER_APP_PER_SEC_PLACEHOLDER: i64 = 2;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkflowJournalLimits {
     pub run_max_bytes: i64,
