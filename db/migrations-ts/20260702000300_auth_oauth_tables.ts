@@ -1,5 +1,13 @@
-import { nextval, table, t, now, genRandomUuid, interval } from "@zeroship/migrate";
-import { pgTable, sequence } from "@zeroship/migrate/pg";
+import {
+  nextval,
+  table,
+  t,
+  now,
+  genRandomUuid,
+  interval,
+  pgTable,
+  sequence,
+} from "@zeroship/migrate";
 
 export const name = "auth_oauth_tables";
 

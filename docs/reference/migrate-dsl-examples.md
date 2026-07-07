@@ -3,20 +3,19 @@
 A practical, example-driven tour of **every** construct in the `@zeroship/migrate` authoring
 surface. For the normative contract, see `docs/reference/migrate-op-dsl.md`; this guide is the
 cookbook. Examples reflect the shipped API and its arg shapes as verified against
-`sdks/migrate/src/{ops,types,pg}.ts` and the engine. Where the surface is currently awkward or
-limited (redundant spellings, a decorative core/vendor split, expressiveness cliffs), this guide
-flags it inline rather than papering over it.
+`sdks/migrate/src/{ops,types}.ts` and the engine. Where the surface is currently awkward or
+limited (redundant spellings, expressiveness cliffs), this guide flags it inline
+rather than papering over it.
 
-The DSL has **two roots**:
+The DSL has **one import root**:
 
 | Import | Scope | Runs on |
 | --- | --- | --- |
-| `@zeroship/migrate` | Portable core — tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers | PG · SQLite · MySQL |
-| `@zeroship/migrate/pg` | Postgres vendor — domains, sequences, schemas, extensions, roles, grants, functions, RLS policies, vendor index options, `raw` | PG only (fail-closed elsewhere) |
+| `@zeroship/migrate` | Tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers, domains, sequences, schemas, extensions, roles, grants, functions, RLS policies, vendor index options, `raw` | PG first; non-PG targets fail closed where no native realization exists |
 
-Confined creator deploys reject every `/pg` op with `VENDOR_OP_DENIED`; operator/platform callers
-pass an explicit trusted capability. The `/pg` subpath is not a security boundary — it is an
-honesty boundary (see [§20](#20-the-raw-escape-hatch)).
+Confined creator deploys reject privileged vendor ops with `VENDOR_OP_DENIED`; operator/platform
+callers pass an explicit trusted capability. The import path is not a security boundary — the
+engine's per-op `VendorCapability` gate is (see [§20](#20-the-raw-escape-hatch)).
 
 ---
 
@@ -295,14 +294,12 @@ Select with `.index(name)`, then pass the target elements and optional modifiers
 in `.add({…})`.
 
 ```ts
-import {
-  pgTable } from "@zeroship/migrate/pg";
+import { table, pgTable } from "@zeroship/migrate";
 
 // Basic
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 
-// Composite + partial (WHERE predicate is the (col) => Expr builder,
-  PG vendor)
+// Composite + partial (WHERE predicate is the (col) => Expr builder, PG vendor)
 pgTable("app_session_anchors").index("app_session_anchors_user_idx")
   .add({ on: ["app_id",
   "global_user_id"],
@@ -482,12 +479,13 @@ table("orders").create({ columns: { status: t.enum("order_status").notNull() }, 
 
 ---
 
-## 10. Domains (`/pg`)
+## 10. Domains
 
 ```ts
 import {
-  domain } from "@zeroship/migrate/pg";
-import { t,
+  table,
+  domain,
+  t,
   now,
   genRandomUuid,
   currentSetting,
@@ -515,12 +513,12 @@ table("spend_state").create({
 
 ---
 
-## 11. Sequences & `nextval` (`/pg` + core)
+## 11. Sequences & `nextval`
 
 ```ts
 import {
-  sequence } from "@zeroship/migrate/pg";
-import { nextval,
+  sequence,
+  nextval,
   t,
   now,
   genRandomUuid,
@@ -549,9 +547,7 @@ A partition is authored from the parent table handle:
 the parent's `partitionBy`.
 
 ```ts
-import { table, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
-import {
-  pgTable } from "@zeroship/migrate/pg";
+import { table, pgTable, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 // 1) Parent declares the partition strategy at create()
 table("sandbox_events",
@@ -652,11 +648,10 @@ view("legacy_report").create({
 
 ---
 
-## 14. Row-level security & policies (`/pg`)
+## 14. Row-level security & policies
 
 ```ts
-import {
-  pgTable } from "@zeroship/migrate/pg";
+import { pgTable, currentSetting } from "@zeroship/migrate";
 
 // Table-scoped RLS state
 pgTable("apps",
@@ -704,12 +699,10 @@ table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").dro
 
 ---
 
-## 16. Functions (`/pg`)
+## 16. Functions
 
 ```ts
-import {
-  createFunction,
-  dropFunction } from "@zeroship/migrate/pg";
+import { createFunction, dropFunction } from "@zeroship/migrate";
 
 createFunction({
   name: "app_audit_block_tamper",
@@ -725,18 +718,17 @@ dropFunction({ name: "app_audit_block_tamper",
 
 ---
 
-## 17. Schemas,
-  extensions,
-  roles,
-  grants (`/pg`)
+## 17. Schemas, extensions, roles, grants
 
 ```ts
-import { schema,
+import {
+  schema,
   extension,
   role,
   dropOwnedBy,
   grant,
-  revoke } from "@zeroship/migrate/pg";
+  revoke,
+} from "@zeroship/migrate";
 
 schema("zeroship").create();
 schema("zeroship").drop({ cascade: true });
@@ -818,15 +810,14 @@ sequences, constraints, indexes, views).
 
 ---
 
-## 20. The raw escape hatch (`/pg`)
+## 20. The raw escape hatch
 
 `raw` is the last resort for genuinely unrepresentable DDL (e.g. a `CREATE TRIGGER … BEFORE
 UPDATE OF <col>` the structured trigger surface can't yet express, or a PL/pgSQL construct). It
 **requires a `reason`** — the boundary is honest and counted, not aspirational.
 
 ```ts
-import {
-  raw } from "@zeroship/migrate/pg";
+import { raw } from "@zeroship/migrate";
 
 raw({
   sql: "CREATE TRIGGER t BEFORE UPDATE OF sector_identifier ON zeroship.app_oauth_clients " +
@@ -873,5 +864,6 @@ const findings = lintDeterminism(sourceText);
 | Deferrable FK | ✅ | ✅ | omitted (InnoDB immediate) |
 | Domains · sequences · RLS/policies · partitioning · roles · grants · `raw` | ✅ | ✖ fail-closed | ✖ fail-closed |
 
-Anything in `@zeroship/migrate/pg` is Postgres-only and fails closed on other dialects; anything
-in `@zeroship/migrate` renders on all three (with the per-dialect mappings above).
+Postgres-only root exports such as domains, sequences, RLS/policies, roles, grants, and `raw`
+fail closed on other dialects; portable root constructs render on all three with the
+per-dialect mappings above.

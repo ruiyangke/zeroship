@@ -975,7 +975,7 @@ fn sequences_and_exclusion_constraints_record_canonical_ir() {
         import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         import {
   pgTable,
-  sequence } from "@zeroship/migrate/pg";
+  sequence } from "@zeroship/migrate";
         export default { name: "n",
   up() {
             sequence("invoice_seq").create({

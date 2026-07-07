@@ -30,13 +30,15 @@ import {
   interval,
   concatWs,
   countStar,
+  domain,
+  pgTable,
+  sequence,
 } from "../src/index.js";
-import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is now the COMPILED artifact
 // (`dist/embedded-recorder.js`) the `zeroship-migrate` crate `include_str!`s —
-// the same `tsup` build output of `src/{ops,pg}.ts`. Importing it here (instead
+// the same `tsup` build output of `src/ops.ts`. Importing it here (instead
 // of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
 // the SDK source and the shipped engine artifact record byte-identically.
 import {
@@ -59,10 +61,7 @@ function record(up: () => void): any[] {
 async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const pgUrl = pathToFileURL(resolve(process.cwd(), "src/pg.js")).href;
-  const source = (await readFile(sourcePath, "utf8"))
-    .replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`)
-    .replaceAll(`from "@zeroship/migrate/pg"`, `from "${pgUrl}"`);
+  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`);
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
   return import(dataUrl) as Promise<{ up(): void }>;
 }
@@ -73,7 +72,7 @@ function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any
   return engDrain();
 }
 
-test("@zeroship/migrate core exports enumType and omits pg-only/old names", async () => {
+test("@zeroship/migrate core exports enumType, pg vendor names, and omits old names", async () => {
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
@@ -83,6 +82,11 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal(typeof imported.currentUser, "function");
   assert.equal(typeof imported.interval, "function");
   assert.equal(typeof imported.countStar, "function");
+  assert.equal(typeof imported.domain, "function");
+  assert.equal(typeof imported.sequence, "function");
+  assert.equal(typeof imported.pgTable, "function");
+  assert.equal(typeof imported.grant, "function");
+  assert.equal(typeof imported.raw, "function");
   assert.equal((imported as any).p, undefined);
   assert.equal((imported as any).partition, undefined);
   assert.equal((imported as any).dropPartition, undefined);
@@ -93,8 +97,6 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal((imported as any).not, undefined);
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
-  assert.equal((imported as any).domain, undefined);
-  assert.equal((imported as any).sequence, undefined);
 });
 
 test("SA-7: enumType.create rejects an empty values[] at authoring time", () => {

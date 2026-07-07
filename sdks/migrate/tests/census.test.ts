@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { table, t } from "../src/index.js";
+import { pgTable, table, t } from "../src/index.js";
 import { __begin, __drain, opProducerRegistry } from "../src/ops.js";
-import { pgTable } from "../src/pg.js";
 
 function record(up: () => void): any[] {
   __begin();

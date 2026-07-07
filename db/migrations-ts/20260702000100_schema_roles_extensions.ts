@@ -1,5 +1,11 @@
-import { t } from "@zeroship/migrate";
-import { domain, extension, role, schema, sequence } from "@zeroship/migrate/pg";
+import {
+  t,
+  domain,
+  extension,
+  role,
+  schema,
+  sequence,
+} from "@zeroship/migrate";
 
 export const name = "schema_roles_extensions";
 

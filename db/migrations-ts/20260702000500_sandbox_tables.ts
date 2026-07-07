@@ -1,5 +1,4 @@
-import { table, t, now } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, t, now, pgTable } from "@zeroship/migrate";
 
 export const name = "sandbox_tables";
 

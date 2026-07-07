@@ -50,9 +50,9 @@ The crate at current HEAD is through J3 plus J2a/J2b surface flattening:
 | Aggregates `c.agg.*` → chain methods + `countStar()` | **DONE** (J2b, `e858cc15`) | `.count/.sum/.avg/.min/.max` (`types.ts:604-608`; `ops.ts:1839-1853`), `countStar()` import (`ops.ts:1872`), `AGGREGATE_IN_SCALAR_CONTEXT` backstop (`validate.rs:107`) |
 | Rename builder handle `c` → `col` (context-typed generic) | **DONE** (J4) | `(col) => col("x")` across the authoring surface; zero wire churn |
 | `dialect()` at **op/spec** granularity (dialectal-op IR) | **PLANNED** (J1) | expression-only today (`ops.ts:1826`) |
-| Retire `@zeroship/migrate/pg` subpath | **PLANNED** (J5) | `pg.ts` still exports `pgTable`/`domain`/`grant`/… |
+| Retire `@zeroship/migrate/pg` subpath | **DONE** (J5) | `pgTable`/`domain`/`grant`/… are rooted on `@zeroship/migrate`; `pg.ts` and the package subpath are deleted |
 
-> **Caveat for readers.** The reference docs now reflect the J4 `(col) => Expr` callback param while the `@zeroship/migrate/pg` split remains pending J5/J7 cleanup. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3/J4 are landed.
+> **Caveat for readers.** The reference docs now reflect the J4 `(col) => Expr` callback param and J5 one-root import surface. Where the reference docs and the two proposals disagree on surface spelling, **the code at this commit is authoritative** and the proposals describe target direction. Job numbers did not land in strict numeric order — the code has op-level `dialect()` absent while J3/J4/J5 are landed.
 
 Because the wire format did not churn across J1–J3 ("zero wire churn"), the **Rust crate structure, the IR shape, the `MigrationBackend` seam, and the dependency graph are stable across the redesign** — what moves is the JS ergonomics and one validate-time backstop (the immutable-context volatility gate, [§7](#7-the-validate-gate--error-taxonomy)).
 
@@ -198,7 +198,7 @@ The top-level `mod.rs` files carry no doc comment — they are bare `pub mod` re
 | `model/load.rs` | The fail-closed `.ir.json` **load gate**: deserialize → `ir_version` → `validate_ir` → ownership stamp → checksum-hint compare. |
 | `model/policy.rs` | Policy value types shared by model validation and the SQL guard (`SchemaScope`, `TrustProfile`). |
 | `model/profile.rs` | Declarative **policy profiles** + sealed apply profiles (`PolicyProfile`, `SealedProfile`, `PolicyMeet`, `CONFINED_PROFILE_TOML`, `PLATFORM_PROFILE_TOML`, `seal_effective_profile`). |
-| `model/capability.rs` | The VENDOR capability-composition policy for the privileged `@zeroship/migrate/pg` primitives. |
+| `model/capability.rs` | The VENDOR capability-composition policy for privileged root-exported Postgres primitives. |
 | `model/table_shape.rs` | Resolve profile-managed table shape into explicit `createTable` IR (`resolve_create_table_policy`). |
 | `model/backfill.rs` | Pure data for large-table backfill plan steps (`BackfillSpec`). |
 | `model/precondition.rs` | Precondition declaration data (`Precondition`, `CmpOp`, `OnUnmet`, `PreconditionCheck`). |
@@ -318,14 +318,13 @@ This section documents the TypeScript authoring surface a creator imports to des
 
 `ops.ts` is the typed TS peer of the engine-embedded recorder (`crates/zeroship-migrate/src/frontend/migrate_ops.js`, which Rust `include_str!`s into V8). Both emit **byte-identical** dialect-neutral op objects that the closed Rust `Op` enum / `op-ir.schema.json` deserialize; the `.ir.json` wire shape is frozen and the golden corpus plus `Checksum::of_ir` round-trip are the contract (`ops.ts:15-29`). Every terminal on a handle **records eagerly and synchronously** onto an ambient per-migration recorder and returns the handle, so handles are reusable and chainable.
 
-### 3.2 Two import roots
+### 3.2 One import root
 
 | Import | Scope | Runs on |
 | --- | --- | --- |
-| `@zeroship/migrate` | Portable core — tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers, core DML | PG · SQLite · MySQL |
-| `@zeroship/migrate/pg` | Postgres vendor — domains, sequences, schemas, extensions, roles, grants, functions, RLS/policies, vendor index options, `raw` | PG only (fail-closed elsewhere) |
+| `@zeroship/migrate` | Tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers, core DML, domains, sequences, schemas, extensions, roles, grants, functions, RLS/policies, vendor index options, `raw` | PG first; non-PG targets fail closed where no native realization exists |
 
-The `/pg` root is implemented as internal `__pg*` factories that the subpath re-exports under public names (`__pgDomain` → `domain`, `__pgSchema` → `schema`, …; `ops.ts:1386-1482`, `3693`). The `/pg` subpath is an **honesty** boundary, not a security boundary: confined creator deploys reject every `/pg` op with `VENDOR_OP_DENIED`; operator/platform callers pass an explicit trusted capability (`migrate-dsl-examples.md:17-19`). See [§3.15](#315-the-pg-vendor-authoring-surface-pgts) for its full JS-authoring surface, and [§10.4](#10-security-first-design) for the capability gate.
+The former `/pg` root is retired. Public vendor names (`domain`, `schema`, `extension`, `role`, `sequence`, `pgTable`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`, `raw`) are exported directly from `@zeroship/migrate`; the internal `__pg*` factories remain implementation hooks in `ops.ts`. The import path is **not** a security boundary: confined creator deploys reject privileged vendor ops with `VENDOR_OP_DENIED`; operator/platform callers pass an explicit trusted capability. See [§3.15](#315-the-postgres-vendor-authoring-surface) for the JS-authoring surface, and [§10.4](#10-security-first-design) for the capability gate.
 
 ### 3.3 Migration module shape
 
@@ -396,7 +395,7 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 | `t.double()` | — | `double` | float8 — **not** an alias of `t.real()` |
 | `t.inet()` | — | `inet` | PG `inet` |
 | `t.enum(name)` | `string \| EnumHandle` | `{ enum: { name } }` | references an enum type |
-| `t.domain(name)` | `string \| DomainHandle` | `{ domain: { name } }` | references a `/pg` domain |
+| `t.domain(name)` | `string \| DomainHandle` | `{ domain: { name } }` | references a Postgres domain |
 | `t.encrypted(arg)` | `{ of } \| ColumnDef \| ColType` | `{ encrypted: { of: innerType } }` | app-level encrypted column |
 
 Closed token sets validated client-side (friendly `OP_INVALID` before serde): `VECTOR_METRICS = ["cosine","l2","innerProduct"]` (`ops.ts:631`); `SEQUENCE_AS_TYPES = ["int","bigInt"]` (`ops.ts:634`); `MASK_KINDS = ["full","last4","first4","email","name","date-year","date-decade","none"]` (`ops.ts:642-651`); `MASK_CLASSIFICATIONS = ["public","pii","spi","phi","pci","internal"]` (`ops.ts:652-659`).
@@ -537,7 +536,7 @@ enumType("order_status").create({ values: ["pending","paid","shipped"], schema: 
 enumType("order_status").comment("lifecycle of an order");   enumType("order_status").drop({ ifExists: true });
 // empty values array throws OP_INVALID (ops.ts:2430-2435)
 
-domain("account_state").create({ as: t.text(),                       // /pg
+domain("account_state").create({ as: t.text(),                       // Postgres vendor
   check: (col) => col("VALUE").in(["active","past_due","suspended"]), schema: "zeroship" });
 // domain CHECK may reference only the VALUE pseudo-column (ops.ts:2084-2103)
 
@@ -592,18 +591,18 @@ table("sandbox_events").partition("y2026_05").drop();
 
 `minValue`/`maxValue` are frozen sentinels. `PartitionBoundArgs` is exactly one of `{from,to}`, `{in}`, `{modulus,remainder}`, `{default:true}`.
 
-### 3.15 The `/pg` vendor authoring surface (`pg.ts`)
+### 3.15 The Postgres vendor authoring surface
 
-`@zeroship/migrate/pg` (`sdks/migrate/src/pg.ts`) is the privileged Postgres vendor authoring surface — importable so platform/operator migrations can author closed vendor IR, but **not the security gate** (confined creator deploy/load paths reject every op emitted here with `VENDOR_OP_DENIED`; operator callers must pass an explicit platform/trusted capability). The header is explicit: "*Do not add a client-side 'trust' global here: migration JS is untrusted authoring code, so a spoofable flag would only create a false gate*" (`pg.ts:1-12`). Each method records the same op payload shape as the engine-embedded recorder twin. Beyond the handle re-exports (`domain`/`schema`/`extension`/`role`/`sequence`/`pgTable`, `pg.ts:149-157`) it exports six free functions:
+`@zeroship/migrate` is also the privileged Postgres vendor authoring surface — platform/operator migrations can author closed vendor IR from the same root import, but **the import path is not the security gate**. Confined creator deploy/load paths reject privileged vendor ops with `VENDOR_OP_DENIED`; operator callers must pass an explicit platform/trusted capability. Each method records the same op payload shape as before. The vendor handle exports are `domain`, `schema`, `extension`, `role`, `sequence`, and `pgTable`; it also exports six free functions:
 
 | Function | Args (interface) | Records | Validation |
 | --- | --- | --- | --- |
-| `dropOwnedBy({ roles })` | `roles: string[]` | `{ op:"dropOwnedBy", roles }` | `roles` must be an array (`pg.ts:159-164`) |
-| `grant({ privileges, on, to, withGrantOption? })` | `privileges: Privilege[]`, `on: GrantTarget`, `to: string[]` | `{ op:"grant", privileges, on, to, withGrantOption }` | `privileges` non-empty; `on` an object; `to` non-empty (`pg.ts:166-183`) |
-| `revoke({ privileges, on, from })` | as above, `from: string[]` | `{ op:"revoke", privileges, on, from }` | non-empty privileges/from; `on` an object (`pg.ts:185-201`) |
-| `createFunction({ name, returns, language, body, schema?, args?, replace?, volatility? })` | `language: FuncLanguage`, `args?: FuncArg[]`, `volatility?: FuncVolatility` | `{ op:"createFunction", … }` | `name`/`returns`/`language`/`body` must be strings (`pg.ts:203-219`) |
-| `dropFunction({ name, schema?, argTypes?, ifExists? })` | `argTypes?: string[]` | `{ op:"dropFunction", … }` | `name` must be a string (`pg.ts:221-230`) |
-| `raw({ sql, reason })` | `sql: string`, `reason: string` | `{ op:"pgRaw", sql, reason }` | both must be strings — the **required** audit `reason` is enforced client-side, and again as `PGRAW_REASON_REQUIRED` server-side (`pg.ts:232-240`) |
+| `dropOwnedBy({ roles })` | `roles: string[]` | `{ op:"dropOwnedBy", roles }` | `roles` must be an array |
+| `grant({ privileges, on, to, withGrantOption? })` | `privileges: Privilege[]`, `on: GrantTarget`, `to: string[]` | `{ op:"grant", privileges, on, to, withGrantOption }` | `privileges` non-empty; `on` an object; `to` non-empty |
+| `revoke({ privileges, on, from })` | as above, `from: string[]` | `{ op:"revoke", privileges, on, from }` | non-empty privileges/from; `on` an object |
+| `createFunction({ name, returns, language, body, schema?, args?, replace?, volatility? })` | `language: FuncLanguage`, `args?: FuncArg[]`, `volatility?: FuncVolatility` | `{ op:"createFunction", … }` | `name`/`returns`/`language`/`body` must be strings |
+| `dropFunction({ name, schema?, argTypes?, ifExists? })` | `argTypes?: string[]` | `{ op:"dropFunction", … }` | `name` must be a string |
+| `raw({ sql, reason })` | `sql: string`, `reason: string` | `{ op:"pgRaw", sql, reason }` | both must be strings — the **required** audit `reason` is enforced client-side, and again as `PGRAW_REASON_REQUIRED` server-side |
 
 Real corpus usage: `grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: [...] })` (`db/migrations-ts/20260702000900_grants.ts:6`); `createFunction({ body, language: "plpgsql", … })` and `raw({ sql, reason })` where the trigger DSL can't express a column-list UPDATE trigger (`..._functions_triggers_comments.ts:27`). All these ops carry a `VendorCapability` gated by the active profile — see [§10.4](#10-security-first-design). Every free function passes through `record → compact` which drops `undefined` keys so an omitted optional never perturbs the checksum.
 
@@ -641,7 +640,7 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 ### 3.19 Doc drift (cookbook vs. code at `544eaada`)
 
-`docs/reference/migrate-dsl-examples.md` is aspirational/stale in these concrete spots — the code is authoritative: (1) `t.numeric(12, 2)` / `t.char(3)` / `t.vector(1536, {...})` use positional args, but the factories take **options objects**; (2) `.softDelete()`/`.withVersioning()`/`.strictness()` don't exist — the real method is `.setOptions({...})`; (3) `table(...).del({...})` is wrong — the handle method **is** `.delete(args)` (wire tag still `"delete"`); (4) the doc's `/pg` helpers are now documented from the JS-author side in [§3.15](#315-the-pg-vendor-authoring-surface-pgts).
+`docs/reference/migrate-dsl-examples.md` is aspirational/stale in these concrete spots — the code is authoritative: (1) `t.numeric(12, 2)` / `t.char(3)` / `t.vector(1536, {...})` use positional args, but the factories take **options objects**; (2) `.softDelete()`/`.withVersioning()`/`.strictness()` don't exist — the real method is `.setOptions({...})`; (3) `table(...).del({...})` is wrong — the handle method **is** `.delete(args)` (wire tag still `"delete"`); (4) Postgres vendor helpers are documented from the JS-author side in [§3.15](#315-the-postgres-vendor-authoring-surface).
 
 ---
 
@@ -844,7 +843,7 @@ The `Op` enum (`ir.rs:2429-3394`) is closed, internally tagged on `"op"`, camel-
 
 **Views, enums, domains, sequences:** `createView@2923` (`query: ViewQuery`, `materialized`), `dropView@2942`, `createEnum@2958`, `dropEnum@2968`, `createDomain@2981` (`check: Option<Expr>` where a `ColRef` named `VALUE` = the domain value), `dropDomain@3002`, `createSequence@3016` (present-nullable `min_value/max_value/owned_by`), `alterSequence@3063` (`restart: Option<Option<SafeI64>>` — `null` → bare `RESTART`), `dropSequence@3112`. The present-nullable fields use `deserialize_present_nullable` (`ir.rs:150-156`) so the wire distinguishes "absent" (omit clause) from "`null`" (emit `NO MINVALUE`/`RESTART`).
 
-**VENDOR — Postgres-only privileged primitives (`@zeroship/migrate/pg`)** (`ir.rs:3123-3131`): each is `dialect_scope = PgOnly` (a SQLite deploy is hard-rejected at load) and refused fail-closed under a Confined capability set. `password`, `body`, and `sql` are the only free-`String` (raw) fields, still parse-scanned by the guard deny-list. `createSchema@3133`, `dropSchema@3144`, `createExtension@3157` (allowlist-gated), `dropExtension@3168`, `createRole@3180` (`superuser` DENIED at render in all profiles; `if_not_exists` synthesizes a `pg_roles` probe), `alterRole@3213`, `dropRole@3224`, `dropOwnedBy@3232`, `grant@3237` (`to: Vec<String>`, `"public"` = PUBLIC sentinel), `revoke@3249`, `setRls@3258`, `createPolicy@3274` (`using: Expr`, `with_check: Option<Expr>` — closed AST, NOT strings), `dropPolicy@3294`, `createTrigger@3309` (`when: Option<Expr>`), `dropTrigger@3331`, `createFunction@3349` (`body: String` — **the single raw-string escape in the whole DSL**, `ir.rs:3343-3348`), `dropFunction@3372`, `pgRaw@3388` (`sql: String` verbatim + mandatory `reason: String` audit). `Op::is_vendor` (`ir.rs:3402-3405`) is the runtime authority via `vendor_capabilities()`; `support()` (`ir.rs:3411`) drives the per-dialect support matrix.
+**VENDOR — Postgres-only privileged primitives rooted on `@zeroship/migrate`** (`ir.rs:3123-3131`): each is `dialect_scope = PgOnly` (a SQLite deploy is hard-rejected at load) and refused fail-closed under a Confined capability set. `password`, `body`, and `sql` are the only free-`String` (raw) fields, still parse-scanned by the guard deny-list. `createSchema@3133`, `dropSchema@3144`, `createExtension@3157` (allowlist-gated), `dropExtension@3168`, `createRole@3180` (`superuser` DENIED at render in all profiles; `if_not_exists` synthesizes a `pg_roles` probe), `alterRole@3213`, `dropRole@3224`, `dropOwnedBy@3232`, `grant@3237` (`to: Vec<String>`, `"public"` = PUBLIC sentinel), `revoke@3249`, `setRls@3258`, `createPolicy@3274` (`using: Expr`, `with_check: Option<Expr>` — closed AST, NOT strings), `dropPolicy@3294`, `createTrigger@3309` (`when: Option<Expr>`), `dropTrigger@3331`, `createFunction@3349` (`body: String` — **the single raw-string escape in the whole DSL**, `ir.rs:3343-3348`), `dropFunction@3372`, `pgRaw@3388` (`sql: String` verbatim + mandatory `reason: String` audit). `Op::is_vendor` (`ir.rs:3402-3405`) is the runtime authority via `vendor_capabilities()`; `support()` (`ir.rs:3411`) drives the per-dialect support matrix.
 
 ### 6.3 Every `Expr` node
 
@@ -1459,7 +1458,7 @@ Stable rule ids (`denylist::rule`, `denylist.rs:239-284`): `copy_program_rce`, `
 
 ### 10.4 The capability-composition model (VENDOR ops)
 
-The privileged `@zeroship/migrate/pg` primitives are gated not by a hard-coded profile name but by a **composition of boolean capability flags + a schema allowlist** (`model/capability.rs:1-20`) — "the gate keys on `caps.allow_role`, never on `trust == Confined`." Every privileged op declares the closed set of `VendorCapability` it needs (`capability.rs:70-94`):
+The privileged Postgres primitives exported from `@zeroship/migrate` are gated not by a hard-coded profile name but by a **composition of boolean capability flags + a schema allowlist** (`model/capability.rs:1-20`) — "the gate keys on `caps.allow_role`, never on `trust == Confined`." Every privileged op declares the closed set of `VendorCapability` it needs (`capability.rs:70-94`):
 
 | Variant | `flag_name` | Gates |
 | --- | --- | --- |
@@ -1499,7 +1498,7 @@ The trust boundary is closed **by construction** (`guard/mod.rs:71-78`, `compile
 
 Four coordinated mechanisms, each closing the gap the previous one admits:
 
-1. **Capability gate (load)** — any `/pg` vendor op is refused `VENDOR_OP_DENIED` because the Confined/`Single` scope grants no capability.
+1. **Capability gate (load)** — any privileged vendor op is refused `VENDOR_OP_DENIED` because the Confined/`Single` scope grants no capability.
 2. **Parse deny-list (line 1)** — the remaining portable SQL's dangerous surface is hard-denied, including inside `DO`/function bodies and literal-carried leaks.
 3. **Least-privilege role (line 2)** — whatever slips past parse (runtime-constructed `EXECUTE format(...)`, dynamic names) fails at execution.
 4. **Immutable journal** — the migration cannot forge or erase its own history (deny-by-absence of meta-schema grants + the append-only UPDATE/DELETE/TRUNCATE triggers).
@@ -1626,7 +1625,7 @@ Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip
 
 ### 12.2 The IR-schema golden (`op_ir_schema.rs`)
 
-`op-ir.schema.json` (crate root) is the JSON-Schema contract the JS builder targets. `emit_op_ir_schema` (`:28-48`) regenerates via `schemars::schema_for!(MigrationIr)` and asserts equality with the on-disk file (`UPDATE_SCHEMA=1` rewrites). `op_variant_names_from_schema` (`:55-148`) extracts every `"op"` const and asserts it equals a hard-coded list — the authoritative human-readable enumeration, grouped as **37 core** DDL/DML ops + **16 vendor** `@zeroship/migrate/pg` ops = **53**. Adding an op touches: the Rust `Op` enum, this list, the `op_round_trip.rs:235` count, and a corpus fixture — in lockstep.
+`op-ir.schema.json` (crate root) is the JSON-Schema contract the JS builder targets. `emit_op_ir_schema` (`:28-48`) regenerates via `schemars::schema_for!(MigrationIr)` and asserts equality with the on-disk file (`UPDATE_SCHEMA=1` rewrites). `op_variant_names_from_schema` (`:55-148`) extracts every `"op"` const and asserts it equals a hard-coded list — the authoritative human-readable enumeration, grouped as **37 non-privileged** DDL/DML ops + **16 privileged vendor** ops = **53**. Adding an op touches: the Rust `Op` enum, this list, the `op_round_trip.rs:235` count, and a corpus fixture — in lockstep.
 
 ### 12.3 The full-surface behavioral suite (`full_surface.rs`)
 
@@ -1644,7 +1643,7 @@ Regenerate: `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip
 
 ### 12.6 Sandboxed-child corpus parity + the recorder sandbox
 
-`op_round_trip.rs`'s `sandboxed_child_matches_in_process_corpus_including_pg_vendor_subpath` (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output (pinning the `@zeroship/migrate/pg` subpath). `tests/recorder_sandbox_e2e.rs` proves the sandbox at the kernel level: it spawns the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserts on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only.
+`op_round_trip.rs`'s sandboxed-child corpus parity test (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output, including fixtures that exercise rooted Postgres vendor exports. `tests/recorder_sandbox_e2e.rs` proves the sandbox at the kernel level: it spawns the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserts on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only.
 
 ### 12.7 Other golden/preview gates
 

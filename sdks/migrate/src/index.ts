@@ -21,9 +21,15 @@
 export {
   // table DDL/DML entry — the reusable fluent TableHandle
   table,
+  pgTable,
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
   enumType,
+  domain,
+  schema,
+  extension,
+  role,
+  sequence,
   comment,
   check,
   lit,
@@ -40,6 +46,12 @@ export {
   minValue,
   maxValue,
   nextval,
+  dropOwnedBy,
+  grant,
+  revoke,
+  createFunction,
+  dropFunction,
+  raw,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -47,6 +59,15 @@ export {
   fromDb,
   // the determinism lint (best-effort source scan)
   lintDeterminism,
+} from "./ops.js";
+
+export type {
+  CreateFunctionArgs,
+  DropFunctionArgs,
+  DropOwnedByArgs,
+  GrantArgs,
+  PgRawArgs,
+  RevokeArgs,
 } from "./ops.js";
 
 // The single-source `@zeroship/db` field → migration `ColType` reduction (PR5
@@ -99,6 +120,15 @@ export type {
   IndexRef,
   IndexAddArgs,
   IndexDropArgs,
+  PgIndexAdd,
+  PgIndexDropArgs,
+  PgIndexElement,
+  PgIndexMethod,
+  PgIndexRef,
+  PgTableHandle,
+  PolicyCreateArgs,
+  PolicyDropArgs,
+  PolicyRef,
   CreateTableArgs,
   TableRuntimeOptions,
   TableStrictness,
@@ -114,6 +144,34 @@ export type {
   EnumHandle,
   CreateEnumArgs,
   DropEnumArgs,
+  AlterSequenceArgs,
+  CreateDomainArgs,
+  CreateSequenceArgs,
+  DomainCheckFn,
+  DomainHandle,
+  DomainValueBuilder,
+  DroppedExtensionHandle,
+  DroppedRoleHandle,
+  DroppedSchemaHandle,
+  DropDomainArgs,
+  DropSequenceArgs,
+  ExtensionCreateArgs,
+  ExtensionDropArgs,
+  ExtensionHandle,
+  CheckBuilderWithPg,
+  PgCheckDef,
+  PgCheckExprFn,
+  PgCheckRef,
+  PgConstraintRef,
+  RoleCreateArgs,
+  RoleDropArgs,
+  RoleHandle,
+  RoleSetOptionsArgs,
+  SchemaCreateArgs,
+  SchemaDropArgs,
+  SchemaHandle,
+  SequenceHandle,
+  SequenceOwnedBy,
   // op-arg shapes
   InsertArgs,
   UpdateArgs,
@@ -169,6 +227,16 @@ export type {
   OrderItem,
   OrderDir,
 } from "./types.js";
+
+export type {
+  FuncArg,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
+  GrantTarget,
+  PolicyCmd,
+  Privilege,
+} from "./generated/ir.js";
 
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
 // `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported

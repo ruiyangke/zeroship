@@ -5,17 +5,17 @@
 // as the `@zeroship/migrate` module inside its V8 recorder isolate
 // (`crates/zeroship-migrate/src/frontend/embedding.rs`). It replaces the former
 // hand-kept twin `crates/zeroship-migrate/src/frontend/migrate_ops.js`: the SDK
-// recorder (`src/ops.ts` + `src/pg.ts`) and the engine-embedded recorder are now
+// recorder (`src/ops.ts`) and the engine-embedded recorder are now
 // the SAME build output (design P7 — "one compiled recorder artifact").
 //
 // Why a dedicated entry (not the package `.` entry `index.ts`): the engine needs
 // the FULL recorder surface — the internal recorder seam (`__begin`/`__drain`),
 // the derived producer census (`opProducers`/`opProducerRegistry`), the
-// value-position `cCase` helper, the `__pgDomain`/`__pgSequence` handles
-// the `/pg` subpath shim re-aliases, AND the whole `pg.ts` vendor surface — all
-// in ONE module (the `@zeroship/migrate/pg` shim in the engine re-exports from
-// `@zeroship/migrate`). `index.ts` is the narrower npm public API. The export set
-// below is exactly the set the deleted `migrate_ops.js` exposed.
+// value-position `cCase` helper, the legacy internal `__pgDomain`/`__pgSequence`
+// handles, AND the whole public Postgres vendor surface — all in ONE module.
+// `index.ts` is the npm public API; this entry also exposes recorder internals
+// required by the Rust build evaluator. The export set below is exactly the set
+// the deleted `migrate_ops.js` exposed, plus the now-rooted vendor names.
 //
 // The bundle is self-contained except for `@zeroship/db` (kept EXTERNAL in
 // tsup.config.ts): the engine module graph registers `@zeroship/db` as its own
@@ -51,17 +51,14 @@ export {
   t,
   // value-position case helper
   cCase,
-  // PG-only handles the `/pg` shim re-aliases to `domain`/`sequence`
+  // internal PG handles retained for recorder artifact tests
   __pgDomain,
   __pgSequence,
-  // the determinism lint (best-effort source scan)
-  lintDeterminism,
-} from "./ops.js";
-
-export {
+  domain,
   schema,
   extension,
   role,
+  sequence,
   dropOwnedBy,
   grant,
   revoke,
@@ -69,4 +66,6 @@ export {
   createFunction,
   dropFunction,
   raw,
-} from "./pg.js";
+  // the determinism lint (best-effort source scan)
+  lintDeterminism,
+} from "./ops.js";

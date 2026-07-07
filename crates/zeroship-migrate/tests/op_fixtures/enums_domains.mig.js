@@ -1,5 +1,4 @@
-import { enumType, table, t } from "@zeroship/migrate";
-import { domain, pgTable } from "@zeroship/migrate/pg";
+import { enumType, table, t, domain, pgTable } from "@zeroship/migrate";
 
 const planTier = enumType("plan_tier");
 const billingPeriod = domain("billing_period");

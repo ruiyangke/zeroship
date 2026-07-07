@@ -1,5 +1,4 @@
-import { currentSetting } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { currentSetting, pgTable } from "@zeroship/migrate";
 
 export const name = "policies_rls";
 

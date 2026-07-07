@@ -476,6 +476,6 @@ fn raw_view_body_is_not_part_of_pg_only_vendor_sweep() {
     assert_eq!(
         pg_vendor_op_kind(&raw_view),
         None,
-        "RawViewBody is capability-gated, but it is not a PG-only @zeroship/migrate/pg op"
+        "RawViewBody is capability-gated, but it is not a PG-only @zeroship/migrate op"
     );
 }

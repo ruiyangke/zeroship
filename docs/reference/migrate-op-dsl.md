@@ -2,16 +2,22 @@
 
 `@zeroship/migrate` is the no-raw-SQL, fully-structured authoring surface for
 zeroship database migrations. A migration is a `.ts` module that imports the
-portable core helpers it needs from `@zeroship/migrate` and exports a single
+helpers it needs from `@zeroship/migrate` and exports a single
 `default { name?, up, down? }` object. You
 describe schema changes (DDL) and data migrations (DML) once through the fluent
-`table()` handle; the engine lowers them per-dialect and applies them faithfully
-to **both Postgres and SQLite** from one script.
+`table()`/`pgTable()` handles; the engine lowers them per-dialect and applies
+them faithfully. PostgreSQL is the first-class target; constructs with no native
+realization on another target fail closed unless the author supplies an explicit
+dialect leg.
 
-The portable core value exports are `table`, `view`, `enumType`, `comment`, `t`,
-`fromDb`, and `lintDeterminism`. `index`/`foreignKey`/`check`/`unique` stay fluent
-methods on the table handle; they are not top-level exports. `domain` and
-`sequence` are Postgres-only and live under `@zeroship/migrate/pg`.
+There is one import root: `@zeroship/migrate`. Core value exports include
+`table`, `pgTable`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
+`sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
+`raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
+`check`/`unique` stay fluent methods on the table handle; they are not
+top-level exports. Postgres-vendor ops are first-class root exports, and the
+security gate remains the engine's per-op `VendorCapability` validation:
+confined creator migrations receive `VENDOR_OP_DENIED`.
 
 `table(name, { schema? })` is the table authoring entry. There is no flat
 `createTable`/`addColumn`/… vocabulary — table operations are methods (or selector
@@ -463,8 +469,8 @@ deterministically. `.index().drop({ unique: true })` carries `unique` because th
 engine gates a UNIQUE-index drop as destructive (it silently removes a
 data-integrity guarantee) — omit it for a plain, reversible drop.
 PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
-`nullsNotDistinct`, per-element `opclass`/`collation`) are only on
-`pgTable(...).index(...)` from `@zeroship/migrate/pg`.
+`nullsNotDistinct`, per-element `opclass`/`collation`) are authored with
+`pgTable(...).index(...)` from `@zeroship/migrate`.
 
 ### Table data — direct named DML
 
@@ -1118,14 +1124,14 @@ the `--check` generated-artifact gate on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
-> **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
-> subpath exposes direct named exports, not a `pg` namespace object. The current
-> vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
+> **Implemented: Postgres vendor primitives.** `@zeroship/migrate` exposes direct
+> named exports, not a `pg` namespace object. The current vendor value exports
+> are `schema`, `extension`, `role`, `dropOwnedBy`,
 > `grant`, `revoke`, `pgTable`, `createFunction`, `dropFunction`, `domain`,
 > `sequence`, and `raw`.
 > Table-scoped policies are authored as
 > `pgTable(table).policy(name).create/drop(...)`. These are Postgres-only and
-> operator-gated so the platform's own privileged DDL can be authored in the DSL.
+> capability-gated so the platform's own privileged DDL can be authored in the DSL.
 > The engine lowers
 > these vendor ops through the Postgres vendor renderer, hard-gated to the
 > Trusted/Platform profile and unreachable from a Confined creator migration by

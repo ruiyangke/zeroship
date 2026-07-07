@@ -1,5 +1,5 @@
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, t, now, genRandomUuid, pgTable } from "@zeroship/migrate";
+
 export const name = "control_tables";
 
 export function up() {

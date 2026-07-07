@@ -22,10 +22,10 @@ import {
   __drain as pubDrain,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
+  pgTable as pubPgTable,
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-import { pgTable as pubPgTable } from "../src/pg.js";
 // The COMPILED engine-embedded recorder artifact (the file the Rust runtime
 // include_str!s into V8). Importing it directly makes this an oracle against the
 // real shipped engine recording, not a self-referential restatement of the source.
