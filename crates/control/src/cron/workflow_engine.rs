@@ -19,6 +19,7 @@ use zeroship_core::typed_id;
 
 use crate::registry::RegistryError;
 use crate::workflow_limits;
+use crate::workflow_rollout;
 use crate::{AppState, Registry};
 
 /// Default tick cadence. Workflow wake latency is intentionally a scheduler
@@ -1180,6 +1181,13 @@ pub async fn tick_with_dispatcher<D>(
 where
     D: StepDispatcher + 'static,
 {
+    {
+        let conn = state.registry.conn().await?;
+        if workflow_rollout::dispatch_paused(&conn).await? {
+            return Ok(0);
+        }
+    }
+
     reap_parked_cancel_requested_batch(&state.registry, &config).await?;
 
     let current = INFLIGHT_DISPATCHES.load(Ordering::SeqCst);
@@ -1233,13 +1241,18 @@ async fn claim_due_batch(
     let rows = tx
         .query(
             "WITH due_apps AS ( \
-               SELECT app_id, MIN(wake_at) AS first_wake \
-                 FROM zeroship.workflow_runs \
-                WHERE wake_at <= now() \
-                  AND state IN ('queued','running','sleeping','waiting','compensating') \
-                  AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
-                GROUP BY app_id \
-                ORDER BY first_wake, app_id \
+               SELECT r.app_id, MIN(r.wake_at) AS first_wake \
+                 FROM zeroship.workflow_runs r \
+                 JOIN zeroship.apps app ON app.id = r.app_id \
+                 JOIN zeroship.plans plan ON plan.id = app.plan_id \
+                WHERE r.wake_at <= now() \
+                  AND r.state IN ('queued','running','sleeping','waiting','compensating') \
+                  AND (r.claimed_by IS NULL OR r.lease_expires IS NULL OR r.lease_expires <= now()) \
+                  AND app.workflows_enabled \
+                  AND plan.workflows_allowed \
+                  AND NOT plan.archived \
+                GROUP BY r.app_id \
+                ORDER BY first_wake, r.app_id \
                 LIMIT $1 \
              ) \
              SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
@@ -1340,11 +1353,16 @@ where
 {
     let rows = tx
         .query(
-            "SELECT id \
-               FROM zeroship.workflow_runs \
-              WHERE cancel_requested \
-                AND state IN ('queued','sleeping','waiting') \
-              ORDER BY wake_at NULLS FIRST, id \
+            "SELECT r.id \
+               FROM zeroship.workflow_runs r \
+               JOIN zeroship.apps app ON app.id = r.app_id \
+               JOIN zeroship.plans plan ON plan.id = app.plan_id \
+              WHERE r.cancel_requested \
+                AND r.state IN ('queued','sleeping','waiting') \
+                AND app.workflows_enabled \
+                AND plan.workflows_allowed \
+                AND NOT plan.archived \
+              ORDER BY r.wake_at NULLS FIRST, r.id \
               LIMIT $1 \
               FOR UPDATE SKIP LOCKED",
             &[&limit],
@@ -1369,7 +1387,13 @@ where
     tx.execute(
         "UPDATE zeroship.workflow_runs r \
             SET wake_at = now() \
+           FROM zeroship.apps app \
+           JOIN zeroship.plans plan ON plan.id = app.plan_id \
           WHERE r.state = 'waiting' \
+            AND r.app_id = app.id \
+            AND app.workflows_enabled \
+            AND plan.workflows_allowed \
+            AND NOT plan.archived \
             AND (r.wake_at IS NULL OR r.wake_at > now()) \
             AND EXISTS ( \
                 SELECT 1 \

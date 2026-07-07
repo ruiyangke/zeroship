@@ -343,12 +343,17 @@ async fn claim_due_schedules(
     let rows = tx
         .query(
             "WITH due AS ( \
-               SELECT id \
-                 FROM zeroship.workflow_schedules \
-                WHERE enabled \
-                  AND next_fire_at <= now() \
-                  AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
-                ORDER BY next_fire_at, id \
+               SELECT s.id \
+                 FROM zeroship.workflow_schedules s \
+                 JOIN zeroship.apps app ON app.id = s.app_id \
+                 JOIN zeroship.plans plan ON plan.id = app.plan_id \
+                WHERE s.enabled \
+                  AND s.next_fire_at <= now() \
+                  AND (s.claimed_by IS NULL OR s.lease_expires IS NULL OR s.lease_expires <= now()) \
+                  AND app.workflows_enabled \
+                  AND plan.workflows_allowed \
+                  AND NOT plan.archived \
+                ORDER BY s.next_fire_at, s.id \
                 LIMIT $1 \
                 FOR UPDATE SKIP LOCKED \
              ) \
@@ -461,11 +466,16 @@ where
                     s.catch_up_max, s.next_fire_at, d.activated_at, d.created_at \
                FROM zeroship.workflow_schedules s \
                JOIN zeroship.app_deploys d ON d.id = s.deploy_id \
+               JOIN zeroship.apps app ON app.id = s.app_id \
+               JOIN zeroship.plans plan ON plan.id = app.plan_id \
               WHERE s.id = $1 \
                 AND s.enabled \
                 AND s.next_fire_at <= now() \
                 AND s.claimed_by = $2 \
                 AND s.lease_expires > now() \
+                AND app.workflows_enabled \
+                AND plan.workflows_allowed \
+                AND NOT plan.archived \
               FOR UPDATE",
             &[&schedule_id, &owner_id],
         )

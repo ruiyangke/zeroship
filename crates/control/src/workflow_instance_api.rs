@@ -217,6 +217,7 @@ enum WorkflowApiError {
     PayloadTooLarge(String),
     RateLimited { retry_after_secs: f64 },
     RateLimitUnavailable(String),
+    Unavailable(String),
     Database(String),
 }
 
@@ -262,6 +263,9 @@ impl WorkflowApiError {
                     .header("retry-after", "1")
                     .json(&json!({ "error": "rate limit unavailable" }))
             }
+            Self::Unavailable(msg) => web::HttpResponse::ServiceUnavailable()
+                .header("retry-after", "30")
+                .json(&json!({ "error": msg })),
             Self::Database(msg) => infrastructure_error_response("workflow instance API", msg),
         }
     }
@@ -929,6 +933,37 @@ where
     check_app_journal_capacity(conn, app_id, input_journal_bytes, limits.app_max_bytes).await
 }
 
+async fn ensure_app_workflows_enabled<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<(), WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    if crate::workflow_rollout::workflows_enabled_for_app(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?
+    {
+        return Ok(());
+    }
+    Err(WorkflowApiError::Forbidden(
+        "workflows are not enabled for this app or plan".to_string(),
+    ))
+}
+
+async fn ensure_public_ingress_enabled(state: &AppState) -> Result<(), WorkflowApiError> {
+    let conn = state.registry.conn().await.map_err(WorkflowApiError::from)?;
+    if crate::workflow_rollout::ingress_disabled(&conn)
+        .await
+        .map_err(WorkflowApiError::from)?
+    {
+        return Err(WorkflowApiError::Unavailable(
+            "workflow signal ingress is disabled".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn check_signal_journal_capacity<C>(
     conn: &C,
     app_id: &Uuid,
@@ -1112,6 +1147,9 @@ where
     C: compio_postgres::GenericClient + Sync,
 {
     validate_workflow_name(workflow_name).map_err(workflow_api_error_to_registry)?;
+    ensure_app_workflows_enabled(tx, app_id)
+        .await
+        .map_err(workflow_api_error_to_registry)?;
     let key = normalize_key(Some(dedup_key.to_string()))
         .map_err(workflow_api_error_to_registry)?
         .ok_or_else(|| RegistryError::InvalidInput("scheduled workflow key is missing".to_string()))?;
@@ -1149,6 +1187,7 @@ fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
         WorkflowApiError::Unauthorized(msg) | WorkflowApiError::Forbidden(msg) => {
             RegistryError::InvalidInput(msg)
         }
+        WorkflowApiError::Unavailable(msg) => RegistryError::Conflict(msg),
         WorkflowApiError::Database(msg) => RegistryError::Database(msg),
     }
 }
@@ -1172,6 +1211,7 @@ async fn create_run_inner(
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
+    ensure_app_workflows_enabled(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
     let input_journal_bytes = workflow_limits::json_column_size(&tx, &body.input)
         .await
@@ -1329,6 +1369,7 @@ async fn start_many_inner(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    ensure_app_workflows_enabled(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)
         .await
@@ -2067,6 +2108,9 @@ pub async fn ingress_signal(
     if let Err(resp) = check_control_auth(&req, &state) {
         return resp;
     }
+    if let Err(e) = ensure_public_ingress_enabled(&state).await {
+        return e.response();
+    }
     match ingress_signal_inner(&state, body.into_inner()).await {
         Ok(value) => web::HttpResponse::Accepted().json(&value),
         Err(e) => e.response(),
@@ -2104,6 +2148,10 @@ async fn ingress_signal_inner(
     let signal_type = resolve_ingress_signal_type(&claims, body.signal_type)?;
     let app_id = parse_app_id(&claims.app_id)
         .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
+    {
+        let conn = state.registry.conn().await.map_err(WorkflowApiError::from)?;
+        ensure_app_workflows_enabled(&conn, &app_id).await?;
+    }
     let idempotency_key = signal_token_replay_key(&body.token);
     match (claims.run_id.as_deref(), claims.topic.as_deref()) {
         (Some(run_id), None) => {

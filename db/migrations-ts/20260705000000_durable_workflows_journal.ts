@@ -14,6 +14,7 @@ const journalTables = [
   "workflow_signals",
   "workflow_subscriptions",
   "workflow_schedules",
+  "workflow_rollout_config",
 ];
 
 function zs(name) {
@@ -351,6 +352,18 @@ export function up() {
   });
   zs("workflow_schedules").index("workflow_schedules_app_idx").add({ on: ["app_id"] });
 
+  zs("workflow_rollout_config").create({
+    columns: {
+      id: t.text().notNull().default("global"),
+      dispatch_paused: t.boolean().notNull().default(false),
+      ingress_disabled: t.boolean().notNull().default(false),
+      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_by: t.text(),
+    },
+    primaryKey: ["id"],
+  });
+  zs("workflow_rollout_config").check("workflow_rollout_config_id_check").add({ expr: (c) => c("id").eq("global") });
+
   zs("app_deploys").foreignKey("app_deploys_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   zs("workflow_runs").foreignKey("workflow_runs_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   zs("workflow_runs").foreignKey("workflow_runs_deploy_id_fkey").add({ columns: ["deploy_id"], references: { table: "app_deploys", columns: ["id"] } });
@@ -373,6 +386,7 @@ export function down() {
   revoke({ privileges: ["select", "insert", "update", "delete"], on: journalTableTarget(), from: ["zeroship_control"] });
 
   zs("workflow_schedules").drop({ ifExists: true });
+  zs("workflow_rollout_config").drop({ ifExists: true });
   zs("workflow_subscriptions").drop({ ifExists: true });
   zs("workflow_signals").drop({ ifExists: true });
   zs("workflow_steps").drop({ ifExists: true });

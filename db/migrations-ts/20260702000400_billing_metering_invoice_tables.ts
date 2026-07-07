@@ -340,6 +340,7 @@ export function up() {
       fx_pico_cents_per_unit: t.bigInt(),
       spend_limit_default_cents: t.bigInt().notNull().default(0),
       assignable_by_creator: t.boolean().notNull().default(false),
+      workflows_allowed: t.boolean().notNull().default(false),
       runtime_limits_json: t.json().notNull(),
       archived: t.boolean().notNull().default(false),
       created_at: t.timestamp().notNull().default((c) => c.fn.now()),
