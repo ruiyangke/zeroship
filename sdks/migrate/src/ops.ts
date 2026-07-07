@@ -3892,7 +3892,10 @@ export function __makeTableHandle(
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
-      return handle;
+      // B7 (L10): rebind the returned handle to the NEW name so chained ops
+      // after a rename target the new name, not the dead one. (A table rename
+      // keeps the same schema, so `opts`/resolver carry over unchanged.)
+      return __makeTableHandle(args.to, opts, checkExprResolver);
     },
     setOptions(args) {
       recordSetTableOptions(name, { ...args, schema: dflt });
