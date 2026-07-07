@@ -15,7 +15,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -45,6 +45,8 @@ const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
 const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
+const COMPENSATION_WORKFLOW_NAME: &str = "CompensationWorkflow";
+const COMPENSATION_DIVERGENCE_WORKFLOW_NAME: &str = "CompensationNameDivergenceWorkflow";
 const SCHEDULED_WORKFLOW_NAME: &str = "ScheduledWorkflow";
 const BLOB_OUTPUT_WORKFLOW_NAME: &str = "BlobOutputWorkflow";
 const STREAM_LIMIT_WORKFLOW_NAME: &str = "StreamLimitWorkflow";
@@ -52,6 +54,8 @@ const PARENT_CALL_WORKFLOW_NAME: &str = "ParentCallWorkflow";
 const PARENT_START_MANY_WORKFLOW_NAME: &str = "ParentStartManyWorkflow";
 const PARENT_CATCH_CHILD_FAILURE_WORKFLOW_NAME: &str = "ParentCatchChildFailureWorkflow";
 const PARENT_CASCADE_WORKFLOW_NAME: &str = "ParentCascadeWorkflow";
+
+static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -222,6 +226,42 @@ impl StepDispatcher for CrashOnceDispatcher {
 }
 
 #[derive(Clone)]
+struct DropOnceDispatcher {
+    inner: GatewayStepDispatcher,
+    dropped: Arc<Mutex<Option<oneshot::Sender<DispatchOutcome>>>>,
+}
+
+impl DropOnceDispatcher {
+    fn new(gateway_url: String) -> (Self, oneshot::Receiver<DispatchOutcome>) {
+        let (drop_tx, drop_rx) = oneshot::channel();
+        (
+            Self {
+                inner: GatewayStepDispatcher::new(gateway_url),
+                dropped: Arc::new(Mutex::new(Some(drop_tx))),
+            },
+            drop_rx,
+        )
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for DropOnceDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        let drop = self.dropped.lock().expect("dropped lock").take();
+        let Some(drop) = drop else {
+            return self.inner.dispatch(request).await;
+        };
+        let outcome = self.inner.dispatch(request.clone()).await;
+        let _ = drop.send(outcome.clone());
+        DispatchOutcome::Backpressure {
+            run_id: request.run_id,
+            dispatch_nonce: request.dispatch_nonce,
+            reason: "simulated crash after compensation effect".to_string(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CountingDispatcher {
     inner: GatewayStepDispatcher,
     count: Arc<AtomicUsize>,
@@ -320,6 +360,79 @@ fn record_side_effect(cfg: &SideEffectConfig, run_id: &str, step: &str) -> Resul
         .map_err(|e| format!("parse psql count: {e}; stdout={:?}", output.stdout))
 }
 
+fn record_idempotent_commit(
+    cfg: &SideEffectConfig,
+    run_id: &str,
+    step: &str,
+    key: &str,
+) -> Result<serde_json::Value, String> {
+    let run_id = sql_literal(run_id);
+    let step = sql_literal(step);
+    let key = sql_literal(key);
+    let sql = format!(
+        "WITH attempt AS ( \
+             INSERT INTO zeroship.workflow_e2e_effect_attempts \
+                 (run_id, step_name, idempotency_key, created_at) \
+             VALUES ('{run_id}', '{step}', '{key}', now()) \
+             RETURNING 1 \
+         ), inserted AS ( \
+             INSERT INTO zeroship.workflow_e2e_effect_commits \
+                 (run_id, step_name, idempotency_key, created_at) \
+             VALUES ('{run_id}', '{step}', '{key}', now()) \
+             ON CONFLICT (idempotency_key) DO NOTHING \
+             RETURNING 1 \
+         ) \
+         SELECT \
+             (SELECT COUNT(*)::bigint FROM attempt), \
+             (SELECT COUNT(*)::bigint FROM inserted), \
+             (SELECT COUNT(*)::bigint FROM zeroship.workflow_e2e_effect_commits WHERE idempotency_key = '{key}');"
+    );
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(&cfg.pg_container)
+        .arg("psql")
+        .arg("-U")
+        .arg(&cfg.pg_user)
+        .arg("-d")
+        .arg(&cfg.pg_db)
+        .arg("-tA")
+        .arg("-v")
+        .arg("ON_ERROR_STOP=1")
+        .arg("-c")
+        .arg(sql)
+        .output()
+        .map_err(|e| format!("spawn docker exec psql: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "psql failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.trim().split('|');
+    let attempt = parts
+        .next()
+        .ok_or_else(|| format!("missing attempt count: {stdout:?}"))?
+        .parse::<i64>()
+        .map_err(|e| format!("parse attempt count: {e}; stdout={stdout:?}"))?;
+    let inserted = parts
+        .next()
+        .ok_or_else(|| format!("missing inserted count: {stdout:?}"))?
+        .parse::<i64>()
+        .map_err(|e| format!("parse inserted count: {e}; stdout={stdout:?}"))?;
+    let committed = parts
+        .next()
+        .ok_or_else(|| format!("missing committed count: {stdout:?}"))?
+        .parse::<i64>()
+        .map_err(|e| format!("parse committed count: {e}; stdout={stdout:?}"))?;
+    Ok(serde_json::json!({
+        "step": step,
+        "attempt": attempt,
+        "inserted": inserted,
+        "committed": committed,
+    }))
+}
+
 fn write_http(stream: &mut TcpStream, status: &str, body: serde_json::Value) {
     let body = body.to_string();
     let response = format!(
@@ -355,7 +468,11 @@ fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>)
         );
         return;
     }
-    let Some(query) = target.strip_prefix("/bump?") else {
+    let (endpoint, query) = if let Some(query) = target.strip_prefix("/bump?") {
+        ("bump", query)
+    } else if let Some(query) = target.strip_prefix("/commit?") {
+        ("commit", query)
+    } else {
         write_http(
             &mut stream,
             "404 Not Found",
@@ -365,8 +482,9 @@ fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>)
     };
     let mut run_id = None;
     let mut step = None;
+    let mut idempotency_key = None;
     for part in query.split('&') {
-        let Some((key, value)) = part.split_once('=') else {
+        let Some((param, value)) = part.split_once('=') else {
             continue;
         };
         let value = match decode_component(value) {
@@ -380,9 +498,10 @@ fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>)
                 return;
             }
         };
-        match key {
+        match param {
             "run" => run_id = Some(value),
             "step" => step = Some(value),
+            "key" => idempotency_key = Some(value),
             _ => {}
         }
     }
@@ -402,12 +521,22 @@ fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>)
         );
         return;
     };
-    match record_side_effect(&cfg, &run_id, &step) {
-        Ok(count) => write_http(
-            &mut stream,
-            "200 OK",
-            serde_json::json!({"step": step, "count": count}),
-        ),
+    let result = if endpoint == "commit" {
+        let Some(key) = idempotency_key else {
+            write_http(
+                &mut stream,
+                "400 Bad Request",
+                serde_json::json!({"error": "missing key"}),
+            );
+            return;
+        };
+        record_idempotent_commit(&cfg, &run_id, &step, &key)
+    } else {
+        record_side_effect(&cfg, &run_id, &step)
+            .map(|count| serde_json::json!({"step": step, "count": count}))
+    };
+    match result {
+        Ok(body) => write_http(&mut stream, "200 OK", body),
         Err(e) => write_http(
             &mut stream,
             "500 Internal Server Error",
@@ -417,6 +546,13 @@ fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>)
 }
 
 fn start_side_effect_server(cfg: SideEffectConfig, port: u16) {
+    if let Some(started_port) = SIDE_EFFECT_SERVER_PORT.get() {
+        assert_eq!(
+            *started_port, port,
+            "side-effect server already started on a different port"
+        );
+        return;
+    }
     let (started_tx, started_rx) = mpsc::channel();
     let bind = format!("127.0.0.1:{port}");
     thread::Builder::new()
@@ -446,16 +582,34 @@ fn start_side_effect_server(cfg: SideEffectConfig, port: u16) {
         .recv()
         .expect("side-effect server reports startup")
         .expect("side-effect server starts");
+    let _ = SIDE_EFFECT_SERVER_PORT.set(port);
 }
 
 async fn prepare_side_effect_table(pg: &compio_postgres::Client) {
     pg.batch_execute(
-        "CREATE TABLE IF NOT EXISTS zeroship.workflow_e2e_side_effects ( \
+        "DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_attempts; \
+         DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_commits; \
+         DROP TABLE IF EXISTS zeroship.workflow_e2e_side_effects; \
+         CREATE TABLE zeroship.workflow_e2e_side_effects ( \
+            id bigserial PRIMARY KEY, \
             run_id text NOT NULL, \
             step_name text NOT NULL, \
             created_at timestamptz NOT NULL DEFAULT now() \
          ); \
-         TRUNCATE zeroship.workflow_e2e_side_effects;",
+         CREATE TABLE zeroship.workflow_e2e_effect_attempts ( \
+            id bigserial PRIMARY KEY, \
+            run_id text NOT NULL, \
+            step_name text NOT NULL, \
+            idempotency_key text NOT NULL, \
+            created_at timestamptz NOT NULL DEFAULT now() \
+         ); \
+         CREATE TABLE zeroship.workflow_e2e_effect_commits ( \
+            id bigserial PRIMARY KEY, \
+            run_id text NOT NULL, \
+            step_name text NOT NULL, \
+            idempotency_key text NOT NULL UNIQUE, \
+            created_at timestamptz NOT NULL DEFAULT now() \
+         );",
     )
     .await
     .expect("prepare side-effect table");
@@ -574,6 +728,33 @@ async fn seed_completed_step(
         .expect("advance seeded run next_ordinal");
 }
 
+async fn seed_compensable_completed_step(
+    fx: &Fixture,
+    run_id: &str,
+    name: &str,
+    output: serde_json::Value,
+) {
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, output, output_kind, \
+                 batch_id, batch_width, finished_at, compensation_state, compensation_max_attempts) \
+             VALUES ($1, 0, $2, 0, 'run', 'completed', $3, 'inline', 'wfd_seed', 1, now(), 'pending', 1)",
+            &[&run_id, &name, &output],
+        )
+        .await
+        .expect("seed compensable completed workflow step");
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET next_ordinal = GREATEST(next_ordinal, 1) \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("advance compensable seeded run next_ordinal");
+}
+
 async fn run_state(
     pg: &compio_postgres::Client,
     run_id: &str,
@@ -683,6 +864,108 @@ where
     }
     panic!(
         "{label} workflow did not fail: {}",
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn drive_until_cancelled<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+    label: &str,
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..160 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        if state == "cancelled" {
+            return;
+        }
+        if state == "failed" || state == "completed" {
+            panic!(
+                "{label} workflow reached {state} instead of cancelled: {}",
+                run_debug(fx, run_id).await
+            );
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "{label} workflow did not cancel: {}",
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn drive_until_sleeping<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+    label: &str,
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..160 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        if state == "sleeping" {
+            return;
+        }
+        if state == "failed" || state == "completed" || state == "cancelled" {
+            panic!(
+                "{label} reached terminal {state} before sleeping: {}",
+                run_debug(fx, run_id).await
+            );
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "{label} workflow did not sleep: {}",
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn drive_until_compensating<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+    label: &str,
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..320 {
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
+        // Only act on a SETTLED run (no in-flight dispatch). Ticking while a
+        // dispatch is in flight, or immediately after the run enters compensating,
+        // would claim the compensating run and dispatch its FIRST compensator here
+        // — over-driving past the point the caller wants (its crash-drop tick must
+        // be the first compensator dispatch). Waiting for claimed_by to clear after
+        // each tick makes us observe the stable post-apply state and return the
+        // moment c's failure lands the run in compensating, before any compensator.
+        if claimed_by.is_none() {
+            if state == "compensating" {
+                return;
+            }
+            if state == "failed" || state == "completed" || state == "cancelled" {
+                panic!(
+                    "{label} reached terminal {state} before compensating: {}",
+                    run_debug(fx, run_id).await
+                );
+            }
+            workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "{label} workflow did not enter compensating: {}",
         run_debug(fx, run_id).await
     );
 }
@@ -932,6 +1215,118 @@ async fn side_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
         .into_iter()
         .map(|row| (row.get("step_name"), row.get("n")))
         .collect()
+}
+
+async fn ordered_side_effect_steps(fx: &Fixture, run_id: &str) -> Vec<String> {
+    fx.pg
+        .query(
+            "SELECT step_name \
+               FROM zeroship.workflow_e2e_side_effects \
+              WHERE run_id = $1 \
+              ORDER BY id",
+            &[&run_id],
+        )
+        .await
+        .expect("load side effect order")
+        .into_iter()
+        .map(|row| row.get("step_name"))
+        .collect()
+}
+
+async fn effect_attempt_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
+    fx.pg
+        .query(
+            "SELECT step_name, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_e2e_effect_attempts \
+              WHERE run_id = $1 \
+              GROUP BY step_name",
+            &[&run_id],
+        )
+        .await
+        .expect("load compensation attempt counts")
+        .into_iter()
+        .map(|row| (row.get("step_name"), row.get("n")))
+        .collect()
+}
+
+async fn effect_commit_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
+    fx.pg
+        .query(
+            "SELECT step_name, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_e2e_effect_commits \
+              WHERE run_id = $1 \
+              GROUP BY step_name",
+            &[&run_id],
+        )
+        .await
+        .expect("load compensation commit counts")
+        .into_iter()
+        .map(|row| (row.get("step_name"), row.get("n")))
+        .collect()
+}
+
+async fn ordered_commit_steps(fx: &Fixture, run_id: &str) -> Vec<String> {
+    fx.pg
+        .query(
+            "SELECT step_name \
+               FROM zeroship.workflow_e2e_effect_commits \
+              WHERE run_id = $1 \
+              ORDER BY id",
+            &[&run_id],
+        )
+        .await
+        .expect("load compensation commit order")
+        .into_iter()
+        .map(|row| row.get("step_name"))
+        .collect()
+}
+
+async fn compensation_step_rows(
+    fx: &Fixture,
+    run_id: &str,
+) -> Vec<(i32, String, Option<String>, i32)> {
+    fx.pg
+        .query(
+            "SELECT ordinal, name, compensation_state, compensation_attempt \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND compensation_state IS NOT NULL \
+              ORDER BY ordinal",
+            &[&run_id],
+        )
+        .await
+        .expect("load compensation step rows")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("ordinal"),
+                row.get("name"),
+                row.get("compensation_state"),
+                row.get("compensation_attempt"),
+            )
+        })
+        .collect()
+}
+
+async fn run_compensation_status(
+    fx: &Fixture,
+    run_id: &str,
+) -> (String, Option<String>, Option<String>, Option<serde_json::Value>) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT state, compensation_target, compensation_outcome, error \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load compensation run status");
+    (
+        row.get("state"),
+        row.get("compensation_target"),
+        row.get("compensation_outcome"),
+        row.get("error"),
+    )
 }
 
 async fn run_output(fx: &Fixture, run_id: &str) -> serde_json::Value {
@@ -1217,6 +1612,40 @@ async fn post_control(
         String::from_utf8_lossy(&body_bytes)
     );
     serde_json::from_slice(&body_bytes).expect("control response json")
+}
+
+async fn post_control_raw(
+    control_url: &str,
+    app_id: Uuid,
+    run_id: &str,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let url = format!(
+        "{}/internal/workflows/runs/{}/{}",
+        control_url.trim_end_matches('/'),
+        run_id,
+        op
+    );
+    let bytes = serde_json::to_vec(&body).expect("control body json");
+    let client = cyper::Client::new();
+    let response = client
+        .post(&url)
+        .expect("control request URL")
+        .header("content-type", "application/json")
+        .expect("content-type header")
+        .header("x-zeroship-app-id", app_id.to_string())
+        .expect("app id header")
+        .body(bytes)
+        .send()
+        .await
+        .expect("post control");
+    let status = response.status().as_u16();
+    let body_bytes = response.bytes().await.expect("read control response");
+    let value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+        serde_json::json!({ "raw": String::from_utf8_lossy(&body_bytes).to_string() })
+    });
+    (status, value)
 }
 
 async fn get_output_bytes(
@@ -3007,5 +3436,235 @@ async fn bare_await_body_io_is_rejected() {
     assert!(
         bare_dispatcher.count() >= 1,
         "bare-await workflow should have dispatched at least once"
+    );
+}
+
+#[compio::test]
+#[serial]
+async fn compensation_saga_rollback_real_spine() {
+    if !enabled() {
+        eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
+        return;
+    }
+
+    let db_url = required_env("CONTROL_TEST_DB");
+    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL");
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        .parse()
+        .expect("app id uuid");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+        .parse()
+        .expect("side port");
+    let side_cfg = SideEffectConfig {
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+    };
+
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    prepare_side_effect_table(&fx.pg).await;
+    start_side_effect_server(side_cfg, side_port);
+    compio::time::sleep(Duration::from_millis(100)).await;
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+
+    let failed_run = seed_workflow_run(
+        &fx,
+        COMPENSATION_WORKFLOW_NAME,
+        serde_json::json!({"case": "fail"}),
+    )
+    .await;
+    let error = drive_until_failed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-failure-rollback"),
+        &failed_run,
+        "DW18 failure rollback",
+    )
+    .await;
+    assert_eq!(error["compensation"]["outcome"], "completed");
+    assert_eq!(
+        ordered_side_effect_steps(&fx, &failed_run).await,
+        vec!["a".to_string(), "b".to_string()]
+    );
+    assert_eq!(
+        ordered_commit_steps(&fx, &failed_run).await,
+        vec!["undo:b".to_string(), "undo:a".to_string()],
+        "completed compensators must run in reverse ordinal order"
+    );
+    assert_eq!(
+        compensation_step_rows(&fx, &failed_run).await,
+        vec![
+            (0, "a".to_string(), Some("completed".to_string()), 1),
+            (1, "b".to_string(), Some("completed".to_string()), 1),
+        ]
+    );
+    let (state, target, outcome, _) = run_compensation_status(&fx, &failed_run).await;
+    assert_eq!(state, "failed");
+    assert_eq!(target.as_deref(), Some("failed"));
+    assert_eq!(outcome.as_deref(), Some("completed"));
+
+    let (restart_status, restart_body) = post_control_raw(
+        &control_url,
+        fx.app_id,
+        &failed_run,
+        "restart",
+        serde_json::json!({"from": {"name": "b"}}),
+    )
+    .await;
+    assert_eq!(
+        restart_status, 409,
+        "restart past settled compensation should be rejected: {restart_body:?}"
+    );
+    assert_eq!(restart_body["error"], "RestartError");
+
+    let crash_run = seed_workflow_run(
+        &fx,
+        COMPENSATION_WORKFLOW_NAME,
+        serde_json::json!({"case": "crash"}),
+    )
+    .await;
+    drive_until_compensating(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-crash-enter"),
+        &crash_run,
+        "DW18 crash enter",
+    )
+    .await;
+    let (drop_dispatcher, dropped_rx) = DropOnceDispatcher::new(gateway_url.clone());
+    let drop_dispatcher = Arc::new(drop_dispatcher);
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&drop_dispatcher),
+        config("dw18-crash-drop"),
+    )
+    .await
+    .expect("DW18 crash-drop tick");
+    assert_eq!(claimed, 1);
+    let dropped = dropped_rx.await.expect("DW18 dropped compensation outcome");
+    let DispatchOutcome::Completed(dropped_result) = dropped else {
+        panic!("DW18 dropped dispatch did not produce a StepResult");
+    };
+    assert_eq!(dropped_result.run_id, crash_run);
+    assert!(
+        dropped_result
+            .outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, workflow_engine::StepOutcome::CompensationCompleted { ordinal: 1, .. })),
+        "first compensation dispatch should complete b's compensator"
+    );
+    compio::time::sleep(Duration::from_millis(150)).await;
+    let attempts_after_drop = effect_attempt_counts(&fx, &crash_run).await;
+    let commits_after_drop = effect_commit_counts(&fx, &crash_run).await;
+    assert_eq!(attempts_after_drop.get("undo:b").copied(), Some(1));
+    assert_eq!(commits_after_drop.get("undo:b").copied(), Some(1));
+
+    drive_until_failed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-crash-redrive"),
+        &crash_run,
+        "DW18 crash redrive",
+    )
+    .await;
+    let attempts = effect_attempt_counts(&fx, &crash_run).await;
+    let commits = effect_commit_counts(&fx, &crash_run).await;
+    assert_eq!(
+        attempts.get("undo:b").copied(),
+        Some(2),
+        "crash after compensator effect should redrive the pending marker"
+    );
+    assert_eq!(
+        commits.get("undo:b").copied(),
+        Some(1),
+        "idempotency marker must commit b's compensation effect once"
+    );
+    assert_eq!(attempts.get("undo:a").copied(), Some(1));
+    assert_eq!(commits.get("undo:a").copied(), Some(1));
+    assert_eq!(
+        compensation_step_rows(&fx, &crash_run).await,
+        vec![
+            (0, "a".to_string(), Some("completed".to_string()), 1),
+            (1, "b".to_string(), Some("completed".to_string()), 1),
+        ]
+    );
+
+    let nondet_run = seed_workflow_run(
+        &fx,
+        COMPENSATION_DIVERGENCE_WORKFLOW_NAME,
+        serde_json::json!({"case": "nondeterministic"}),
+    )
+    .await;
+    seed_compensable_completed_step(
+        &fx,
+        &nondet_run,
+        "expected",
+        serde_json::json!({"step": "expected"}),
+    )
+    .await;
+    let nondet_error = drive_until_failed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-nondet"),
+        &nondet_run,
+        "DW18 nondeterministic fail-closed",
+    )
+    .await;
+    assert_eq!(nondet_error["type"], "NondeterministicError");
+    assert!(
+        effect_commit_counts(&fx, &nondet_run).await.is_empty(),
+        "nondeterministic replay must not run compensators off an untrusted prefix"
+    );
+    let (state, target, outcome, _) = run_compensation_status(&fx, &nondet_run).await;
+    assert_eq!(state, "failed");
+    assert!(target.is_none());
+    assert!(outcome.is_none());
+
+    let cancel_run = seed_workflow_run(
+        &fx,
+        COMPENSATION_WORKFLOW_NAME,
+        serde_json::json!({"case": "cancel-compensate"}),
+    )
+    .await;
+    drive_until_sleeping(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-cancel-park"),
+        &cancel_run,
+        "DW18 cancel park",
+    )
+    .await;
+    let cancel = post_control(
+        &control_url,
+        fx.app_id,
+        &cancel_run,
+        "cancel",
+        serde_json::json!({"mode": "compensate"}),
+    )
+    .await;
+    assert_eq!(cancel["state"], "compensating");
+    drive_until_cancelled(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw18-cancel-compensate"),
+        &cancel_run,
+        "DW18 cancel compensate",
+    )
+    .await;
+    assert_eq!(
+        ordered_commit_steps(&fx, &cancel_run).await,
+        vec!["undo:b".to_string(), "undo:a".to_string()]
+    );
+    let (state, target, outcome, error) = run_compensation_status(&fx, &cancel_run).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(target.as_deref(), Some("cancelled"));
+    assert_eq!(outcome.as_deref(), Some("completed"));
+    assert_eq!(
+        error
+            .and_then(|e| e.get("compensation").cloned())
+            .and_then(|c| c.get("outcome").cloned()),
+        Some(serde_json::Value::String("completed".to_string()))
     );
 }

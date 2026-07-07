@@ -53,6 +53,7 @@ export interface JournalStepRecord {
   signalType?: string;
   consumedSignal?: SignalEnvelope<unknown> | null;
   childRunId?: string;
+  compensationState?: "pending" | "running" | "completed" | "failed";
 }
 
 export interface JournalEnvelope {
@@ -88,6 +89,8 @@ export type FrontierOutcome =
       config?: StepConfig<unknown>;
       outputMode?: string;
       outputContentType?: string;
+      compensable?: boolean;
+      compensationMaxAttempts?: number;
     }
   | {
       kind: "run";
@@ -508,6 +511,7 @@ class JournalBackedStep implements WorkflowStep {
     try {
       const output = await this.#withTimeout(bodyPromise, config?.timeout);
       const outputConfig = workflowOutputConfig(config);
+      const compensable = hasCompensator(config);
       return {
         kind: "run",
         ordinal: issued.ordinal,
@@ -516,6 +520,7 @@ class JournalBackedStep implements WorkflowStep {
         state: "completed",
         output,
         config,
+        ...(compensable ? { compensable: true, compensationMaxAttempts: 1 } : {}),
         ...outputConfig,
       };
     } catch (e) {
@@ -919,6 +924,10 @@ function workflowOutputConfig(config: StepConfig<unknown> | undefined): {
     outputMode: raw.as,
     ...(raw.contentType ? { outputContentType: raw.contentType } : {}),
   };
+}
+
+function hasCompensator(config: StepConfig<unknown> | undefined): boolean {
+  return typeof config?.compensate === "function";
 }
 
 function createStepOutputRef(

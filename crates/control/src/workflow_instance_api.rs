@@ -148,6 +148,12 @@ pub struct RestartBody {
     pub deploy: Option<RestartDeployBody>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct CancelBody {
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RestartTargetBody {
     pub name: String,
@@ -2289,7 +2295,7 @@ pub async fn pause_run(
     state: State<Arc<AppState>>,
     run_id: Path<String>,
 ) -> web::HttpResponse {
-    control_transition(req, state, run_id, "pause").await
+    control_transition(req, state, run_id, "pause", None).await
 }
 
 pub async fn resume_run(
@@ -2297,15 +2303,16 @@ pub async fn resume_run(
     state: State<Arc<AppState>>,
     run_id: Path<String>,
 ) -> web::HttpResponse {
-    control_transition(req, state, run_id, "resume").await
+    control_transition(req, state, run_id, "resume", None).await
 }
 
 pub async fn cancel_run(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
     run_id: Path<String>,
+    body: Option<Json<CancelBody>>,
 ) -> web::HttpResponse {
-    control_transition(req, state, run_id, "cancel").await
+    control_transition(req, state, run_id, "cancel", body.map(|body| body.into_inner())).await
 }
 
 pub async fn restart_run(
@@ -2596,6 +2603,7 @@ async fn control_transition(
     state: State<Arc<AppState>>,
     run_id: Path<String>,
     op: &'static str,
+    cancel_body: Option<CancelBody>,
 ) -> web::HttpResponse {
     let app_id = match app_id_from_channel(&req, &state) {
         Ok(app_id) => app_id,
@@ -2692,13 +2700,108 @@ async fn control_transition(
             }
         }
         "cancel" => {
-            if matches!(
+            let mode = cancel_body
+                .as_ref()
+                .and_then(|body| body.mode.as_deref())
+                .unwrap_or("abort");
+            if !matches!(mode, "abort" | "compensate") {
+                Err(WorkflowApiError::BadRequest(format!(
+                    "invalid cancel mode '{mode}'"
+                )))
+            } else if matches!(
                 current.as_str(),
                 "completed" | "failed" | "cancelled" | "stalled"
             ) {
                 Err(WorkflowApiError::Conflict(format!(
                     "cannot cancel workflow run in state {current}"
                 )))
+            } else if mode == "compensate" {
+                let pending_row = match tx
+                    .query_one(
+                        "SELECT COUNT(*)::bigint AS n \
+                           FROM zeroship.workflow_steps \
+                          WHERE run_id = $1 AND compensation_state = 'pending'",
+                        &[&run_id],
+                    )
+                    .await
+                {
+                    Ok(row) => row,
+                    Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+                };
+                let pending = pending_row.get::<_, i64>("n");
+                if pending > 0 {
+                    let progress = match tx
+                        .query_one(
+                            "SELECT \
+                                COUNT(*) FILTER (WHERE compensation_state IS NOT NULL)::bigint AS total, \
+                                COUNT(*) FILTER (WHERE compensation_state = 'completed')::bigint AS completed, \
+                                COUNT(*) FILTER (WHERE compensation_state = 'failed')::bigint AS failed \
+                               FROM zeroship.workflow_steps \
+                              WHERE run_id = $1",
+                            &[&run_id],
+                        )
+                        .await
+                    {
+                        Ok(row) => row,
+                        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+                    };
+                    let error = json!({
+                        "type": "ChildCancelledError",
+                        "message": "child workflow was cancelled",
+                        "retryable": false,
+                        "compensation": {
+                            "total": progress.get::<_, i64>("total"),
+                            "completed": progress.get::<_, i64>("completed"),
+                            "failed": progress.get::<_, i64>("failed"),
+                        },
+                    });
+                    tx.query(
+                        "UPDATE zeroship.workflow_runs \
+                            SET state = 'compensating', \
+                                wake_at = now(), \
+                                output = NULL, \
+                                error = $3, \
+                                output_kind = 'inline', \
+                                output_hash = NULL, \
+                                output_size = NULL, \
+                                output_content_type = NULL, \
+                                compensation_target = 'cancelled', \
+                                compensation_outcome = NULL, \
+                                waiting_step_key = NULL, \
+                                paused_from_status = NULL, \
+                                claimed_by = NULL, \
+                                lease_expires = NULL, \
+                                dispatch_nonce = NULL, \
+                                claim_epoch = claim_epoch + 1 \
+                          WHERE id = $1 AND app_id = $2 \
+                          RETURNING state",
+                        &[&run_id, &app_id, &error],
+                    )
+                    .await
+                    .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                } else {
+                    tx.query(
+                        "UPDATE zeroship.workflow_runs \
+                            SET state = 'cancelled', \
+                                wake_at = NULL, \
+                                output = NULL, \
+                                error = NULL, \
+                                output_kind = 'inline', \
+                                output_hash = NULL, \
+                                output_size = NULL, \
+                                output_content_type = NULL, \
+                                paused_from_status = NULL, \
+                                claimed_by = NULL, \
+                                lease_expires = NULL, \
+                                dispatch_nonce = NULL, \
+                                claim_epoch = claim_epoch + 1 \
+                          WHERE id = $1 AND app_id = $2 \
+                          RETURNING state",
+                        &[&run_id, &app_id],
+                    )
+                    .await
+                    .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                }
             } else {
                 tx.query(
                     "UPDATE zeroship.workflow_runs \
@@ -2733,7 +2836,11 @@ async fn control_transition(
             return e.response();
         }
     };
-    if op == "cancel" {
+    let state_value: String = rows
+        .first()
+        .map(|row| row.get("state"))
+        .unwrap_or_else(|| current.clone());
+    if op == "cancel" && state_value != "compensating" {
         if let Err(e) = workflow_engine::cascade_cancel_children(&tx, &run_id).await {
             let _ = tx.commit().await;
             return WorkflowApiError::from(e).response();
@@ -2742,10 +2849,6 @@ async fn control_transition(
     if let Err(e) = tx.commit().await {
         return WorkflowApiError::Database(e.to_string()).response();
     }
-    let state_value: String = rows
-        .first()
-        .map(|row| row.get("state"))
-        .unwrap_or_else(|| current.clone());
     web::HttpResponse::Ok().json(&json!({ "state": state_value }))
 }
 

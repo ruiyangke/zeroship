@@ -192,6 +192,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     signalType?: string;
     consumedSignal?: unknown;
     childRunId?: string;
+    compensationState?: "pending" | "running" | "completed" | "failed";
   };
   type WorkflowOutputReadConfig = {
     controlUrl: string;
@@ -215,6 +216,8 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         output: unknown;
         outputMode?: string;
         outputContentType?: string;
+        compensable?: boolean;
+        compensationMaxAttempts?: number;
       }
     | {
         kind: "run";
@@ -267,6 +270,13 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       }
       this.outcome = outcomes[0]!;
       this.outcomes = outcomes;
+    }
+  }
+
+  class CompensationReplayReady extends Error {
+    constructor() {
+      super("workflow compensation registry is ready");
+      this.name = "CompensationReplayReady";
     }
   }
 
@@ -423,6 +433,14 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     return {};
   }
 
+  function hasCompensator(config: unknown): boolean {
+    return !!(
+      config &&
+      typeof config === "object" &&
+      typeof (config as { compensate?: unknown }).compensate === "function"
+    );
+  }
+
   function workflowOutputReadConfig(envelope: Record<string, unknown>): WorkflowOutputReadConfig | undefined {
     const raw = envelope.outputRead;
     if (!raw || typeof raw !== "object") return undefined;
@@ -544,6 +562,9 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         signalType: typeof row.signalType === "string" ? row.signalType : undefined,
         consumedSignal: row.consumedSignal,
         childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
+        compensationState: typeof row.compensationState === "string"
+          ? row.compensationState as JournalStepRecord["compensationState"]
+          : undefined,
       }));
   }
 
@@ -613,6 +634,16 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     readonly #runId: string;
     readonly #outputRead: WorkflowOutputReadConfig | undefined;
     readonly #outputReadMemo = new Map<string, Promise<Uint8Array>>();
+    readonly #phase: string;
+    readonly #trigger: Record<string, unknown>;
+    readonly #compensatorRegistry = new Map<number, {
+      ordinal: number;
+      name: string;
+      nameOccurrence: number;
+      output: unknown;
+      compensate: (output: unknown, ctx: unknown) => unknown;
+      state?: JournalStepRecord["compensationState"];
+    }>();
     #cursor = 0;
     #frontier: FrontierCoordinator | undefined;
     #activeStepCallbacks = 0;
@@ -625,10 +656,14 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       quiescence: DispatchMicrotaskQuiescenceBarrier,
       runId: string,
       outputRead: WorkflowOutputReadConfig | undefined,
+      phase: string,
+      trigger: Record<string, unknown>,
     ) {
       this.#quiescence = quiescence;
       this.#runId = runId;
       this.#outputRead = outputRead;
+      this.#phase = phase;
+      this.#trigger = trigger;
       for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
@@ -657,7 +692,10 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       }
 
       const issued = this.#issue(name, "run");
-      if (issued.record) return this.#recordPromise<T>(issued.record);
+      if (issued.record) {
+        this.#registerCompensator(issued.record, config);
+        return this.#recordPromise<T>(issued.record);
+      }
       return this.#registerFrontier(this.#runFrontier(issued, name, config, fn as () => T | Promise<T>));
     }
 
@@ -804,6 +842,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       try {
         const output = await bodyPromise;
         const outputConfig = workflowOutputConfig(config);
+        const compensable = hasCompensator(config);
         return {
           kind: "run",
           ordinal: issued.ordinal,
@@ -811,6 +850,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
           nameOccurrence: issued.nameOccurrence,
           state: "completed",
           output,
+          ...(compensable ? { compensable: true, compensationMaxAttempts: 1 } : {}),
           ...outputConfig,
         };
       } catch (e) {
@@ -898,6 +938,72 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       }
     }
 
+    #registerCompensator(record: JournalStepRecord, config: unknown): void {
+      if (
+        record.kind !== "run" ||
+        record.state !== "completed" ||
+        !hasCompensator(config)
+      ) {
+        return;
+      }
+      const compensate = (config as { compensate: (output: unknown, ctx: unknown) => unknown }).compensate;
+      this.#compensatorRegistry.set(record.ordinal, {
+        ordinal: record.ordinal,
+        name: record.name,
+        nameOccurrence: record.nameOccurrence ?? 0,
+        output: this.#completedRecordValue(record),
+        compensate,
+        state: record.compensationState,
+      });
+    }
+
+    #completedRecordValue(record: JournalStepRecord): unknown {
+      if (record.outputRef) {
+        return createStepOutputRef(
+          record.outputRef,
+          this.#outputRead,
+          this.#runId,
+          record.name,
+          record.nameOccurrence ?? 0,
+          this.#outputReadMemo,
+        );
+      }
+      return record.output;
+    }
+
+    async runNextCompensator(): Promise<Record<string, unknown>> {
+      const pending = [...this.#compensatorRegistry.values()]
+        .filter((entry) => entry.state === "pending" || entry.state === "running")
+        .sort((a, b) => b.ordinal - a.ordinal)[0];
+      if (!pending) {
+        throw new NondeterministicError("compensating run has no pending compensator");
+      }
+      const ctx = {
+        idempotencyKey: `comp:${this.#runId}:${pending.ordinal}:${pending.nameOccurrence}`,
+        trigger: this.#trigger,
+      };
+      try {
+        await workflowDispatchAls.run(
+          { mode: "step" },
+          () => Promise.resolve(pending.compensate(pending.output, ctx)),
+        );
+        return {
+          kind: "CompensationCompleted",
+          ordinal: pending.ordinal,
+          name: pending.name,
+          nameOccurrence: pending.nameOccurrence,
+        };
+      } catch (e) {
+        return {
+          kind: "CompensationFailed",
+          ordinal: pending.ordinal,
+          name: pending.name,
+          nameOccurrence: pending.nameOccurrence,
+          error: serializeError(e),
+        };
+      }
+    }
+
     #registerFrontier<T>(outcome: Promise<FrontierOutcome>): Promise<T> {
       const frontier = this.#frontier ??= new FrontierCoordinator(this.#quiescence);
       if (!frontier.sealed) {
@@ -918,6 +1024,9 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
       this.#nameOccurrences.set(name, nameOccurrence + 1);
       const record = this.#stepsByOrdinal.get(ordinal);
+      if (!record && this.#phase === "compensating") {
+        throw new CompensationReplayReady();
+      }
       if (record) {
         if (
           record.name !== name ||
@@ -934,19 +1043,12 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
 
     #resolveRecord<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): T {
       if (record.state === "completed") {
-        if (record.outputRef) {
-          return createStepOutputRef(
-            record.outputRef,
-            this.#outputRead,
-            this.#runId,
-            record.name,
-            record.nameOccurrence ?? 0,
-            this.#outputReadMemo,
-          ) as T;
-        }
-        return record.output as T;
+        return this.#completedRecordValue(record) as T;
       }
       if (record.state === "failed") throw deserializeError(record.error);
+      if (this.#phase === "compensating") {
+        throw new CompensationReplayReady();
+      }
       throw new SuspendSignal(pendingOutcome ?? {
         kind: record.kind === "child" ? "child" : record.kind,
         ordinal: record.ordinal,
@@ -1172,6 +1274,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         output: outcome.output,
         ...(outcome.outputMode ? { outputMode: outcome.outputMode } : {}),
         ...(outcome.outputContentType ? { outputContentType: outcome.outputContentType } : {}),
+        ...(outcome.compensable ? { compensable: true, compensationMaxAttempts: outcome.compensationMaxAttempts ?? 1 } : {}),
       };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
@@ -1249,18 +1352,39 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
       }
       const quiescence = new DispatchMicrotaskQuiescenceBarrier();
+      const trigger = buildTrigger(env);
       const step = new JournalBackedStep(
         normalizeJournal(env),
         quiescence,
         String(env.runId ?? ""),
         workflowOutputReadConfig(env),
+        String(env.phase ?? "running"),
+        trigger,
       );
+      if (env.phase === "compensating") {
+        try {
+          await workflowDispatchAls.run(
+            { mode: "body" },
+            () => Promise.resolve(run.call(workflow, trigger, step)),
+          );
+        } catch (error) {
+          if (
+            !(error instanceof CompensationReplayReady) &&
+            !(error instanceof SuspendSignal)
+          ) {
+            // Terminal forward errors are expected while rebuilding the registry.
+            // NondeterministicError still fails closed below if no compensator can
+            // be reconstructed for a pending journal marker.
+          }
+        }
+        return terminalBatch(env, await step.runNextCompensator());
+      }
       const blockedByNonStepWork = quiescence.waitUntilBlocked(() => step.frontierObserved);
       let outputPromise: Promise<unknown>;
       try {
         outputPromise = workflowDispatchAls.run(
           { mode: "body" },
-          () => Promise.resolve(run.call(workflow, buildTrigger(env), step)),
+          () => Promise.resolve(run.call(workflow, trigger, step)),
         );
       } catch (error) {
         quiescence.stop();

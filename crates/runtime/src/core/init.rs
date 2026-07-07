@@ -588,6 +588,13 @@ class ZsLimitExceededError extends Error {
     }
 }
 
+class ZsWorkflowCompensationReplayReady extends Error {
+    constructor() {
+        super("workflow compensation registry is ready");
+        this.name = "CompensationReplayReady";
+    }
+}
+
 const ZS_MAX_START_MANY_BATCH = 1000;
 
 function wfErr(message, status, code) {
@@ -654,6 +661,7 @@ function wfJournal(envelope) {
             signalType: typeof row.signalType === "string" ? row.signalType : undefined,
             consumedSignal: row.consumedSignal,
             childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
+            compensationState: typeof row.compensationState === "string" ? row.compensationState : undefined,
         }));
 }
 
@@ -694,6 +702,10 @@ function wfOutputConfig(config) {
         };
     }
     return {};
+}
+
+function wfHasCompensator(config) {
+    return !!(config && typeof config === "object" && typeof config.compensate === "function");
 }
 
 function wfCreateStepOutputRef(descriptor, outputRead, runId, name, occurrence, memo) {
@@ -773,10 +785,15 @@ class ZsJournalBackedStep {
     #runId = "";
     #outputRead = undefined;
     #outputReadMemo = new Map();
+    #phase = "running";
+    #trigger = {};
+    #compensatorRegistry = new Map();
 
-    constructor(steps, runId = "", outputRead = undefined) {
+    constructor(steps, runId = "", outputRead = undefined, phase = "running", trigger = {}) {
         this.#runId = runId;
         this.#outputRead = outputRead;
+        this.#phase = phase;
+        this.#trigger = trigger;
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
@@ -788,7 +805,10 @@ class ZsJournalBackedStep {
             return Promise.reject(wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
         }
         const issued = this.#issue(name, "run");
-        if (issued.record) return this.#recordPromise(issued.record);
+        if (issued.record) {
+            this.#registerCompensator(issued.record, config);
+            return this.#recordPromise(issued.record);
+        }
         return this.#registerFrontier(this.#runFrontier(issued, name, config, fn));
     }
 
@@ -927,6 +947,7 @@ class ZsJournalBackedStep {
         try {
             const output = await bodyPromise;
             const outputConfig = wfOutputConfig(config);
+            const compensable = wfHasCompensator(config);
             return {
                 kind: "run",
                 ordinal: issued.ordinal,
@@ -934,6 +955,7 @@ class ZsJournalBackedStep {
                 nameOccurrence: issued.nameOccurrence,
                 state: "completed",
                 output,
+                ...(compensable ? { compensable: true, compensationMaxAttempts: 1 } : {}),
                 ...outputConfig,
             };
         } catch (e) {
@@ -1011,6 +1033,71 @@ class ZsJournalBackedStep {
         }
     }
 
+    #registerCompensator(record, config) {
+        if (
+            record.kind !== "run" ||
+            record.state !== "completed" ||
+            !wfHasCompensator(config)
+        ) {
+            return;
+        }
+        this.#compensatorRegistry.set(record.ordinal, {
+            ordinal: record.ordinal,
+            name: record.name,
+            nameOccurrence: record.nameOccurrence ?? 0,
+            output: this.#completedRecordValue(record),
+            compensate: config.compensate,
+            state: record.compensationState,
+        });
+    }
+
+    #completedRecordValue(record) {
+        if (record.outputRef) {
+            return wfCreateStepOutputRef(
+                record.outputRef,
+                this.#outputRead,
+                this.#runId,
+                record.name,
+                record.nameOccurrence ?? 0,
+                this.#outputReadMemo,
+            );
+        }
+        return record.output;
+    }
+
+    async runNextCompensator() {
+        const pending = [...this.#compensatorRegistry.values()]
+            .filter((entry) => entry.state === "pending" || entry.state === "running")
+            .sort((a, b) => b.ordinal - a.ordinal)[0];
+        if (!pending) {
+            throw new ZsNondeterministicError("compensating run has no pending compensator");
+        }
+        const ctx = {
+            idempotencyKey: `comp:${this.#runId}:${pending.ordinal}:${pending.nameOccurrence}`,
+            trigger: this.#trigger,
+        };
+        try {
+            await zsWorkflowDispatchAls.run(
+                { mode: "step" },
+                () => Promise.resolve(pending.compensate(pending.output, ctx)),
+            );
+            return {
+                kind: "CompensationCompleted",
+                ordinal: pending.ordinal,
+                name: pending.name,
+                nameOccurrence: pending.nameOccurrence,
+            };
+        } catch (e) {
+            return {
+                kind: "CompensationFailed",
+                ordinal: pending.ordinal,
+                name: pending.name,
+                nameOccurrence: pending.nameOccurrence,
+                error: wfSerializeError(e),
+            };
+        }
+    }
+
     #registerFrontier(outcome) {
         const frontier = this.#frontier ??= new ZsFrontierCoordinator();
         if (!frontier.sealed) {
@@ -1025,6 +1112,9 @@ class ZsJournalBackedStep {
         const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
         this.#nameOccurrences.set(name, nameOccurrence + 1);
         const record = this.#stepsByOrdinal.get(ordinal);
+        if (!record && this.#phase === "compensating") {
+            throw new ZsWorkflowCompensationReplayReady();
+        }
         if (record) {
             if (record.name !== name || record.kind !== kind || (record.nameOccurrence ?? 0) !== nameOccurrence) {
                 throw new ZsNondeterministicError(
@@ -1037,19 +1127,12 @@ class ZsJournalBackedStep {
 
     #resolveRecord(record, pendingOutcome) {
         if (record.state === "completed") {
-            if (record.outputRef) {
-                return wfCreateStepOutputRef(
-                    record.outputRef,
-                    this.#outputRead,
-                    this.#runId,
-                    record.name,
-                    record.nameOccurrence ?? 0,
-                    this.#outputReadMemo,
-                );
-            }
-            return record.output;
+            return this.#completedRecordValue(record);
         }
         if (record.state === "failed") throw wfDeserializeError(record.error);
+        if (this.#phase === "compensating") {
+            throw new ZsWorkflowCompensationReplayReady();
+        }
         throw new ZsWorkflowSuspendSignal(pendingOutcome ?? {
             kind: record.kind === "child" ? "child" : record.kind,
             ordinal: record.ordinal,
@@ -1160,6 +1243,7 @@ function workflowFrontierResult(envelope, outcome) {
             output: outcome.output,
             ...(outcome.outputMode ? { outputMode: outcome.outputMode } : {}),
             ...(outcome.outputContentType ? { outputContentType: outcome.outputContentType } : {}),
+            ...(outcome.compensable ? { compensable: true, compensationMaxAttempts: outcome.compensationMaxAttempts ?? 1 } : {}),
         };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
@@ -1220,14 +1304,35 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
         }
+        const trigger = wfTrigger(envelope);
         const step = new ZsJournalBackedStep(
             wfJournal(envelope),
             String(envelope.runId ?? ""),
             wfOutputReadConfig(envelope),
+            String(envelope.phase ?? "running"),
+            trigger,
         );
+        if (envelope.phase === "compensating") {
+            try {
+                await zsWorkflowDispatchAls.run(
+                    { mode: "body" },
+                    () => Promise.resolve(workflow.run(trigger, step)),
+                );
+            } catch (e) {
+                if (
+                    !(e instanceof ZsWorkflowCompensationReplayReady) &&
+                    !(e instanceof ZsWorkflowSuspendSignal)
+                ) {
+                    // Terminal forward errors are expected while rebuilding the registry.
+                    // Corrupt prefixes still fail closed if no pending compensator
+                    // reconstructs from the replayed journal.
+                }
+            }
+            return workflowTerminalResult(envelope, await step.runNextCompensator());
+        }
         const output = await zsWorkflowDispatchAls.run(
             { mode: "body" },
-            () => workflow.run(wfTrigger(envelope), step),
+            () => workflow.run(trigger, step),
         );
         return workflowTerminalResult(envelope, {
             kind: "RunCompleted",

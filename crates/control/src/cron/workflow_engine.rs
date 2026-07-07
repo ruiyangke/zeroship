@@ -104,6 +104,8 @@ pub struct JournalStep {
     pub error: Option<Value>,
     #[serde(default, rename = "childRunId")]
     pub child_run_id: Option<String>,
+    #[serde(default, rename = "compensationState")]
+    pub compensation_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,6 +137,8 @@ pub struct StepRequest {
     pub deploy_id: String,
     pub deploy_hash: String,
     pub dispatch_nonce: String,
+    #[serde(default = "default_dispatch_phase")]
+    pub phase: String,
     #[serde(default)]
     pub input: Option<Value>,
     pub started_at: DateTime<Utc>,
@@ -162,6 +166,10 @@ pub struct StepCheckpoint {
     pub child_workflow_name: Option<String>,
     pub child_input: Option<Value>,
     pub child_options: Option<ChildWorkflowOptions>,
+    #[serde(default, rename = "compensationState")]
+    pub compensation_state: Option<String>,
+    #[serde(default = "default_compensation_max_attempts", rename = "compensationMaxAttempts")]
+    pub compensation_max_attempts: i32,
 }
 
 impl StepCheckpoint {
@@ -185,12 +193,22 @@ impl StepCheckpoint {
             child_workflow_name: None,
             child_input: None,
             child_options: None,
+            compensation_state: None,
+            compensation_max_attempts: 1,
         }
     }
 }
 
 fn default_step_kind() -> String {
     "run".to_string()
+}
+
+fn default_compensation_max_attempts() -> i32 {
+    1
+}
+
+fn default_dispatch_phase() -> String {
+    "running".to_string()
 }
 
 fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
@@ -317,6 +335,10 @@ pub enum StepOutcome {
         #[serde(default = "default_step_kind", rename = "stepKind")]
         step_kind: String,
         #[serde(default)]
+        compensable: bool,
+        #[serde(default = "default_compensation_max_attempts", rename = "compensationMaxAttempts")]
+        compensation_max_attempts: i32,
+        #[serde(default)]
         output: Option<Value>,
         #[serde(default, rename = "outputRef")]
         output_ref: Option<WorkflowOutputRef>,
@@ -381,6 +403,20 @@ pub enum StepOutcome {
         input: Value,
         #[serde(default)]
         options: ChildWorkflowOptions,
+    },
+    CompensationCompleted {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+    },
+    CompensationFailed {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(default)]
+        error: Value,
     },
 }
 
@@ -631,6 +667,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 name,
                 name_occurrence,
                 step_kind,
+                compensable,
+                compensation_max_attempts,
                 output,
                 output_ref,
             } => {
@@ -657,6 +695,9 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: (*compensable && step_kind == "run")
+                        .then(|| "pending".to_string()),
+                    compensation_max_attempts: (*compensation_max_attempts).max(1),
                 });
             }
             StepOutcome::StepFailed {
@@ -683,6 +724,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 });
                 saw_step_failure = true;
                 run_update = RunUpdate::Queued;
@@ -719,6 +762,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                             child_workflow_name: None,
                             child_input: None,
                             child_options: None,
+                            compensation_state: None,
+                            compensation_max_attempts: 1,
                         });
                         saw_step_failure = true;
                         run_update = RunUpdate::Queued;
@@ -760,6 +805,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Sleeping {
@@ -797,6 +844,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
@@ -830,6 +879,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     child_workflow_name: Some(child_workflow_name.clone()),
                     child_input: Some(input.clone()),
                     child_options: Some(options.clone()),
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
@@ -837,6 +888,8 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     };
                 }
             }
+            StepOutcome::CompensationCompleted { .. }
+            | StepOutcome::CompensationFailed { .. } => {}
         }
     }
 
@@ -870,6 +923,8 @@ fn outcomes_from_apply_parts(
                 name: checkpoint.name.clone(),
                 name_occurrence: checkpoint.name_occurrence,
                 step_kind: checkpoint.kind.clone(),
+                compensable: checkpoint.compensation_state.is_some(),
+                compensation_max_attempts: checkpoint.compensation_max_attempts,
                 output: checkpoint.output.clone(),
                 output_ref: checkpoint.output_ref.clone(),
             }),
@@ -1152,6 +1207,7 @@ struct CandidateRun {
     workflow_name: String,
     deploy_id: String,
     deploy_hash: String,
+    state: String,
     input: Option<Value>,
     started_at: DateTime<Utc>,
     waiting_step_key: Option<String>,
@@ -1180,21 +1236,21 @@ async fn claim_due_batch(
                SELECT app_id, MIN(wake_at) AS first_wake \
                  FROM zeroship.workflow_runs \
                 WHERE wake_at <= now() \
-                  AND state IN ('queued','running','sleeping','waiting') \
+                  AND state IN ('queued','running','sleeping','waiting','compensating') \
                   AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
                 GROUP BY app_id \
                 ORDER BY first_wake, app_id \
                 LIMIT $1 \
              ) \
              SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
-                    r.input, r.started_at, r.waiting_step_key, r.cancel_requested \
+                    r.state, r.input, r.started_at, r.waiting_step_key, r.cancel_requested \
                FROM due_apps a \
                CROSS JOIN LATERAL ( \
-                 SELECT id, app_id, workflow_name, deploy_id, input, started_at, waiting_step_key, wake_at, cancel_requested \
+                 SELECT id, app_id, workflow_name, deploy_id, state, input, started_at, waiting_step_key, wake_at, cancel_requested \
                    FROM zeroship.workflow_runs \
                   WHERE app_id = a.app_id \
                     AND wake_at <= now() \
-                    AND state IN ('queued','running','sleeping','waiting') \
+                    AND state IN ('queued','running','sleeping','waiting','compensating') \
                     AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
                   ORDER BY wake_at, id \
                   LIMIT $2 \
@@ -1220,6 +1276,7 @@ async fn claim_due_batch(
             workflow_name: row.get("workflow_name"),
             deploy_id: row.get("deploy_id"),
             deploy_hash: row.get("deploy_hash"),
+            state: row.get("state"),
             input: row.get("input"),
             started_at: row.get("started_at"),
             waiting_step_key: row.get("waiting_step_key"),
@@ -1345,7 +1402,7 @@ where
                FROM zeroship.workflow_runs \
               WHERE app_id = $1 \
                 AND id <> $2 \
-                AND state = 'running' \
+                AND state IN ('running','compensating') \
                 AND claimed_by IS NOT NULL \
                 AND lease_expires IS NOT NULL \
                 AND lease_expires > now()",
@@ -1358,8 +1415,15 @@ where
         return Ok(None);
     }
 
-    if candidate.cancel_requested {
+    if candidate.cancel_requested && candidate.state != "compensating" {
         cancel_requested_run(tx, &candidate.run_id).await?;
+        return Ok(None);
+    }
+
+    if candidate.state == "compensating"
+        && !has_due_compensation(tx, &candidate.run_id).await?
+    {
+        finalize_compensation_if_drained(tx, &candidate.run_id).await?;
         return Ok(None);
     }
 
@@ -1378,11 +1442,11 @@ where
                     lease_expires = $2, \
                     dispatch_nonce = $3, \
                     claim_epoch = claim_epoch + 1, \
-                    state = 'running', \
+                    state = CASE WHEN state = 'compensating' THEN 'compensating' ELSE 'running' END, \
                     last_dispatch_at = now() \
               WHERE id = $4 \
                 AND wake_at <= now() \
-                AND state IN ('queued','running','sleeping','waiting') \
+                AND state IN ('queued','running','sleeping','waiting','compensating') \
                 AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
               RETURNING id",
             &[
@@ -1407,6 +1471,11 @@ where
             deploy_id: candidate.deploy_id,
             deploy_hash: candidate.deploy_hash,
             dispatch_nonce,
+            phase: if candidate.state == "compensating" {
+                "compensating".to_string()
+            } else {
+                "running".to_string()
+            },
             input: candidate.input,
             started_at: candidate.started_at,
             journal,
@@ -1421,7 +1490,8 @@ where
     let rows = conn
         .query(
             "SELECT ordinal, name, name_occurrence, kind, state, output, error, child_run_id, \
-                    output_kind, output_hash, output_size, output_content_type \
+                    output_kind, output_hash, output_size, output_content_type, \
+                    compensation_state \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 \
               ORDER BY ordinal",
@@ -1446,6 +1516,7 @@ where
             output: row.get("output"),
             error: row.get("error"),
             child_run_id: row.get("child_run_id"),
+            compensation_state: row.get("compensation_state"),
         })
         .collect())
 }
@@ -1582,6 +1653,8 @@ where
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1685,6 +1758,8 @@ where
                             child_workflow_name: None,
                             child_input: None,
                             child_options: None,
+                            compensation_state: None,
+                            compensation_max_attempts: 1,
                         },
                         run_id,
                         dispatch_nonce,
@@ -1752,6 +1827,8 @@ where
                     child_workflow_name: None,
                     child_input: None,
                     child_options: None,
+                    compensation_state: None,
+                    compensation_max_attempts: 1,
                 },
                 run_id,
                 dispatch_nonce,
@@ -1896,6 +1973,8 @@ where
                             child_workflow_name: None,
                             child_input: None,
                             child_options: None,
+                            compensation_state: None,
+                            compensation_max_attempts: 1,
                         },
                         run_id,
                         dispatch_nonce,
@@ -1968,6 +2047,8 @@ where
                 child_workflow_name: None,
                 child_input: None,
                 child_options: None,
+                compensation_state: None,
+                compensation_max_attempts: 1,
             };
             if insert_resolved_step(tx, &checkpoint, run_id, dispatch_nonce, 1).await?
                 == StepWriteOutcome::CapExceeded
@@ -2112,6 +2193,38 @@ enum StepWriteOutcome {
     CapExceeded,
 }
 
+#[derive(Debug, Clone)]
+struct CompensationApplyOutcome {
+    ordinal: i32,
+    name: String,
+    name_occurrence: i32,
+    state: &'static str,
+    error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompensationProgress {
+    total: i64,
+    completed: i64,
+    failed: i64,
+    pending: i64,
+    running: i64,
+}
+
+impl CompensationProgress {
+    fn remaining(self) -> i64 {
+        self.pending + self.running
+    }
+
+    fn terminal_outcome(self) -> &'static str {
+        if self.failed > 0 {
+            "partial"
+        } else {
+            "completed"
+        }
+    }
+}
+
 impl fmt::Display for ApplyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2134,6 +2247,44 @@ fn map_apply_error(e: compio_postgres::Error) -> ApplyError {
     } else {
         ApplyError::Db(RegistryError::from(e))
     }
+}
+
+fn compensation_outcomes_from_step_outcomes(
+    outcomes: &[StepOutcome],
+) -> Result<Vec<CompensationApplyOutcome>, String> {
+    let mut compensation = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            StepOutcome::CompensationCompleted {
+                ordinal,
+                name,
+                name_occurrence,
+            } => compensation.push(CompensationApplyOutcome {
+                ordinal: *ordinal,
+                name: name.clone(),
+                name_occurrence: *name_occurrence,
+                state: "completed",
+                error: None,
+            }),
+            StepOutcome::CompensationFailed {
+                ordinal,
+                name,
+                name_occurrence,
+                error,
+            } => compensation.push(CompensationApplyOutcome {
+                ordinal: *ordinal,
+                name: name.clone(),
+                name_occurrence: *name_occurrence,
+                state: "failed",
+                error: Some(error.clone()),
+            }),
+            _ => {}
+        }
+    }
+    if !compensation.is_empty() && compensation.len() != outcomes.len() {
+        return Err("compensation outcomes cannot be mixed with forward outcomes".to_string());
+    }
+    Ok(compensation)
 }
 
 /// Public deterministic apply path for tests and future control handlers.
@@ -2175,6 +2326,8 @@ async fn apply_step_result_on_registry(
     config: &WorkflowEngineConfig,
     mut result: StepResult,
 ) -> Result<bool, ApplyError> {
+    let compensation_outcomes =
+        compensation_outcomes_from_step_outcomes(&result.outcomes).map_err(ApplyError::Invalid)?;
     let (checkpoints, run_update) = fold_outcomes(&result.outcomes).map_err(ApplyError::Invalid)?;
     result.checkpoints = checkpoints;
     result.run_update = run_update;
@@ -2187,7 +2340,7 @@ async fn apply_step_result_on_registry(
     let rows = tx
         .query(
             "SELECT app_id, deploy_id, claimed_by, state, dispatch_nonce, stuck_strikes, \
-                    tree_depth \
+                    tree_depth, compensation_target, error \
                FROM zeroship.workflow_runs \
               WHERE id = $1 \
               FOR UPDATE",
@@ -2206,12 +2359,34 @@ async fn apply_step_result_on_registry(
     let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
     let stuck_strikes: i16 = row.get("stuck_strikes");
     let tree_depth: i16 = row.get("tree_depth");
+    let compensation_target: Option<String> = row.get("compensation_target");
+    let current_error: Option<Value> = row.get("error");
     if claimed_by.as_deref() != Some(config.owner_id.as_str())
         || dispatch_nonce.as_deref() != Some(result.dispatch_nonce.as_str())
-        || !matches!(state.as_str(), "running" | "paused")
+        || !matches!(state.as_str(), "running" | "paused" | "compensating")
     {
         tx.commit().await.map_err(map_apply_error)?;
         return Ok(false);
+    }
+    if state == "compensating" {
+        let applied = apply_compensation_result(
+            &tx,
+            config,
+            &result.run_id,
+            &result.dispatch_nonce,
+            compensation_target.as_deref(),
+            current_error,
+            &compensation_outcomes,
+        )
+        .await?;
+        tx.commit().await.map_err(map_apply_error)?;
+        return Ok(applied);
+    }
+    if !compensation_outcomes.is_empty() {
+        tx.commit().await.map_err(map_apply_error)?;
+        return Err(ApplyError::Invalid(
+            "compensation outcome received outside compensating phase".to_string(),
+        ));
     }
 
     let child_checkpoint_count = result
@@ -2378,7 +2553,7 @@ async fn apply_step_result_on_registry(
         .await
         .map_err(map_apply_error)?;
     } else {
-        let state = result.run_update.state();
+        let mut state = result.run_update.state().to_string();
         let output_ref = result.run_update.output_ref();
         let output = if output_ref.is_some() {
             None
@@ -2396,7 +2571,28 @@ async fn apply_step_result_on_registry(
             .await
             .map_err(ApplyError::Db)?;
         let blob_bytes_delta = output_ref.as_ref().map_or(0, |value| value.size.max(0));
-        let error = result.run_update.error();
+        let mut error = result.run_update.error();
+        let mut compensation_target: Option<String> = None;
+        let mut compensation_outcome: Option<String> = None;
+        let mut wake_at = wake_at;
+        if state == "failed"
+            && error
+                .as_ref()
+                .is_some_and(should_enter_compensation_for_error)
+            && pending_compensation_count(&tx, &result.run_id)
+                .await
+                .map_err(ApplyError::Db)?
+                > 0
+        {
+            state = "compensating".to_string();
+            compensation_target = Some("failed".to_string());
+            compensation_outcome = None;
+            wake_at = Some(Utc::now());
+            let progress = compensation_progress(&tx, &result.run_id)
+                .await
+                .map_err(ApplyError::Db)?;
+            error = Some(compensation_progress_error(error, progress, None));
+        }
         let changed = tx.execute(
             "UPDATE zeroship.workflow_runs \
                 SET state = $1, \
@@ -2413,6 +2609,8 @@ async fn apply_step_result_on_registry(
                     output_content_type = $14, \
                     journal_bytes = journal_bytes + $15, \
                     blob_bytes = blob_bytes + $16, \
+                    compensation_target = $17, \
+                    compensation_outcome = $18, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
                     dispatch_nonce = NULL \
@@ -2437,6 +2635,8 @@ async fn apply_step_result_on_registry(
                 &output_content_type,
                 &run_journal_delta,
                 &blob_bytes_delta,
+                &compensation_target,
+                &compensation_outcome,
             ],
         )
         .await
@@ -2447,12 +2647,12 @@ async fn apply_step_result_on_registry(
                     .await
                     .map_err(ApplyError::Db)?;
             }
-            if matches!(state, "completed" | "failed" | "cancelled" | "stalled") {
+            if matches!(state.as_str(), "completed" | "failed" | "cancelled" | "stalled") {
                 emit_child_terminal_hook(
                     &tx,
                     &result.run_id,
                     ChildTerminalPayload {
-                        state,
+                        state: &state,
                         output: output.clone(),
                         output_ref,
                         error: error.clone(),
@@ -2461,7 +2661,7 @@ async fn apply_step_result_on_registry(
                 .await
                 .map_err(ApplyError::Db)?;
             }
-            if matches!(state, "failed" | "cancelled" | "stalled") {
+            if matches!(state.as_str(), "failed" | "cancelled" | "stalled") {
                 cascade_cancel_children(&tx, &result.run_id)
                     .await
                     .map_err(ApplyError::Db)?;
@@ -2471,6 +2671,346 @@ async fn apply_step_result_on_registry(
 
     tx.commit().await.map_err(map_apply_error)?;
     Ok(true)
+}
+
+async fn apply_compensation_result<C>(
+    conn: &C,
+    config: &WorkflowEngineConfig,
+    run_id: &str,
+    dispatch_nonce: &str,
+    compensation_target: Option<&str>,
+    current_error: Option<Value>,
+    outcomes: &[CompensationApplyOutcome],
+) -> Result<bool, ApplyError>
+where
+    C: GenericClient + Sync,
+{
+    for outcome in outcomes {
+        conn.execute(
+            "UPDATE zeroship.workflow_steps s \
+                SET compensation_state = $5, \
+                    compensation_attempt = compensation_attempt + 1, \
+                    compensation_wake_at = NULL, \
+                    compensation_error = $6, \
+                    compensation_batch_id = $7, \
+                    compensation_finished_at = now() \
+              WHERE s.run_id = $1 \
+                AND s.ordinal = $2 \
+                AND s.name = $3 \
+                AND s.name_occurrence = $4 \
+                AND s.kind = 'run' \
+                AND s.compensation_state IN ('pending','running') \
+                AND NOT EXISTS ( \
+                    SELECT 1 \
+                      FROM zeroship.workflow_steps higher \
+                     WHERE higher.run_id = s.run_id \
+                       AND higher.ordinal > s.ordinal \
+                       AND higher.compensation_state IN ('pending','running') \
+                )",
+            &[
+                &run_id,
+                &outcome.ordinal,
+                &outcome.name,
+                &outcome.name_occurrence,
+                &outcome.state,
+                &outcome.error,
+                &dispatch_nonce,
+            ],
+        )
+        .await
+        .map_err(map_apply_error)?;
+    }
+
+    update_compensating_run_progress(
+        conn,
+        config,
+        run_id,
+        dispatch_nonce,
+        compensation_target,
+        current_error,
+    )
+    .await
+}
+
+async fn update_compensating_run_progress<C>(
+    conn: &C,
+    config: &WorkflowEngineConfig,
+    run_id: &str,
+    dispatch_nonce: &str,
+    compensation_target: Option<&str>,
+    current_error: Option<Value>,
+) -> Result<bool, ApplyError>
+where
+    C: GenericClient + Sync,
+{
+    let progress = compensation_progress(conn, run_id)
+        .await
+        .map_err(ApplyError::Db)?;
+    let (next_state, wake_at, outcome) = if progress.remaining() > 0 {
+        let wake_at = next_compensation_wake_at(conn, run_id)
+            .await
+            .map_err(ApplyError::Db)?;
+        ("compensating".to_string(), wake_at, None)
+    } else {
+        let target = compensation_target.unwrap_or("failed");
+        (
+            target.to_string(),
+            None,
+            Some(progress.terminal_outcome().to_string()),
+        )
+    };
+    let error = compensation_progress_error(current_error, progress, outcome.as_deref());
+    let changed = conn
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state = $1, \
+                    output = NULL, \
+                    error = $2, \
+                    wake_at = $3, \
+                    waiting_step_key = NULL, \
+                    compensation_outcome = $4, \
+                    paused_from_status = NULL, \
+                    stuck_strikes = 0, \
+                    output_kind = 'inline', \
+                    output_hash = NULL, \
+                    output_size = NULL, \
+                    output_content_type = NULL, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL \
+              WHERE id = $5 \
+                AND claimed_by = $6 \
+                AND dispatch_nonce = $7 \
+                AND state = 'compensating'",
+            &[
+                &next_state,
+                &error,
+                &wake_at,
+                &outcome,
+                &run_id,
+                &config.owner_id,
+                &dispatch_nonce,
+            ],
+        )
+        .await
+        .map_err(map_apply_error)?;
+    if changed > 0 && matches!(next_state.as_str(), "failed" | "cancelled") {
+        emit_child_terminal_hook(
+            conn,
+            run_id,
+            ChildTerminalPayload {
+                state: &next_state,
+                output: None,
+                output_ref: None,
+                error: Some(error.clone()),
+            },
+        )
+        .await
+        .map_err(ApplyError::Db)?;
+        cascade_cancel_children(conn, run_id)
+            .await
+            .map_err(ApplyError::Db)?;
+    }
+    Ok(changed > 0)
+}
+
+async fn has_due_compensation<C>(conn: &C, run_id: &str) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT 1 \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+                AND ( \
+                    compensation_state = 'pending' \
+                    OR (compensation_state = 'running' \
+                        AND (compensation_wake_at IS NULL OR compensation_wake_at <= now())) \
+                ) \
+              ORDER BY ordinal DESC \
+              LIMIT 1",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(!rows.is_empty())
+}
+
+async fn pending_compensation_count<C>(conn: &C, run_id: &str) -> Result<i64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let row = conn
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND compensation_state = 'pending'",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(row.get("n"))
+}
+
+async fn finalize_compensation_if_drained<C>(
+    conn: &C,
+    run_id: &str,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let progress = compensation_progress(conn, run_id).await?;
+    if progress.remaining() > 0 {
+        return Ok(false);
+    }
+    let rows = conn
+        .query(
+            "SELECT compensation_target, error \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 AND state = 'compensating' \
+              FOR UPDATE",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let target = row
+        .get::<_, Option<String>>("compensation_target")
+        .unwrap_or_else(|| "failed".to_string());
+    let current_error: Option<Value> = row.get("error");
+    let outcome = progress.terminal_outcome().to_string();
+    let error = compensation_progress_error(current_error, progress, Some(outcome.as_str()));
+    let changed = conn
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state = $2, \
+                    error = $3, \
+                    wake_at = NULL, \
+                    waiting_step_key = NULL, \
+                    compensation_outcome = $4, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL \
+              WHERE id = $1 AND state = 'compensating'",
+            &[&run_id, &target, &error, &outcome],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if changed > 0 && matches!(target.as_str(), "failed" | "cancelled") {
+        emit_child_terminal_hook(
+            conn,
+            run_id,
+            ChildTerminalPayload {
+                state: &target,
+                output: None,
+                output_ref: None,
+                error: Some(error.clone()),
+            },
+        )
+        .await?;
+        cascade_cancel_children(conn, run_id).await?;
+    }
+    Ok(changed > 0)
+}
+
+async fn compensation_progress<C>(
+    conn: &C,
+    run_id: &str,
+) -> Result<CompensationProgress, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let row = conn
+        .query_one(
+            "SELECT \
+                COUNT(*) FILTER (WHERE compensation_state IS NOT NULL)::bigint AS total, \
+                COUNT(*) FILTER (WHERE compensation_state = 'completed')::bigint AS completed, \
+                COUNT(*) FILTER (WHERE compensation_state = 'failed')::bigint AS failed, \
+                COUNT(*) FILTER (WHERE compensation_state = 'pending')::bigint AS pending, \
+                COUNT(*) FILTER (WHERE compensation_state = 'running')::bigint AS running \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(CompensationProgress {
+        total: row.get("total"),
+        completed: row.get("completed"),
+        failed: row.get("failed"),
+        pending: row.get("pending"),
+        running: row.get("running"),
+    })
+}
+
+async fn next_compensation_wake_at<C>(
+    conn: &C,
+    run_id: &str,
+) -> Result<Option<DateTime<Utc>>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let row = conn
+        .query_one(
+            "SELECT \
+                EXISTS ( \
+                    SELECT 1 FROM zeroship.workflow_steps \
+                     WHERE run_id = $1 AND compensation_state = 'pending' \
+                ) AS has_pending, \
+                MIN(compensation_wake_at) FILTER (WHERE compensation_state = 'running') AS running_wake \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if row.get::<_, bool>("has_pending") {
+        return Ok(Some(Utc::now()));
+    }
+    Ok(row
+        .get::<_, Option<DateTime<Utc>>>("running_wake")
+        .or_else(|| Some(Utc::now())))
+}
+
+fn compensation_progress_error(
+    base: Option<Value>,
+    progress: CompensationProgress,
+    outcome: Option<&str>,
+) -> Value {
+    let mut error = match base {
+        Some(Value::Object(map)) => Value::Object(map),
+        Some(value) => serde_json::json!({
+            "type": "Error",
+            "message": "workflow failed during compensation",
+            "cause": value,
+        }),
+        None => serde_json::json!({
+            "type": "Error",
+            "message": "workflow compensation is running",
+        }),
+    };
+    let mut compensation = serde_json::json!({
+        "total": progress.total,
+        "completed": progress.completed,
+        "failed": progress.failed,
+    });
+    if let Some(outcome) = outcome {
+        compensation["outcome"] = Value::String(outcome.to_string());
+    }
+    if let Some(obj) = error.as_object_mut() {
+        obj.insert("compensation".to_string(), compensation);
+    }
+    error
+}
+
+fn should_enter_compensation_for_error(error: &Value) -> bool {
+    !matches!(
+        error.get("type").and_then(Value::as_str),
+        Some("NondeterministicError" | "StalledError")
+    )
 }
 
 async fn upsert_workflow_subscription<C>(
@@ -2898,6 +3438,12 @@ where
         .and_then(|value| value.content_type.clone())
         .or_else(|| output_ref.map(|_| "application/json".to_string()));
     let blob_bytes_delta = output_ref.map_or(0, |value| value.size.max(0));
+    let compensation_state = if checkpoint.kind == "run" && checkpoint.state == "completed" {
+        checkpoint.compensation_state.as_deref()
+    } else {
+        None
+    };
+    let compensation_max_attempts = checkpoint.compensation_max_attempts.max(1);
 
     let delta = checkpoint_journal_bytes(conn, checkpoint).await?;
     if delta > 0 {
@@ -2941,6 +3487,8 @@ where
                     output_size = $14, \
                     output_content_type = $15, \
                     child_run_id = COALESCE(child_run_id, $16), \
+                    compensation_state = $17, \
+                    compensation_max_attempts = $18, \
                     finished_at = now() \
               WHERE run_id = $1 \
                 AND ordinal = $2 \
@@ -2964,6 +3512,8 @@ where
                 &output_size,
                 &output_content_type,
                 &checkpoint.child_run_id,
+                &compensation_state,
+                &compensation_max_attempts,
             ],
         )
         .await
@@ -2974,9 +3524,9 @@ where
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
              output_kind, output_hash, output_size, output_content_type, \
              wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
-             child_run_id, batch_id, batch_width, finished_at) \
+             child_run_id, batch_id, batch_width, compensation_state, compensation_max_attempts, finished_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now()) \
+                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now()) \
          ON CONFLICT (run_id, ordinal) DO NOTHING",
             &[
                 &run_id,
@@ -2998,6 +3548,8 @@ where
                 &checkpoint.child_run_id,
                 &batch_id,
                 &batch_width,
+                &compensation_state,
+                &compensation_max_attempts,
             ],
         )
         .await
@@ -3147,7 +3699,11 @@ async fn requeue_claim(
     let conn = registry.conn().await?;
     conn.execute(
         "UPDATE zeroship.workflow_runs \
-            SET state = CASE WHEN state = 'paused' THEN 'paused' ELSE 'queued' END, \
+            SET state = CASE \
+                    WHEN state = 'paused' THEN 'paused' \
+                    WHEN state = 'compensating' THEN 'compensating' \
+                    ELSE 'queued' \
+                END, \
                 wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE now() END, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
@@ -3155,7 +3711,7 @@ async fn requeue_claim(
           WHERE id = $1 \
             AND claimed_by = $2 \
             AND dispatch_nonce = $3 \
-            AND state IN ('running','paused')",
+            AND state IN ('running','paused','compensating')",
         &[&run_id, &owner_id, &dispatch_nonce],
     )
     .await
@@ -3173,7 +3729,11 @@ async fn park_backpressure_claim(
     let conn = registry.conn().await?;
     conn.execute(
         "UPDATE zeroship.workflow_runs \
-            SET state = CASE WHEN state = 'paused' THEN 'paused' ELSE 'queued' END, \
+            SET state = CASE \
+                    WHEN state = 'paused' THEN 'paused' \
+                    WHEN state = 'compensating' THEN 'compensating' \
+                    ELSE 'queued' \
+                END, \
                 wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE $1 END, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
@@ -3181,7 +3741,7 @@ async fn park_backpressure_claim(
           WHERE id = $2 \
             AND claimed_by = $3 \
             AND dispatch_nonce = $4 \
-            AND state IN ('running','paused')",
+            AND state IN ('running','paused','compensating')",
         &[&wake_at, &run_id, &owner_id, &dispatch_nonce],
     )
     .await
@@ -3264,6 +3824,7 @@ mod tests {
             deploy_id: "dep_test".to_string(),
             deploy_hash: "hash_test".to_string(),
             dispatch_nonce: "wfd_test".to_string(),
+            phase: "running".to_string(),
             input: Some(serde_json::json!({"orderId": "ord_1"})),
             started_at: Utc::now(),
             journal: Vec::new(),
