@@ -87,8 +87,8 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       unit_cents: t.int(),
       ratio: t.real(),
       source_ip: t.inet(),
-      total_cents: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
-      virtual_total: t.int().generated((c: any) => c("qty").mul(c("unit_cents")), { virtual: true }),
+      total_cents: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
+      virtual_total: t.int().generated((col: any) => col("qty").mul(col("unit_cents")), { virtual: true }),
       embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
@@ -101,7 +101,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
-    type: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
+    type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
   });
   table("documents").column("added_seq").add({ type: t.bigInt().identity() });
   return drain();
@@ -117,7 +117,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   const ops = authorWith(PUBLIC);
   const create = ops[0];
   assert.equal(create.op, "createTable");
-  const byName = (n: string) => create.columns.find((c: any) => c.name === n);
+  const byName = (n: string) => create.columns.find((column: any) => column.name === n);
 
   // t.id({ prefix }) → idPrefix
   assert.equal(byName("id").idPrefix, "doc");

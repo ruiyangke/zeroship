@@ -236,7 +236,7 @@ export function up() {
     },
     primaryKey: ["app_id", "route"],
     checks: [
-      { name: "platform_registry_target_nonempty", expr: (c) => c("target").ne("") },
+      { name: "platform_registry_target_nonempty", expr: (col) => col("target").ne("") },
     ],
   });
 
@@ -246,14 +246,14 @@ export function up() {
     references: { table: "platform_apps", columns: ["id"] },
   });
   registry.check("platform_registry_status_check").add({
-    expr: (c) => c("status").in(["active", "paused"]),
+    expr: (col) => col("status").in(["active", "paused"]),
   });
   registry.index("platform_registry_target_idx").add({ on: ["target"] });
   registry.setRls({ enabled: true, forced: true });
   registry.policy("tenant_isolation").create({
     for: "all",
-    using: (c) => c("app_id").isNotNull(),
-    withCheck: (c) => c("app_id").isNotNull(),
+    using: (col) => col("app_id").isNotNull(),
+    withCheck: (col) => col("app_id").isNotNull(),
   });
   registry.comment("Platform route registry");
 
@@ -384,35 +384,35 @@ export function up() {
       snapshot_ch_version: t.text(),
     },
     checks: [
-      check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
-      check("expr_user_id_fmt", (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$")),
-      check("expr_kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-      check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
-      check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
-      check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-      check("expr_floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
-      check("expr_active_visible", (c) => c("active").and(c("visible"))),
-      { name: "expr_expires_window", expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) },
+      check("expr_pkce_method_check", (col) => col("pkce_method").eq("S256")),
+      check("expr_user_id_fmt", (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$")),
+      check("expr_kind_ok", (col) => col("kind").in(["a", "b", "c"])),
+      check("expr_kind_not_reserved", (col) => col("kind").notIn(["x", "y"])),
+      check("expr_data_size", (col) => col("data").columnSize().lt(262144)),
+      check("expr_total_matches", (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")))),
+      check("expr_floor_nonneg_or_null", (col) => col("floor_cents").isNull().or(col("floor_cents").ge(0))),
+      check("expr_active_visible", (col) => col("active").and(col("visible"))),
+      { name: "expr_expires_window", expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) },
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
       // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
-      check("expr_snapshot_consistency", (c) =>
-        c("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
-          c("snapshot_artifact_path").isNotNull()
-            .and(c("snapshot_sha256").isNotNull())
-            .and(c("snapshot_ch_version").isNotNull()),
+      check("expr_snapshot_consistency", (col) =>
+        col("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
+          col("snapshot_artifact_path").isNotNull()
+            .and(col("snapshot_sha256").isNotNull())
+            .and(col("snapshot_ch_version").isNotNull()),
         )),
     ],
   });
 
   table("expr_surface", { schema: "zeroship" }).check("expr_amount_nonnegative").add({
-    expr: (c) => c("amount_cents").ge(0),
+    expr: (col) => col("amount_cents").ge(0),
   });
 
   // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
   pgTable("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
-    .add({ on: ["status"], where: (c) => c("status").notIn(["snapshotted", "snapshotted_suspect"]) });
+    .add({ on: ["status"], where: (col) => col("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_created_desc_idx")

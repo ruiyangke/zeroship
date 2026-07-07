@@ -7,8 +7,8 @@ export function up() {
       enabled: t.boolean().notNull(),
     },
     checks: [
-      { name: "http_status_known", expr: (c) => c("http_status").in([200, 404, 500]) },
-      { name: "enabled_known", expr: (c) => c("enabled").in([true, false]) },
+      { name: "http_status_known", expr: (col) => col("http_status").in([200, 404, 500]) },
+      { name: "enabled_known", expr: (col) => col("enabled").in([true, false]) },
     ],
   });
 }

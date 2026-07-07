@@ -74,7 +74,7 @@ const confinedSystemColumns = [
   { name: "deleted_at", type: "timestamp", nullable: true },
 ];
 
-const confinedSystemColumnNames = new Set(confinedSystemColumns.map((c) => c.name));
+const confinedSystemColumnNames = new Set(confinedSystemColumns.map((column) => column.name));
 const confinedSystemIndexes = [
   { columns: [{ kind: "column", name: "deleted_at" }] },
   { columns: [{ kind: "column", name: "updated_at" }] },
@@ -145,7 +145,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("memberships").create({
       columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
-      checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
+      checks: [{ name: "memberships_team_chk", expr: (col) => col("team").isNotNull() }],
       foreignKeys: [
         {
           name: "memberships_account_fk",
@@ -161,7 +161,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
       references: { table: "teams", columns: ["name"] },
     });
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
-    table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
+    table("accounts").check("accounts_balance_chk").add({ expr: (col) => col("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
     table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
     table("accounts").column("profile").setNotNull();
@@ -169,7 +169,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     pgTable("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
-      where: (c) => c("active").isTrue(),
+      where: (col) => col("active").isTrue(),
     });
     table("accounts").column("nickname").add({ type: t.text() });
     table("accounts").column("nickname").setNotNull();
@@ -188,41 +188,41 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
     });
     table("status_codes").update({
       set: {
-        label: (c) => c("label").coalesce("unknown"),
-        norm: (c) => c("label").trim().lower(),
-        shout: (c) => c("label").upper(),
-        len: (c) => c("label").length(),
-        mag: (c) => c("code").sub(500).abs(),
-        canon: (c) => c("label").nullif(""),
-        score: (c) => c("code").add(1).mul(2).sub(3).div(1),
-        joined: (c) => c("label").concat(" ", c("code").cast({ to: "text" })),
-        code_txt: (c) => c("code").cast({ to: "text" }),
+        label: (col) => col("label").coalesce("unknown"),
+        norm: (col) => col("label").trim().lower(),
+        shout: (col) => col("label").upper(),
+        len: (col) => col("label").length(),
+        mag: (col) => col("code").sub(500).abs(),
+        canon: (col) => col("label").nullif(""),
+        score: (col) => col("code").add(1).mul(2).sub(3).div(1),
+        joined: (col) => col("label").concat(" ", col("code").cast({ to: "text" })),
+        code_txt: (col) => col("code").cast({ to: "text" }),
       },
-      where: (c) => c("code").gt(0).and(c("label").isNotNull()),
+      where: (col) => col("code").gt(0).and(col("label").isNotNull()),
     });
     table("status_codes").delete({
-      where: (c) =>
-        c("code")
+      where: (col) =>
+        col("code")
           .ne(0)
-          .or(c("code").le(0))
-          .or(c("code").ge(999))
-          .or(c("label").isNull())
-          .or(c("active").isFalse())
+          .or(col("code").le(0))
+          .or(col("code").ge(999))
+          .or(col("label").isNull())
+          .or(col("active").isFalse())
           .and(
-            c
-              .case({ branches: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
+            col
+              .case({ branches: [{ when: col("code").lt(100), then: col("code").isNull() }], else: col("label").isNull() })
               .isTrue(),
           ),
       limit: 100,
     });
     table("status_codes").backfill({
       set: {
-        full: (c) => concatWs(" ", c("label"), c("code").cast({ to: "text" })),
-        first: (c) => c("label").splitPart(" ", 1),
+        full: (col) => concatWs(" ", col("label"), col("code").cast({ to: "text" })),
+        first: (col) => col("label").splitPart(" ", 1),
         touched: now(),
         token: genRandomUuid(),
       },
-      where: (c) => c("code").gt(0),
+      where: (col) => col("code").gt(0),
       cursorColumn: "code",
       batchSize: 500,
       name: "fluent_backfill",
@@ -284,10 +284,10 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     secrets.setRls({ enabled: true, forced: true });
     secrets.policy("tenant_isolation").create({
       for: "all",
-      using: (c) =>
-        c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
-      withCheck: (c) =>
-        c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+      using: (col) =>
+        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+      withCheck: (col) =>
+        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
     });
     secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.setRls({ enabled: false, forced: false });
@@ -307,7 +307,7 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       events: ["update", "delete"],
       forEach: "row",
       execute: "audit_events_block_tamper",
-      when: (c) => c("app_id").isNotNull(),
+      when: (col) => col("app_id").isNotNull(),
     });
     audit.trigger("audit_events_append_only").create({
       timing: "before",

@@ -62,7 +62,7 @@ test("tier-2 addConstraint byte collision check covers serialized constraint kin
       references: { table: "customers", columns: ["id"] },
     });
     table("users").unique("users_email_key").add({ columns: ["email"] });
-    table("users").check("users_email_present").add({ expr: (c) => c("email").isNotNull() });
+    table("users").check("users_email_present").add({ expr: (col) => col("email").isNotNull() });
     pgTable("bookings").exclusion("bookings_room_excl").add({
       using: "gist",
       elements: [{ target: "room_id", operator: "=" }],

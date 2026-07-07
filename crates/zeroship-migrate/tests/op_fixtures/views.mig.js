@@ -7,7 +7,7 @@ export default {
       as: (q) => q
         .from("users")
         .select(["id", "email"])
-        .where((c) => c("deleted_at").isNull()),
+        .where((col) => col("deleted_at").isNull()),
     });
 
     view("recent_users").create({

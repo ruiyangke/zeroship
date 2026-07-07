@@ -596,7 +596,7 @@ test("insert normalizes decimal() to {decimal} and Uint8Array to {bytes:base64}"
 test("update set records scalar RHS as IrValue scalar and callback RHS as IrValue expr", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ a: 1 }] });
-    table("t").update({ set: { a: 1, b: (c) => c("x").add(1) } });
+    table("t").update({ set: { a: 1, b: (col) => col("x").add(1) } });
   });
 
   assert.deepEqual(ops[1].set.a, ops[0].rows[0][0], "set scalar must match insert scalar wire shape");
@@ -616,7 +616,7 @@ test("decimal() validates decimal strings and records byte-identical IR", () => 
       rows: [{ id: 1 }],
       onConflict: { columns: ["id"], doUpdate: { price: decimal("9007199254740993") } as any },
     });
-    table("t").check("price_chk").add({ expr: (c) => c("price").ge(decimal("0.00")) });
+    table("t").check("price_chk").add({ expr: (col) => col("price").ge(decimal("0.00")) });
     lit(decimal("1.25"));
   });
 
@@ -651,7 +651,7 @@ test("byteValue() validates bytes inputs and records byte-identical IR", () => {
       rows: [{ id: 1 }],
       onConflict: { columns: ["id"], doUpdate: { raw: byteValue(new Uint8Array([1, 2, 3])) } as any },
     });
-    table("t").check("raw_chk").add({ expr: (c) => c("raw").eq(byteValue("AQID")) });
+    table("t").check("raw_chk").add({ expr: (col) => col("raw").eq(byteValue("AQID")) });
     lit(byteValue("AQID"));
   });
 
@@ -968,7 +968,7 @@ test("update records a plain one-shot op with no batch field", () => {
   const ops = record(() =>
     table("t").update({
       set: { x: now() },
-      where: (c) => c("id").isNotNull(),
+      where: (col) => col("id").isNotNull(),
     }),
   );
   assert.equal(ops[0].op, "update");
@@ -979,7 +979,7 @@ test("backfill remains the batched-write spelling", () => {
   const ops = record(() =>
     table("t").backfill({
       set: { x: now() },
-      where: (c) => c("id").isNotNull(),
+      where: (col) => col("id").isNotNull(),
       cursorColumn: "id",
       batchSize: 500,
     }),
@@ -990,23 +990,23 @@ test("backfill remains the batched-write spelling", () => {
 });
 
 test("del records the 'delete' wire tag and requires where", () => {
-  const ops = record(() => table("t").delete({ where: (c) => c("code").isNull(), limit: 5 }));
+  const ops = record(() => table("t").delete({ where: (col) => col("code").isNull(), limit: 5 }));
   assert.equal(ops[0].op, "delete");
   assert.equal(ops[0].limit, 5);
   assert.throws(() => record(() => table("t").delete({} as any)), /where is mandatory/);
 });
 
-test("the (c) => Expr builder constructs the closed AST", () => {
+test("the (col) => Expr builder constructs the closed AST", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        a: (c) => c("x").add(1).mul(2).cast({ to: "int" }),
-        b: (c) => concatWs(" ", c("p"), c("q")),
-        d: (c) => c.case({ branches: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
-        e: (c) => c("payload").cast({ to: "bytes" }),
-        f: (c) => c("label").cast({ to: "text" }),
+        a: (col) => col("x").add(1).mul(2).cast({ to: "int" }),
+        b: (col) => concatWs(" ", col("p"), col("q")),
+        d: (col) => col.case({ branches: [{ when: col("x").lt(0), then: col("y") }], else: col("z") }),
+        e: (col) => col("payload").cast({ to: "bytes" }),
+        f: (col) => col("label").cast({ to: "text" }),
       },
-      where: (c) => c("x").gt(0).and(c("y").isNotNull()),
+      where: (col) => col("x").gt(0).and(col("y").isNotNull()),
     }),
   );
   const set = ops[0].set;
@@ -1023,67 +1023,67 @@ test("the (c) => Expr builder constructs the closed AST", () => {
 
 test("cast fails closed on positional calls and old affinity tokens", () => {
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").cast("text" as any) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").cast("text" as any) } })),
     (e: any) => e.code === "OP_INVALID" && /must be \{ to \}/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").cast({ to: "blob" } as any) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").cast({ to: "blob" } as any) } })),
     (e: any) => e.code === "OP_INVALID" && /to must be one of/.test(e.message),
   );
 });
 
-test("c.case validates the object branch shape", () => {
+test("col.case validates the object branch shape", () => {
   assert.throws(
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ branches: [] }) },
-          where: (c) => c("id").isNotNull(),
+          set: { x: (col) => col.case({ branches: [] }) },
+          where: (col) => col("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches must be a non-empty array/,
+    /col\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches must be a non-empty array/,
   );
   assert.throws(
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ branches: [[c("a"), c("b")]] as any }) },
-          where: (c) => c("id").isNotNull(),
+          set: { x: (col) => col.case({ branches: [[col("a"), col("b")]] as any }) },
+          where: (col) => col("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches\[0\] must be an object with when and then/,
+    /col\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches\[0\] must be an object with when and then/,
   );
 });
 
 test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull() (P4)", () => {
   assert.throws(
-    () => record(() => table("t").check("c_eq").add({ expr: (c) => c("a").eq(null) })),
+    () => record(() => table("t").check("c_eq").add({ expr: (col) => col("a").eq(null) })),
     /eq\(null\) is always UNKNOWN in SQL — use isNull\(\)/,
   );
   assert.throws(
-    () => record(() => table("t").check("c_ne").add({ expr: (c) => c("a").ne(null) })),
+    () => record(() => table("t").check("c_ne").add({ expr: (col) => col("a").ne(null) })),
     /ne\(null\) is always UNKNOWN in SQL — use isNotNull\(\)/,
   );
   // the steer target itself still records without error
-  const ops = record(() => table("t").check("c_ok").add({ expr: (c) => c("a").isNull() }));
+  const ops = record(() => table("t").check("c_ok").add({ expr: (col) => col("a").isNull() }));
   assert.equal(ops.length, 1);
   assert.equal(JSON.stringify(ops[0]).includes('"isNull"'), true);
 });
 
-test("the two-arg c('table','col') records a qualified colRef; one-arg stays unqualified", () => {
-  // §3.4 the join-ON fix: `c("orders", "customer_id")` records a colRef carrying
-  // an optional `table`; `c("id")` records the pre-qualification unqualified shape
+test("the two-arg col('table','col') records a qualified colRef; one-arg stays unqualified", () => {
+  // §3.4 the join-ON fix: `col("orders", "customer_id")` records a colRef carrying
+  // an optional `table`; `col("id")` records the pre-qualification unqualified shape
   // (no `table` key at all — byte-identical to today).
   const ops = record(() =>
     table("t").update({
       set: {
         // qualified two-arg form on both sides of the predicate-shaped value
-        q: (c) => c("orders", "customer_id"),
+        q: (col) => col("orders", "customer_id"),
         // one-arg form is untouched
-        u: (c) => c("id"),
-        // the callable two-arg spelling replaces the old c.col("table", "col")
-        cq: (c) => c("users", "id"),
-        tx: (c) => c("t", "x"),
+        u: (col) => col("id"),
+        // the callable two-arg spelling replaces the old col.col("table", "col")
+        cq: (col) => col("users", "id"),
+        tx: (col) => col("t", "x"),
       },
     }),
   );
@@ -1099,10 +1099,10 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
 test("variadic boolean chains record the old free-combinator left fold", () => {
   const ops = record(() =>
     table("t").check("wide_bool").add({
-      expr: (c) =>
-        c("a").eq(1)
-          .and(c("b").eq(2), c("c").eq(3))
-          .or(c("d").eq(4), c("e").eq(5)),
+      expr: (col) =>
+        col("a").eq(1)
+          .and(col("b").eq(2), col("c").eq(3))
+          .or(col("d").eq(4), col("e").eq(5)),
     }),
   );
 
@@ -1138,8 +1138,8 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
         data: t.json().notNull(),
       },
       checks: [
-        { name: "name_shape", expr: (c) => c("name").regex("^[a-z]+$") },
-        { name: "data_size", expr: (c) => c("data").columnSize().le(8192) },
+        { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
+        { name: "data_size", expr: (col) => col("data").columnSize().le(8192) },
       ],
     });
     table("t").update({
@@ -1149,7 +1149,7 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
       },
     });
   });
-  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  const checks = ops[0].constraints.map((constraint: any) => constraint.kind.expr);
   assert.deepEqual(checks[0], {
     node: "pgRegexMatch",
     expr: { node: "colRef", name: "name" },
@@ -1196,7 +1196,7 @@ test("core CHECK expressions reject vendor/volatile and record aggregate nodes f
 test("pgTable CHECK expressions allow immutable PG nodes, record aggregates, and reject volatile nodes", () => {
   const ops = record(() =>
     pgTable("t").check("data_small").add({
-      expr: (c) => c("data").columnSize().lt(1000),
+      expr: (col) => col("data").columnSize().lt(1000),
     }),
   );
   assert.deepEqual(ops[0], {
@@ -1248,14 +1248,14 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
   const ops = record(() =>
     table("t").update({
       set: {
-        b: (c) => c("age").between(18, 65),
-        l: (c) => c("name").like("A%"),
-        i: (c) => c("status").in(["a", "b"]),
-        ni: (c) => c("status").notIn(["x"]),
-        empty: (c) => c("status").in([]),
-        codes: (c) => c("http_status").in([200, 404, 500]),
-        bools: (c) => c("enabled").in([true, false]),
-        d: (c) => c("a").distinctFrom(c("b")),
+        b: (col) => col("age").between(18, 65),
+        l: (col) => col("name").like("A%"),
+        i: (col) => col("status").in(["a", "b"]),
+        ni: (col) => col("status").notIn(["x"]),
+        empty: (col) => col("status").in([]),
+        codes: (col) => col("http_status").in([200, 404, 500]),
+        bools: (col) => col("enabled").in([true, false]),
+        d: (col) => col("a").distinctFrom(col("b")),
       },
     }),
   );
@@ -1349,11 +1349,11 @@ test("aggregate chain methods and countStar record the portable aggregate node",
     table("t").update({
       set: {
         n: () => countStar(),
-        s: (c) => c("x").sum(),
-        d: (c) => c("x").count({ distinct: true }),
-        a: (c) => c("x").avg(),
-        lo: (c) => c("x").min(),
-        hi: (c) => c("x").max(),
+        s: (col) => col("x").sum(),
+        d: (col) => col("x").count({ distinct: true }),
+        a: (col) => col("x").avg(),
+        lo: (col) => col("x").min(),
+        hi: (col) => col("x").max(),
       },
     }),
   );
@@ -1406,22 +1406,22 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         visible: t.boolean().notNull(),
       },
       checks: [
-        check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
-        { name: "user_id_fmt", expr: (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") },
-        check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-        { name: "data_size", expr: (c) => c("data").columnSize().lt(262144) },
-        check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-        check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
-        check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
-        { name: "expires_window", expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) },
-        check("not_archived", (c) => c("kind").eq(lit("archived")).not()),
-        check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
+        check("pkce_method_check", (col) => col("pkce_method").eq("S256")),
+        { name: "user_id_fmt", expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") },
+        check("kind_ok", (col) => col("kind").in(["a", "b", "c"])),
+        { name: "data_size", expr: (col) => col("data").columnSize().lt(262144) },
+        check("total_matches", (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")))),
+        check("floor_nonneg_or_null", (col) => col("floor_cents").isNull().or(col("floor_cents").ge(0))),
+        check("enabled_and_visible", (col) => col("enabled").and(col("visible"))),
+        { name: "expires_window", expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) },
+        check("not_archived", (col) => col("kind").eq(lit("archived")).not()),
+        check("kind_not_reserved", (col) => col("kind").notIn(["x", "y"])),
       ],
     });
-    table("expr_checks").check("score_nonnegative").add({ expr: (c) => c("total_cents").ge(0) });
+    table("expr_checks").check("score_nonnegative").add({ expr: (col) => col("total_cents").ge(0) });
   });
 
-  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  const checks = ops[0].constraints.map((constraint: any) => constraint.kind.expr);
   assert.deepEqual(checks[0], {
     node: "binOp",
     op: "eq",
@@ -1653,11 +1653,11 @@ test("chain extract and root interval build extract and interval nodes", () => {
     });
     table("events").update({
       set: {
-        year_part: (c) => c("created_at").extract("year"),
+        year_part: (col) => col("created_at").extract("year"),
       },
     });
     pgTable("epoch_events").check("epoch_positive").add({
-      expr: (c) => c("created_at").extract("epoch").gt(0),
+      expr: (col) => col("created_at").extract("epoch").gt(0),
     });
     pgTable("oauth_device_codes").create({
       columns: {
@@ -1667,7 +1667,7 @@ test("chain extract and root interval build extract and interval nodes", () => {
       checks: [
         {
           name: "expires_window",
-          expr: (c) => c("expires_at").le(c("issued_at").add(interval({ minutes: 1 }))),
+          expr: (col) => col("expires_at").le(col("issued_at").add(interval({ minutes: 1 }))),
         },
       ],
     });
@@ -1707,27 +1707,27 @@ test("chain extract and root interval build extract and interval nodes", () => {
 
 test("inList rejects malformed scalar arrays and chain regex rejects bad patterns", () => {
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").in(["ok", 7 as any]) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in(["ok", 7 as any]) } })),
     (e: any) => e.code === "OP_INVALID" && /homogeneous/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").in([byteValue("AQID") as any]) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in([byteValue("AQID") as any]) } })),
     (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").in([{ value: "ok" } as any]) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in([{ value: "ok" } as any]) } })),
     (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").notIn([""]) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").notIn([""]) } })),
     (e: any) => e.code === "OP_INVALID" && /must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").regex("") } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").regex("") } })),
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").extract("bogus" as any) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").extract("bogus" as any) } })),
     (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
@@ -1743,8 +1743,8 @@ test("inList rejects malformed scalar arrays and chain regex rejects bad pattern
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
     pgTable("users").index("users_email_lower_idx").add({
-      on: ["email", { expr: (c) => c("email").lower() }],
-      where: (c) => c("active").isTrue(),
+      on: ["email", { expr: (col) => col("email").lower() }],
+      where: (col) => col("active").isTrue(),
     }),
   );
   assert.deepEqual(ops[0].columns, [
@@ -1853,7 +1853,7 @@ test("pgTable index widening records the same createIndex op as the shared runti
   const args = {
     on: [{ column: "email", opclass: "text_pattern_ops" }],
     using: "gin",
-    where: (c: any) => c("active").isTrue(),
+    where: (col: any) => col("active").isTrue(),
     include: ["id"],
     with: { fillfactor: 90 },
     only: true,
@@ -2053,7 +2053,7 @@ test("table().trigger().create/drop record legacy trigger op payloads", () => {
         events: ["insert", "update"],
         forEach: "row",
         execute: "audit_events_fn",
-        when: (c) => c("id").isNotNull(),
+        when: (col) => col("id").isNotNull(),
       })
       .trigger("audit_events_trg")
       .drop({ ifExists: true }),
@@ -2203,9 +2203,9 @@ test("backfill defaults cursorColumn to 'id' and batchSize to the engine default
 
 test("chain splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
   const isExprNotPortable = (e: any) => e.code === "EXPR_NOT_PORTABLE";
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c("n").splitPart("", 1) } })), isExprNotPortable);
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c("n").splitPart(" ", 0) } })), isExprNotPortable);
-  const ops = record(() => table("u").update({ set: { x: (c) => c("n").splitPart(" ", 1) } }));
+  assert.throws(() => record(() => table("u").update({ set: { x: (col) => col("n").splitPart("", 1) } })), isExprNotPortable);
+  assert.throws(() => record(() => table("u").update({ set: { x: (col) => col("n").splitPart(" ", 0) } })), isExprNotPortable);
+  const ops = record(() => table("u").update({ set: { x: (col) => col("n").splitPart(" ", 1) } }));
   assert.equal(ops[0].set.x.fn, "splitPart");
 });
 
@@ -2213,14 +2213,14 @@ test("chain {mod,round,floor,ceil,substr,replace} record the right portable fnCa
   const ops = record(() =>
     table("t").update({
       set: {
-        m: (c) => c("n").mod(3),
-        r1: (c) => c("x").round(),
-        r2: (c) => c("x").round(2),
-        fl: (c) => c("x").floor(),
-        ce: (c) => c("x").ceil(),
-        s2: (c) => c("s").substr(1),
-        s3: (c) => c("s").substr(1, 3),
-        rp: (c) => c("s").replace("a", "b"),
+        m: (col) => col("n").mod(3),
+        r1: (col) => col("x").round(),
+        r2: (col) => col("x").round(2),
+        fl: (col) => col("x").floor(),
+        ce: (col) => col("x").ceil(),
+        s2: (col) => col("s").substr(1),
+        s3: (col) => col("s").substr(1, 3),
+        rp: (col) => col("s").replace("a", "b"),
       },
     }),
   );
@@ -2268,7 +2268,7 @@ test("determinism lint flags Date.now()/Math.random()/new Date(); clean source i
     assert.ok(findings.length >= 1, `${frag} must be flagged`);
     assert.equal(findings[0].code, "NONDETERMINISTIC_OP_ARG");
   }
-  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: c => now() } });`), []);
+  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: col => now() } });`), []);
 });
 
 test("determinism lint is a coarse whole-source scan (over-flags, never under-flags)", () => {
