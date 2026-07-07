@@ -601,6 +601,7 @@ Two forms: the portable structured `SelectAst` builder,
 
 ```ts
 import { view,
+  countStar,
   now,
   genRandomUuid,
   currentSetting,
@@ -618,26 +619,31 @@ view("active_users").create({
       .limit(100),
 });
 
-// Joins; `materialized: true` makes it a matview.
-// ⚠️ Expressiveness cliff: the expression builder currently rejects table-qualified
-//    column refs (`col("orders.customer_id")` fails the strict identifier gate), so a
-//    join ON predicate is effectively unwritable structurally today — use raw
-//    view bodies for joined/aggregated views until the builder gains qualified refs.
+// Joins and grouped aggregation; `materialized: true` makes it a matview.
 view("order_totals").create({
   materialized: true,
-  as: (q) => q.from("orders").select(["id", "total"]).where((col) => col("total").gt(0)),
+  as: (q) => q
+    .from("orders")
+    .select([
+      "customer_id",
+      { kind: "expr", alias: "n", expr: () => countStar() },
+      { kind: "expr", alias: "revenue", expr: (col) => col("amount").sum() },
+    ])
+    .where((col) => col("status").eq("paid"))
+    .groupBy(["customer_id"])
+    .having((col) => col("id").count().gt(5)),
 });
 
 view("active_users").drop({ ifExists: true });
 view("active_users").comment("non-deleted users");
 
-// Raw view body.
+// Raw view body for constructs outside the structured SelectAst.
 view("legacy_report").create({
   as: { raw: "SELECT a.id, count(b.*) FROM a JOIN b USING (id) GROUP BY 1" },
 });
 ```
 
-`ViewQueryBuilder`: `from · select · join · innerJoin · leftJoin · where · orderBy · limit`.
+`ViewQueryBuilder`: `from · select · join · innerJoin · leftJoin · where · groupBy · having · orderBy · limit`.
 
 ---
 

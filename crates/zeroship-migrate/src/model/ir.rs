@@ -2280,6 +2280,12 @@ pub struct SelectAst {
     /// Optional WHERE predicate.
     #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
     pub r#where: Option<Expr>,
+    /// Optional GROUP BY expressions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<Expr>,
+    /// Optional HAVING predicate.
+    #[serde(rename = "having", default, skip_serializing_if = "Option::is_none")]
+    pub having: Option<Expr>,
     /// Optional ORDER BY.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_by: Option<Vec<OrderItem>>,

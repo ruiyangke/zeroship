@@ -168,6 +168,7 @@ export type {
   CreateViewArgs,
   DropViewArgs,
   ViewQueryBuilder,
+  GroupByItem,
   IndexMethod,
   IndexStorageParams,
   IndexStorageParamsArg,

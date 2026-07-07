@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import {
   t,
   table,
+  view,
   minValue,
   maxValue,
   nextval,
@@ -1621,6 +1622,66 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
     inDomain("spend_state", ["allow", "warn", "degrade", "block"]),
   ];
   assert.equal(JSON.stringify(domainOps), JSON.stringify(expected));
+});
+
+test("view builder records groupBy and having in the structured SelectAst", () => {
+  const ops = record(() => {
+    view("order_totals").create({
+      as: (q) => q
+        .from("orders")
+        .select([
+          "customer_id",
+          { kind: "expr", alias: "n", expr: () => countStar() },
+          { kind: "expr", alias: "revenue", expr: (col) => col("amount").sum() },
+        ])
+        .where((col) => col("status").eq("paid"))
+        .groupBy(["customer_id"])
+        .having((col) => col("id").count().gt(5)),
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createView",
+      name: "order_totals",
+      query: {
+        kind: "structured",
+        select: {
+          from: { name: "orders" },
+          projection: [
+            { kind: "colRef", name: "customer_id" },
+            { kind: "expr", expr: { node: "agg", func: "count" }, alias: "n" },
+            {
+              kind: "expr",
+              expr: {
+                node: "agg",
+                func: "sum",
+                arg: { node: "colRef", name: "amount" },
+              },
+              alias: "revenue",
+            },
+          ],
+          where: {
+            node: "binOp",
+            op: "eq",
+            lhs: { node: "colRef", name: "status" },
+            rhs: { node: "literal", value: "paid" },
+          },
+          groupBy: [{ node: "colRef", name: "customer_id" }],
+          having: {
+            node: "binOp",
+            op: "gt",
+            lhs: {
+              node: "agg",
+              func: "count",
+              arg: { node: "colRef", name: "id" },
+            },
+            rhs: { node: "literal", value: 5 },
+          },
+        },
+      },
+    },
+  ]);
 });
 
 test("domain check validation rejects smuggled volatile functions and records aggregates for validate", () => {

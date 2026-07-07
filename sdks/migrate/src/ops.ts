@@ -84,6 +84,7 @@ import type {
   ForeignKeyReference,
   GeneratedColumnExprFn,
   GeneratedOptions,
+  GroupByItem,
   IdOptions,
   IdentityOptions,
   IndexExprBuilder,
@@ -3535,17 +3536,31 @@ function normalizeOrderItem(item: string | OrderItem | ExprFn | ExprChainType | 
   throw structuredError("OP_INVALID", "orderBy item must be a column name, expression, or OrderItem object");
 }
 
+function normalizeGroupByItem(item: GroupByItem): Expr {
+  if (typeof item === "string") return { node: "colRef", name: item } as Expr;
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return viewExpr(item as ExprFn | ExprChainType);
+  }
+  if (item && typeof item === "object" && (item as Node).node !== undefined) {
+    return viewExpr(item as Node);
+  }
+  throw structuredError("OP_INVALID", "groupBy item must be a column name or expression");
+}
+
 function viewQueryBuilder(): SelectAstBuilder {
   const state: {
     from?: TableRef;
     projection: SelectItem[];
     joins: Join[];
     where?: Expr;
+    groupBy: Expr[];
+    having?: Expr;
     orderBy?: OrderItem[];
     limit?: number;
   } = {
     projection: [],
     joins: [],
+    groupBy: [],
   };
 
   let builder: SelectAstBuilder;
@@ -3582,6 +3597,17 @@ function viewQueryBuilder(): SelectAstBuilder {
       state.where = viewExpr(expr as ExprFn | ExprChainType | Node);
       return builder;
     },
+    groupBy(items: GroupByItem[]) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query groupBy(items): items must be an array");
+      }
+      state.groupBy = items.map(normalizeGroupByItem);
+      return builder;
+    },
+    having(expr: ExprFn | ExprChainType | Expr) {
+      state.having = viewExpr(expr as ExprFn | ExprChainType | Node);
+      return builder;
+    },
     orderBy(items: Array<string | OrderItem | ExprFn | ExprChainType | Expr>) {
       if (!Array.isArray(items)) {
         throw structuredError("OP_INVALID", "view query orderBy(items): items must be an array");
@@ -3605,6 +3631,8 @@ function viewQueryBuilder(): SelectAstBuilder {
         projection: state.projection,
         joins: state.joins.length ? state.joins : undefined,
         where: state.where,
+        groupBy: state.groupBy.length ? state.groupBy : undefined,
+        having: state.having,
         orderBy: state.orderBy,
         limit: state.limit,
       }) as SelectAst;

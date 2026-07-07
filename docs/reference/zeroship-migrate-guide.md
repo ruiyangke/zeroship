@@ -556,11 +556,16 @@ Handle interfaces: `EnumHandle` (`types.ts:286-291`), `DomainHandle` (`types.ts:
 ```ts
 view("active_users").create({ as: (q) => q.from("users").select(["id","email"])
   .where((col) => col("deleted_at").isNull()).orderBy(["created_at"]).limit(100) });
-view("legacy_report").create({ materialized: true,
-  as: { raw: "SELECT a.id, count(b.*) FROM a JOIN b USING (id) GROUP BY 1" } });
+view("order_totals").create({ materialized: true, as: (q) => q.from("orders")
+  .select(["customer_id", () => countStar(), (col) => col("amount").sum()])
+  .where((col) => col("status").eq("paid"))
+  .groupBy(["customer_id"])
+  .having((col) => col("id").count().gt(5)) });
+view("legacy_report").create({
+  as: { raw: "SELECT a.id, percentile_cont(0.5) WITHIN GROUP (ORDER BY b.n) FROM a JOIN b USING (id) GROUP BY a.id" } });
 ```
 
-`ViewQueryBuilder` methods: `from · select · join(kind,…) · innerJoin · leftJoin · where · orderBy · limit`. `join` accepts only `"inner"`/`"left"`; `q.from(...)` is mandatory or `__selectAst()` throws.
+`ViewQueryBuilder` methods: `from · select · join(kind,…) · innerJoin · leftJoin · where · groupBy · having · orderBy · limit`. `groupBy` takes column names or expressions; `having` is a grouped SELECT context, so aggregate expressions are valid there. `join` accepts only `"inner"`/`"left"`; `q.from(...)` is mandatory or `__selectAst()` throws.
 
 ### 3.13 Triggers
 
@@ -768,7 +773,7 @@ The redesign is governed by **P0** (`2026-07-04-...:33`): the platform targets P
 ### 4.11 Ambiguities I could not fully confirm
 
 - Op-level `dialect()` (J1) is absent while J3 (value constructors) is landed — the jobs did not land in strict numeric order.
-- Aggregate position enforcement is now verified in the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts. Grouped/SELECT/HAVING ergonomics are still not fully documented here.
+- Aggregate position enforcement is verified in the Rust validator: `AGGREGATE_IN_SCALAR_CONTEXT` rejects aggregates in scalar contexts, while structured view projection and `having` are grouped SELECT contexts.
 - The Rust-side MySQL render of `.regex` (`REGEXP`) is asserted by the design + the `types.ts:574` comment, but the MySQL leg lives in the engine crate (J8 incremental) — I did not confirm it is implemented vs. still fail-closed.
 
 ---

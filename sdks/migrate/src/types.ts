@@ -871,6 +871,7 @@ export interface ViewOptions {
 
 export type TableRefInput = string | TableRef;
 export type SelectProjectionItem = string | SelectItem | ExprFn | ExprChain | Expr;
+export type GroupByItem = string | ExprFn | ExprChain | Expr;
 export type OrderByItem = string | OrderItem | ExprFn | ExprChain | Expr;
 
 export interface ViewQueryBuilder {
@@ -880,6 +881,8 @@ export interface ViewQueryBuilder {
   innerJoin(table: TableRefInput, on: ExprFn | ExprChain | Expr): ViewQueryBuilder;
   leftJoin(table: TableRefInput, on: ExprFn | ExprChain | Expr): ViewQueryBuilder;
   where(expr: ExprFn | ExprChain | Expr): ViewQueryBuilder;
+  groupBy(items: GroupByItem[]): ViewQueryBuilder;
+  having(expr: ExprFn | ExprChain | Expr): ViewQueryBuilder;
   orderBy(items: OrderByItem[]): ViewQueryBuilder;
   limit(n: number): ViewQueryBuilder;
 }
