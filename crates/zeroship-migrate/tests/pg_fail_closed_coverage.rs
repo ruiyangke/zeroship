@@ -298,6 +298,9 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         Op::CreateFunction { .. } => Some("CreateFunction"),
         Op::DropFunction { .. } => Some("DropFunction"),
         Op::PgRaw { .. } => Some("PgRaw"),
+        // Dialectal is a portable wrapper — per-target leg selection + fail-closed
+        // behavior lives in its legs (checked at lower/validate), not here.
+        Op::Dialectal { .. } => None,
     }
 }
 

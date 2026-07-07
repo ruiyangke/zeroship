@@ -488,6 +488,24 @@ export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
  *  plus the `(col) => Expr` callback shorthand. */
 export type DmlSetValue = DmlValue | ExprFn;
 
+/** Expression-position dialect legs. Missing own leg with no default is refused
+ *  by the engine for that target. */
+export type DialectExprLegs = {
+  default?: unknown;
+  pg?: unknown;
+  sqlite?: unknown;
+  mysql?: unknown;
+};
+
+/** Op-position dialect legs. Each present leg is thunked and records normal ops;
+ *  missing own leg with no default is skipped for that target. */
+export type DialectOpLegs = {
+  default?: () => void;
+  pg?: () => void;
+  sqlite?: () => void;
+  mysql?: () => void;
+};
+
 /** Empty object/array defaults admitted for JSON/text-array columns. */
 export type EmptyContainerDefault = Record<string, never> | readonly [];
 

@@ -232,8 +232,8 @@ fn every_op_variant_has_a_fixture() {
         .collect();
     assert_eq!(
         expected.len(),
-        53,
-        "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition"
+        54,
+        "the closed Op set has 54 variants after adding op-level dialectal"
     );
 
     // The union of op discriminants across all recorded fixtures.

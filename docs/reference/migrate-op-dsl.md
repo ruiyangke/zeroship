@@ -142,6 +142,7 @@ The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 | `enumType` | portable enum entry — returns an inert `EnumHandle`; `.create({ values })` records |
 | `comment` | standalone structured object comments |
 | `t` | the immutable column-type lexicon |
+| `dialect` | per-dialect value or whole-op escape hatch |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
 | `countStar` | receiver-less aggregate helper for `COUNT(*)`; receiver aggregates are `ExprChain` methods |
@@ -169,6 +170,41 @@ PostgreSQL aggregates `stringAgg(delimiter)`, `arrayAgg()`, `boolAnd()`, and
 MySQL (`DIALECT_UNSUPPORTED`) unless the value is wrapped in `dialect({...})`.
 `jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses are
 documented follow-ups, not part of the current surface.
+
+## `dialect()` at value and op position
+
+`dialect(legs)` is the explicit portability escape. It has two modes, selected
+by the leg values:
+
+- **Expression/value position**: legs are expression values. The recorder emits
+  `Expr::Dialectal`, and a target with no own leg and no `default` leg is a hard
+  portability error. Use this inside defaults, predicates, generated expressions,
+  DML values, and other expression slots.
+- **Statement/op position**: legs are thunks. The recorder runs each present
+  thunk in canonical order (`default`, `pg`, `sqlite`, `mysql`), captures the ops
+  it emitted, removes those captured ops from the outer recorder, and emits one
+  `dialectal` op containing the per-target op lists. A target with no own leg
+  and no `default` leg skips the op entirely.
+
+```ts
+import { dialect, table } from "@zeroship/migrate";
+
+dialect({
+  pg: () => table("docs").index("docs_embedding_hnsw_idx").add({
+    on: ["embedding"],
+    using: "hnsw",
+  }),
+});
+```
+
+An explicit empty thunk is a present no-op leg for that target. An absent key is
+different: absent own leg plus absent `default` means "skip" for op-level
+`dialect()` and "error" for expression-level `dialect()`. Mixing thunk legs with
+expression-value legs in the same call throws `OP_INVALID`.
+
+Spec-level dialectal fragments, such as wrapping one index element inside
+`indexes: []` or wrapping a `ColumnDef`, are a future increment. Today, use
+op-level `dialect()` around the whole op or op sequence.
 
 ## Names are strings (and why)
 

@@ -1337,6 +1337,58 @@ test("dialect() rejects an empty leg set at record time", () => {
   assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
 });
 
+test("dialect() records op-level thunk legs by sub-recording normal ops", () => {
+  const ops = record(() => {
+    table("docs").create({
+      columns: {
+        id: t.uuid().primaryKey(),
+        embedding: t.vector({ dimensions: 3, metric: "cosine" }),
+      },
+    });
+    dialect({
+      pg: () => table("docs").index("docs_embedding_hnsw_idx").add({ on: ["embedding"], using: "hnsw" }),
+      sqlite: () => {},
+    });
+  });
+
+  assert.equal(ops.length, 2);
+  assert.equal(ops[1].op, "dialectal");
+  assert.deepEqual(Object.keys(ops[1]), ["op", "pg", "sqlite"]);
+  assert.deepEqual(ops[1].pg, [
+    {
+      op: "createIndex",
+      table: "docs",
+      columns: [{ kind: "column", name: "embedding" }],
+      name: "docs_embedding_hnsw_idx",
+      using: "hnsw",
+    },
+  ]);
+  assert.deepEqual(ops[1].sqlite, []);
+  assert.equal("mysql" in ops[1], false);
+});
+
+test("dialect() rejects mixed op thunk and expression legs", () => {
+  assert.throws(
+    () => record(() => dialect({ pg: () => table("docs").column("title").add({ type: t.text() }), sqlite: lit(0) })),
+    (e: any) => e.code === "OP_INVALID" && /cannot mix op thunk legs/.test(e.message),
+  );
+});
+
+test("dialect() still treats bare native synth symbols as expression legs", () => {
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        ts: () => dialect({ pg: Date.now, sqlite: now() }),
+      },
+    }),
+  );
+  assert.deepEqual(ops[0].set.ts, {
+    node: "dialect",
+    pg: { node: "fnSynth", fn: "now", args: [] },
+    sqlite: { node: "fnSynth", fn: "now", args: [] },
+  });
+});
+
 test("aggregate chain methods and countStar record aggregate nodes", () => {
   // §3.4/§3.6 aggregate nodes. count()/sum/avg/min/max render on all three
   // dialects; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
