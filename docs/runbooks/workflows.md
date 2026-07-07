@@ -181,6 +181,23 @@ SELECT count(*) AS blobs,
   FROM zeroship.workflow_blobs;
 ```
 
+Terminal-run retention backlog:
+
+```sql
+SELECT state, count(*) AS runs, min(terminal_at) AS oldest_terminal
+  FROM zeroship.workflow_runs
+ WHERE state IN ('completed', 'failed', 'cancelled', 'stalled')
+   AND terminal_at IS NOT NULL
+ GROUP BY state
+ ORDER BY oldest_terminal;
+```
+
+The retention sweep prunes only terminal runs whose `terminal_at` is older than
+the operator-tunable `CONTROL_WORKFLOW_RETENTION_WINDOW_MS`; the code default is
+`DEFAULT_RETENTION_WINDOW_MS` (7 days). `compensating` is not terminal and is
+never eligible. Each tick logs counters for reaped runs, steps, signals,
+subscriptions, broadcasts, and blobs.
+
 Largest apps by retained workflow bytes:
 
 ```sql

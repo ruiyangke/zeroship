@@ -1273,6 +1273,7 @@ async fn create_run_inner(
                         SET state = 'cancelled', \
                             dedup_key = NULL, \
                             wake_at = NULL, \
+                            terminal_at = now(), \
                             output = NULL, \
                             error = NULL, \
                             output_kind = 'inline', \
@@ -1443,6 +1444,7 @@ async fn start_many_inner(
                             SET state = 'cancelled', \
                                 dedup_key = NULL, \
                                 wake_at = NULL, \
+                                terminal_at = now(), \
                                 output = NULL, \
                                 error = NULL, \
                                 output_kind = 'inline', \
@@ -2597,6 +2599,7 @@ async fn restart_run_inner(
         "UPDATE zeroship.workflow_runs \
             SET state = 'queued', \
                 wake_at = now(), \
+                terminal_at = NULL, \
                 output = NULL, \
                 error = NULL, \
                 output_kind = 'inline', \
@@ -2700,6 +2703,7 @@ async fn control_transition(
                 tx.query(
                     "UPDATE zeroship.workflow_runs \
                         SET state = 'paused', \
+                            terminal_at = NULL, \
                             paused_from_status = CASE \
                                 WHEN state = 'paused' THEN paused_from_status \
                                 ELSE state \
@@ -2737,6 +2741,7 @@ async fn control_transition(
                 let sql = format!(
                     "UPDATE zeroship.workflow_runs \
                         SET state = {}, \
+                            terminal_at = NULL, \
                             paused_from_status = NULL \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
@@ -2807,6 +2812,7 @@ async fn control_transition(
                         "UPDATE zeroship.workflow_runs \
                             SET state = 'compensating', \
                                 wake_at = now(), \
+                                terminal_at = NULL, \
                                 output = NULL, \
                                 error = $3, \
                                 output_kind = 'inline', \
@@ -2832,6 +2838,7 @@ async fn control_transition(
                         "UPDATE zeroship.workflow_runs \
                             SET state = 'cancelled', \
                                 wake_at = NULL, \
+                                terminal_at = now(), \
                                 output = NULL, \
                                 error = NULL, \
                                 output_kind = 'inline', \
@@ -2855,6 +2862,7 @@ async fn control_transition(
                     "UPDATE zeroship.workflow_runs \
                         SET state = 'cancelled', \
                             wake_at = NULL, \
+                            terminal_at = now(), \
                             output = NULL, \
                             error = NULL, \
                             output_kind = 'inline', \
