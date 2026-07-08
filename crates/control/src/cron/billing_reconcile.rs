@@ -62,7 +62,6 @@ use uuid::Uuid;
 use crate::metering::{period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
-use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::stripe_client::{Period, StripeApi, StripeClient};
 use crate::AppState;
@@ -223,7 +222,7 @@ pub async fn tick_with<S: StripeApi>(
 #[allow(clippy::future_not_send)]
 async fn sweep<S: StripeApi>(
     state: &AppState,
-    stripe: &S,
+    _stripe: &S,
     period_start: i64,
 ) -> Result<usize, RegistryError> {
     // Creator→apps via ownership (H1): app_members WHERE role='owner'. Apps with
@@ -275,27 +274,25 @@ async fn sweep<S: StripeApi>(
         apps_by_creator.entry(creator_id).or_default().push(app_id);
     }
 
-    let catalog = PlanCatalog::new(state.registry.clone());
-
-    // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
-    // default FX ONCE per tick (tiny global tables), then bill each app's
-    // closed-period usage as integer CU × the plan's effective FX. The invoice
-    // shape is UNCHANGED — one item per app = `charge_cents(...).total_cents`.
-    let pricing = PricingStore::new(state.registry.clone());
-    let weights = pricing.weights().await?;
-    let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-
     let mut billed = 0usize;
+    let billing_period = crate::metering::provider::BillingPeriod {
+        start: period_start,
+        end: period_end_unix(period_start),
+    };
+    let invoicer = state
+        .billing_stack
+        .invoicer
+        .as_invoicer()
+        .ok_or_else(|| RegistryError::Database("billing stack has no invoicer".to_string()))?;
 
-    for (creator_id, app_ids) in &apps_by_creator {
-        match bill_creator(
-            state, stripe, &catalog, &weights, default_fx, creator_id, app_ids,
-            period_start,
-        )
-        .await
+    for (creator_id, _app_ids) in &apps_by_creator {
+        let subject = crate::metering::provider::SubjectRef(creator_id.to_string());
+        match invoicer.close_period(&subject, billing_period, &[]).await.map_err(RegistryError::from)
         {
-            Ok(true) => billed += 1,
-            Ok(false) => { /* nothing to bill / already billed / no customer */ }
+            Ok(crate::metering::provider::InvoiceRef(Some(_))) => billed += 1,
+            Ok(crate::metering::provider::InvoiceRef(None)) => {
+                /* nothing to bill / already billed / no customer */
+            }
             // MAJOR-2: a missing global default FX means the platform cannot
             // price ANY inheriting plan — this is NOT a per-creator hiccup. Abort
             // the WHOLE sweep (bill no one) so we never emit a mix of correct and
@@ -337,6 +334,38 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
+    bill_creator_with_parts(
+        &state.registry,
+        &state.stripe_store,
+        state.tax_provider.as_ref(),
+        stripe,
+        catalog,
+        weights,
+        default_fx,
+        creator_id,
+        app_ids,
+        period_start,
+    )
+    .await
+}
+
+/// Dependency-injected form of [`bill_creator`]. The Lite/Stripe-invoice
+/// providers use this through `LiteStore`, keeping provider traits free of
+/// `&AppState` while preserving the existing reconciler body and money math.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::future_not_send)]
+pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
+    registry: &crate::registry::Registry,
+    stripe_store: &crate::stripe_store::StripeStore,
+    tax_provider: &dyn crate::tax::TaxProvider,
+    stripe: &S,
+    catalog: &PlanCatalog,
+    weights: &MetricWeights,
+    default_fx: Option<u64>,
+    creator_id: &Uuid,
+    app_ids: &[Uuid],
+    period_start: i64,
+) -> Result<bool, RegistryError> {
     // `period` is the first-of-month `billing_period` DATE (the claim key). Bound
     // via `$N::date` on every write (the domain param OID rejects a bare
     // NaiveDate); reads need no cast.
@@ -344,7 +373,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
 
     // `mut` so the finalize→provider-ref pair can run in ONE `conn.transaction()`
     // (M1). Every read/UPSERT before that still borrows `&conn` immutably.
-    let mut conn = state.registry.conn().await?;
+    let mut conn = registry.conn().await?;
 
     // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
     // for (creator, period) means this period is fully billed — do no pricing
@@ -376,7 +405,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // Resolve the creator's Customer; a creator with no saved payment identity is
     // skipped. MAJOR-5: if such a creator HAS usage we will surface a warn below
     // (silent under-bill is revenue lost invisibly).
-    let customer = match state.stripe_store.get_customer(*creator_id).await {
+    let customer = match stripe_store.get_customer(*creator_id).await {
         Ok(Some(c)) => Some(c),
         Ok(None) => None,
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
@@ -940,8 +969,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     .await?;
     let credit_i64 = credit.applied_cents;
     let taxable_base_cents = (amount_i64 - credit_i64).max(0);
-    let tax = state
-        .tax_provider
+    let tax = tax_provider
         .compute_tax(&crate::tax::TaxContext {
             creator_id: *creator_id,
             taxable_base_cents,
@@ -1129,7 +1157,15 @@ pub(crate) async fn owned_app_ids(
     state: &AppState,
     creator_id: &Uuid,
 ) -> Result<Vec<Uuid>, RegistryError> {
-    let conn = state.registry.conn().await?;
+    owned_app_ids_for_registry(&state.registry, creator_id).await
+}
+
+#[allow(clippy::future_not_send)]
+pub(crate) async fn owned_app_ids_for_registry(
+    registry: &crate::registry::Registry,
+    creator_id: &Uuid,
+) -> Result<Vec<Uuid>, RegistryError> {
+    let conn = registry.conn().await?;
     let rows = conn
         .query(
             "SELECT DISTINCT ON (m.app_id) m.app_id \
@@ -1140,6 +1176,30 @@ pub(crate) async fn owned_app_ids(
         )
         .await?;
     Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
+}
+
+/// Read back the finalized Stripe provider invoice id persisted for
+/// `(creator, period)`.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn lookup_invoice_id_for_registry(
+    registry: &crate::registry::Registry,
+    creator_id: &Uuid,
+    period_start: i64,
+) -> Result<Option<String>, RegistryError> {
+    let period = crate::metering::period_date(period_start);
+    let conn = registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT r.external_id \
+             FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.creator_id = $1 AND i.period = $2::date \
+               AND i.status = 'finalized' \
+               AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
+            &[creator_id, &period],
+        )
+        .await?;
+    Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
 }
 
 /// Resolve an app's `plan_id` on a BORROWED connection (the caller already holds

@@ -71,9 +71,7 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile::period_end_unix;
 use zeroship_control::cron::metering_export;
-use zeroship_control::metering::provider::{
-    build_provider, MeteringProviderConfig, StripeMeterConfig,
-};
+use zeroship_control::metering::provider::{build_registered_provider, BillingStack};
 use zeroship_control::metering::{current_period_start_unix, Metering};
 use zeroship_control::stripe_client::{StripeApi, StripeClient};
 use zeroship_control::{
@@ -166,12 +164,21 @@ async fn build_fixture(db_url: &str, secret_key: &str, meter_id: &str, label: &s
     // THE faithful seam: a REAL StripeProvider whose base URL is the LIVE Stripe
     // API. Every export pushes a meter_event through the real cyper client over
     // the wire to api.stripe.com and reads the REAL meter aggregate back.
-    let provider = build_provider(&MeteringProviderConfig::stripe(StripeMeterConfig {
-        event_name: event_name.clone(),
-        meter_id: meter_id.to_string(),
-        secret_key: SecretString::new(secret_key.to_string()),
-        base_url: STRIPE_LIVE_BASE_URL.to_string(),
-    }))
+    let provider = build_registered_provider(
+        "stripe_meters",
+        serde_json::json!({
+            "stripe_meters": {
+                "event_name": event_name.clone(),
+                "meter_id": meter_id,
+                "secret_key": "stripe_secret_key",
+                "base_url": STRIPE_LIVE_BASE_URL,
+            }
+        }),
+        std::collections::HashMap::from([(
+            "stripe_secret_key".to_string(),
+            secret_key.to_string(),
+        )]),
+    )
     .expect("stripe provider builds");
 
     let state = Arc::new(AppState {
@@ -202,7 +209,8 @@ async fn build_fixture(db_url: &str, secret_key: &str, meter_id: &str, label: &s
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: provider,
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: BillingStack::with_meter_for_tests(provider),
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )

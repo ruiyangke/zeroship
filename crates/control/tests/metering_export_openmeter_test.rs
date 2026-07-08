@@ -6,7 +6,7 @@
 //! HTTP server** (a small HTTP/1.1 server stood up in-test on
 //! `compio::net::TcpListener` that speaks OpenMeter's CloudEvents ingest + meter
 //! query protocol and RECORDS every request). There is NO stubbed client on the
-//! wire path: the export cron reads `state.metering_provider` (a real
+//! wire path: the export cron reads `state.billing_stack.meter` (a real
 //! `OpenMeterProvider`) whose base URL points at the mock, so the CloudEvents
 //! JSON encoding, the `Authorization: Bearer` header, the HTTP round-trip and the
 //! JSON parse are all exercised end to end. The assertions are on the recorded
@@ -32,9 +32,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::metering_export;
-use zeroship_control::metering::provider::{
-    build_provider, MeteringProviderConfig, OpenMeterConfig,
-};
+use zeroship_control::metering::provider::{build_registered_provider, BillingStack};
 use zeroship_control::metering::Metering;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -437,12 +435,21 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 
     // THE faithful seam: a REAL OpenMeterProvider whose base URL is the mock
     // server. The export cron pushes through the real cyper client over the wire.
-    let provider = build_provider(&MeteringProviderConfig::openmeter(OpenMeterConfig {
-        base_url: mock.base_url.clone(),
-        token: SecretString::new("om_test_mock".to_string()),
-        event_type: OM_EVENT_TYPE.to_string(),
-        meter_slug: OM_METER_SLUG.to_string(),
-    }))
+    let provider = build_registered_provider(
+        "openmeter",
+        serde_json::json!({
+            "openmeter": {
+                "base_url": mock.base_url.clone(),
+                "token": "openmeter_token",
+                "event_type": OM_EVENT_TYPE,
+                "meter_slug": OM_METER_SLUG,
+            }
+        }),
+        std::collections::HashMap::from([(
+            "openmeter_token".to_string(),
+            "om_test_mock".to_string(),
+        )]),
+    )
     .expect("openmeter provider builds");
 
     let state = Arc::new(AppState {
@@ -471,7 +478,8 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: provider,
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: BillingStack::with_meter_for_tests(provider),
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )

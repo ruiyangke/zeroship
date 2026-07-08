@@ -6,7 +6,7 @@
 //! server** (a small HTTP/1.1 server stood up in-test on
 //! `compio::net::TcpListener` that speaks Stripe's meter-events form protocol
 //! and RECORDS every request). There is NO stubbed client on the wire path: the
-//! export cron reads `state.metering_provider` (a real `StripeProvider`) whose
+//! export cron reads `state.billing_stack.meter` (a real `stripe_meters` provider) whose
 //! base URL points at the mock, so the form encoding, the
 //! `Authorization: Bearer` + `Idempotency-Key` headers, the HTTP round-trip and
 //! the JSON parse are all exercised end to end. The assertions are on the
@@ -27,9 +27,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::metering_export;
-use zeroship_control::metering::provider::{
-    build_provider, MeteringProviderConfig, StripeMeterConfig,
-};
+use zeroship_control::metering::provider::{build_registered_provider, BillingStack};
 use zeroship_control::metering::Metering;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -468,12 +466,21 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 
     // THE faithful seam: a REAL StripeProvider whose base URL is the mock-meters
     // server. The export cron pushes through the real cyper client over the wire.
-    let provider = build_provider(&MeteringProviderConfig::stripe(StripeMeterConfig {
-        event_name: METER_EVENT_NAME.to_string(),
-        meter_id: METER_ID.to_string(),
-        secret_key: SecretString::new("sk_test_mock".to_string()),
-        base_url: mock.base_url.clone(),
-    }))
+    let provider = build_registered_provider(
+        "stripe_meters",
+        serde_json::json!({
+            "stripe_meters": {
+                "event_name": METER_EVENT_NAME,
+                "meter_id": METER_ID,
+                "secret_key": "stripe_secret_key",
+                "base_url": mock.base_url.clone(),
+            }
+        }),
+        std::collections::HashMap::from([(
+            "stripe_secret_key".to_string(),
+            "sk_test_mock".to_string(),
+        )]),
+    )
     .expect("stripe provider builds");
 
     let state = Arc::new(AppState {
@@ -502,7 +509,8 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: provider,
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: BillingStack::with_meter_for_tests(provider),
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
