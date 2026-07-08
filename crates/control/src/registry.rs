@@ -702,12 +702,10 @@ impl Registry {
 
     // -- Usage / Metering ---------------------------------------------------
     //
-    // Usage ingest + reads moved to `crate::metering::Metering` (the
-    // idempotent, period-aggregated pipeline backed by
-    // `zeroship.usage_aggregates` + `zeroship.usage_reports_seen`). The old
-    // raw-additive `record_usage`/`get_usage` over `zeroship.app_usage`
-    // (no idempotency, no period, no custom metrics) are gone — pre-launch,
-    // no deprecated aliases.
+    // Usage snapshot writes + reads moved to `crate::metering::Metering`,
+    // backed by `zeroship.usage_aggregates`. The old raw-additive
+    // `record_usage`/`get_usage` over `zeroship.app_usage` are gone —
+    // pre-launch, no deprecated aliases.
 }
 
 #[derive(Debug, Clone, Default)]

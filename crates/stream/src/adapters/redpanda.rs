@@ -276,4 +276,25 @@ impl StreamTransport for RedpandaTransport {
             .commit(&topic_partitions, CommitMode::Sync)
             .map_err(StreamError::from)
     }
+
+    async fn rewind(&self) -> Result<(), StreamError> {
+        let consumer = self
+            .consumer
+            .lock()
+            .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
+
+        // Ensure the consumer has joined its group and received assignments.
+        let mut assignment = consumer.assignment().map_err(StreamError::from)?;
+        if assignment.count() == 0 {
+            let _ = consumer.poll(self.poll_timeout);
+            assignment = consumer.assignment().map_err(StreamError::from)?;
+        }
+
+        for elem in assignment.elements() {
+            consumer
+                .seek(elem.topic(), elem.partition(), Offset::Beginning, self.poll_timeout)
+                .map_err(StreamError::from)?;
+        }
+        Ok(())
+    }
 }

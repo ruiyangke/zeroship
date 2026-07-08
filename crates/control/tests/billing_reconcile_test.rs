@@ -28,13 +28,11 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::metering::Metering;
-use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice};
+use zeroship_control::pricing::{charge_cents, MetricWeights, PlanPrice};
 use zeroship_control::stripe_client::{Period, StripeApi, StripeClient, STRIPE_API_VERSION};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -768,26 +766,18 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
-/// Ingest usage directly at a given period_start (the CLOSED period the
-/// reconciler bills). Mirrors `Metering::ingest_at`.
+/// Seed usage directly at a given period_start (the CLOSED period the
+/// reconciler bills).
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 /// Ingest a set of CUSTOM metrics (name → raw) for `app` at `period_start`, after
@@ -801,26 +791,27 @@ async fn ingest_custom_metrics(
     period_start: i64,
     seq: u64,
 ) {
-    // Ingest FIRST: the real metering path auto-registers each `custom` metric in
-    // `billing_metrics` (the catalog `metric_weights.metric` FKs to) and writes its
-    // `usage_aggregates` delta. Seeding a weight before the catalog row exists would
-    // violate `metric_weights_metric_fkey`.
-    let mut custom = HashMap::new();
     for (name, raw) in metrics {
-        custom.insert(name.clone(), *raw);
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
+                 VALUES ($1, 'custom', 'unit', $2, NOW()) \
+                 ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW()",
+                &[name, &app],
+            )
+            .await
+            .expect("seed custom metric");
+        common::seed_usage_delta(
+            &state.control_pg,
+            app,
+            period_start,
+            name,
+            i64::try_from(*raw).expect("test metric value fits i64"),
+        )
+        .await;
     }
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { custom, ..Default::default() });
-    let report = UsageReport {
-        worker_id: format!("w-{}", Uuid::new_v4()),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    };
-    Metering::new(state.registry.clone())
-        .ingest_at(&report, period_start)
-        .await
-        .expect("ingest custom metrics");
+    let _ = seq;
 
     // Now that each metric is cataloged, seed a 1 CU/op weight so it prices through
     // the real CU pipeline at reconcile time.

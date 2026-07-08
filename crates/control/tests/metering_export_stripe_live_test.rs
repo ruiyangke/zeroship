@@ -61,7 +61,6 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,12 +71,11 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile::period_end_unix;
 use zeroship_control::cron::metering_export;
 use zeroship_control::metering::provider::{build_registered_provider, BillingStack};
-use zeroship_control::metering::{current_period_start_unix, Metering};
+use zeroship_control::metering::current_period_start_unix;
 use zeroship_control::stripe_client::{StripeApi, StripeClient};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const STRIPE_LIVE_BASE_URL: &str = "https://api.stripe.com";
@@ -303,24 +301,16 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 fn now_unix() -> i64 {

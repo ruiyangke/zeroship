@@ -446,15 +446,6 @@ export function up() {
     primaryKey: ["app_id", "period", "metric"],
   });
   table("usage_aggregates", { schema: "zeroship" }).check("usage_aggregates_total_check").add({ expr: (col) => col("total").ge(0) });
-  table("usage_reports_seen", { schema: "zeroship" }).create({
-    columns: {
-      worker_id: t.text().notNull(),
-      sequence: t.bigInt().notNull(),
-      period: t.domain("billing_period"),
-      seen_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["worker_id", "sequence"],
-  });
 }
 
 export function down() {

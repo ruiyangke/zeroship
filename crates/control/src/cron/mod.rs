@@ -20,6 +20,7 @@ pub mod dunning;
 pub mod event_forwarder;
 pub mod metering_export;
 pub mod orphaned_app_reaper;
+pub mod spend_recompute;
 pub mod spend_reconcile;
 pub mod stripe_reconcile;
 
@@ -32,7 +33,12 @@ use crate::AppState;
 /// Detached: tasks live for the lifetime of the process. The caller keeps the
 /// `Arc<AppState>` alive for the lifetime of the server, so each cron's per-tick
 /// connections / blob-store handles stay live.
-pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_secs: u64) {
+pub fn spawn_all(
+    state: Arc<AppState>,
+    retention_months: u32,
+    retention_check_secs: u64,
+    spend_recompute_interval_secs: u64,
+) {
     // Audit-retention sweep — needs only the registry (cheap clone of the
     // db-url handle inside `AppState`).
     let registry = Arc::new(state.registry.clone());
@@ -49,14 +55,16 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     })
     .detach();
 
-    // Spend-reconcile sweep (billing PR5) — prices each app's period usage,
-    // derives + persists its SpendState; the gateway pulls the new state on
-    // its next /internal/routes poll (decision D1).
-    let spend_state = Arc::clone(&state);
-    compio::runtime::spawn(async move {
-        spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
-    })
-    .detach();
+    if state.billing_stream.is_none() {
+        // Non-stream fallback for local aggregate fixtures. In stream mode this
+        // is replaced by spend_recompute, which first rewrites usage_aggregates
+        // from UsageEvents and then calls the same spend evaluator.
+        let spend_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
+        })
+        .detach();
+    }
 
     // Dunning sweep (billing G2) — suspends each `past_due` creator whose
     // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway
@@ -117,6 +125,23 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
                 forwarder_stack,
                 forwarder_sink,
                 event_forwarder::EventForwarderConfig::default(),
+            )
+            .await;
+        })
+        .detach();
+
+        let recompute_state = Arc::clone(&state);
+        let recompute_stream = Arc::clone(stream);
+        compio::runtime::spawn(async move {
+            spend_recompute::run(
+                recompute_state,
+                recompute_stream,
+                spend_recompute::SpendRecomputeConfig {
+                    interval: std::time::Duration::from_secs(
+                        spend_recompute_interval_secs.max(1),
+                    ),
+                    ..spend_recompute::SpendRecomputeConfig::default()
+                },
             )
             .await;
         })

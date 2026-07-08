@@ -688,6 +688,11 @@ fn main() -> std::io::Result<()> {
         },
         routes: sync::RouteCache::new(),
         hash_ring,
+        // TODO(S5 throughput backstop, billing-provider-platform design v7
+        // Pillar 4/5): make this plan-aware so FREE-tier apps get a tighter
+        // default per-app cap. The current registry is global; wiring the
+        // route's plan into limiter defaults belongs in the gateway config
+        // slice, not in the usage-aggregate recompute writer.
         rate_limiters: enforce::RateLimitRegistry::new(1000, 2000),
         per_rule_rate_limits: enforce::PerRuleRateLimitRegistry::new(),
         concurrency: enforce::ConcurrencyRegistry::new(100),
