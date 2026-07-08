@@ -472,13 +472,17 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
                 "event_name": METER_EVENT_NAME,
                 "meter_id": METER_ID,
                 "secret_key": "stripe_secret_key",
+                "webhook_secret": "stripe_webhook_secret",
                 "base_url": mock.base_url.clone(),
             }
         }),
-        std::collections::HashMap::from([(
-            "stripe_secret_key".to_string(),
-            "sk_test_mock".to_string(),
-        )]),
+        std::collections::HashMap::from([
+            ("stripe_secret_key".to_string(), "sk_test_mock".to_string()),
+            (
+                "stripe_webhook_secret".to_string(),
+                "whsec_test_mock".to_string(),
+            ),
+        ]),
     )
     .expect("stripe provider builds");
 

@@ -9,11 +9,14 @@ use crate::metering::provider::{
 };
 use crate::stripe_client::{StripeApi, StripeClient};
 
+use super::stripe_webhook::StripeWebhookState;
+
 #[derive(Debug, serde::Deserialize)]
 struct StripeMetersCfg {
     event_name: String,
     meter_id: String,
     secret_key: SecretHandle,
+    webhook_secret: SecretHandle,
     #[serde(default = "default_stripe_base_url")]
     base_url: String,
 }
@@ -27,11 +30,13 @@ pub struct StripeMetersProvider {
     meter_id: String,
     secret_key: crate::SecretString,
     base_url: String,
+    webhook: StripeWebhookState,
 }
 
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let cfg: StripeMetersCfg = ctx.parse_adapter_config("stripe_meters")?;
     let secret_key = ctx.secrets.resolve(&cfg.secret_key)?;
+    let webhook_secret = ctx.secrets.resolve(&cfg.webhook_secret)?;
     if cfg.event_name.trim().is_empty() {
         return Err(ProviderError::Config(
             "stripe_meters: event_name required — refusing to boot".to_string(),
@@ -47,11 +52,18 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
             "stripe_meters: secret_key resolved empty".to_string(),
         ));
     }
+    if cfg.base_url.trim().is_empty() {
+        return Err(ProviderError::Config(
+            "stripe_meters: base_url must not be empty".to_string(),
+        ));
+    }
+    let webhook = StripeWebhookState::new(webhook_secret, ctx.clock)?;
     Ok(Arc::new(StripeMetersProvider {
         event_name: cfg.event_name,
         meter_id: cfg.meter_id,
         secret_key,
         base_url: cfg.base_url,
+        webhook,
     }))
 }
 
@@ -141,12 +153,12 @@ impl crate::metering::provider::Invoicer for StripeMetersProvider {
 
 #[async_trait::async_trait(?Send)]
 impl WebhookSink for StripeMetersProvider {
-    fn verify(&self, _payload: &[u8], _sig: &str) -> Result<(), ProviderError> {
-        Ok(())
+    fn verify(&self, payload: &[u8], sig: &str) -> Result<(), ProviderError> {
+        self.webhook.verify(payload, sig)
     }
 
-    async fn handle(&self, _event: WebhookEvent) -> Result<WebhookOutcome, ProviderError> {
-        Ok(WebhookOutcome::Ignored)
+    async fn handle(&self, event: WebhookEvent) -> Result<WebhookOutcome, ProviderError> {
+        self.webhook.handle(event)
     }
 }
 

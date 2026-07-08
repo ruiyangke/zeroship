@@ -3,44 +3,37 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::metering::provider::{
-    AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, IngestAck, InvoiceRef,
-    LineItem, LiteStore, Meter, MeteringProvider, ProviderCtx, ProviderError, RatedInput, Rater,
-    Subject, SubjectRef, UsageEvent,
+    AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
+    DedupTtl, IngestAck, InvoiceRef, LineItem, LiteStore, Meter, MeteringProvider, ProviderCtx,
+    ProviderError, RatedInput, Rater, Subject, SubjectRef, UsageEvent,
 };
 
 #[derive(Clone)]
 pub struct LiteProvider {
-    store: Option<Arc<dyn LiteStore>>,
+    store: Arc<dyn LiteStore>,
 }
 
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
+    let store = ctx
+        .store
+        .clone()
+        .ok_or_else(|| ProviderError::Config("lite: LiteStore is required".to_string()))?;
     Ok(Arc::new(LiteProvider {
-        store: ctx.store.clone(),
+        store,
     }))
-}
-
-impl LiteProvider {
-    fn store(&self) -> Result<&dyn LiteStore, ProviderError> {
-        self.store
-            .as_deref()
-            .ok_or_else(|| ProviderError::Config("lite: LiteStore is required".to_string()))
-    }
 }
 
 #[async_trait::async_trait(?Send)]
 impl Meter for LiteProvider {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
-        Ok(IngestAck {
-            accepted: batch.len(),
-            deduped: 0,
-        })
+        self.store.ingest_usage_events(batch).await
     }
 
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
         let creator = Uuid::parse_str(q.subject.as_str()).map_err(|e| {
             ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
         })?;
-        self.store()?
+        self.store
             .period_billable_units(&creator, q.period.start)
             .await
     }
@@ -85,7 +78,7 @@ impl crate::metering::provider::Invoicer for LiteProvider {
         let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
             ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
         })?;
-        self.store()?.close_period_invoice(&creator, period).await
+        self.store.close_period_invoice(&creator, period).await
     }
 
     async fn adjustment_note(
@@ -122,6 +115,13 @@ impl MeteringProvider for LiteProvider {
 
     fn production_ready(&self) -> bool {
         false
+    }
+
+    fn dedup(&self) -> DedupContract {
+        DedupContract {
+            key: DedupKey::SourceAndId,
+            ttl: DedupTtl::Unbounded,
+        }
     }
 
     fn correction(&self) -> CorrectionCapability {

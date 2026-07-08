@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use super::{BillingPeriod, InvoiceRef, LiteStore, ProviderError, SubjectRef};
+use super::{
+    BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, SubjectRef, UsageEvent,
+};
 use crate::cron::billing_reconcile;
 use crate::metering::Metering;
 use crate::plan_catalog::PlanCatalog;
@@ -49,6 +51,13 @@ impl ControlLiteStore {
 
 #[async_trait::async_trait(?Send)]
 impl LiteStore for ControlLiteStore {
+    async fn ingest_usage_events(&self, _batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+        Err(ProviderError::Store(
+            "lite: stream ingest requires a LiteStore event sink; ControlLiteStore uses the recompute snapshot path"
+                .to_string(),
+        ))
+    }
+
     async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
         billing_reconcile::owned_app_ids_for_registry(&self.registry, creator)
             .await
