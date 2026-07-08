@@ -6936,13 +6936,14 @@ dependencies = [
 name = "zeroship-metering"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "compio",
  "criterion",
- "cyper",
  "serde_json",
  "tracing",
  "uuid",
  "zeroship-core",
+ "zeroship-stream",
 ]
 
 [[package]]
@@ -7185,6 +7186,7 @@ dependencies = [
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
  "zeroship-runtime",
+ "zeroship-stream",
 ]
 
 [[package]]

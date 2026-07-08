@@ -45,7 +45,7 @@ thread_local! {
     /// storage_ops, …) at its op boundary — app code can neither forge nor
     /// suppress them. The worker itself feeds the five platform counters via
     /// `record_request`. All of it lands in this single place that the one
-    /// per-process flush task drains. `None` until `init_cache` runs.
+    /// per-process usage-event outbox drains. `None` until `init_cache` runs.
     static METER: RefCell<Option<Arc<zeroship_metering::Meter>>> = const { RefCell::new(None) };
 }
 
@@ -60,7 +60,7 @@ pub struct KernelConfig {
     pub db_url: Option<String>,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
-    /// The process-wide usage meter shared with the per-process flush task
+    /// The process-wide usage meter shared with the per-process outbox task
     /// (see `main`). Always set in the real worker; an `Arc<Meter>` is
     /// cheap so there is no "absent" tier — the namespace is registered
     /// unconditionally when present.

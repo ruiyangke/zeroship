@@ -1,10 +1,10 @@
 //! Metering infrastructure — the platform-measured usage signal.
 //!
 //! This crate is the home of the per-worker [`Meter`] (atomic
-//! per-`(app_id, metric)` counters) and the compio [`flush`] task that
-//! drains it and POSTs a `UsageReport` to control for idempotent
-//! aggregation. It carries **no V8** and depends only on
-//! `zeroship-core` (wire types) + `compio` + `cyper` + `uuid`.
+//! per-`(app_id, metric)` counters) and the compio [`outbox`] task that
+//! drains it into `UsageEvent` records and publishes them to the durable
+//! stream. It carries **no V8** and depends only on `zeroship-core`
+//! (wire types), `zeroship-stream`, `compio`, `serde_json`, and `uuid`.
 //!
 //! ## Metering is infrastructure, not a creator API
 //!
@@ -26,11 +26,14 @@
 
 use std::sync::Arc;
 
-pub mod flush;
 pub mod meter;
+pub mod outbox;
 
-pub use flush::{boot_worker_id, spawn_flush_task, FlushConfig, DEFAULT_FLUSH_INTERVAL};
-pub use meter::{build_report, Meter, SequenceSource};
+pub use meter::Meter;
+pub use outbox::{
+    spawn_disabled_drain_task, spawn_outbox_task, OutboxConfig, OutboxFailure,
+    OutboxPublishResult, UsageOutbox, DEFAULT_OUTBOX_INTERVAL, DEFAULT_USAGE_EVENTS_TOPIC,
+};
 
 /// The injection vehicle for the trusted producers (the db/kv/storage
 /// native primitives). Binds the process-wide `Arc<Meter>` to the
@@ -95,10 +98,21 @@ mod tests {
         ha.record("db_writes", 1);
         hb.record("db_writes", 5);
 
-        let snap = meter.drain();
+        let events = meter.drain();
         let ia = Uuid::parse_str(&a).unwrap();
         let ib = Uuid::parse_str(&b).unwrap();
-        assert_eq!(snap.get(&ia).unwrap().custom.get("db_writes").copied(), Some(3));
-        assert_eq!(snap.get(&ib).unwrap().custom.get("db_writes").copied(), Some(5));
+        assert_eq!(event_value(&events, ia, "db_writes"), Some(3));
+        assert_eq!(event_value(&events, ib, "db_writes"), Some(5));
+    }
+
+    fn event_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
     }
 }
