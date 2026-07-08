@@ -6828,6 +6828,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
+ "zeroship-stream",
  "zstd",
 ]
 

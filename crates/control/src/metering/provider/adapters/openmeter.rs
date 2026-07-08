@@ -69,10 +69,14 @@ impl Meter for OpenMeterProvider {
             let cloud = CloudEvent {
                 id: event.event_id.clone(),
                 event_type: self.event_type.clone(),
-                subject: event.subject.as_str().to_string(),
-                time_unix: event.time_unix,
+                subject: event.creator_subject(),
+                time_unix: event.event_time,
                 value: event.value,
-                period_start_unix: event.period.start,
+                period_start_unix: event
+                    .dims
+                    .get("period_start")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(event.event_time),
             };
             client.ingest_event(&cloud).await?;
         }

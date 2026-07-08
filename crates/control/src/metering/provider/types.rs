@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use uuid::Uuid;
+pub use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 
 use crate::registry::RegistryError;
 use crate::stripe_store::StripeError;
@@ -49,17 +50,6 @@ impl From<BillingPeriod> for crate::stripe_client::Period {
             end: p.end,
         }
     }
-}
-
-/// One immutable usage event accepted by a `Meter` provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageEvent {
-    pub event_id: String,
-    pub subject: SubjectRef,
-    pub meter: String,
-    pub value: u64,
-    pub period: BillingPeriod,
-    pub time_unix: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -157,6 +147,32 @@ pub enum ProviderError {
     Transport(String),
     Store(String),
     Config(String),
+    PermanentReject { status: u16, message: String },
+}
+
+impl ProviderError {
+    #[must_use]
+    pub fn permanent_reject(status: u16, message: impl Into<String>) -> Self {
+        Self::PermanentReject {
+            status,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_permanent_reject(&self) -> bool {
+        matches!(self, Self::PermanentReject { status: 400..=499, .. })
+    }
+
+    #[must_use]
+    pub fn reject_reason(&self) -> String {
+        match self {
+            Self::PermanentReject { status, message } => {
+                format!("provider permanent reject {status}: {message}")
+            }
+            other => other.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderError {
@@ -167,6 +183,9 @@ impl std::fmt::Display for ProviderError {
             Self::Transport(m) => write!(f, "transport: {m}"),
             Self::Store(m) => write!(f, "store: {m}"),
             Self::Config(m) => write!(f, "config: {m}"),
+            Self::PermanentReject { status, message } => {
+                write!(f, "provider permanent reject {status}: {message}")
+            }
         }
     }
 }
@@ -193,6 +212,9 @@ impl From<ProviderError> for RegistryError {
             ProviderError::Transport(m) => Self::Database(format!("transport: {m}")),
             ProviderError::Store(m) => Self::Database(format!("provider store: {m}")),
             ProviderError::Config(m) => Self::Database(format!("provider config: {m}")),
+            ProviderError::PermanentReject { status, message } => Self::Database(format!(
+                "provider permanent reject {status}: {message}"
+            )),
         }
     }
 }

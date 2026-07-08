@@ -80,6 +80,7 @@ use crate::registry::RegistryError;
 use crate::AppState;
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, CreatorBilling, CustomerRef, SubjectRef, UsageEvent,
+    UsageSubject,
 };
 
 /// Default tick cadence in seconds (~hourly), matching the billing sweep. The
@@ -454,13 +455,21 @@ async fn export_creator(
     //    delta through the provider (Stripe meter_events / OpenMeter CloudEvent),
     //    stamped at `now` (C1). The push is per CUSTOMER — one delta per creator.
     let identifier = export_identifier(&creator_id, period.start, already, current_units);
+    let mut dims = BTreeMap::new();
+    dims.insert("period_start".to_string(), period.start.to_string());
+    dims.insert("period_end".to_string(), period.end.to_string());
+    dims.insert("legacy_export".to_string(), "true".to_string());
     let event = UsageEvent {
         event_id: identifier,
-        subject: customer.clone(),
+        source: "zeroship-control-metering-export".to_string(),
+        subject: UsageSubject {
+            app: None,
+            creator: creator_id,
+        },
         meter: "compute_units".to_string(),
         value: delta,
-        period,
-        time_unix: now,
+        event_time: now,
+        dims,
     };
     if let Err(e) = meter.ingest(&[event]).await {
         // M2 — durable failure surface: a logged-only failure lets a permanently

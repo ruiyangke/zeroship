@@ -111,6 +111,23 @@ export function up() {
     },
     primaryKey: ["id"],
   });
+  table("provider_dead_letter", { schema: "zeroship" }).create({
+    columns: {
+      id: t.text().notNull(),
+      provider_id: t.text().notNull(),
+      event_id: t.text().notNull(),
+      source: t.text().notNull(),
+      subject: t.json().notNull(),
+      meter: t.text().notNull(),
+      event_time: t.bigInt().notNull(),
+      value: t.bigInt().notNull(),
+      dims: t.json().notNull(),
+      reason: t.text().notNull(),
+      created_at: t.timestamp().notNull().default(now()),
+    },
+    primaryKey: ["id"],
+  });
+  table("provider_dead_letter", { schema: "zeroship" }).check("provider_dead_letter_value_check").add({ expr: (col) => col("value").ge(0) });
   table("connect_checkout_failures", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
