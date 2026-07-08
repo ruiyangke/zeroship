@@ -78,7 +78,9 @@ use crate::pricing::{billable_units, total_units};
 use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::AppState;
-use crate::metering::provider::{BillingPeriod, CreatorBilling, CustomerRef};
+use crate::metering::provider::{
+    AggregateQuery, BillingPeriod, CreatorBilling, CustomerRef, SubjectRef, UsageEvent,
+};
 
 /// Default tick cadence in seconds (~hourly), matching the billing sweep. The
 /// delta export is idempotent (the high-water + the deterministic identifier),
@@ -115,7 +117,7 @@ pub fn export_identifier(
 pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(
         tick_secs,
-        provider = state.metering_provider.kind().as_str(),
+        provider = state.billing_stack.meter_id(),
         "control metering_export cron starting"
     );
     loop {
@@ -268,7 +270,7 @@ async fn sweep(state: &AppState, period_start: i64, now: i64) -> Result<usize, R
         // cannot be metered on the external rail — skip them (the local ledger +
         // spend cap are unaffected; this is export-only).
         let customer = match state.stripe_store.get_customer(*creator_id).await {
-            Ok(Some(c)) => CustomerRef(c),
+            Ok(Some(c)) => SubjectRef(c),
             Ok(None) => {
                 tracing::debug!(
                     creator_id = %creator_id,
@@ -419,11 +421,17 @@ async fn export_creator(
     // never double-counts (the aggregate authoritatively reflects what landed) and
     // never under-counts on read lag (the high-water floors it). The guarantee
     // rides on the customer aggregate, NOT on the 24h identifier window.
-    let customer_aggregate = match state
-        .metering_provider
-        .reported_total(state, customer, period)
-        .await
-    {
+    let meter = state
+        .billing_stack
+        .meter
+        .as_meter()
+        .ok_or_else(|| RegistryError::Database("billing stack has no meter".to_string()))?;
+    let query = AggregateQuery {
+        subject: customer.clone(),
+        meter: "compute_units".to_string(),
+        period,
+    };
+    let customer_aggregate = match meter.read_aggregate(&query).await {
         Ok(t) => t,
         Err(e) => {
             record_export_failure(&conn, &creator_id, &period_d, &format!("reported_total: {e}")).await;
@@ -446,11 +454,15 @@ async fn export_creator(
     //    delta through the provider (Stripe meter_events / OpenMeter CloudEvent),
     //    stamped at `now` (C1). The push is per CUSTOMER — one delta per creator.
     let identifier = export_identifier(&creator_id, period.start, already, current_units);
-    if let Err(e) = state
-        .metering_provider
-        .report_usage(state, customer, period, delta, &identifier, now)
-        .await
-    {
+    let event = UsageEvent {
+        event_id: identifier,
+        subject: customer.clone(),
+        meter: "compute_units".to_string(),
+        value: delta,
+        period,
+        time_unix: now,
+    };
+    if let Err(e) = meter.ingest(&[event]).await {
         // M2 — durable failure surface: a logged-only failure lets a permanently
         // mis-provisioned creator under-bill forever invisibly. Record it (bump
         // consecutive_failures, stamp last_error/last_attempt_at) so it is

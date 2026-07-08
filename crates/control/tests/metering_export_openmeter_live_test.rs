@@ -36,9 +36,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::metering_export;
-use zeroship_control::metering::provider::{
-    build_provider, MeteringProviderConfig, OpenMeterConfig,
-};
+use zeroship_control::metering::provider::{build_registered_provider, BillingStack};
 use zeroship_control::metering::{current_period_start_unix, Metering};
 use zeroship_control::openmeter_client::{OpenMeterApi, OpenMeterClient};
 use zeroship_control::{
@@ -117,12 +115,21 @@ async fn build_fixture(db_url: &str, om_base: &str, label: &str) -> Fixture {
     // THE faithful seam: a REAL OpenMeterProvider whose base URL is the LIVE
     // OpenMeter. Every export pushes a CloudEvent through the real cyper client
     // over the wire and reads the real ClickHouse-backed aggregate back.
-    let provider = build_provider(&MeteringProviderConfig::openmeter(OpenMeterConfig {
-        base_url: om_base.to_string(),
-        token: SecretString::new(om_token.clone()),
-        event_type: OM_EVENT_TYPE.to_string(),
-        meter_slug: OM_METER_SLUG.to_string(),
-    }))
+    let provider = build_registered_provider(
+        "openmeter",
+        serde_json::json!({
+            "openmeter": {
+                "base_url": om_base,
+                "token": "openmeter_token",
+                "event_type": OM_EVENT_TYPE,
+                "meter_slug": OM_METER_SLUG,
+            }
+        }),
+        std::collections::HashMap::from([(
+            "openmeter_token".to_string(),
+            om_token.clone(),
+        )]),
+    )
     .expect("openmeter provider builds");
 
     let state = Arc::new(AppState {
@@ -151,7 +158,8 @@ async fn build_fixture(db_url: &str, om_base: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: provider,
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: BillingStack::with_meter_for_tests(provider),
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )

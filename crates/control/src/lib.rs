@@ -214,13 +214,12 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
-    /// The configured metering/billing provider, built once at boot
-    /// (`--metering-provider`, default `native`). The billing-reconcile cron
-    /// drives `Native` (invoice); the metering-export cron drives the export
-    /// backends `Stripe` (CU → meter_events) and `OpenMeter` (CU → CloudEvents).
-    /// `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the local ledger,
-    /// provider-independent). See [`metering::provider::MeteringProvider`].
-    pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
+    /// Provider factories available in this process. Boot registers built-ins
+    /// explicitly, then builds the role-addressed billing stack below.
+    pub provider_registry: Arc<metering::provider::ProviderRegistry>,
+    /// Role-addressed billing stack: one provider for metering, one for rating,
+    /// one for invoicing, plus webhook sinks.
+    pub billing_stack: Arc<metering::provider::BillingStack>,
     /// The configured tax provider, built once at boot (`--tax-provider`, default
     /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
     /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the
