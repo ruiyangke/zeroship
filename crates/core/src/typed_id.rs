@@ -464,6 +464,15 @@ pub fn new_reconcile_finding_id() -> String {
     generate(RECONCILE_FINDING_PREFIX)
 }
 
+/// Provider-dead-letter surrogate-id prefix. Dead-letter rows are operator
+/// audit facts, not notification transition sources.
+pub const PROVIDER_DEAD_LETTER_PREFIX: &str = "pdl";
+
+/// Generate a new provider-dead-letter ID: `pdl_{base62(uuidv7)}`.
+pub fn new_provider_dead_letter_id() -> String {
+    generate(PROVIDER_DEAD_LETTER_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

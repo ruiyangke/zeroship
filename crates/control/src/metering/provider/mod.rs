@@ -18,7 +18,7 @@ pub use types::{
     AdjustmentNote, AggregateQuery, BillingPeriod, ClosedPeriodPolicy, CorrectionCapability,
     CreatorBilling, CustomerRef, DedupContract, DedupKey, DedupTtl, IngestAck, InvoiceRef,
     LineItem, ProviderError, RatedInput, Subject, SubjectRef, UsageEvent, WebhookEvent,
-    WebhookOutcome,
+    UsageSubject, WebhookOutcome,
 };
 
 bitflags::bitflags! {

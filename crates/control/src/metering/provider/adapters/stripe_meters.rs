@@ -72,10 +72,10 @@ impl Meter for StripeMetersProvider {
             stripe
                 .create_meter_event(
                     &self.event_name,
-                    event.subject.as_str(),
+                    &event.creator_subject(),
                     event.value,
                     &event.event_id,
-                    event.time_unix,
+                    event.event_time,
                 )
                 .await?;
         }

@@ -117,6 +117,15 @@ struct ControlCli {
     #[arg(long = "provider-config", env = "PROVIDER_CONFIG", default_value = "{}")]
     provider_config: String,
 
+    /// Durable usage-event stream transport. Empty disables the event-forwarder
+    /// and keeps the legacy aggregate export cron active.
+    #[arg(long = "stream-transport", env = "STREAM_TRANSPORT")]
+    stream_transport: Option<String>,
+
+    /// Opaque stream transport JSON config, parsed by the selected transport.
+    #[arg(long = "stream-config", env = "STREAM_CONFIG", default_value = "{}")]
+    stream_config: String,
+
     /// Permit an evaluation-grade provider such as `lite` in production.
     #[arg(long = "allow-unsupported-billing", env = "ALLOW_UNSUPPORTED_BILLING")]
     allow_unsupported_billing: bool,
@@ -1015,6 +1024,16 @@ fn main() -> std::io::Result<()> {
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
+            "stream_transport",
+            CheckValue::Plain(
+                cli.stream_transport
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("(disabled)")
+                    .to_string(),
+            ),
+        );
+        report.field(
             "deploy_tmp_dir",
             CheckValue::Plain(deploy_tmp_dir.display().to_string()),
         );
@@ -1311,6 +1330,41 @@ fn main() -> std::io::Result<()> {
         "control: billing provider stack selected"
     );
 
+    let billing_stream = match cli
+        .stream_transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => {
+            let stream_config_json: serde_json::Value = match serde_json::from_str(&cli.stream_config)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "control: --stream-config must be valid JSON");
+                    std::process::exit(1);
+                }
+            };
+            let mut stream_registry = zeroship_stream::StreamRegistry::default();
+            zeroship_stream::adapters::register_builtin(&mut stream_registry);
+            let config = zeroship_stream::StreamConfig::from(stream_config_json);
+            match stream_registry.build(id, &config) {
+                Ok(stream) => {
+                    tracing::info!(stream = stream.id(), "control: billing event stream selected");
+                    Some(stream)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "control: refusing to start — stream transport invalid");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            tracing::info!("control: billing event stream disabled; legacy metering export cron remains active");
+            None
+        }
+    };
+
     // Billing notifier (PR-6): a `BillingNotifier` over the relocated `zeroship-mailer`
     // `Mailer` built above. Wraps the mailer + the per-message idempotency key.
     let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> =
@@ -1350,6 +1404,7 @@ fn main() -> std::io::Result<()> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         provider_registry,
         billing_stack,
+        billing_stream,
         tax_provider,
         notifier,
         pairwise_salt,

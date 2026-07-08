@@ -17,6 +17,7 @@ pub mod audit_retention;
 pub mod billing_notify;
 pub mod billing_reconcile;
 pub mod dunning;
+pub mod event_forwarder;
 pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
@@ -96,9 +97,28 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
         .detach();
     }
     if tasks.contains(&"metering_export") {
-        let export_state = Arc::clone(&state);
+        if state.billing_stream.is_none() {
+            let export_state = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                metering_export::run(export_state, metering_export::DEFAULT_TICK_SECS).await;
+            })
+            .detach();
+        }
+    }
+    if let Some(stream) = state.billing_stream.as_ref() {
+        let forwarder_stack = Arc::clone(&state.billing_stack);
+        let forwarder_stream = Arc::clone(stream);
+        let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
+            &state.control_pg,
+        )));
         compio::runtime::spawn(async move {
-            metering_export::run(export_state, metering_export::DEFAULT_TICK_SECS).await;
+            event_forwarder::run(
+                forwarder_stream,
+                forwarder_stack,
+                forwarder_sink,
+                event_forwarder::EventForwarderConfig::default(),
+            )
+            .await;
         })
         .detach();
     }

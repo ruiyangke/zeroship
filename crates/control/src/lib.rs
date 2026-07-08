@@ -220,6 +220,10 @@ pub struct AppState {
     /// Role-addressed billing stack: one provider for metering, one for rating,
     /// one for invoicing, plus webhook sinks.
     pub billing_stack: Arc<metering::provider::BillingStack>,
+    /// Optional durable usage-event stream. When configured, the control
+    /// event-forwarder consumes this stream and the legacy aggregate export cron
+    /// is not spawned.
+    pub billing_stream: Option<Arc<dyn zeroship_stream::StreamTransport>>,
     /// The configured tax provider, built once at boot (`--tax-provider`, default
     /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
     /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the
