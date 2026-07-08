@@ -179,6 +179,10 @@ tracing-bunyan-formatter = "0.3"
 # Phase 0 wires the dep but does not use the queue yet — declaring
 # it now eliminates a Phase-1 dep churn.
 flume = { version = "0.11", default-features = false, features = ["async"] }
+# Kafka-family stream transport. Default features stay OFF so rust-rdkafka does
+# not enable its tokio-backed async producer/consumer helpers; the stream crate
+# uses BaseProducer/BaseConsumer over librdkafka's own C threads.
+rdkafka = { version = "0.36", default-features = false, features = ["cmake-build"] }
 
 # Auto-cleaning temp file / directory helper. Used by
 # `zeroship-plugin-db`'s `tests/sqlite_integration.rs` to provide a
@@ -199,6 +203,7 @@ zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
 zeroship-metering = { path = "crates/metering" }
+zeroship-stream = { path = "crates/stream" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
