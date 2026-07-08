@@ -118,6 +118,7 @@ pub trait WebhookSink {
 
 #[async_trait::async_trait(?Send)]
 pub trait LiteStore: Send + Sync {
+    async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
     async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError>;
     async fn period_totals(
         &self,
@@ -562,7 +563,7 @@ mod tests {
         let registry = builtin_registry();
         let err = expect_provider_err(build_stack(
             &registry,
-            &ctx(),
+            &ctx_with_store(),
             &BillingStackConfig {
                 meter_provider: "lite".to_string(),
                 rater_provider: None,
@@ -589,5 +590,65 @@ mod tests {
 
         let err = assert_capability_consistency(&Bad).unwrap_err();
         assert!(err.to_string().contains("capabilities() disagree"));
+    }
+
+    #[derive(Default)]
+    struct DummyLiteStore;
+
+    #[async_trait::async_trait(?Send)]
+    impl LiteStore for DummyLiteStore {
+        async fn ingest_usage_events(
+            &self,
+            batch: &[UsageEvent],
+        ) -> Result<IngestAck, ProviderError> {
+            Ok(IngestAck {
+                accepted: batch.len(),
+                deduped: 0,
+            })
+        }
+
+        async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn period_totals(
+            &self,
+            _app: &Uuid,
+            _period_start: i64,
+        ) -> Result<HashMap<String, i64>, ProviderError> {
+            Ok(HashMap::new())
+        }
+
+        async fn ensure_customer(
+            &self,
+            _creator: &Uuid,
+            _email: &str,
+        ) -> Result<Option<SubjectRef>, ProviderError> {
+            Ok(None)
+        }
+
+        async fn period_billable_units(
+            &self,
+            _creator: &Uuid,
+            _period_start: i64,
+        ) -> Result<u64, ProviderError> {
+            Ok(0)
+        }
+
+        async fn close_period_invoice(
+            &self,
+            _creator: &Uuid,
+            _period: BillingPeriod,
+        ) -> Result<InvoiceRef, ProviderError> {
+            Ok(InvoiceRef(Some("dummy-invoice".to_string())))
+        }
+    }
+
+    fn ctx_with_store() -> ProviderCtx {
+        ProviderCtx::new(
+            serde_json::json!({}),
+            Arc::new(StaticSecretResolver::default()),
+            Some(Arc::new(DummyLiteStore)),
+        )
     }
 }

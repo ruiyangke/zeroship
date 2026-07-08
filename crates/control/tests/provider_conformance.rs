@@ -1,0 +1,1052 @@
+//! Provider conformance gate for billing adapters.
+//!
+//! A new metering provider is not trustworthy until it passes this shared suite:
+//! wire it into the descriptor list, provide a DB-free recording backend, and let
+//! the common assertions exercise the advertised capability traits.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::net::{TcpListener, TcpStream};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use zeroship_control::metering::provider::{
+    assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
+    DedupTtl, IngestAck, InvoiceRef, LineItem, LiteStore, MeteringProvider, ProviderCtx,
+    ProviderError, StaticSecretResolver, SubjectRef, UsageEvent, UsageSubject, WebhookEvent,
+    WebhookOutcome,
+};
+
+const METER: &str = "compute_units";
+const PERIOD: BillingPeriod = BillingPeriod {
+    start: 1_783_468_800,
+    end: 1_786_147_200,
+};
+const STRIPE_SECRET: &str = "sk_test_conformance";
+const STRIPE_WEBHOOK_SECRET: &str = "whsec_conformance";
+
+#[compio::test]
+async fn provider_conformance_lite() {
+    run_provider_conformance(Adapter::Lite).await;
+}
+
+#[compio::test]
+async fn provider_conformance_openmeter() {
+    run_provider_conformance(Adapter::OpenMeter).await;
+}
+
+#[compio::test]
+async fn provider_conformance_stripe_meters() {
+    run_provider_conformance(Adapter::StripeMeters).await;
+}
+
+#[compio::test]
+async fn provider_conformance_stripe_invoice() {
+    run_provider_conformance(Adapter::StripeInvoice).await;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Adapter {
+    Lite,
+    OpenMeter,
+    StripeMeters,
+    StripeInvoice,
+}
+
+impl Adapter {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Lite => "lite",
+            Self::OpenMeter => "openmeter",
+            Self::StripeMeters => "stripe_meters",
+            Self::StripeInvoice => "stripe_invoice",
+        }
+    }
+
+    fn expected_capabilities(self) -> Capabilities {
+        match self {
+            Self::Lite => Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            Self::OpenMeter => Capabilities::METER,
+            Self::StripeMeters => {
+                Capabilities::METER
+                    | Capabilities::RATE
+                    | Capabilities::INVOICE
+                    | Capabilities::WEBHOOK
+            }
+            Self::StripeInvoice => {
+                Capabilities::RATE | Capabilities::INVOICE | Capabilities::WEBHOOK
+            }
+        }
+    }
+}
+
+struct Fixture {
+    adapter: Adapter,
+    provider: Arc<dyn MeteringProvider>,
+    backend: Backend,
+}
+
+enum Backend {
+    Lite(Arc<FakeLiteStore>),
+    OpenMeter(MockHttpProvider),
+    StripeMeters(MockHttpProvider),
+    StripeInvoice(Arc<FakeLiteStore>),
+}
+
+impl Backend {
+    fn expire_dedup_window(&self) {
+        match self {
+            Self::OpenMeter(mock) | Self::StripeMeters(mock) => mock.expire_dedup_window(),
+            Self::Lite(store) | Self::StripeInvoice(store) => store.expire_dedup_window(),
+        }
+    }
+
+    fn accepted_ingests(&self) -> usize {
+        match self {
+            Self::OpenMeter(mock) | Self::StripeMeters(mock) => mock.accepted_ingests(),
+            Self::Lite(store) | Self::StripeInvoice(store) => store.accepted_events(),
+        }
+    }
+}
+
+async fn run_provider_conformance(adapter: Adapter) {
+    let fx = build_fixture(adapter).await;
+
+    assert_capabilities_consistent(&fx.provider, adapter.expected_capabilities());
+    assert_dedup_contract_matches_docs(&fx.provider);
+    assert_fail_closed_config(adapter).await;
+
+    if fx.provider.as_meter().is_some() {
+        assert_meter_retry_idempotency(&fx).await;
+        assert_meter_read_back(&fx).await;
+        assert_dedup_ttl_switchover(&fx).await;
+    }
+
+    if fx.provider.as_invoicer().is_some() {
+        assert_invoice_close_idempotent(&fx).await;
+    }
+
+    if fx.provider.as_webhook().is_some() {
+        assert_webhook_verify_and_redelivery(&fx).await;
+    }
+}
+
+async fn build_fixture(adapter: Adapter) -> Fixture {
+    match adapter {
+        Adapter::Lite => {
+            let store = Arc::new(FakeLiteStore::default());
+            let provider = build_provider(
+                adapter.id(),
+                serde_json::json!({}),
+                HashMap::new(),
+                Some(store.clone()),
+            )
+            .expect("lite provider builds");
+            Fixture {
+                adapter,
+                provider,
+                backend: Backend::Lite(store),
+            }
+        }
+        Adapter::OpenMeter => {
+            let mock = MockHttpProvider::start(HttpKind::OpenMeter).await;
+            let provider = build_provider(
+                adapter.id(),
+                serde_json::json!({
+                    "openmeter": {
+                        "base_url": mock.base_url.clone(),
+                        "token": "openmeter_token",
+                        "event_type": METER,
+                        "meter_slug": METER,
+                    }
+                }),
+                HashMap::from([(
+                    "openmeter_token".to_string(),
+                    "om_test_conformance".to_string(),
+                )]),
+                None,
+            )
+            .expect("openmeter provider builds");
+            Fixture {
+                adapter,
+                provider,
+                backend: Backend::OpenMeter(mock),
+            }
+        }
+        Adapter::StripeMeters => {
+            let mock = MockHttpProvider::start(HttpKind::StripeMeters).await;
+            let provider = build_provider(
+                adapter.id(),
+                serde_json::json!({
+                    "stripe_meters": {
+                        "event_name": METER,
+                        "meter_id": "mtr_conformance",
+                        "secret_key": "stripe_secret_key",
+                        "webhook_secret": "stripe_webhook_secret",
+                        "base_url": mock.base_url.clone(),
+                    }
+                }),
+                HashMap::from([
+                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
+                    (
+                        "stripe_webhook_secret".to_string(),
+                        STRIPE_WEBHOOK_SECRET.to_string(),
+                    ),
+                ]),
+                None,
+            )
+            .expect("stripe_meters provider builds");
+            Fixture {
+                adapter,
+                provider,
+                backend: Backend::StripeMeters(mock),
+            }
+        }
+        Adapter::StripeInvoice => {
+            let store = Arc::new(FakeLiteStore::default());
+            let provider = build_provider(
+                adapter.id(),
+                serde_json::json!({
+                    "stripe_invoice": {
+                        "secret_key": "stripe_secret_key",
+                        "webhook_secret": "stripe_webhook_secret",
+                    }
+                }),
+                HashMap::from([
+                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
+                    (
+                        "stripe_webhook_secret".to_string(),
+                        STRIPE_WEBHOOK_SECRET.to_string(),
+                    ),
+                ]),
+                Some(store.clone()),
+            )
+            .expect("stripe_invoice provider builds");
+            Fixture {
+                adapter,
+                provider,
+                backend: Backend::StripeInvoice(store),
+            }
+        }
+    }
+}
+
+fn build_provider(
+    id: &str,
+    raw_config: serde_json::Value,
+    secrets: HashMap<String, String>,
+    store: Option<Arc<FakeLiteStore>>,
+) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
+    let registry = zeroship_control::metering::provider::builtin_registry();
+    let store: Option<Arc<dyn LiteStore>> = store.map(|s| s as Arc<dyn LiteStore>);
+    let ctx = ProviderCtx::new(
+        raw_config,
+        Arc::new(StaticSecretResolver::new(secrets)),
+        store,
+    );
+    registry.build(id, &ctx)
+}
+
+fn assert_capabilities_consistent(provider: &Arc<dyn MeteringProvider>, expected: Capabilities) {
+    assert_capability_consistency(provider.as_ref()).expect("capabilities/downcasts consistent");
+    assert_eq!(provider.capabilities(), expected, "{} capability matrix drift", provider.id());
+    assert_eq!(
+        provider.capabilities().contains(Capabilities::METER),
+        provider.as_meter().is_some()
+    );
+    assert_eq!(
+        provider.capabilities().contains(Capabilities::RATE),
+        provider.as_rater().is_some()
+    );
+    assert_eq!(
+        provider.capabilities().contains(Capabilities::INVOICE),
+        provider.as_invoicer().is_some()
+    );
+    assert_eq!(
+        provider.capabilities().contains(Capabilities::WEBHOOK),
+        provider.as_webhook().is_some()
+    );
+}
+
+fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
+    let dedup = provider.dedup();
+    match provider.id() {
+        "lite" => {
+            assert_eq!(dedup.key, DedupKey::SourceAndId);
+            assert_eq!(dedup.ttl, DedupTtl::Unbounded);
+        }
+        "openmeter" => {
+            assert_eq!(dedup.key, DedupKey::SourceAndId);
+            assert_eq!(dedup.ttl, DedupTtl::Unbounded);
+        }
+        "stripe_meters" => {
+            assert_eq!(dedup.key, DedupKey::Identifier);
+            assert_eq!(dedup.ttl, DedupTtl::Bounded(Duration::from_secs(24 * 60 * 60)));
+        }
+        "stripe_invoice" => {
+            assert_eq!(dedup.key, DedupKey::NotApplicable);
+            assert_eq!(dedup.ttl, DedupTtl::NotApplicable);
+        }
+        other => panic!("unexpected provider in conformance suite: {other}"),
+    }
+}
+
+async fn assert_meter_retry_idempotency(fx: &Fixture) {
+    let meter = fx.provider.as_meter().expect("meter capability");
+    let subject = subject_ref("retry");
+    let batch = events("retry", subject_uuid(&subject), &[3, 5, 7]);
+    meter.ingest(&batch).await.expect("first ingest");
+    let q = aggregate_query(&subject);
+    let first = meter.read_aggregate(&q).await.expect("read aggregate after first ingest");
+    meter.ingest(&batch).await.expect("retry ingest");
+    let second = meter.read_aggregate(&q).await.expect("read aggregate after retry");
+    assert_eq!(first, 15);
+    assert_eq!(
+        second, first,
+        "{} double-counted a retry with the same event_ids",
+        fx.provider.id()
+    );
+}
+
+async fn assert_meter_read_back(fx: &Fixture) {
+    let meter = fx.provider.as_meter().expect("meter capability");
+    let subject = subject_ref("readback");
+    let batch = events("readback", subject_uuid(&subject), &[11, 13]);
+    meter.ingest(&batch).await.expect("ingest read-back batch");
+    let got = meter
+        .read_aggregate(&aggregate_query(&subject))
+        .await
+        .expect("read aggregate");
+    assert_eq!(got, 24, "{} aggregate read-back drifted", fx.provider.id());
+}
+
+async fn assert_dedup_ttl_switchover(fx: &Fixture) {
+    let meter = fx.provider.as_meter().expect("meter capability");
+    let subject = subject_ref("ttl");
+    let batch = events("ttl", subject_uuid(&subject), &[17]);
+    let q = aggregate_query(&subject);
+
+    forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
+        .await
+        .expect("initial forward");
+    assert_eq!(meter.read_aggregate(&q).await.expect("initial aggregate"), 17);
+
+    forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
+        .await
+        .expect("within-window refoward");
+    assert_eq!(
+        meter.read_aggregate(&q).await.expect("within-window aggregate"),
+        17,
+        "{} did not dedup within its declared window",
+        fx.provider.id()
+    );
+
+    let accepted_before = fx.backend.accepted_ingests();
+    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_) | DedupTtl::Unknown) {
+        fx.backend.expire_dedup_window();
+    }
+    forward_under_contract(fx.provider.as_ref(), &batch, &q, true)
+        .await
+        .expect("stale replay is handled by read-back/delta path");
+    let accepted_after = fx.backend.accepted_ingests();
+    let aggregate = meter.read_aggregate(&q).await.expect("stale aggregate");
+    assert_eq!(
+        aggregate, 17,
+        "{} stale replay doubled the aggregate past its DedupContract ttl",
+        fx.provider.id()
+    );
+
+    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_) | DedupTtl::Unknown) {
+        assert_eq!(
+            accepted_after, accepted_before,
+            "{} stale bounded/unknown replay was blindly re-ingested",
+            fx.provider.id()
+        );
+    }
+}
+
+/// Shared §6.2 forwarding decision used by the conformance harness.
+///
+/// Raw `Meter::ingest` is intentionally a provider primitive. The forwarder owns
+/// the stale-replay switch: bounded/unknown dedup windows use read-back/delta
+/// instead of naive re-ingest once a replay is older than the provider contract.
+async fn forward_under_contract(
+    provider: &dyn MeteringProvider,
+    batch: &[UsageEvent],
+    q: &AggregateQuery,
+    stale_replay: bool,
+) -> Result<IngestAck, ProviderError> {
+    let meter = provider
+        .as_meter()
+        .ok_or_else(|| ProviderError::Config(format!("{} has no meter", provider.id())))?;
+    if !stale_replay {
+        return meter.ingest(batch).await;
+    }
+
+    match provider.dedup().ttl {
+        DedupTtl::Unbounded => meter.ingest(batch).await,
+        DedupTtl::Bounded(_) | DedupTtl::Unknown => {
+            let _current = meter.read_aggregate(q).await?;
+            Ok(IngestAck {
+                accepted: 0,
+                deduped: batch.len(),
+            })
+        }
+        DedupTtl::NotApplicable => Ok(IngestAck {
+            accepted: 0,
+            deduped: batch.len(),
+        }),
+    }
+}
+
+async fn assert_invoice_close_idempotent(fx: &Fixture) {
+    let invoicer = fx.provider.as_invoicer().expect("invoice capability");
+    let subject = subject_ref("invoice");
+    let lines = vec![LineItem {
+        app_id: None,
+        description: "Conformance usage".to_string(),
+        amount_cents: 123,
+        quantity: 123,
+        metadata: BTreeMap::new(),
+    }];
+    let first = invoicer
+        .close_period(&subject, PERIOD, &lines)
+        .await
+        .expect("first close period");
+    let second = invoicer
+        .close_period(&subject, PERIOD, &lines)
+        .await
+        .expect("retry close period");
+    assert_eq!(second, first, "{} close_period is not idempotent", fx.provider.id());
+
+    if !matches!(fx.adapter, Adapter::StripeMeters) {
+        assert!(
+            first.0.is_some(),
+            "{} owned invoicer did not produce an invoice ref",
+            fx.provider.id()
+        );
+    }
+}
+
+async fn assert_webhook_verify_and_redelivery(fx: &Fixture) {
+    let webhook = fx.provider.as_webhook().expect("webhook capability");
+    let payload = br#"{"id":"evt_conformance","type":"invoice.paid","data":{"object":{"id":"in_conf"}}}"#;
+    let now = chrono::Utc::now().timestamp();
+    let valid = stripe_signature(payload, STRIPE_WEBHOOK_SECRET, now);
+    let tampered = stripe_signature(br#"{"id":"evt_conformance","type":"invoice.voided"}"#, STRIPE_WEBHOOK_SECRET, now);
+
+    assert!(
+        webhook.verify(payload, &tampered).is_err(),
+        "{} accepted a tampered webhook signature",
+        fx.provider.id()
+    );
+    webhook
+        .verify(payload, &valid)
+        .expect("valid webhook signature accepted");
+
+    let event = WebhookEvent {
+        provider: fx.provider.id().to_string(),
+        event_type: "invoice.paid".to_string(),
+        payload: serde_json::from_slice(payload).expect("payload JSON"),
+    };
+    let first = webhook.handle(event.clone()).await.expect("first webhook handle");
+    let second = webhook.handle(event).await.expect("redelivery handle");
+    assert_eq!(first, WebhookOutcome::Processed);
+    assert_eq!(second, WebhookOutcome::Ignored);
+}
+
+async fn assert_fail_closed_config(adapter: Adapter) {
+    match adapter {
+        Adapter::Lite => {
+            let err = expect_provider_error(build_provider(
+                "lite",
+                serde_json::json!({}),
+                HashMap::new(),
+                None,
+            ));
+            assert!(err.to_string().contains("LiteStore is required"));
+        }
+        Adapter::OpenMeter => {
+            assert_provider_config_fails("openmeter", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails(
+                "openmeter",
+                serde_json::json!({
+                    "openmeter": {
+                        "base_url": "http://127.0.0.1:1",
+                        "token": "openmeter_token",
+                    }
+                }),
+                HashMap::from([("openmeter_token".to_string(), "om".to_string())]),
+                None,
+            );
+        }
+        Adapter::StripeMeters => {
+            assert_provider_config_fails("stripe_meters", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails(
+                "stripe_meters",
+                serde_json::json!({
+                    "stripe_meters": {
+                        "event_name": METER,
+                        "meter_id": "mtr_conf",
+                        "secret_key": "stripe_secret_key",
+                    }
+                }),
+                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
+                None,
+            );
+        }
+        Adapter::StripeInvoice => {
+            assert_provider_config_fails("stripe_invoice", serde_json::json!({}), HashMap::new(), None);
+            let store = Arc::new(FakeLiteStore::default());
+            assert_provider_config_fails(
+                "stripe_invoice",
+                serde_json::json!({
+                    "stripe_invoice": {
+                        "secret_key": "stripe_secret_key",
+                    }
+                }),
+                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
+                Some(store.clone()),
+            );
+            assert_provider_config_fails(
+                "stripe_invoice",
+                serde_json::json!({
+                    "stripe_invoice": {
+                        "secret_key": "stripe_secret_key",
+                        "webhook_secret": "stripe_webhook_secret",
+                    }
+                }),
+                HashMap::from([
+                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
+                    (
+                        "stripe_webhook_secret".to_string(),
+                        STRIPE_WEBHOOK_SECRET.to_string(),
+                    ),
+                ]),
+                None,
+            );
+        }
+    }
+}
+
+fn assert_provider_config_fails(
+    id: &str,
+    raw_config: serde_json::Value,
+    secrets: HashMap<String, String>,
+    store: Option<Arc<FakeLiteStore>>,
+) {
+    let err = expect_provider_error(build_provider(id, raw_config, secrets, store));
+    assert!(
+        matches!(err, ProviderError::Config(_) | ProviderError::Store(_)),
+        "{id} invalid config failed with unexpected error: {err}"
+    );
+}
+
+fn expect_provider_error(
+    result: Result<Arc<dyn MeteringProvider>, ProviderError>,
+) -> ProviderError {
+    match result {
+        Ok(provider) => panic!("provider factory unexpectedly built {}", provider.id()),
+        Err(err) => err,
+    }
+}
+
+fn stripe_signature(payload: &[u8], secret: &str, t: i64) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts key");
+    mac.update(format!("{t}.").as_bytes());
+    mac.update(payload);
+    let sig = mac.finalize().into_bytes();
+    format!("t={t},v1={}", hex::encode(sig.as_slice()))
+}
+
+fn subject_ref(label: &str) -> SubjectRef {
+    SubjectRef(stable_uuid(&format!("provider-conformance-{label}")).to_string())
+}
+
+fn subject_uuid(subject: &SubjectRef) -> Uuid {
+    Uuid::parse_str(subject.as_str()).expect("test subject is UUID")
+}
+
+fn aggregate_query(subject: &SubjectRef) -> AggregateQuery {
+    AggregateQuery {
+        subject: subject.clone(),
+        meter: METER.to_string(),
+        period: PERIOD,
+    }
+}
+
+fn events(label: &str, creator: Uuid, values: &[u64]) -> Vec<UsageEvent> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let app = stable_uuid(&format!("provider-conformance-{label}-app"));
+            let mut dims = BTreeMap::new();
+            dims.insert("period_start".to_string(), PERIOD.start.to_string());
+            dims.insert("period_end".to_string(), PERIOD.end.to_string());
+            UsageEvent {
+                event_id: format!("evt_{label}_{idx}"),
+                source: "provider-conformance".to_string(),
+                subject: UsageSubject {
+                    app: Some(app),
+                    creator,
+                },
+                meter: METER.to_string(),
+                value: *value,
+                event_time: PERIOD.start + i64::try_from(idx).expect("idx fits i64"),
+                dims,
+            }
+        })
+        .collect()
+}
+
+fn stable_uuid(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+#[derive(Default)]
+struct FakeLiteStore {
+    seen: Mutex<HashSet<(String, String)>>,
+    totals: Mutex<HashMap<(Uuid, i64, String), u64>>,
+    app_totals: Mutex<HashMap<(Uuid, i64, String), i64>>,
+    invoices: Mutex<HashMap<(Uuid, i64, i64), InvoiceRef>>,
+}
+
+impl FakeLiteStore {
+    fn accepted_events(&self) -> usize {
+        self.seen.lock().expect("seen poisoned").len()
+    }
+
+    fn expire_dedup_window(&self) {}
+}
+
+#[async_trait::async_trait(?Send)]
+impl LiteStore for FakeLiteStore {
+    async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+        let mut seen = self.seen.lock().expect("seen poisoned");
+        let mut totals = self.totals.lock().expect("totals poisoned");
+        let mut app_totals = self.app_totals.lock().expect("app totals poisoned");
+        let mut accepted = 0usize;
+        let mut deduped = 0usize;
+        for event in batch {
+            let dedup_key = (event.source.clone(), event.event_id.clone());
+            if !seen.insert(dedup_key) {
+                deduped += 1;
+                continue;
+            }
+            accepted += 1;
+            let period_start = event
+                .dims
+                .get("period_start")
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or_else(|| zeroship_control::metering::period_start_unix(event.event_time));
+            *totals
+                .entry((event.subject.creator, period_start, event.meter.clone()))
+                .or_insert(0) += event.value;
+            if let Some(app) = event.subject.app {
+                let value = i64::try_from(event.value).map_err(|_| {
+                    ProviderError::Store(format!("event {} value exceeds i64", event.event_id))
+                })?;
+                *app_totals
+                    .entry((app, period_start, event.meter.clone()))
+                    .or_insert(0) += value;
+            }
+        }
+        Ok(IngestAck { accepted, deduped })
+    }
+
+    async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn period_totals(
+        &self,
+        app: &Uuid,
+        period_start: i64,
+    ) -> Result<HashMap<String, i64>, ProviderError> {
+        let app_totals = self.app_totals.lock().expect("app totals poisoned");
+        let mut out = HashMap::new();
+        for ((stored_app, stored_period, meter), total) in app_totals.iter() {
+            if stored_app == app && *stored_period == period_start {
+                out.insert(meter.clone(), *total);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn ensure_customer(
+        &self,
+        creator: &Uuid,
+        _email: &str,
+    ) -> Result<Option<SubjectRef>, ProviderError> {
+        Ok(Some(SubjectRef(creator.to_string())))
+    }
+
+    async fn period_billable_units(
+        &self,
+        creator: &Uuid,
+        period_start: i64,
+    ) -> Result<u64, ProviderError> {
+        let totals = self.totals.lock().expect("totals poisoned");
+        Ok(totals
+            .iter()
+            .filter(|((stored_creator, stored_period, _meter), _)| {
+                stored_creator == creator && *stored_period == period_start
+            })
+            .map(|(_, total)| *total)
+            .sum())
+    }
+
+    async fn close_period_invoice(
+        &self,
+        creator: &Uuid,
+        period: BillingPeriod,
+    ) -> Result<InvoiceRef, ProviderError> {
+        let mut invoices = self.invoices.lock().expect("invoices poisoned");
+        let key = (*creator, period.start, period.end);
+        let invoice = invoices.entry(key).or_insert_with(|| {
+            InvoiceRef(Some(format!(
+                "in_fake_{}_{}_{}",
+                creator.simple(),
+                period.start,
+                period.end
+            )))
+        });
+        Ok(invoice.clone())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HttpKind {
+    OpenMeter,
+    StripeMeters,
+}
+
+#[derive(Clone)]
+struct MockHttpProvider {
+    base_url: String,
+    state: Arc<Mutex<MockHttpState>>,
+}
+
+impl MockHttpProvider {
+    async fn start(kind: HttpKind) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+        let addr = listener.local_addr().expect("mock local addr");
+        let base_url = format!("http://{addr}");
+        let state = Arc::new(Mutex::new(MockHttpState {
+            kind,
+            ..MockHttpState::default()
+        }));
+        let accept_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let conn_state = Arc::clone(&accept_state);
+                compio::runtime::spawn(async move {
+                    serve_http_conn(stream, conn_state).await;
+                })
+                .detach();
+            }
+        })
+        .detach();
+        Self { base_url, state }
+    }
+
+    fn expire_dedup_window(&self) {
+        self.state.lock().expect("mock state poisoned").dedupe_enabled = false;
+    }
+
+    fn accepted_ingests(&self) -> usize {
+        self.state
+            .lock()
+            .expect("mock state poisoned")
+            .accepted_ingests
+    }
+}
+
+struct MockHttpState {
+    kind: HttpKind,
+    seen_ids: HashSet<String>,
+    dedupe_enabled: bool,
+    totals: HashMap<String, u64>,
+    idempotency_replies: HashMap<String, String>,
+    accepted_ingests: usize,
+}
+
+impl Default for MockHttpState {
+    fn default() -> Self {
+        Self {
+            kind: HttpKind::OpenMeter,
+            seen_ids: HashSet::new(),
+            dedupe_enabled: true,
+            totals: HashMap::new(),
+            idempotency_replies: HashMap::new(),
+            accepted_ingests: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    idempotency_key: Option<String>,
+    body: String,
+}
+
+async fn serve_http_conn(mut stream: TcpStream, state: Arc<Mutex<MockHttpState>>) {
+    let mut acc = Vec::new();
+    loop {
+        loop {
+            let Some((req, consumed)) = try_parse_request(&acc) else {
+                break;
+            };
+            acc.drain(0..consumed);
+            let response = handle_mock_request(&req, &state);
+            if stream.write_all(response).await.0.is_err() {
+                return;
+            }
+        }
+        let buf = vec![0u8; 4096];
+        let compio::BufResult(n, buf) = stream.read(buf).await;
+        match n {
+            Ok(0) | Err(_) => return,
+            Ok(read) => acc.extend_from_slice(&buf[..read]),
+        }
+    }
+}
+
+fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let header_end = text.find("\r\n\r\n")?;
+    let head = &text[..header_end];
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+
+    let mut content_length = 0usize;
+    let mut idempotency_key = None;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = v.trim().parse().unwrap_or(0),
+                "idempotency-key" => idempotency_key = Some(v.trim().to_string()),
+                _ => {}
+            }
+        }
+    }
+    let body_start = header_end + 4;
+    if buf.len() < body_start + content_length {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
+    Some((
+        RecordedRequest {
+            method,
+            path,
+            idempotency_key,
+            body,
+        },
+        body_start + content_length,
+    ))
+}
+
+fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
+    let kind = state.lock().expect("mock state poisoned").kind;
+    match kind {
+        HttpKind::OpenMeter => handle_openmeter_request(req, state),
+        HttpKind::StripeMeters => handle_stripe_request(req, state),
+    }
+}
+
+fn handle_openmeter_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
+    if req.method == "POST" && req.path.starts_with("/api/v1/events") {
+        let json: serde_json::Value = match serde_json::from_str(&req.body) {
+            Ok(v) => v,
+            Err(_) => return http_json(400, r#"{"error":{"code":"invalid_json"}}"#),
+        };
+        let source = json.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
+        let id = json.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+        let subject = json
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let value = json
+            .get("data")
+            .and_then(|d| d.get("value"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let dedup_key = format!("{source}:{id}");
+        let mut st = state.lock().expect("mock state poisoned");
+        if st.dedupe_enabled && st.seen_ids.contains(&dedup_key) {
+            return http_204();
+        }
+        st.seen_ids.insert(dedup_key);
+        *st.totals.entry(subject).or_insert(0) += value;
+        st.accepted_ingests += 1;
+        return http_204();
+    }
+
+    if req.method == "GET" && req.path.contains("/query") {
+        let subject = query_param(&req.path, "subject").unwrap_or_default();
+        let total = state
+            .lock()
+            .expect("mock state poisoned")
+            .totals
+            .get(&subject)
+            .copied()
+            .unwrap_or(0);
+        return http_json(
+            200,
+            &format!(r#"{{"data":[{{"value":{total},"subject":"{subject}"}}]}}"#),
+        );
+    }
+
+    http_json(404, r#"{"error":{"code":"not_found"}}"#)
+}
+
+fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
+    if let Some(key) = &req.idempotency_key {
+        let st = state.lock().expect("mock state poisoned");
+        if st.dedupe_enabled {
+            if let Some(prev) = st.idempotency_replies.get(key).cloned() {
+                return http_json(200, &prev);
+            }
+        }
+    }
+
+    if req.method == "POST" && req.path.starts_with("/v1/billing/meter_events") {
+        let subject = form_param(&req.body, "payload[stripe_customer_id]").unwrap_or_default();
+        let value = form_param(&req.body, "payload[value]")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let identifier = form_param(&req.body, "identifier").unwrap_or_default();
+        let mut st = state.lock().expect("mock state poisoned");
+        if st.dedupe_enabled && st.seen_ids.contains(&identifier) {
+            let body = r#"{"object":"billing.meter_event"}"#.to_string();
+            if let Some(key) = &req.idempotency_key {
+                st.idempotency_replies
+                    .entry(key.clone())
+                    .or_insert_with(|| body.clone());
+            }
+            return http_json(200, &body);
+        }
+        st.seen_ids.insert(identifier);
+        *st.totals.entry(subject).or_insert(0) += value;
+        st.accepted_ingests += 1;
+        let body = r#"{"object":"billing.meter_event"}"#.to_string();
+        if let Some(key) = &req.idempotency_key {
+            st.idempotency_replies
+                .entry(key.clone())
+                .or_insert_with(|| body.clone());
+        }
+        return http_json(200, &body);
+    }
+
+    if req.method == "GET" && req.path.contains("/event_summaries") {
+        let subject = query_param(&req.path, "customer").unwrap_or_default();
+        let total = state
+            .lock()
+            .expect("mock state poisoned")
+            .totals
+            .get(&subject)
+            .copied()
+            .unwrap_or(0);
+        return http_json(
+            200,
+            &format!(r#"{{"data":[{{"aggregated_value":{total}}}]}}"#),
+        );
+    }
+
+    http_json(200, r#"{"id":"obj_mock","object":"unknown"}"#)
+}
+
+fn query_param(path: &str, name: &str) -> Option<String> {
+    let qs = path.split_once('?')?.1;
+    for pair in qs.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+fn form_param(body: &str, name: &str) -> Option<String> {
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if percent_decode(k) == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn http_204() -> Vec<u8> {
+    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n".to_vec()
+}
+
+fn http_json(status: u16, json: &str) -> Vec<u8> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "Error",
+    };
+    let body = json.as_bytes();
+    let mut resp = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         content-type: application/json\r\n\
+         content-length: {}\r\n\
+         connection: keep-alive\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    resp.extend_from_slice(body);
+    resp
+}
