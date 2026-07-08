@@ -10,7 +10,7 @@
 //! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise (CI without a DB
 //! stays green). The pure tier math is unit-tested DB-free in `src/pricing.rs`.
 
-use std::collections::HashMap;
+mod common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
@@ -473,6 +473,7 @@ async fn charge_from_real_aggregates_uses_weight_table() {
 
     // Make the weight for `requests` deterministic for this assertion (1 CU per
     // request), independent of any future seed re-tuning.
+    common::seed_metric_catalog(&client, "requests").await;
     client
         .execute(
             "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
@@ -488,21 +489,18 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     let name = format!("charge-{}", Uuid::new_v4().simple());
     let app = registry.create_app(&name, &plan.id, &owner).await.expect("create");
 
-    // Write 1.5M requests into the current period via the real Metering ingest.
+    // Write 1.5M requests into the current period, then read it back through the
+    // real Metering aggregate reader.
     let metering = zeroship_control::metering::Metering::new(registry.clone());
     let period = zeroship_control::metering::current_period_start_unix();
-    let mut counters = HashMap::new();
-    counters.insert(
+    common::seed_usage_total(
+        &client,
         app.id,
-        zeroship_core::types::AppUsage { requests: 1_500_000, ..Default::default() },
-    );
-    let report = zeroship_core::types::UsageReport {
-        worker_id: format!("w-{}", Uuid::new_v4()),
-        report_id: Uuid::now_v7(),
-        sequence: 1,
-        counters,
-    };
-    metering.ingest_at(&report, period).await.expect("ingest");
+        period,
+        "requests",
+        1_500_000,
+    )
+    .await;
 
     // Read back the real aggregates, the real global weight table, and price.
     let totals = metering.period_totals(&app.id, period).await.expect("totals");

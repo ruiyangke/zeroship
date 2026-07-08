@@ -7,7 +7,8 @@
 //! Gated on `CONTROL_TEST_DB`; silent skip otherwise. The DB must have changeset
 //! 0039 applied.
 
-use std::collections::HashMap;
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,11 +16,9 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::spend_reconcile;
-use zeroship_control::metering::Metering;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -166,17 +165,6 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
     rows[0].get("id")
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 /// #8: a transition through the REAL cron `tick` writes a `SpendStateChange`
 /// audit row whose detail carries the money context `{from,to,spend_cents,
 /// limit_cents}` — matching the doc on `audit::Action::SpendStateChange`.
@@ -190,12 +178,17 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     };
     let fx = build_state(&url, "audit").await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let metering = Metering::new(fx.state.registry.clone());
 
     // 100-cent cap, 1 cent/request, 100 requests ⇒ 100% ⇒ Allow→Block.
     let app = make_over_limit_app(&fx.state, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    common::seed_usage_delta(
+        &fx.state.control_pg,
+        app,
+        zeroship_control::metering::current_period_start_unix(),
+        "requests",
+        100,
+    )
+    .await;
 
     let n = spend_reconcile::tick(&fx.state).await.expect("tick");
     assert!(n >= 1, "at least our app transitioned");
@@ -233,11 +226,16 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
     };
     let fx = build_state(&url, "lock").await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let metering = Metering::new(fx.state.registry.clone());
 
     let app = make_over_limit_app(&fx.state, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    common::seed_usage_delta(
+        &fx.state.control_pg,
+        app,
+        zeroship_control::metering::current_period_start_unix(),
+        "requests",
+        100,
+    )
+    .await;
 
     // Hold the spend-sweep advisory lock on a dedicated side connection (same
     // key the cron derives — kept in sync with `spend_reconcile`). A fresh PG

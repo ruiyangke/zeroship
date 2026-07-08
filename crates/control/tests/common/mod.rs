@@ -147,3 +147,66 @@ pub async fn ensure_builtin_plans(registry: &Registry) {
         .await
         .expect("seed built-in plans for test");
 }
+
+#[allow(dead_code)]
+pub async fn seed_usage_total(
+    pg: &compio_postgres::Client,
+    app: Uuid,
+    period_start_unix: i64,
+    metric: &str,
+    total: i64,
+) {
+    seed_metric_catalog(pg, metric).await;
+    pg.execute(
+        "INSERT INTO zeroship.usage_aggregates AS u (app_id, period, metric, total, updated_at) \
+         VALUES ($1, $2::date, $3, $4, NOW()) \
+         ON CONFLICT (app_id, period, metric) DO UPDATE SET \
+           total = EXCLUDED.total, updated_at = NOW()",
+        &[&app, &period_date(period_start_unix), &metric, &total],
+    )
+    .await
+    .expect("seed usage total");
+}
+
+#[allow(dead_code)]
+pub async fn seed_usage_delta(
+    pg: &compio_postgres::Client,
+    app: Uuid,
+    period_start_unix: i64,
+    metric: &str,
+    delta: i64,
+) {
+    seed_metric_catalog(pg, metric).await;
+    pg.execute(
+        "INSERT INTO zeroship.usage_aggregates AS u (app_id, period, metric, total, updated_at) \
+         VALUES ($1, $2::date, $3, $4, NOW()) \
+         ON CONFLICT (app_id, period, metric) DO UPDATE SET \
+           total = u.total + EXCLUDED.total, updated_at = NOW()",
+        &[&app, &period_date(period_start_unix), &metric, &delta],
+    )
+    .await
+    .expect("seed usage delta");
+}
+
+#[allow(dead_code)]
+pub async fn seed_metric_catalog(pg: &compio_postgres::Client, metric: &str) {
+    pg.execute(
+        "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
+         VALUES ($1, 'platform', 'op') \
+         ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
+        &[&metric],
+    )
+    .await
+    .expect("seed billing metric");
+}
+
+#[allow(dead_code)]
+pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
+    use chrono::{Datelike, TimeZone};
+    let dt = chrono::Utc
+        .timestamp_opt(period_start_unix, 0)
+        .single()
+        .unwrap_or_else(chrono::Utc::now);
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
+        .expect("valid first-of-month period")
+}

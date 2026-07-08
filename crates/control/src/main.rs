@@ -126,6 +126,15 @@ struct ControlCli {
     #[arg(long = "stream-config", env = "STREAM_CONFIG", default_value = "{}")]
     stream_config: String,
 
+    /// Interval in seconds for the stream-backed spend recompute cron. Default
+    /// is hourly per billing-provider-platform v7 enforcement.
+    #[arg(
+        long = "spend-recompute-interval",
+        env = "SPEND_RECOMPUTE_INTERVAL",
+        default_value_t = zeroship_control::cron::spend_recompute::DEFAULT_RECOMPUTE_INTERVAL_SECS
+    )]
+    spend_recompute_interval: u64,
+
     /// Permit an evaluation-grade provider such as `lite` in production.
     #[arg(long = "allow-unsupported-billing", env = "ALLOW_UNSUPPORTED_BILLING")]
     allow_unsupported_billing: bool,
@@ -429,6 +438,7 @@ impl std::fmt::Debug for ControlCli {
             .field("pairwise_salt_file", &self.pairwise_salt_file)
             .field("oauth_audience", &self.oauth_audience)
             .field("app_base_domain", &self.app_base_domain)
+            .field("spend_recompute_interval", &self.spend_recompute_interval)
             .field("audit_retention_months", &self.audit_retention_months)
             .field("audit_retention_check_secs", &self.audit_retention_check_secs)
             .finish()
@@ -807,6 +817,7 @@ fn main() -> std::io::Result<()> {
     );
     let expected_oauth_audience = cli.oauth_audience;
     let app_base_domain = cli.app_base_domain;
+    let spend_recompute_interval = cli.spend_recompute_interval;
     let audit_retention_months = cli.audit_retention_months;
     let audit_retention_check_secs = cli.audit_retention_check_secs;
 
@@ -1032,6 +1043,10 @@ fn main() -> std::io::Result<()> {
                     .unwrap_or("(disabled)")
                     .to_string(),
             ),
+        );
+        report.field(
+            "spend_recompute_interval_secs",
+            CheckValue::Count(spend_recompute_interval as usize),
         );
         report.field(
             "deploy_tmp_dir",
@@ -1426,6 +1441,7 @@ fn main() -> std::io::Result<()> {
         Arc::clone(&state),
         audit_retention_months,
         audit_retention_check_secs,
+        spend_recompute_interval,
     );
     tracing::info!(
         retention_months = audit_retention_months,
@@ -1640,10 +1656,6 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
-            )
-            .service(
-                web::resource("/internal/usage")
-                    .route(web::post().to(internal::report_usage)),
             )
             .service(
                 web::resource("/internal/billing/reconcile")
