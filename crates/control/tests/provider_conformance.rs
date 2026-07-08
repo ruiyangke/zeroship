@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use zeroship_control::metering::provider::{
     assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
-    DedupTtl, IngestAck, InvoiceRef, LineItem, LiteStore, MeteringProvider, ProviderCtx,
-    ProviderError, StaticSecretResolver, SubjectRef, UsageEvent, UsageSubject, WebhookEvent,
-    WebhookOutcome,
+    DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LineItem, LiteStore,
+    MeteringProvider, ProviderCtx, ProviderError, StaticSecretResolver, SubjectRef, UsageEvent,
+    UsageSubject, WebhookEvent, WebhookOutcome,
 };
 
 const METER: &str = "compute_units";
@@ -118,6 +118,7 @@ async fn run_provider_conformance(adapter: Adapter) {
 
     assert_capabilities_consistent(&fx.provider, adapter.expected_capabilities());
     assert_dedup_contract_matches_docs(&fx.provider);
+    assert_correction_capability_matches_docs(&fx.provider);
     assert_fail_closed_config(adapter).await;
 
     if fx.provider.as_meter().is_some() {
@@ -290,6 +291,16 @@ fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
         "stripe_invoice" => {
             assert_eq!(dedup.key, DedupKey::NotApplicable);
             assert_eq!(dedup.ttl, DedupTtl::NotApplicable);
+        }
+        other => panic!("unexpected provider in conformance suite: {other}"),
+    }
+}
+
+fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider>) {
+    match provider.id() {
+        "openmeter" => assert_eq!(provider.correction(), CorrectionCapability::None),
+        "stripe_meters" | "stripe_invoice" | "lite" => {
+            assert_eq!(provider.correction(), CorrectionCapability::InvoiceCredit);
         }
         other => panic!("unexpected provider in conformance suite: {other}"),
     }
@@ -718,6 +729,24 @@ impl LiteStore for FakeLiteStore {
                 creator.simple(),
                 period.start,
                 period.end
+            )))
+        });
+        Ok(invoice.clone())
+    }
+
+    async fn adjustment_note_invoice(
+        &self,
+        creator: &Uuid,
+        note: &zeroship_control::metering::provider::AdjustmentNote,
+    ) -> Result<InvoiceRef, ProviderError> {
+        let mut invoices = self.invoices.lock().expect("invoices poisoned");
+        let key = (*creator, note.period.end, note.period.end);
+        let invoice = invoices.entry(key).or_insert_with(|| {
+            InvoiceRef(Some(format!(
+                "in_adjustment_{}_{}_{}",
+                creator.simple(),
+                note.period.start,
+                note.correction_seq
             )))
         });
         Ok(invoice.clone())
