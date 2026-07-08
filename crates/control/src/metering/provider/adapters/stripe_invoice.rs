@@ -22,6 +22,16 @@ pub struct StripeInvoiceProvider {
     webhook: StripeWebhookState,
 }
 
+impl std::fmt::Debug for StripeInvoiceProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StripeInvoiceProvider")
+            .field("store", &"<lite store>")
+            .field("secret_key", &self._secret_key)
+            .field("webhook", &self.webhook)
+            .finish()
+    }
+}
+
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let cfg: StripeInvoiceCfg = ctx.parse_adapter_config("stripe_invoice")?;
     let secret_key = ctx.secrets.resolve(&cfg.secret_key)?;
@@ -50,8 +60,8 @@ impl Rater for StripeInvoiceProvider {
         _period: BillingPeriod,
         _input: &RatedInput,
     ) -> Result<Vec<LineItem>, ProviderError> {
-        // TODO(S4/S6): rate from the stream recompute witness. S1 intentionally
-        // preserves the current usage_aggregates/pricing reconciler as the source.
+        // The stream recompute witness will provide first-class lines here.
+        // Until then, period close preserves the existing reconciler as source.
         Ok(Vec::new())
     }
 }

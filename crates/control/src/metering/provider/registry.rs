@@ -5,7 +5,7 @@ use super::{assert_capability_consistency, MeteringProvider, ProviderCtx, Provid
 
 pub type ProviderFactory = fn(&ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ProviderRegistry {
     factories: HashMap<&'static str, ProviderFactory>,
 }

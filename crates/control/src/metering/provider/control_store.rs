@@ -24,6 +24,18 @@ pub struct ControlLiteStore {
     tax_provider: Arc<dyn crate::tax::TaxProvider>,
 }
 
+impl std::fmt::Debug for ControlLiteStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlLiteStore")
+            .field("registry", &self.registry)
+            .field("stripe_store", &"<stripe store>")
+            .field("stripe_secret_key", &self.stripe_secret_key)
+            .field("stripe_base_url", &self.stripe_base_url)
+            .field("tax_provider", &"<tax provider>")
+            .finish()
+    }
+}
+
 impl ControlLiteStore {
     #[must_use]
     pub fn new(

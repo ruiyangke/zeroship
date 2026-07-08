@@ -13,6 +13,14 @@ pub struct LiteProvider {
     store: Arc<dyn LiteStore>,
 }
 
+impl std::fmt::Debug for LiteProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiteProvider")
+            .field("store", &"<lite store>")
+            .finish()
+    }
+}
+
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let store = ctx
         .store
@@ -55,7 +63,7 @@ impl Rater for LiteProvider {
         input: &RatedInput,
     ) -> Result<Vec<LineItem>, ProviderError> {
         // The existing reconciler does per-app plan and proration pricing inside
-        // close_period. The S1 rater surface is present for role composition and
+        // close_period. The rater surface is present for role composition and
         // will carry first-class line generation when the stream recompute lands.
         Ok(vec![LineItem {
             app_id: None,

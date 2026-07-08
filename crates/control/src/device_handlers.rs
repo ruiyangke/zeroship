@@ -725,10 +725,6 @@ async fn verified_gotrue_bearer(
                 tracing::warn!(error = %err, "control: device approve platform bearer verify failed");
                 web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
             }
-            err => {
-                tracing::warn!(error = %err, "control: device approve bearer verify failed");
-                web::HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
-            }
         })?;
 
     match &verified.provider_authz {

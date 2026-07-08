@@ -181,6 +181,14 @@ pub struct StripeRefundProvider<'a, S: StripeApi> {
     pub stripe: &'a S,
 }
 
+impl<S: StripeApi> std::fmt::Debug for StripeRefundProvider<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StripeRefundProvider")
+            .field("stripe", &"<stripe api>")
+            .finish()
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl<S: StripeApi> RefundProvider for StripeRefundProvider<'_, S> {
     async fn refund_cash(

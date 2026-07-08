@@ -1,9 +1,8 @@
 //! Lago billing-provider adapter.
 //!
-//! This S8 adapter proves the provider L1 seam: adding Lago required this
-//! adapter file plus the `register_builtin` entry in `adapters/mod.rs` (and the
-//! shared conformance parameter/mock in tests), with no provider trait,
-//! registry, stack-builder, forwarder, or pipeline edits.
+//! Lago billing-provider adapter. Adding a provider requires this adapter file
+//! plus the `register_builtin` entry in `adapters/mod.rs`, with no provider
+//! trait, registry, stack-builder, forwarder, or pipeline edits.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
