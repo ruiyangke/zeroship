@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use hmac::{Hmac, Mac};
@@ -26,8 +27,14 @@ const PERIOD: BillingPeriod = BillingPeriod {
     start: 1_783_468_800,
     end: 1_786_147_200,
 };
+const LAGO_API_KEY: &str = "lago_hmac_conformance";
 const STRIPE_SECRET: &str = "sk_test_conformance";
 const STRIPE_WEBHOOK_SECRET: &str = "whsec_conformance";
+
+#[compio::test]
+async fn provider_conformance_lago() {
+    run_provider_conformance(Adapter::Lago).await;
+}
 
 #[compio::test]
 async fn provider_conformance_lite() {
@@ -51,6 +58,7 @@ async fn provider_conformance_stripe_invoice() {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Adapter {
+    Lago,
     Lite,
     OpenMeter,
     StripeMeters,
@@ -60,6 +68,7 @@ enum Adapter {
 impl Adapter {
     fn id(self) -> &'static str {
         match self {
+            Self::Lago => "lago",
             Self::Lite => "lite",
             Self::OpenMeter => "openmeter",
             Self::StripeMeters => "stripe_meters",
@@ -69,6 +78,12 @@ impl Adapter {
 
     fn expected_capabilities(self) -> Capabilities {
         match self {
+            Self::Lago => {
+                Capabilities::METER
+                    | Capabilities::RATE
+                    | Capabilities::INVOICE
+                    | Capabilities::WEBHOOK
+            }
             Self::Lite => Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
             Self::OpenMeter => Capabilities::METER,
             Self::StripeMeters => {
@@ -91,6 +106,7 @@ struct Fixture {
 }
 
 enum Backend {
+    Lago(MockHttpProvider),
     Lite(Arc<FakeLiteStore>),
     OpenMeter(MockHttpProvider),
     StripeMeters(MockHttpProvider),
@@ -100,14 +116,18 @@ enum Backend {
 impl Backend {
     fn expire_dedup_window(&self) {
         match self {
-            Self::OpenMeter(mock) | Self::StripeMeters(mock) => mock.expire_dedup_window(),
+            Self::Lago(mock) | Self::OpenMeter(mock) | Self::StripeMeters(mock) => {
+                mock.expire_dedup_window();
+            }
             Self::Lite(store) | Self::StripeInvoice(store) => store.expire_dedup_window(),
         }
     }
 
     fn accepted_ingests(&self) -> usize {
         match self {
-            Self::OpenMeter(mock) | Self::StripeMeters(mock) => mock.accepted_ingests(),
+            Self::Lago(mock) | Self::OpenMeter(mock) | Self::StripeMeters(mock) => {
+                mock.accepted_ingests()
+            }
             Self::Lite(store) | Self::StripeInvoice(store) => store.accepted_events(),
         }
     }
@@ -138,6 +158,27 @@ async fn run_provider_conformance(adapter: Adapter) {
 
 async fn build_fixture(adapter: Adapter) -> Fixture {
     match adapter {
+        Adapter::Lago => {
+            let mock = MockHttpProvider::start(HttpKind::Lago).await;
+            let provider = build_provider(
+                adapter.id(),
+                serde_json::json!({
+                    "lago": {
+                        "api_url": mock.base_url.clone(),
+                        "api_key": "lago_api_key",
+                        "billable_metric_code": METER,
+                    }
+                }),
+                HashMap::from([("lago_api_key".to_string(), LAGO_API_KEY.to_string())]),
+                None,
+            )
+            .expect("lago provider builds");
+            Fixture {
+                adapter,
+                provider,
+                backend: Backend::Lago(mock),
+            }
+        }
         Adapter::Lite => {
             let store = Arc::new(FakeLiteStore::default());
             let provider = build_provider(
@@ -276,6 +317,10 @@ fn assert_capabilities_consistent(provider: &Arc<dyn MeteringProvider>, expected
 fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
     let dedup = provider.dedup();
     match provider.id() {
+        "lago" => {
+            assert_eq!(dedup.key, DedupKey::TransactionId);
+            assert_eq!(dedup.ttl, DedupTtl::Unbounded);
+        }
         "lite" => {
             assert_eq!(dedup.key, DedupKey::SourceAndId);
             assert_eq!(dedup.ttl, DedupTtl::Unbounded);
@@ -298,6 +343,20 @@ fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
 
 fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider>) {
     match provider.id() {
+        "lago" => match provider.correction() {
+            CorrectionCapability::Backfill { window, closed } => {
+                assert!(window > Duration::ZERO);
+                assert_eq!(
+                    closed,
+                    zeroship_control::metering::provider::ClosedPeriodPolicy::OpenPeriodOnly
+                );
+                assert!(
+                    provider.as_backfiller().is_some(),
+                    "lago Backfill correction must expose Backfiller"
+                );
+            }
+            other => panic!("lago correction matrix drift: {other:?}"),
+        },
         "openmeter" => assert_eq!(provider.correction(), CorrectionCapability::None),
         "stripe_meters" | "stripe_invoice" | "lite" => {
             assert_eq!(provider.correction(), CorrectionCapability::InvoiceCredit);
@@ -434,7 +493,7 @@ async fn assert_invoice_close_idempotent(fx: &Fixture) {
         .expect("retry close period");
     assert_eq!(second, first, "{} close_period is not idempotent", fx.provider.id());
 
-    if !matches!(fx.adapter, Adapter::StripeMeters) {
+    if !matches!(fx.adapter, Adapter::Lago | Adapter::StripeMeters) {
         assert!(
             first.0.is_some(),
             "{} owned invoicer did not produce an invoice ref",
@@ -446,9 +505,20 @@ async fn assert_invoice_close_idempotent(fx: &Fixture) {
 async fn assert_webhook_verify_and_redelivery(fx: &Fixture) {
     let webhook = fx.provider.as_webhook().expect("webhook capability");
     let payload = br#"{"id":"evt_conformance","type":"invoice.paid","data":{"object":{"id":"in_conf"}}}"#;
-    let now = chrono::Utc::now().timestamp();
-    let valid = stripe_signature(payload, STRIPE_WEBHOOK_SECRET, now);
-    let tampered = stripe_signature(br#"{"id":"evt_conformance","type":"invoice.voided"}"#, STRIPE_WEBHOOK_SECRET, now);
+    let tampered_payload = br#"{"id":"evt_conformance","type":"invoice.voided"}"#;
+    let (valid, tampered) = match fx.adapter {
+        Adapter::Lago => (
+            lago_signature(payload, LAGO_API_KEY),
+            lago_signature(tampered_payload, LAGO_API_KEY),
+        ),
+        _ => {
+            let now = chrono::Utc::now().timestamp();
+            (
+                stripe_signature(payload, STRIPE_WEBHOOK_SECRET, now),
+                stripe_signature(tampered_payload, STRIPE_WEBHOOK_SECRET, now),
+            )
+        }
+    };
 
     assert!(
         webhook.verify(payload, &tampered).is_err(),
@@ -472,6 +542,32 @@ async fn assert_webhook_verify_and_redelivery(fx: &Fixture) {
 
 async fn assert_fail_closed_config(adapter: Adapter) {
     match adapter {
+        Adapter::Lago => {
+            assert_provider_config_fails("lago", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails(
+                "lago",
+                serde_json::json!({
+                    "lago": {
+                        "api_url": "http://127.0.0.1:1",
+                        "api_key": "lago_api_key",
+                    }
+                }),
+                HashMap::from([("lago_api_key".to_string(), LAGO_API_KEY.to_string())]),
+                None,
+            );
+            assert_provider_config_fails(
+                "lago",
+                serde_json::json!({
+                    "lago": {
+                        "api_url": "http://127.0.0.1:1",
+                        "api_key": "lago_api_key",
+                        "billable_metric_code": METER,
+                    }
+                }),
+                HashMap::new(),
+                None,
+            );
+        }
         Adapter::Lite => {
             let err = expect_provider_error(build_provider(
                 "lite",
@@ -573,6 +669,13 @@ fn stripe_signature(payload: &[u8], secret: &str, t: i64) -> String {
     mac.update(payload);
     let sig = mac.finalize().into_bytes();
     format!("t={t},v1={}", hex::encode(sig.as_slice()))
+}
+
+fn lago_signature(payload: &[u8], secret: &str) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts key");
+    mac.update(payload);
+    BASE64.encode(mac.finalize().into_bytes())
 }
 
 fn subject_ref(label: &str) -> SubjectRef {
@@ -755,6 +858,7 @@ impl LiteStore for FakeLiteStore {
 
 #[derive(Clone, Copy, Debug)]
 enum HttpKind {
+    Lago,
     OpenMeter,
     StripeMeters,
 }
@@ -895,9 +999,98 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
 fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
     let kind = state.lock().expect("mock state poisoned").kind;
     match kind {
+        HttpKind::Lago => handle_lago_request(req, state),
         HttpKind::OpenMeter => handle_openmeter_request(req, state),
         HttpKind::StripeMeters => handle_stripe_request(req, state),
     }
+}
+
+fn handle_lago_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
+    if req.method == "POST" && req.path.starts_with("/api/v1/events") {
+        let json: serde_json::Value = match serde_json::from_str(&req.body) {
+            Ok(v) => v,
+            Err(_) => return http_json(400, r#"{"error":"invalid_json"}"#),
+        };
+        let event = json.get("event").unwrap_or(&json);
+        let transaction_id = event
+            .get("transaction_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let subject = event
+            .get("external_subscription_id")
+            .or_else(|| event.get("external_customer_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let code = event
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let value = event
+            .get("properties")
+            .and_then(|properties| properties.get("value"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let correct_total = event
+            .get("properties")
+            .and_then(|properties| properties.get("zeroship_correct_total"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut st = state.lock().expect("mock state poisoned");
+        if st.dedupe_enabled && st.seen_ids.contains(&transaction_id) {
+            return http_json(
+                200,
+                &format!(
+                    r#"{{"event":{{"transaction_id":"{}","code":"{}"}}}}"#,
+                    json_escape(&transaction_id),
+                    json_escape(&code)
+                ),
+            );
+        }
+        st.seen_ids.insert(transaction_id.clone());
+        let total = st.totals.entry(subject).or_insert(0);
+        if correct_total {
+            *total = value;
+        } else {
+            *total += value;
+        }
+        st.accepted_ingests += 1;
+        return http_json(
+            200,
+            &format!(
+                r#"{{"event":{{"transaction_id":"{}","code":"{}"}}}}"#,
+                json_escape(&transaction_id),
+                json_escape(&code)
+            ),
+        );
+    }
+
+    if req.method == "GET" && req.path.contains("/current_usage") {
+        let subject = req
+            .path
+            .split("/api/v1/customers/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .map(percent_decode)
+            .unwrap_or_default();
+        let total = state
+            .lock()
+            .expect("mock state poisoned")
+            .totals
+            .get(&subject)
+            .copied()
+            .unwrap_or(0);
+        return http_json(
+            200,
+            &format!(
+                r#"{{"customer_usage":{{"charges_usage":[{{"total_aggregated_units":"{total}.0","billable_metric":{{"code":"{METER}"}}}}]}}}}"#
+            ),
+        );
+    }
+
+    http_json(404, r#"{"error":"not_found"}"#)
 }
 
 fn handle_openmeter_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>) -> Vec<u8> {
@@ -1054,6 +1247,10 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn http_204() -> Vec<u8> {
