@@ -75,6 +75,12 @@ use crate::AppState;
 /// is billed. Hourly bounds the lag between month-close and invoicing.
 pub const DEFAULT_TICK_SECS: u64 = 3600;
 
+/// Default tick cadence in seconds for the §6.3 reconciliation safety net. This
+/// is a low-cost drift/late-adjustment backstop over already snapshotted period
+/// aggregates, so a few-minute cadence bounds correction lag without making it
+/// part of the request path.
+pub const DEFAULT_SAFETY_NET_TICK_SECS: u64 = 300;
+
 /// Stable `pg_advisory_lock` key for the billing-reconcile sweep. Distinct from
 /// the spend-sweep key. Two control instances racing this sweep would both try
 /// to claim+bill; the per-period `invoices(creator_id, period)` UNIQUE claim
@@ -82,6 +88,12 @@ pub const DEFAULT_TICK_SECS: u64 = 3600;
 /// duplicate Stripe round-trips and keeps the sweep single-flight fleet-wide.
 /// Arbitrary FIXED 64-bit constant (derived from "zsbill01").
 const BILLING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6269_6c6c_0001;
+
+/// Stable `pg_advisory_lock` key for the §6.3 reconciliation safety-net sweep.
+/// Distinct from the invoice close sweep above: the safety net may run on a
+/// tighter cadence and must not serialize invoice finalization behind read-back
+/// drift checks.
+const BILLING_SAFETY_NET_ADVISORY_LOCK_KEY: i64 = 0x7a73_6273_6166_0001;
 
 /// Currency for infra-cost invoices (v1: USD only).
 const BILLING_CURRENCY: &str = "usd";
@@ -489,6 +501,130 @@ async fn sweep<S: StripeApi>(
         }
     }
     Ok(billed)
+}
+
+/// Periodic §6.3 reconciliation/correction safety-net entry point. This is the
+/// scheduler around [`reconcile_pass`]; the pass itself remains the single owner
+/// of drift/correction decisions.
+#[allow(clippy::future_not_send)]
+pub async fn run_safety_net(state: Arc<AppState>, tick_secs: u64) {
+    tracing::info!(
+        tick_secs,
+        meter = state.billing_stack.meter_id(),
+        invoicer = state.billing_stack.invoicer_id(),
+        "control billing_reconcile safety-net cron starting"
+    );
+    loop {
+        match safety_net_tick(&state).await {
+            Ok(summary) => {
+                if summary.corrections_issued > 0
+                    || summary.findings_recorded > 0
+                    || summary.provider_rejects > 0
+                {
+                    tracing::warn!(
+                        subjects = summary.subjects_checked,
+                        corrections = summary.corrections_issued,
+                        findings = summary.findings_recorded,
+                        provider_rejects = summary.provider_rejects,
+                        "control billing_reconcile safety-net sweep recorded billing drift"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "control billing_reconcile safety-net tick failed");
+            }
+        }
+        compio::time::sleep(Duration::from_secs(tick_secs)).await;
+    }
+}
+
+/// Run one §6.3 safety-net sweep at the real wall-clock instant.
+#[allow(clippy::future_not_send)]
+pub async fn safety_net_tick(state: &AppState) -> Result<BillingSafetyNetSummary, RegistryError> {
+    safety_net_tick_at(state, Utc::now().timestamp()).await
+}
+
+/// Run one §6.3 safety-net sweep for the period set implied by the billing stack.
+/// The whole sweep is single-flighted under its own advisory lock.
+#[allow(clippy::future_not_send)]
+pub async fn safety_net_tick_at(
+    state: &AppState,
+    now_unix: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let lock_conn = state.registry.conn().await?;
+    let got = lock_conn
+        .query(
+            "SELECT pg_try_advisory_lock($1) AS locked",
+            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+    let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
+    if !acquired {
+        tracing::debug!(
+            "billing_reconcile safety-net: advisory lock held by another instance — skipping tick"
+        );
+        return Ok(BillingSafetyNetSummary::default());
+    }
+
+    let result = safety_net_sweep(state, now_unix).await;
+
+    if let Err(e) = lock_conn
+        .execute(
+            "SELECT pg_advisory_unlock($1)",
+            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            "billing_reconcile safety-net: advisory unlock failed (frees on conn drop)"
+        );
+    }
+
+    result
+}
+
+#[allow(clippy::future_not_send)]
+async fn safety_net_sweep(
+    state: &AppState,
+    now_unix: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let mut total = BillingSafetyNetSummary::default();
+    for period in safety_net_periods(&state.billing_stack, now_unix) {
+        add_safety_net_summary(&mut total, reconcile_pass(state, period).await?);
+    }
+    Ok(total)
+}
+
+fn safety_net_periods(
+    stack: &crate::metering::provider::BillingStack,
+    now_unix: i64,
+) -> Vec<BillingPeriod> {
+    let previous_start = previous_period_start_unix(now_unix);
+    let previous = BillingPeriod {
+        start: previous_start,
+        end: period_end_unix(previous_start),
+    };
+    if !stack.self_invoicing() {
+        return vec![previous];
+    }
+
+    let current_start = crate::metering::period_start_unix(now_unix);
+    let current = BillingPeriod {
+        start: current_start,
+        end: period_end_unix(current_start),
+    };
+    vec![current, previous]
+}
+
+fn add_safety_net_summary(
+    total: &mut BillingSafetyNetSummary,
+    next: BillingSafetyNetSummary,
+) {
+    total.subjects_checked += next.subjects_checked;
+    total.corrections_issued += next.corrections_issued;
+    total.findings_recorded += next.findings_recorded;
+    total.provider_rejects += next.provider_rejects;
 }
 
 /// S7 bounded reconciliation/correction safety-net for one closed period.

@@ -104,6 +104,20 @@ pub fn spawn_all(
         })
         .detach();
     }
+    if should_spawn_billing_reconcile_safety_net(
+        &state.billing_stack,
+        state.billing_stream.is_some(),
+    ) {
+        let safety_net_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            billing_reconcile::run_safety_net(
+                safety_net_state,
+                billing_reconcile::DEFAULT_SAFETY_NET_TICK_SECS,
+            )
+            .await;
+        })
+        .detach();
+    }
     if tasks.contains(&"metering_export") {
         if state.billing_stream.is_none() {
             let export_state = Arc::clone(&state);
@@ -164,6 +178,9 @@ pub fn provider_aware_cron_tasks(
     if !stack.metered_by_owned_local_provider() {
         tasks.push("metering_export");
     }
+    if billing_reconcile_safety_net_needed(stack) {
+        tasks.push("billing_reconcile_safety_net");
+    }
     if !stack.self_invoicing() {
         tasks.push("billing_reconcile");
         if stack.invoicer_id() == "lite" || stack.invoicer_id() == "stripe_invoice" {
@@ -173,11 +190,35 @@ pub fn provider_aware_cron_tasks(
     tasks
 }
 
+/// Full spawn predicate for the §6.3 billing reconciliation safety-net. It
+/// needs the retained stream witness; without a configured stream, spawning the
+/// cron only wakes up to read stale/no-op snapshots.
+#[must_use]
+pub fn should_spawn_billing_reconcile_safety_net(
+    stack: &crate::metering::provider::BillingStack,
+    stream_configured: bool,
+) -> bool {
+    stream_configured && billing_reconcile_safety_net_needed(stack)
+}
+
+fn billing_reconcile_safety_net_needed(
+    stack: &crate::metering::provider::BillingStack,
+) -> bool {
+    use crate::metering::provider::{Capabilities, CorrectionCapability};
+
+    let has_meter = stack.meter.capabilities().contains(Capabilities::METER);
+    let has_correction = !matches!(stack.meter.correction(), CorrectionCapability::None)
+        || !matches!(stack.invoicer.correction(), CorrectionCapability::None);
+    has_meter && (has_correction || !stack.metered_by_owned_local_provider())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::provider_aware_cron_tasks;
+    use super::{provider_aware_cron_tasks, should_spawn_billing_reconcile_safety_net};
     use std::sync::Arc;
-    use crate::metering::provider::{BillingStack, Capabilities, MeteringProvider};
+    use crate::metering::provider::{
+        BillingStack, Capabilities, CorrectionCapability, MeteringProvider,
+    };
 
     /// THE $0-revenue guard (blueprint §M9 risk 3): under `stripe`, the
     /// `metering_export` cron — where CU is PUSHED — MUST be in the spawned set.
@@ -193,6 +234,10 @@ mod tests {
             "stripe MUST spawn metering_export (else $0 revenue) — got {tasks:?}"
         );
         assert!(
+            tasks.contains(&"billing_reconcile_safety_net"),
+            "stripe MUST be safety-net eligible when a stream is configured — got {tasks:?}"
+        );
+        assert!(
             !tasks.contains(&"billing_reconcile"),
             "stripe must NOT spawn billing_reconcile (invoice is a no-op) — got {tasks:?}"
         );
@@ -204,7 +249,14 @@ mod tests {
     fn native_spawns_billing_reconcile_not_metering_export() {
         let stack = lite_stack();
         let tasks = provider_aware_cron_tasks(&stack);
-        assert!(tasks.contains(&"billing_reconcile"), "native spawns billing_reconcile — got {tasks:?}");
+        assert!(
+            tasks.contains(&"billing_reconcile"),
+            "native spawns billing_reconcile — got {tasks:?}"
+        );
+        assert!(
+            tasks.contains(&"billing_reconcile_safety_net"),
+            "native is safety-net eligible when a stream is configured — got {tasks:?}"
+        );
         assert!(
             !tasks.contains(&"metering_export"),
             "native must NOT spawn metering_export (report_usage is a no-op) — got {tasks:?}"
@@ -243,13 +295,40 @@ mod tests {
             "openmeter MUST spawn metering_export (else $0 export) — got {tasks:?}"
         );
         assert!(
+            tasks.contains(&"billing_reconcile_safety_net"),
+            "openmeter+stripe_invoice needs the safety net for provider drift/late adjustments — got {tasks:?}"
+        );
+        assert!(
             tasks.contains(&"billing_reconcile"),
             "openmeter+stripe_invoice must spawn billing_reconcile — got {tasks:?}"
         );
     }
 
+    #[test]
+    fn safety_net_spawn_requires_stream_and_reconcilable_stack() {
+        let stack = openmeter_stripe_invoice_stack();
+        assert!(
+            should_spawn_billing_reconcile_safety_net(&stack, true),
+            "stream-backed openmeter+stripe_invoice needs the safety net"
+        );
+        assert!(
+            !should_spawn_billing_reconcile_safety_net(&stack, false),
+            "without a stream there is no retained witness to reconcile"
+        );
+
+        let noop = no_correction_local_stack();
+        assert!(
+            !should_spawn_billing_reconcile_safety_net(&noop, true),
+            "a local stack with no provider drift/correction surface should not spawn the safety net"
+        );
+    }
+
     fn stripe_meters_stack() -> BillingStack {
-        let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider("stripe_meters"));
+        let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
+            id: "stripe_meters",
+            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            correction: CorrectionCapability::InvoiceCredit,
+        });
         BillingStack {
             meter: p.clone(),
             rater: p.clone(),
@@ -259,8 +338,16 @@ mod tests {
     }
 
     fn openmeter_stripe_invoice_stack() -> BillingStack {
-        let meter: Arc<dyn MeteringProvider> = Arc::new(CronProvider("openmeter"));
-        let invoicer: Arc<dyn MeteringProvider> = Arc::new(CronProvider("stripe_invoice"));
+        let meter: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
+            id: "openmeter",
+            capabilities: Capabilities::METER,
+            correction: CorrectionCapability::None,
+        });
+        let invoicer: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
+            id: "stripe_invoice",
+            capabilities: Capabilities::RATE | Capabilities::INVOICE,
+            correction: CorrectionCapability::InvoiceCredit,
+        });
         BillingStack {
             meter,
             rater: invoicer.clone(),
@@ -270,7 +357,25 @@ mod tests {
     }
 
     fn lite_stack() -> BillingStack {
-        let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider("lite"));
+        let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
+            id: "lite",
+            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            correction: CorrectionCapability::InvoiceCredit,
+        });
+        BillingStack {
+            meter: p.clone(),
+            rater: p.clone(),
+            invoicer: p,
+            webhooks: Vec::new(),
+        }
+    }
+
+    fn no_correction_local_stack() -> BillingStack {
+        let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
+            id: "lite",
+            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            correction: CorrectionCapability::None,
+        });
         BillingStack {
             meter: p.clone(),
             rater: p.clone(),
@@ -280,15 +385,23 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct CronProvider(&'static str);
+    struct CronProvider {
+        id: &'static str,
+        capabilities: Capabilities,
+        correction: CorrectionCapability,
+    }
 
     impl MeteringProvider for CronProvider {
         fn id(&self) -> &str {
-            self.0
+            self.id
         }
 
         fn capabilities(&self) -> Capabilities {
-            Capabilities::empty()
+            self.capabilities
+        }
+
+        fn correction(&self) -> CorrectionCapability {
+            self.correction
         }
     }
 }
