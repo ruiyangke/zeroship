@@ -111,6 +111,18 @@ struct MockState {
     /// Created invoices, keyed by the `in_…` id the mock minted: the swept total
     /// (D1) + the settlement ids the EXPANDED `GET /v1/invoices` returns (D2).
     invoices: HashMap<String, MockInvoice>,
+    fault: MockFault,
+}
+
+#[derive(Default)]
+enum MockFault {
+    #[default]
+    None,
+    FailAfterInvoiceItems { fail_after: usize, seen: usize },
+    PostThenCrashInvoiceItem,
+    CrashOnFinalize,
+    FinalizeAlreadyFinalized,
+    FinalizeReturnsFixedId(String),
 }
 
 /// A pending invoice item recorded by the mock.
@@ -183,6 +195,33 @@ impl MockStripe {
     /// Turn OFF Idempotency-Key replay to simulate Stripe's >24h key expiry.
     fn disable_dedupe(&self) {
         self.state.lock().unwrap().dedupe_by_key = false;
+    }
+
+    fn clear_fault(&self) {
+        self.state.lock().unwrap().fault = MockFault::None;
+    }
+
+    fn fail_after_invoice_items(&self, fail_after: usize) {
+        self.state.lock().unwrap().fault = MockFault::FailAfterInvoiceItems {
+            fail_after,
+            seen: 0,
+        };
+    }
+
+    fn post_then_crash_invoice_item(&self) {
+        self.state.lock().unwrap().fault = MockFault::PostThenCrashInvoiceItem;
+    }
+
+    fn crash_on_finalize(&self) {
+        self.state.lock().unwrap().fault = MockFault::CrashOnFinalize;
+    }
+
+    fn finalize_already_finalized(&self) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeAlreadyFinalized;
+    }
+
+    fn finalize_returns_fixed_id(&self, fixed_id: String) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeReturnsFixedId(fixed_id);
     }
 
     /// The swept total the mock attached to a created invoice (D1). ZERO when the
@@ -350,6 +389,19 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
     }
 
+    if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
+        let mut st = state.lock().unwrap();
+        if let MockFault::FailAfterInvoiceItems { fail_after, seen } = &mut st.fault {
+            *seen += 1;
+            if *seen > *fail_after {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item"}}"#,
+                );
+            }
+        }
+    }
+
     // GET /v1/invoiceitems?...&pending=true — list the pending items for a
     // customer (C1's `find_invoice_item_by_key`). Faithful Stripe list shape:
     // `{ "object":"list", "data":[ {id, metadata:{zs_item_key}}, … ] }`.
@@ -417,6 +469,53 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&body);
     }
 
+    if req.method == "POST"
+        && req.path.starts_with("/v1/invoices/")
+        && req.path.contains("/finalize")
+    {
+        let draft_id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let mut st = state.lock().unwrap();
+        st.requests.push(req.clone());
+        match &st.fault {
+            MockFault::CrashOnFinalize => {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_before_finalize"}}"#,
+                );
+            }
+            MockFault::FinalizeAlreadyFinalized => {
+                return http_json(
+                    400,
+                    r#"{"error":{"type":"invalid_request_error","code":"invoice_already_finalized"}}"#,
+                );
+            }
+            MockFault::FinalizeReturnsFixedId(fixed_id) => {
+                let json =
+                    format!(r#"{{"id":"{fixed_id}","object":"invoice","status":"open"}}"#);
+                if let Some(key) = req.idempotency_key.clone() {
+                    st.idempotency_replies
+                        .entry(key)
+                        .or_insert_with(|| json.clone());
+                }
+                return http_200_json(&json);
+            }
+            _ => {}
+        }
+        let json = format!(r#"{{"id":"{draft_id}","object":"invoice","status":"open"}}"#);
+        if let Some(key) = req.idempotency_key.clone() {
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
+        }
+        return http_200_json(&json);
+    }
+
     // POST /v1/refunds (D2 refund leg). Faithful to real Stripe: `currency` is NOT an
     // accepted parameter — a body that sends it gets a 400 `parameter_unknown`. The
     // body MUST carry exactly one money target (`payment_intent` OR `charge`).
@@ -466,6 +565,10 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     {
         let mut st = state.lock().unwrap();
         // Record a created invoice item so the GET-list (adopt) path can find it.
+        let post_then_crash =
+            matches!(st.fault, MockFault::PostThenCrashInvoiceItem)
+                && req.method == "POST"
+                && req.path.starts_with("/v1/invoiceitems");
         if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
             let customer = form_param(&req.body, "customer").unwrap_or_default();
             let key = form_param(&req.body, "metadata[zs_item_key]");
@@ -514,6 +617,12 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
             st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+        }
+        if post_then_crash {
+            return http_json(
+                500,
+                r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item_post"}}"#,
+            );
         }
     }
 
@@ -635,6 +744,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -673,12 +791,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
-        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stack,
         billing_stream: None,
-        tax_provider: zeroship_control::tax::build_tax_provider(
-            &zeroship_control::tax::TaxProviderConfig::native(),
-        )
-        .expect("native tax provider builds"),
+        tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
@@ -715,6 +830,7 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
 /// Seed a plan that charges 1 cent/request with no included CU. CU pricing:
 /// global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU (= 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -830,7 +946,7 @@ async fn ingest_custom_metrics(
 
 /// `now` placed mid-current-month so the CLOSED period is the previous month.
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -1354,7 +1470,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         .expect("create draft");
     assert!(draft.starts_with("in_mock_"), "parsed the draft invoice id");
     let invoice = client.finalize_invoice(&draft).await.expect("finalize");
-    assert!(invoice.starts_with("in_mock_final_"), "parsed the finalized invoice id");
+    assert_eq!(invoice, draft, "finalize preserves the Stripe invoice id");
 
     let reqs = fx.mock.requests();
     let item_req = reqs.iter().find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems")).expect("item req");
@@ -1933,11 +2049,9 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     ingest_at(&fx.state, app_b, 200, period, 2).await; // 200c
 
     // First drive: crashes after the first invoice item posts.
-    let failing = FailAfterFirstItem {
-        inner: dummy_passthrough(&fx),
-        items_seen: std::cell::Cell::new(0),
-    };
-    let res = billing_reconcile::tick_with(&fx.state, &failing, now).await;
+    fx.mock.fail_after_invoice_items(1);
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     // The sweep swallows per-creator errors → Ok(0) (nobody fully billed), but
     // exactly ONE item must have posted + been ledgered.
     assert_eq!(res.expect("tick swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
@@ -2085,8 +2199,9 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 
     // First drive: the item posts to Stripe, then we crash before the ledger
     // confirms it.
-    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
-    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.post_then_crash_invoice_item();
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
 
     // The item DID post to Stripe exactly once on the crashed drive.
@@ -2157,8 +2272,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     fx.state.stripe_store.set_customer(creator, &format!("cus_test_c1within_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 320, period, 1).await; // 320c
 
-    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
-    let _ = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.post_then_crash_invoice_item();
+    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before crash");
 
     // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
@@ -2281,8 +2397,9 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
     ingest_at(&fx.state, app, 700, period, 1).await; // 700c
 
     // First drive: items post, draft is created + persisted, then finalize crashes.
-    let crashing = CrashOnFinalize { inner: dummy_passthrough(&fx) };
-    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.crash_on_finalize();
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "not fully billed (finalize crashed)");
 
     // The item posted, the draft was created exactly once and PERSISTED.
@@ -2564,6 +2681,16 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() 
     fx.state
         .control_pg
         .execute(
+            "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
+             VALUES ('cpu_us', 'platform', 'op') \
+             ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
+            &[],
+        )
+        .await
+        .expect("seed cpu_us metric");
+    fx.state
+        .control_pg
+        .execute(
             "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
              VALUES ('cpu_us', 1, 1000) \
              ON CONFLICT (metric) DO UPDATE SET units_per_op = 1, per_units = 1000",
@@ -2733,13 +2860,13 @@ async fn refinalize_already_finalized_converges_locally() {
     // First drive: items + draft post for real, but finalize reports the invoice
     // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
     // must CONVERGE the local finalize, not error-loop.
-    let decorated = FinalizeAlreadyFinalized { inner: dummy_passthrough(&fx) };
+    fx.mock.finalize_already_finalized();
     // `billed` is a FLEET-wide count (the sweep bills every un-finalized creator
     // with usage in `period`), so other tests' leftovers can inflate it; assert
     // on THIS creator's converged outcome below rather than the exact count. The
     // key M2 guarantee is that the drive did NOT error-loop (it returned Ok and
     // this creator converged), which a pre-fix run could not do.
-    let billed = billing_reconcile::tick_with(&fx.state, &decorated, now)
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick converges on already-finalized (no error loop)");
     assert!(billed >= 1, "the re-finalize converges (at least this creator billed)");
@@ -2908,11 +3035,11 @@ async fn finalize_and_invoice_ref_commit_atomically() {
 
     // Drive the reconcile: finalize returns the fixed id → the ref INSERT collides
     // → the txn must roll back the finalize.
-    let decorated = FinalizeReturnsFixedId { inner: dummy_passthrough(&fx), fixed_id: fixed_id.clone() };
+    fx.mock.finalize_returns_fixed_id(fixed_id.clone());
     // The colliding finalize is a per-creator error the sweep swallows + continues
     // past (so the tick still returns Ok). We assert on THIS creator's state below
     // rather than the fleet-wide count (other tests' creators may also be swept).
-    let _ = billing_reconcile::tick_with(&fx.state, &decorated, now)
+    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("sweep swallows the per-creator error and returns Ok");
 

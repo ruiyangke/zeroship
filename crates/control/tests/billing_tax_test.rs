@@ -268,6 +268,7 @@ async fn build_fixture(
     label: &str,
     tax_provider: Arc<dyn TaxProvider>,
 ) -> Fixture {
+    let mock = common::stripe_mock::start_mock_stripe().await;
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -278,6 +279,11 @@ async fn build_fixture(
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -316,7 +322,7 @@ async fn build_fixture(
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
-        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stack,
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
@@ -360,6 +366,7 @@ async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
 
 /// A plan charging 1 cent/request, no included CU, no base fee (fx = 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -423,7 +430,7 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
 }
 
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
