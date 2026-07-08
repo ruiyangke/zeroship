@@ -173,6 +173,24 @@ pub struct BillingStack {
     pub webhooks: Vec<Arc<dyn MeteringProvider>>,
 }
 
+impl std::fmt::Debug for BillingStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BillingStack")
+            .field("meter", &self.meter_id())
+            .field("rater", &self.rater_id())
+            .field("invoicer", &self.invoicer_id())
+            .field(
+                "webhooks",
+                &self
+                    .webhooks
+                    .iter()
+                    .map(|provider| provider.id())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 impl BillingStack {
     #[must_use]
     pub fn meter_id(&self) -> &str {

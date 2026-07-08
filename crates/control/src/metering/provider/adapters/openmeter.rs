@@ -26,6 +26,17 @@ pub struct OpenMeterProvider {
     meter_slug: String,
 }
 
+impl std::fmt::Debug for OpenMeterProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenMeterProvider")
+            .field("base_url", &self.base_url)
+            .field("token", &self.token)
+            .field("event_type", &self.event_type)
+            .field("meter_slug", &self.meter_slug)
+            .finish()
+    }
+}
+
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let cfg: OpenMeterCfg = ctx.parse_adapter_config("openmeter")?;
     let token = ctx.secrets.resolve(&cfg.token)?;

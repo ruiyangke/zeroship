@@ -132,6 +132,7 @@ impl Action {
     }
 }
 
+#[derive(Debug)]
 pub struct AuditEntry<'a> {
     pub app_id: Option<Uuid>,
     pub creator_id: Option<Uuid>,

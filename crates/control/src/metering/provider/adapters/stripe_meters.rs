@@ -33,6 +33,18 @@ pub struct StripeMetersProvider {
     webhook: StripeWebhookState,
 }
 
+impl std::fmt::Debug for StripeMetersProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StripeMetersProvider")
+            .field("event_name", &self.event_name)
+            .field("meter_id", &self.meter_id)
+            .field("secret_key", &self.secret_key)
+            .field("base_url", &self.base_url)
+            .field("webhook", &self.webhook)
+            .finish()
+    }
+}
+
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let cfg: StripeMetersCfg = ctx.parse_adapter_config("stripe_meters")?;
     let secret_key = ctx.secrets.resolve(&cfg.secret_key)?;
@@ -146,7 +158,7 @@ impl crate::metering::provider::Invoicer for StripeMetersProvider {
         _note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
         Err(ProviderError::Config(
-            "stripe_meters: adjustment notes are not implemented in S1".to_string(),
+            "stripe_meters: adjustment notes are not implemented".to_string(),
         ))
     }
 }

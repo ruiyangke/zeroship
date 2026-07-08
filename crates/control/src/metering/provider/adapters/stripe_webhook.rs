@@ -10,6 +10,17 @@ pub(crate) struct StripeWebhookState {
     seen: Mutex<HashSet<String>>,
 }
 
+impl std::fmt::Debug for StripeWebhookState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let seen_count = self.seen.lock().map(|seen| seen.len()).ok();
+        f.debug_struct("StripeWebhookState")
+            .field("secret", &self.secret)
+            .field("clock", &self.clock)
+            .field("seen_count", &seen_count)
+            .finish()
+    }
+}
+
 impl StripeWebhookState {
     pub(crate) fn new(secret: SecretString, clock: Clock) -> Result<Self, ProviderError> {
         if secret.expose_secret().trim().is_empty() {

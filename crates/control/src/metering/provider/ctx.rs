@@ -78,6 +78,18 @@ pub struct ProviderCtx {
     pub store: Option<Arc<dyn LiteStore>>,
 }
 
+impl std::fmt::Debug for ProviderCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderCtx")
+            .field("http", &self.http)
+            .field("raw_config", &self.raw_config)
+            .field("secrets", &"<secret resolver>")
+            .field("clock", &self.clock)
+            .field("has_store", &self.store.is_some())
+            .finish()
+    }
+}
+
 impl ProviderCtx {
     #[must_use]
     pub fn new(
