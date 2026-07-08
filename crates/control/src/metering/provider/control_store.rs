@@ -4,7 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
-    BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, SubjectRef, UsageEvent,
+    AdjustmentNote, BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, SubjectRef,
+    UsageEvent,
 };
 use crate::cron::billing_reconcile;
 use crate::metering::Metering;
@@ -150,5 +151,135 @@ impl LiteStore for ControlLiteStore {
         } else {
             Ok(InvoiceRef(None))
         }
+    }
+
+    async fn adjustment_note_invoice(
+        &self,
+        creator: &Uuid,
+        note: &AdjustmentNote,
+    ) -> Result<InvoiceRef, ProviderError> {
+        let app_id = note.app_id.ok_or_else(|| {
+            ProviderError::Config(
+                "adjustment_note requires an app_id for local invoice_lines bookkeeping"
+                    .to_string(),
+            )
+        })?;
+        let conn = self.registry.conn().await?;
+        let adjustment_period = crate::metering::period_date(note.period.end);
+        let invoice_id = match conn
+            .query(
+                "SELECT id FROM zeroship.invoices \
+                 WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
+                &[creator, &adjustment_period],
+            )
+            .await?
+            .first()
+            .map(|r| r.get::<_, String>("id"))
+        {
+            Some(id) => id,
+            None => {
+                let new_id = zeroship_core::typed_id::new_invoice_id();
+                conn.execute(
+                    "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+                     VALUES ($1, $2, $3::date, 'draft') \
+                     ON CONFLICT (creator_id, period) WHERE status <> 'void' DO NOTHING",
+                    &[&new_id, creator, &adjustment_period],
+                )
+                .await?;
+                conn.query(
+                    "SELECT id FROM zeroship.invoices \
+                     WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
+                    &[creator, &adjustment_period],
+                )
+                .await?
+                .first()
+                .map(|r| r.get::<_, String>("id"))
+                .ok_or_else(|| {
+                    ProviderError::Store(
+                        "adjustment_note invoice claim vanished after insert".to_string(),
+                    )
+                })?
+            }
+        };
+
+        let status = conn
+            .query(
+                "SELECT status FROM zeroship.invoices WHERE id = $1",
+                &[&invoice_id],
+            )
+            .await?
+            .first()
+            .map(|r| r.get::<_, String>("status"))
+            .unwrap_or_default();
+        if status == "finalized" {
+            return Err(ProviderError::Store(format!(
+                "adjustment invoice {invoice_id} is already finalized"
+            )));
+        }
+
+        let plan_id = conn
+            .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .await?
+            .first()
+            .map(|r| r.get::<_, String>("plan_id"))
+            .ok_or_else(|| {
+                ProviderError::Store(format!(
+                    "adjustment_note app {app_id} has no current plan"
+                ))
+            })?;
+        let segment_no_u32 = (i16::MAX as u32)
+            .checked_sub(note.correction_seq)
+            .ok_or_else(|| {
+                ProviderError::Config(format!(
+                    "correction_seq {} exceeds invoice line segment range",
+                    note.correction_seq
+                ))
+            })?;
+        let segment_no = i16::try_from(segment_no_u32).map_err(|_| {
+            ProviderError::Config(format!(
+                "correction_seq {} exceeds invoice line segment range",
+                note.correction_seq
+            ))
+        })?;
+        let line_kind = if note.amount_cents > 0 {
+            "debit_note"
+        } else if note.amount_cents < 0 {
+            "credit_note"
+        } else {
+            return Err(ProviderError::Config(
+                "adjustment_note amount_cents must be non-zero".to_string(),
+            ));
+        };
+        let usage = serde_json::json!({
+            "kind": "billing_correction",
+            "period_start": note.period.start,
+            "period_end": note.period.end,
+            "quantity_delta": note.quantity_delta,
+            "correction_seq": note.correction_seq,
+            "reason": note.reason,
+        });
+        let weights = serde_json::json!({});
+        conn.execute(
+            "INSERT INTO zeroship.invoice_lines \
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, \
+                usage_snapshot, weights_snapshot, line_kind, correction_dedup_key) \
+             VALUES ($1, $2, $3, $4, 0, 1000, 0, $5, $6, $7, $8, $9) \
+             ON CONFLICT (correction_dedup_key) WHERE correction_dedup_key IS NOT NULL \
+             DO NOTHING",
+            &[
+                &invoice_id,
+                &app_id,
+                &segment_no,
+                &plan_id,
+                &note.amount_cents,
+                &usage,
+                &weights,
+                &line_kind,
+                &note.idempotency_key,
+            ],
+        )
+        .await?;
+        Ok(InvoiceRef(Some(invoice_id)))
     }
 }

@@ -83,6 +83,9 @@ pub struct LineItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdjustmentNote {
     pub period: BillingPeriod,
+    pub app_id: Option<Uuid>,
+    pub quantity_delta: i64,
+    pub correction_seq: u32,
     pub amount_cents: i64,
     pub reason: String,
     pub idempotency_key: String,
@@ -201,6 +204,12 @@ impl From<StripeError> for ProviderError {
 impl From<RegistryError> for ProviderError {
     fn from(e: RegistryError) -> Self {
         Self::Registry(e)
+    }
+}
+
+impl From<compio_postgres::Error> for ProviderError {
+    fn from(e: compio_postgres::Error) -> Self {
+        Self::Store(e.to_string())
     }
 }
 

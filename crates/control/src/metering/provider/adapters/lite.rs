@@ -83,12 +83,13 @@ impl crate::metering::provider::Invoicer for LiteProvider {
 
     async fn adjustment_note(
         &self,
-        _subject: &SubjectRef,
-        _note: &crate::metering::provider::AdjustmentNote,
+        subject: &SubjectRef,
+        note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        Err(ProviderError::Config(
-            "lite: adjustment notes are not implemented in S1".to_string(),
-        ))
+        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
+        })?;
+        self.store.adjustment_note_invoice(&creator, note).await
     }
 }
 

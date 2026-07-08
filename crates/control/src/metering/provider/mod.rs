@@ -140,6 +140,11 @@ pub trait LiteStore: Send + Sync {
         creator: &Uuid,
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError>;
+    async fn adjustment_note_invoice(
+        &self,
+        creator: &Uuid,
+        note: &AdjustmentNote,
+    ) -> Result<InvoiceRef, ProviderError>;
 }
 
 pub fn assert_capability_consistency(p: &dyn MeteringProvider) -> Result<(), ProviderError> {
@@ -641,6 +646,14 @@ mod tests {
             _period: BillingPeriod,
         ) -> Result<InvoiceRef, ProviderError> {
             Ok(InvoiceRef(Some("dummy-invoice".to_string())))
+        }
+
+        async fn adjustment_note_invoice(
+            &self,
+            _creator: &Uuid,
+            _note: &AdjustmentNote,
+        ) -> Result<InvoiceRef, ProviderError> {
+            Ok(InvoiceRef(Some("dummy-adjustment-invoice".to_string())))
         }
     }
 

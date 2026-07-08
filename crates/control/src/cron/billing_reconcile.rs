@@ -52,13 +52,17 @@
 //! pattern PR5's `spend_reconcile` uses) so two control replicas don't
 //! double-bill.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, TimeZone, Utc};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::metering::provider::{
+    AdjustmentNote, AggregateQuery, BillingPeriod, CorrectionCapability, SubjectRef,
+};
 use crate::metering::{period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
@@ -81,6 +85,174 @@ const BILLING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6269_6c6c_0001;
 
 /// Currency for infra-cost invoices (v1: USD only).
 const BILLING_CURRENCY: &str = "usd";
+
+/// The S7 safety-net pass compares period quantities at this metric grain. The
+/// stream recompute slice feeds the same quantity into `usage_aggregates` in this
+/// worktree, so the reader below stays small and swappable.
+pub const DEFAULT_RECONCILE_METER: &str = "compute_units";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceOwnership {
+    OwnedInvoicer,
+    SelfInvoicing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionHistory {
+    pub correction_seq: u32,
+    pub corrected_quantity: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileFindingKind {
+    ProviderMeterDrift,
+    LatePeriodAdjustment,
+    ProviderReject,
+}
+
+impl ReconcileFindingKind {
+    fn as_db_kind(self) -> &'static str {
+        match self {
+            Self::ProviderMeterDrift => "provider_meter_drift",
+            Self::LatePeriodAdjustment => "late_period_adjustment",
+            Self::ProviderReject => "provider_reject",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrectionActionKind {
+    AdjustmentNote,
+    Backfill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionAction {
+    pub kind: CorrectionActionKind,
+    pub correction_seq: u32,
+    pub corrected_quantity: i64,
+    pub quantity_delta: i64,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileDecision {
+    pub correction: Option<CorrectionAction>,
+    pub findings: Vec<ReconcileFindingKind>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileInputs<'a> {
+    pub ownership: InvoiceOwnership,
+    pub correction_capability: CorrectionCapability,
+    pub witness_quantity: i64,
+    pub invoiced_quantity: i64,
+    pub provider_quantity: Option<i64>,
+    pub tolerance: i64,
+    pub cents_per_unit: i64,
+    pub history: &'a [CorrectionHistory],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BillingSafetyNetSummary {
+    pub subjects_checked: usize,
+    pub corrections_issued: usize,
+    pub findings_recorded: usize,
+    pub provider_rejects: usize,
+}
+
+/// Return the next correction sequence for a changed corrected quantity. A prior
+/// correction to the same quantity means a re-run with the same numbers is a no-op.
+#[must_use]
+pub fn next_correction_seq(
+    history: &[CorrectionHistory],
+    corrected_quantity: i64,
+) -> Option<u32> {
+    if history
+        .iter()
+        .any(|h| h.corrected_quantity == corrected_quantity)
+    {
+        return None;
+    }
+    Some(
+        history
+            .iter()
+            .map(|h| h.correction_seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    )
+}
+
+#[must_use]
+pub fn reconcile_decision(input: ReconcileInputs<'_>) -> ReconcileDecision {
+    let tolerance = input.tolerance.max(0);
+    let mut findings = Vec::new();
+    if let Some(provider_quantity) = input.provider_quantity {
+        if outside_tolerance(input.witness_quantity - provider_quantity, tolerance) {
+            findings.push(ReconcileFindingKind::ProviderMeterDrift);
+        }
+    }
+
+    let basis_quantity = match input.ownership {
+        InvoiceOwnership::OwnedInvoicer => input.invoiced_quantity,
+        InvoiceOwnership::SelfInvoicing => match input.provider_quantity {
+            Some(provider_quantity) => provider_quantity,
+            None => {
+                return ReconcileDecision {
+                    correction: None,
+                    findings,
+                };
+            }
+        },
+    };
+    let quantity_delta = input.witness_quantity - basis_quantity;
+    if !outside_tolerance(quantity_delta, tolerance) {
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    }
+
+    let action_kind = match input.correction_capability {
+        CorrectionCapability::InvoiceCredit => Some(CorrectionActionKind::AdjustmentNote),
+        CorrectionCapability::Backfill { .. } => Some(CorrectionActionKind::Backfill),
+        CorrectionCapability::None => None,
+    };
+    let Some(kind) = action_kind else {
+        if !findings.contains(&ReconcileFindingKind::ProviderMeterDrift) {
+            findings.push(ReconcileFindingKind::ProviderMeterDrift);
+        }
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    };
+    let Some(correction_seq) = next_correction_seq(input.history, input.witness_quantity) else {
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    };
+    let amount_cents = quantity_delta.saturating_mul(input.cents_per_unit.max(1));
+    if !findings.contains(&ReconcileFindingKind::LatePeriodAdjustment) {
+        findings.push(ReconcileFindingKind::LatePeriodAdjustment);
+    }
+    ReconcileDecision {
+        correction: Some(CorrectionAction {
+            kind,
+            correction_seq,
+            corrected_quantity: input.witness_quantity,
+            quantity_delta,
+            amount_cents,
+        }),
+        findings,
+    }
+}
+
+fn outside_tolerance(delta: i64, tolerance: i64) -> bool {
+    delta.unsigned_abs() > tolerance as u64
+}
 
 /// Compute the unix-seconds start of the calendar month BEFORE the month
 /// containing `now_unix` (UTC). This is the CLOSED period the reconciler bills:
@@ -317,6 +489,470 @@ async fn sweep<S: StripeApi>(
         }
     }
     Ok(billed)
+}
+
+/// S7 bounded reconciliation/correction safety-net for one closed period.
+///
+/// The primary billing path has already finalized invoices. This pass only
+/// compares the independent local witness against the correct basis for the
+/// configured stack and emits idempotent corrections/findings.
+#[allow(clippy::future_not_send)]
+pub async fn reconcile_pass(
+    state: &AppState,
+    period: BillingPeriod,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    reconcile_pass_for_meter(state, period, DEFAULT_RECONCILE_METER, 0).await
+}
+
+#[allow(clippy::future_not_send)]
+pub async fn reconcile_pass_for_meter(
+    state: &AppState,
+    period: BillingPeriod,
+    meter_name: &str,
+    tolerance: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let period_date = period_date(period.start);
+    let ownership = if state.billing_stack.self_invoicing() {
+        InvoiceOwnership::SelfInvoicing
+    } else {
+        InvoiceOwnership::OwnedInvoicer
+    };
+
+    let mut subjects: HashMap<(Uuid, Uuid), SubjectPeriodTotals> = HashMap::new();
+    let local_rows = conn
+        .query(
+            "SELECT DISTINCT ON (u.app_id) m.user_id AS creator_id, u.app_id, \
+                    SUM(u.total)::bigint AS witness_quantity \
+             FROM zeroship.usage_aggregates u \
+             JOIN zeroship.app_members m ON m.app_id = u.app_id AND m.role = 'owner' \
+             WHERE u.period = $1::date AND u.metric = $2 \
+             GROUP BY u.app_id, m.user_id \
+             ORDER BY u.app_id, m.user_id",
+            &[&period_date, &meter_name],
+        )
+        .await?;
+    for row in &local_rows {
+        let creator_id: Uuid = row.get("creator_id");
+        let app_id: Uuid = row.get("app_id");
+        let witness_quantity: i64 = row.get("witness_quantity");
+        subjects
+            .entry((creator_id, app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id))
+            .witness_quantity = witness_quantity;
+    }
+
+    let line_rows = conn
+        .query(
+            "SELECT i.creator_id, l.app_id, l.amount_cents, l.usage_snapshot \
+             FROM zeroship.invoices i \
+             JOIN zeroship.invoice_lines l ON l.invoice_id = i.id \
+             WHERE i.period = $1::date AND i.status = 'finalized' \
+               AND COALESCE(l.line_kind, 'usage') = 'usage'",
+            &[&period_date],
+        )
+        .await?;
+    for row in &line_rows {
+        let creator_id: Uuid = row.get("creator_id");
+        let app_id: Uuid = row.get("app_id");
+        let usage: serde_json::Value = row.get("usage_snapshot");
+        let amount_cents: i64 = row.get("amount_cents");
+        let subject = subjects
+            .entry((creator_id, app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id));
+        subject.invoiced_quantity += invoice_line_quantity(&usage);
+        subject.invoiced_amount_cents += amount_cents;
+    }
+
+    let mut apps_by_creator: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+    for (creator_id, app_id) in subjects.keys() {
+        apps_by_creator
+            .entry(*creator_id)
+            .or_default()
+            .insert(*app_id);
+    }
+
+    let mut provider_cache: HashMap<Uuid, Option<i64>> = HashMap::new();
+    let mut summary = BillingSafetyNetSummary::default();
+    for totals in subjects.values() {
+        summary.subjects_checked += 1;
+        let provider_quantity = if apps_by_creator
+            .get(&totals.creator_id)
+            .is_some_and(|apps| apps.len() == 1)
+        {
+            provider_cache
+                .entry(totals.creator_id)
+                .or_insert_with(|| None)
+                .to_owned()
+        } else {
+            None
+        };
+        let provider_quantity = match provider_quantity {
+            Some(q) => Some(q),
+            None if apps_by_creator
+                .get(&totals.creator_id)
+                .is_some_and(|apps| apps.len() == 1) =>
+            {
+                let read = read_provider_quantity(state, totals.creator_id, period, meter_name).await?;
+                provider_cache.insert(totals.creator_id, read);
+                read
+            }
+            None => None,
+        };
+
+        let entity_id = correction_entity_id(totals.app_id, period);
+        let history = load_correction_history(&conn, &entity_id).await?;
+        let correction_capability = match ownership {
+            InvoiceOwnership::OwnedInvoicer => state.billing_stack.invoicer.correction(),
+            InvoiceOwnership::SelfInvoicing => state.billing_stack.meter.correction(),
+        };
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership,
+            correction_capability,
+            witness_quantity: totals.witness_quantity,
+            invoiced_quantity: totals.invoiced_quantity,
+            provider_quantity,
+            tolerance,
+            cents_per_unit: totals.cents_per_unit(),
+            history: &history,
+        });
+
+        if let Some(correction) = &decision.correction {
+            match apply_correction(
+                state,
+                &conn,
+                totals,
+                period,
+                provider_quantity,
+                correction,
+            )
+            .await
+            {
+                Ok(inserted_findings) => {
+                    summary.corrections_issued += 1;
+                    summary.findings_recorded += inserted_findings;
+                }
+                Err(err) => {
+                    summary.provider_rejects += 1;
+                    summary.findings_recorded += record_provider_reject_finding(
+                        &conn,
+                        totals,
+                        period,
+                        &err.to_string(),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        for finding in decision.findings {
+            if matches!(finding, ReconcileFindingKind::LatePeriodAdjustment)
+                && decision.correction.is_some()
+            {
+                continue;
+            }
+            summary.findings_recorded += record_safety_net_finding(
+                &conn,
+                finding,
+                "high",
+                &entity_id,
+                serde_json::json!({
+                    "witness_quantity": totals.witness_quantity,
+                    "invoiced_quantity": totals.invoiced_quantity,
+                    "app_id": totals.app_id,
+                    "period_start": period.start,
+                    "period_end": period.end,
+                }),
+                serde_json::json!({
+                    "provider_quantity": provider_quantity,
+                    "meter": meter_name,
+                }),
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(summary)
+}
+
+#[derive(Debug, Clone)]
+struct SubjectPeriodTotals {
+    creator_id: Uuid,
+    app_id: Uuid,
+    witness_quantity: i64,
+    invoiced_quantity: i64,
+    invoiced_amount_cents: i64,
+}
+
+impl SubjectPeriodTotals {
+    fn new(creator_id: Uuid, app_id: Uuid) -> Self {
+        Self {
+            creator_id,
+            app_id,
+            witness_quantity: 0,
+            invoiced_quantity: 0,
+            invoiced_amount_cents: 0,
+        }
+    }
+
+    fn cents_per_unit(&self) -> i64 {
+        if self.invoiced_quantity <= 0 || self.invoiced_amount_cents <= 0 {
+            return 1;
+        }
+        (self.invoiced_amount_cents / self.invoiced_quantity).max(1)
+    }
+}
+
+#[allow(clippy::future_not_send)]
+async fn read_provider_quantity(
+    state: &AppState,
+    creator_id: Uuid,
+    period: BillingPeriod,
+    meter_name: &str,
+) -> Result<Option<i64>, RegistryError> {
+    let Some(meter) = state.billing_stack.meter.as_meter() else {
+        return Ok(None);
+    };
+    let quantity = meter
+        .read_aggregate(&AggregateQuery {
+            subject: SubjectRef(creator_id.to_string()),
+            meter: meter_name.to_string(),
+            period,
+        })
+        .await
+        .map_err(RegistryError::from)?;
+    i64::try_from(quantity)
+        .map(Some)
+        .map_err(|_| RegistryError::Database(format!("provider aggregate {quantity} exceeds i64")))
+}
+
+#[allow(clippy::future_not_send)]
+async fn apply_correction<C>(
+    state: &AppState,
+    conn: &C,
+    totals: &SubjectPeriodTotals,
+    period: BillingPeriod,
+    provider_quantity: Option<i64>,
+    correction: &CorrectionAction,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let entity_id = correction_entity_id(totals.app_id, period);
+    let dedup_key = correction_dedup_key(totals.app_id, period, correction.correction_seq);
+    match correction.kind {
+        CorrectionActionKind::AdjustmentNote => {
+            let invoicer = state.billing_stack.invoicer.as_invoicer().ok_or_else(|| {
+                RegistryError::Database("billing stack has no invoicer".to_string())
+            })?;
+            let reason = if correction.quantity_delta > 0 {
+                "late usage under-bill"
+            } else {
+                "late usage over-bill"
+            };
+            invoicer
+                .adjustment_note(
+                    &SubjectRef(totals.creator_id.to_string()),
+                    &AdjustmentNote {
+                        period,
+                        app_id: Some(totals.app_id),
+                        quantity_delta: correction.quantity_delta,
+                        correction_seq: correction.correction_seq,
+                        amount_cents: correction.amount_cents,
+                        reason: reason.to_string(),
+                        idempotency_key: dedup_key.clone(),
+                    },
+                )
+                .await
+                .map_err(RegistryError::from)?;
+        }
+        CorrectionActionKind::Backfill => {
+            let backfiller = state.billing_stack.meter.as_backfiller().ok_or_else(|| {
+                RegistryError::Database(format!(
+                    "provider '{}' declared Backfill but exposes no Backfiller",
+                    state.billing_stack.meter.id()
+                ))
+            })?;
+            let correct_total = u64::try_from(correction.corrected_quantity).map_err(|_| {
+                RegistryError::Database(format!(
+                    "negative corrected quantity {} cannot be backfilled",
+                    correction.corrected_quantity
+                ))
+            })?;
+            backfiller
+                .backfill(&SubjectRef(totals.creator_id.to_string()), period, correct_total)
+                .await
+                .map_err(RegistryError::from)?;
+        }
+    }
+
+    record_safety_net_finding(
+        conn,
+        ReconcileFindingKind::LatePeriodAdjustment,
+        "high",
+        &entity_id,
+        serde_json::json!({
+            "app_id": totals.app_id,
+            "period_start": period.start,
+            "period_end": period.end,
+            "witness_quantity": totals.witness_quantity,
+            "invoiced_quantity": totals.invoiced_quantity,
+            "provider_quantity": provider_quantity,
+            "corrected_quantity": correction.corrected_quantity,
+            "quantity_delta": correction.quantity_delta,
+            "amount_cents": correction.amount_cents,
+            "correction_seq": correction.correction_seq,
+        }),
+        serde_json::json!({
+            "provider": state.billing_stack.meter_id(),
+            "invoicer": state.billing_stack.invoicer_id(),
+        }),
+        Some(dedup_key),
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn load_correction_history<C>(
+    conn: &C,
+    entity_id: &str,
+) -> Result<Vec<CorrectionHistory>, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT our_value FROM zeroship.billing_reconciliation_findings \
+             WHERE kind = 'late_period_adjustment'::text::zeroship.reconciliation_finding_kind \
+               AND entity_id = $1",
+            &[&entity_id],
+        )
+        .await?;
+    let mut history = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let value: serde_json::Value = row.get("our_value");
+        let Some(seq) = value.get("correction_seq").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(quantity) = value
+            .get("corrected_quantity")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if let Ok(correction_seq) = u32::try_from(seq) {
+            history.push(CorrectionHistory {
+                correction_seq,
+                corrected_quantity: quantity,
+            });
+        }
+    }
+    Ok(history)
+}
+
+#[allow(clippy::future_not_send)]
+async fn record_provider_reject_finding<C>(
+    conn: &C,
+    totals: &SubjectPeriodTotals,
+    period: BillingPeriod,
+    reason: &str,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let entity_id = correction_entity_id(totals.app_id, period);
+    record_safety_net_finding(
+        conn,
+        ReconcileFindingKind::ProviderReject,
+        "high",
+        &entity_id,
+        serde_json::json!({
+            "app_id": totals.app_id,
+            "period_start": period.start,
+            "period_end": period.end,
+            "witness_quantity": totals.witness_quantity,
+            "invoiced_quantity": totals.invoiced_quantity,
+        }),
+        serde_json::json!({
+            "provider_reject": reason,
+        }),
+        Some(format!(
+            "provider_reject:{}:{}:{}",
+            totals.app_id, period.start, reason
+        )),
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn record_safety_net_finding<C>(
+    conn: &C,
+    kind: ReconcileFindingKind,
+    severity: &str,
+    entity_id: &str,
+    our_value: serde_json::Value,
+    provider_value: serde_json::Value,
+    dedup_key: Option<String>,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let dedup_key = dedup_key
+        .unwrap_or_else(|| safety_net_finding_dedup_key(kind.as_db_kind(), entity_id, &our_value, &provider_value));
+    let id = zeroship_core::typed_id::new_reconcile_finding_id();
+    let inserted = conn
+        .query(
+            "INSERT INTO zeroship.billing_reconciliation_findings \
+               (id, kind, severity, entity_id, our_value, stripe_value, dedup_key) \
+             VALUES ($1, $2::text::zeroship.reconciliation_finding_kind, \
+                     $3::text::zeroship.reconciliation_finding_severity, $4, $5, $6, $7) \
+             ON CONFLICT (dedup_key) DO NOTHING \
+             RETURNING id",
+            &[
+                &id,
+                &kind.as_db_kind(),
+                &severity,
+                &entity_id,
+                &our_value,
+                &provider_value,
+                &dedup_key,
+            ],
+        )
+        .await?;
+    Ok(usize::from(!inserted.is_empty()))
+}
+
+fn safety_net_finding_dedup_key(
+    kind: &str,
+    entity_id: &str,
+    our_value: &serde_json::Value,
+    provider_value: &serde_json::Value,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(our_value.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(provider_value.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("{kind}:{entity_id}:{hex}")
+}
+
+fn correction_entity_id(app_id: Uuid, period: BillingPeriod) -> String {
+    format!("billing-correction:{app_id}:{}", period.start)
+}
+
+fn correction_dedup_key(app_id: Uuid, period: BillingPeriod, correction_seq: u32) -> String {
+    format!("billing_correction:{app_id}:{}:{correction_seq}", period.start)
+}
+
+fn invoice_line_quantity(usage: &serde_json::Value) -> i64 {
+    match usage {
+        serde_json::Value::Object(map) => map
+            .values()
+            .filter_map(serde_json::Value::as_i64)
+            .sum::<i64>(),
+        _ => 0,
+    }
 }
 
 /// Bill ONE creator for the closed period. Returns `Ok(true)` if a fresh invoice
@@ -1291,6 +1927,122 @@ mod tests {
     #[test]
     fn default_tick_is_hourly() {
         assert_eq!(DEFAULT_TICK_SECS, 3600);
+    }
+
+    #[test]
+    fn safety_net_owned_invoicer_compares_local_final_to_invoiced_only() {
+        let provider_lag = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 100,
+            invoiced_quantity: 100,
+            provider_quantity: Some(80),
+            tolerance: 0,
+            cents_per_unit: 2,
+            history: &[],
+        });
+        assert_eq!(
+            provider_lag.correction, None,
+            "owned invoicer must not bill from provider-meter health drift"
+        );
+        assert_eq!(
+            provider_lag.findings,
+            vec![ReconcileFindingKind::ProviderMeterDrift]
+        );
+
+        let straggler = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 125,
+            invoiced_quantity: 100,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: 2,
+            history: &[],
+        });
+        assert_eq!(
+            straggler.correction,
+            Some(CorrectionAction {
+                kind: CorrectionActionKind::AdjustmentNote,
+                correction_seq: 1,
+                corrected_quantity: 125,
+                quantity_delta: 25,
+                amount_cents: 50,
+            })
+        );
+        assert!(straggler
+            .findings
+            .contains(&ReconcileFindingKind::LatePeriodAdjustment));
+    }
+
+    #[test]
+    fn safety_net_self_invoicer_compares_local_to_provider_meter() {
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 90,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: 3,
+            history: &[],
+        });
+        assert_eq!(
+            decision.correction,
+            Some(CorrectionAction {
+                kind: CorrectionActionKind::AdjustmentNote,
+                correction_seq: 1,
+                corrected_quantity: 120,
+                quantity_delta: 20,
+                amount_cents: 60,
+            })
+        );
+
+        let no_api = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::None,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: 3,
+            history: &[],
+        });
+        assert_eq!(no_api.correction, None);
+        assert_eq!(
+            no_api.findings,
+            vec![ReconcileFindingKind::ProviderMeterDrift]
+        );
+    }
+
+    #[test]
+    fn safety_net_correction_seq_changes_only_when_corrected_quantity_changes() {
+        let history = vec![CorrectionHistory {
+            correction_seq: 1,
+            corrected_quantity: 125,
+        }];
+        assert_eq!(
+            next_correction_seq(&history, 125),
+            None,
+            "same corrected quantity is a no-op"
+        );
+        assert_eq!(
+            next_correction_seq(&history, 130),
+            Some(2),
+            "changed corrected quantity advances the correction sequence"
+        );
+
+        let rerun = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 125,
+            invoiced_quantity: 100,
+            provider_quantity: Some(125),
+            tolerance: 0,
+            cents_per_unit: 1,
+            history: &history,
+        });
+        assert_eq!(rerun.correction, None);
     }
 
     // -- injected-StripeApi unit (no PG): prove the trait seam records the
