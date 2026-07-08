@@ -9,7 +9,6 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::TimeZone;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
@@ -228,15 +227,10 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
         return;
     };
     let fx = build_fixture(&url, "invoice-credit").await;
+    let period_start = billing_reconcile::previous_period_start_unix(common::isolated_closed_period_now());
     let period = BillingPeriod {
-        start: chrono::Utc
-            .with_ymd_and_hms(2026, 5, 1, 0, 0, 0)
-            .unwrap()
-            .timestamp(),
-        end: chrono::Utc
-            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
-            .unwrap()
-            .timestamp(),
+        start: period_start,
+        end: billing_reconcile::period_end_unix(period_start),
     };
     let creator = make_creator(&fx.state).await;
     let plan_id = make_plan(&fx.state).await;
@@ -362,12 +356,12 @@ async fn seed_witness_and_invoice(
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, total_cents, finalized_at) \
-             VALUES ($1, $2, $3::date, 'finalized', 100, 100, NOW())",
+               (id, creator_id, period, status, subtotal_cents, total_cents) \
+             VALUES ($1, $2, $3::date, 'draft', 100, 100)",
             &[&invoice_id, &creator, &period_date],
         )
         .await
-        .expect("seed finalized invoice");
+        .expect("seed draft invoice");
     let usage = serde_json::json!({ "compute_units": 100 });
     let weights = serde_json::json!({});
     state
@@ -381,6 +375,16 @@ async fn seed_witness_and_invoice(
         )
         .await
         .expect("seed invoiced usage line");
+    state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.invoices \
+             SET status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
+             WHERE id = $1",
+            &[&invoice_id],
+        )
+        .await
+        .expect("finalize seeded invoice");
 }
 
 async fn correction_lines(state: &AppState, app: Uuid) -> (i64, i64) {

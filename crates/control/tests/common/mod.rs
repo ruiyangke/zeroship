@@ -1,7 +1,9 @@
 pub mod authz_fixture;
+pub mod stripe_mock;
 
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -209,4 +211,55 @@ pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .unwrap_or_else(chrono::Utc::now);
     chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
         .expect("valid first-of-month period")
+}
+
+#[allow(dead_code)]
+pub fn isolated_closed_period_now() -> i64 {
+    use chrono::TimeZone;
+
+    static NOW: OnceLock<i64> = OnceLock::new();
+    *NOW.get_or_init(|| {
+        let offset = (Uuid::new_v4().as_u128() % 2400) as i32;
+        let year = 2030 + offset / 12;
+        let month = (offset % 12) as u32 + 1;
+        chrono::Utc
+            .with_ymd_and_hms(year, month, 15, 12, 0, 0)
+            .single()
+            .expect("valid isolated billing period")
+            .timestamp()
+    })
+}
+
+#[allow(dead_code)]
+pub fn lite_billing_stack(
+    registry: Registry,
+    stripe_base_url: String,
+    tax_provider: Arc<dyn zeroship_control::tax::TaxProvider>,
+) -> Arc<zeroship_control::metering::provider::BillingStack> {
+    use zeroship_control::metering::provider::{
+        BillingStack, ControlLiteStore, LiteStore, ProviderCtx, StaticSecretResolver,
+    };
+    use zeroship_control::{SecretString, StripeStore};
+
+    let store: Arc<dyn LiteStore> = Arc::new(ControlLiteStore::new(
+        registry.clone(),
+        StripeStore::new(registry.clone()),
+        SecretString::new("sk_test_mock".to_string()),
+        stripe_base_url,
+        tax_provider,
+    ));
+    let ctx = ProviderCtx::new(
+        serde_json::json!({}),
+        Arc::new(StaticSecretResolver::default()),
+        Some(store),
+    );
+    let provider = zeroship_control::metering::provider::builtin_registry()
+        .build("lite", &ctx)
+        .expect("test lite billing provider builds");
+    Arc::new(BillingStack {
+        meter: Arc::clone(&provider),
+        rater: Arc::clone(&provider),
+        invoicer: provider,
+        webhooks: Vec::new(),
+    })
 }
