@@ -175,7 +175,7 @@ pub async fn tick_with_config(
     let claims = claim_due_schedules(&state.registry, &config).await?;
     let mut fired = 0usize;
     for claim in claims {
-        match fire_claimed_schedule(&state.registry, &config, &claim).await {
+        match fire_claimed_schedule(state, &config, &claim).await {
             Ok(n) => fired = fired.saturating_add(n),
             Err(e) => tracing::warn!(schedule_id = %claim.id, error = %e, "workflow_schedules fire failed"),
         }
@@ -377,10 +377,11 @@ async fn claim_due_schedules(
 }
 
 async fn fire_claimed_schedule(
-    registry: &Registry,
+    state: &AppState,
     config: &ScheduleSweepConfig,
     claim: &ClaimedSchedule,
 ) -> Result<usize, RegistryError> {
+    let registry = &state.registry;
     let mut conn = registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
     let locked = tx
@@ -411,6 +412,7 @@ async fn fire_claimed_schedule(
         config.backfill_hard_max,
     )?;
     let mut fired = 0usize;
+    let mut fired_run_ids = Vec::new();
     let mut last_processed = row.next_fire_at;
     for planned in instants {
         last_processed = planned;
@@ -420,7 +422,7 @@ async fn fire_claimed_schedule(
             continue;
         }
         let key = schedule_dedup_key(&row.id, planned);
-        workflow_instance_api::start_scheduled_workflow_run(
+        let run_id = workflow_instance_api::start_scheduled_workflow_run(
             &tx,
             &row.app_id,
             &row.workflow_name,
@@ -430,6 +432,7 @@ async fn fire_claimed_schedule(
             planned,
         )
         .await?;
+        fired_run_ids.push(run_id);
         fired = fired.saturating_add(1);
     }
     let last_epoch = last_processed.timestamp_millis();
@@ -448,6 +451,9 @@ async fn fire_claimed_schedule(
     .await
     .map_err(RegistryError::from)?;
     tx.commit().await.map_err(RegistryError::from)?;
+    for run_id in fired_run_ids {
+        super::workflow_engine::register_run_timer(state, &run_id).await?;
+    }
     Ok(fired)
 }
 

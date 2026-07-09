@@ -186,6 +186,7 @@ async fn drain_one_broadcast(
         .map_err(RegistryError::from)?;
 
     let mut deliveries = 0;
+    let mut woken_run_ids = Vec::new();
     for subscriber in subscribers {
         let run_id: String = subscriber.get("run_id");
         let signal_id = typed_id::new_workflow_signal_id();
@@ -219,7 +220,7 @@ async fn drain_one_broadcast(
         };
         if inserted > 0 {
             deliveries += 1;
-            tx.execute(
+            let woken = tx.execute(
                 "UPDATE zeroship.workflow_runs \
                     SET wake_at = now() \
                   WHERE id = $1 AND state = 'waiting'",
@@ -227,6 +228,9 @@ async fn drain_one_broadcast(
             )
             .await
             .map_err(RegistryError::from)?;
+            if woken > 0 {
+                woken_run_ids.push(run_id);
+            }
         }
     }
 
@@ -263,6 +267,9 @@ async fn drain_one_broadcast(
     }
 
     tx.commit().await.map_err(RegistryError::from)?;
+    for run_id in woken_run_ids {
+        super::workflow_engine::register_run_timer(state, &run_id).await?;
+    }
     Ok(FanoutStats {
         broadcasts: 1,
         deliveries,

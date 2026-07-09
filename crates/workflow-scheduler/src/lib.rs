@@ -12,7 +12,8 @@ pub mod store;
 pub mod wheel;
 
 pub use store::{
-    FiredTimer, InflightTimer, TimerRow, WorkflowSchedulerStore, WorkflowSchedulerStoreError,
+    FiredTimer, InflightTimer, LapsedInflightTimer, TimerRow, WorkflowSchedulerStore,
+    WorkflowSchedulerStoreError, WorkflowSchedulerStoreMetrics,
 };
 pub use wheel::{TimerEntry, TimerWheel, WakeHandle};
 
@@ -75,6 +76,7 @@ pub async fn fire_once(
 #[allow(clippy::future_not_send)]
 pub async fn run(store: WorkflowSchedulerStore, config: SchedulerConfig) -> Result<(), SchedulerError> {
     store.provision().await?;
+    store.boot_reconcile_from_workflow_runs().await?;
     let wake = WakeHandle::new();
     let mut wheel = TimerWheel::new(wake.clone());
     loop {
