@@ -6,8 +6,12 @@
 //! enters V8.
 
 pub mod backend;
+pub mod apply;
 pub mod client;
 pub mod dev;
+pub mod engine;
+pub mod errors;
+pub mod store;
 pub mod v8_class;
 
 use std::path::Path;

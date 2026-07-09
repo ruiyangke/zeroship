@@ -11,23 +11,16 @@ zeroship-runtime-macros = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 cyper = { workspace = true }
 percent-encoding = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
-v8 = { workspace = true }
-
-[dev-dependencies]
-zeroship-bundle = { workspace = true }
-zeroship-control = { workspace = true }
-zeroship-authz = { workspace = true }
-zeroship-authn = { workspace = true }
-compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
-ntex = { workspace = true }
-tempfile = { workspace = true }
 uuid = { workspace = true }
+v8 = { workspace = true }
 
 [lints]
 workspace = true
