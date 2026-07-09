@@ -14,6 +14,10 @@ use serde::Deserialize;
 
 use crate::{StreamConfig, StreamError, StreamOffset, StreamRecord, StreamTransport};
 
+/// Upper bound on how long `rewind` waits for a group assignment to settle and
+/// for a cold-start partition to become seekable before surfacing the error.
+const REWIND_DEADLINE: Duration = Duration::from_secs(10);
+
 type DeliveryAck = Result<(i32, i64), String>;
 type DeliverySender = mpsc::SyncSender<DeliveryAck>;
 
@@ -283,18 +287,48 @@ impl StreamTransport for RedpandaTransport {
             .lock()
             .map_err(|_| StreamError::Unavailable("redpanda consumer mutex poisoned"))?;
 
-        // Ensure the consumer has joined its group and received assignments.
+        // A freshly-subscribed group consumer has no assignment until it has
+        // polled AND the group rebalance has settled — that can take longer than
+        // a single poll cycle against a real broker. Poll until partitions are
+        // assigned, bounded by REWIND_DEADLINE.
+        let deadline = Instant::now() + REWIND_DEADLINE;
         let mut assignment = consumer.assignment().map_err(StreamError::from)?;
-        if assignment.count() == 0 {
+        while assignment.count() == 0 && Instant::now() < deadline {
             let _ = consumer.poll(self.poll_timeout);
             assignment = consumer.assignment().map_err(StreamError::from)?;
         }
-
-        for elem in assignment.elements() {
-            consumer
-                .seek(elem.topic(), elem.partition(), Offset::Beginning, self.poll_timeout)
-                .map_err(StreamError::from)?;
+        if assignment.count() == 0 {
+            // Nothing assigned to this member yet (another member holds the
+            // partitions, or the rebalance has not landed). The next recompute
+            // cycle rewinds once this consumer is assigned — not an error.
+            return Ok(());
         }
-        Ok(())
+
+        // `seek()` transiently returns `Local: Erroneous state` (__STATE) when a
+        // just-assigned partition has no established fetch position yet — the
+        // exact cold-start the enforcement recompute hits on its first cycle.
+        // Poll to advance the partition into a seekable state and retry, bounded.
+        // seek(Beginning) resets the fetch position, so records consumed by these
+        // priming polls are re-read by the caller's subsequent poll — no loss.
+        loop {
+            let mut last_err = None;
+            for elem in assignment.elements() {
+                if let Err(err) = consumer.seek(
+                    elem.topic(),
+                    elem.partition(),
+                    Offset::Beginning,
+                    self.poll_timeout,
+                ) {
+                    last_err = Some(err);
+                }
+            }
+            match last_err {
+                None => return Ok(()),
+                Some(err) if Instant::now() >= deadline => return Err(StreamError::from(err)),
+                Some(_) => {
+                    let _ = consumer.poll(self.poll_timeout);
+                }
+            }
+        }
     }
 }
