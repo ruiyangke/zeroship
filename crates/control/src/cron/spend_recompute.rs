@@ -46,6 +46,7 @@ pub struct SpendRecomputeCycle {
     pub polled: usize,
     pub decoded: usize,
     pub skipped: usize,
+    pub skipped_undecodable: usize,
     pub aggregates: usize,
     pub written: usize,
     pub transitions: usize,
@@ -93,6 +94,7 @@ pub async fn run(
                     polled = cycle.polled,
                     decoded = cycle.decoded,
                     skipped = cycle.skipped,
+                    skipped_undecodable = cycle.skipped_undecodable,
                     aggregates = cycle.aggregates,
                     written = cycle.written,
                     transitions = cycle.transitions,
@@ -142,6 +144,7 @@ pub async fn recompute_unsettled_period_snapshots(
         total.polled += next.polled;
         total.decoded += next.decoded;
         total.skipped += next.skipped;
+        total.skipped_undecodable += next.skipped_undecodable;
         total.aggregates += next.aggregates;
         total.written += next.written;
     }
@@ -196,6 +199,19 @@ pub async fn recompute_usage_aggregates(
                         continue;
                     }
                     cycle.skipped += 1;
+                }
+                Err(SpendRecomputeError::Decode {
+                    partition,
+                    offset,
+                    source,
+                }) => {
+                    cycle.skipped_undecodable += 1;
+                    tracing::warn!(
+                        partition,
+                        offset,
+                        error = %source,
+                        "spend_recompute: skipping undecodable usage stream record"
+                    );
                 }
                 Err(err) => return Err(err),
             }
@@ -495,6 +511,48 @@ mod tests {
         assert_total(&client, app, period, 42).await;
     }
 
+    #[compio::test]
+    async fn stream_recompute_skips_undecodable_records() {
+        let Some(url) = db_url() else {
+            eprintln!("skip: CONTROL_TEST_DB not set");
+            return;
+        };
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let period = current_period_start_unix();
+        let plan_id = seed_pricing(&client).await;
+        let app = seed_priced_app(&client, &plan_id, "recompute-poison").await;
+        let creator = Uuid::new_v4();
+        let stream = FakeStream::from_records(vec![
+            record_from_event(0, event("evt_before_poison", app, creator, 10, period + 10)),
+            StreamRecord {
+                partition: 0,
+                offset: 1,
+                key: b"poison".to_vec(),
+                payload: b"{not-json".to_vec(),
+            },
+            record_from_event(2, event("evt_after_poison", app, creator, 7, period + 11)),
+        ]);
+        let cfg = SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(
+                super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
+            batch_max: 2,
+        };
+
+        let cycle = recompute_usage_aggregates(&registry, &stream, period, &cfg)
+            .await
+            .expect("recompute skips undecodable stream records");
+        assert_eq!(cycle.polled, 3);
+        assert_eq!(cycle.decoded, 2);
+        assert_eq!(cycle.skipped, 0);
+        assert_eq!(cycle.skipped_undecodable, 1);
+        assert_eq!(cycle.aggregates, 1);
+        assert_eq!(cycle.written, 1);
+        assert_total(&client, app, period, 17).await;
+    }
+
     #[test]
     fn periods_to_recompute_include_previous_until_settle_window_closes() {
         let now = chrono::Utc
@@ -564,13 +622,12 @@ mod tests {
             let records = events
                 .into_iter()
                 .enumerate()
-                .map(|(offset, event)| StreamRecord {
-                    partition: 0,
-                    offset: offset as i64,
-                    key: event.creator_subject().into_bytes(),
-                    payload: serde_json::to_vec(&event).expect("event serializes"),
-                })
+                .map(|(offset, event)| record_from_event(offset as i64, event))
                 .collect();
+            Self::from_records(records)
+        }
+
+        fn from_records(records: Vec<StreamRecord>) -> Self {
             Self {
                 records,
                 cursor: Mutex::new(0),
@@ -590,6 +647,15 @@ mod tests {
             value,
             event_time,
             dims: BTreeMap::new(),
+        }
+    }
+
+    fn record_from_event(offset: i64, event: UsageEvent) -> StreamRecord {
+        StreamRecord {
+            partition: 0,
+            offset,
+            key: event.creator_subject().into_bytes(),
+            payload: serde_json::to_vec(&event).expect("event serializes"),
         }
     }
 
