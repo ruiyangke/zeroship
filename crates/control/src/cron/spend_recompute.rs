@@ -7,7 +7,7 @@
 //! that snapshot into `usage_aggregates`, and then triggers the existing spend
 //! evaluator so the gateway can keep enforcing `app_spend_state`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -176,6 +176,7 @@ pub async fn recompute_usage_aggregates(
     let batch_max = cfg.batch_max.max(1);
     let mut cycle = SpendRecomputeCycle::default();
     let mut totals = HashMap::<(Uuid, String), i64>::new();
+    let mut seen_event_ids = HashSet::<String>::new();
 
     loop {
         let records = stream.poll(batch_max).await?;
@@ -187,6 +188,10 @@ pub async fn recompute_usage_aggregates(
             match decode_record(record) {
                 Ok(event) => {
                     cycle.decoded += 1;
+                    if !seen_event_ids.insert(event.event_id.clone()) {
+                        cycle.skipped += 1;
+                        continue;
+                    }
                     if apply_event(&mut totals, &event, period_start) {
                         continue;
                     }
@@ -452,6 +457,42 @@ mod tests {
         assert_state(&client, warn_app, SpendState::Warn).await;
         assert_state(&client, degrade_app, SpendState::Degrade).await;
         assert_state(&client, block_app, SpendState::Block).await;
+    }
+
+    #[compio::test]
+    async fn stream_recompute_dedups_duplicate_event_ids() {
+        let Some(url) = db_url() else {
+            eprintln!("skip: CONTROL_TEST_DB not set");
+            return;
+        };
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let period = current_period_start_unix();
+        let plan_id = seed_pricing(&client).await;
+        let app = seed_priced_app(&client, &plan_id, "recompute-dedup").await;
+        let creator = Uuid::new_v4();
+        let stream = FakeStream::new(vec![
+            event("evt_duplicate_replay", app, creator, 40, period + 10),
+            event("evt_duplicate_replay", app, creator, 40, period + 10),
+            event("evt_distinct", app, creator, 2, period + 11),
+        ]);
+        let cfg = SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(
+                super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
+            batch_max: 2,
+        };
+
+        let cycle = recompute_usage_aggregates(&registry, &stream, period, &cfg)
+            .await
+            .expect("recompute with duplicate event_id");
+        assert_eq!(cycle.polled, 3);
+        assert_eq!(cycle.decoded, 3);
+        assert_eq!(cycle.skipped, 1);
+        assert_eq!(cycle.aggregates, 1);
+        assert_eq!(cycle.written, 1);
+        assert_total(&client, app, period, 42).await;
     }
 
     #[test]
