@@ -76,6 +76,16 @@ pub trait MeteringProvider: Send + Sync {
 pub trait Meter {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError>;
+
+    /// Whether this meter is fed by the stream forwarder (`ingest` of forwarded
+    /// `UsageEvent`s). Providers that instead derive usage from the platform's
+    /// local recompute snapshot (`usage_aggregates`) — e.g. `lite` — return
+    /// `false`, so the control plane does not spawn a forwarder that would only
+    /// error on every batch. The recompute rail runs regardless (it drives
+    /// enforcement for every provider).
+    fn accepts_forwarded_events(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -185,6 +195,18 @@ impl BillingStack {
     #[must_use]
     pub fn self_invoicing(&self) -> bool {
         self.invoicer.self_invoices()
+    }
+
+    /// Whether the stream forwarder should run for this stack: true only when the
+    /// meter accepts forwarded `UsageEvent`s. A recompute-fed provider (`lite`)
+    /// returns false — its billing is driven by the local recompute snapshot, so
+    /// a forwarder would only error on every batch. Enforcement recompute runs
+    /// regardless of this flag.
+    #[must_use]
+    pub fn forwards_usage_events(&self) -> bool {
+        self.meter
+            .as_meter()
+            .is_some_and(|meter| meter.accepts_forwarded_events())
     }
 
     #[must_use]
@@ -396,6 +418,43 @@ mod tests {
         let mut registry = ProviderRegistry::default();
         register_test(&mut registry);
         register_test(&mut registry);
+    }
+
+    struct RecomputeFedProvider;
+    #[async_trait::async_trait(?Send)]
+    impl Meter for RecomputeFedProvider {
+        async fn ingest(&self, _batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+            Err(ProviderError::Store("recompute-fed: no forwarded ingest".into()))
+        }
+        async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
+            Ok(0)
+        }
+        fn accepts_forwarded_events(&self) -> bool {
+            false
+        }
+    }
+    impl MeteringProvider for RecomputeFedProvider {
+        fn id(&self) -> &str {
+            "recompute_fed"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::METER
+        }
+        fn as_meter(&self) -> Option<&dyn Meter> {
+            Some(self)
+        }
+    }
+
+    #[test]
+    fn forwards_usage_events_gates_on_meter_ingest_model() {
+        // A forwarder-fed meter (the default) => run the forwarder.
+        assert!(BillingStack::with_meter_for_tests(Arc::new(TestProvider)).forwards_usage_events());
+        // A recompute-fed meter (lite-like) => do NOT run the forwarder (it would
+        // perpetually error on ingest).
+        assert!(
+            !BillingStack::with_meter_for_tests(Arc::new(RecomputeFedProvider))
+                .forwards_usage_events()
+        );
     }
 
     #[test]

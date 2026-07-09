@@ -37,6 +37,15 @@ impl Meter for LiteProvider {
         self.store.ingest_usage_events(batch).await
     }
 
+    /// `lite` derives usage from the platform's local recompute snapshot
+    /// (`usage_aggregates`) and bills from it in `close_period`; it does not
+    /// accept forwarded stream events (`ingest` errors by design). Signal that
+    /// so the control plane does not spawn a forwarder that would perpetually
+    /// error on this provider.
+    fn accepts_forwarded_events(&self) -> bool {
+        false
+    }
+
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
         let creator = Uuid::parse_str(q.subject.as_str()).map_err(|e| {
             ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
