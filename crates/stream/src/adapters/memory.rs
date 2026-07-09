@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -52,6 +53,7 @@ impl MemoryConfig {
 pub struct MemoryTransport {
     topic: String,
     group_id: String,
+    consumer_id: u64,
     partitions: usize,
     broker: &'static Mutex<MemoryBroker>,
 }
@@ -62,6 +64,7 @@ pub fn factory(config: &StreamConfig) -> Result<Arc<dyn StreamTransport>, Stream
     Ok(Arc::new(MemoryTransport {
         topic: config.topic,
         group_id: config.group_id,
+        consumer_id: next_consumer_id(),
         partitions: config.partitions,
         broker: broker(),
     }))
@@ -96,11 +99,11 @@ impl StreamTransport for MemoryTransport {
         if max == 0 {
             return Ok(Vec::new());
         }
-        let broker = self
+        let mut broker = self
             .broker
             .lock()
             .map_err(|_| StreamError::Unavailable("memory broker mutex poisoned"))?;
-        Ok(broker.poll(&self.topic, &self.group_id, max))
+        Ok(broker.poll(&self.topic, &self.group_id, self.consumer_id, max))
     }
 
     async fn commit(&self, offsets: &[StreamOffset]) -> Result<(), StreamError> {
@@ -108,7 +111,7 @@ impl StreamTransport for MemoryTransport {
             .broker
             .lock()
             .map_err(|_| StreamError::Unavailable("memory broker mutex poisoned"))?;
-        broker.commit(&self.topic, &self.group_id, offsets)
+        broker.commit(&self.topic, &self.group_id, self.consumer_id, offsets)
     }
 
     async fn rewind(&self) -> Result<(), StreamError> {
@@ -125,6 +128,7 @@ impl StreamTransport for MemoryTransport {
 struct MemoryBroker {
     topics: HashMap<String, TopicLog>,
     committed_next: HashMap<(String, String, i32), i64>,
+    cursor_next: HashMap<(String, String, u64, i32), i64>,
 }
 
 impl MemoryBroker {
@@ -156,19 +160,37 @@ impl MemoryBroker {
         Ok(())
     }
 
-    fn poll(&self, topic: &str, group_id: &str, max: usize) -> Vec<StreamRecord> {
+    fn poll(
+        &mut self,
+        topic: &str,
+        group_id: &str,
+        consumer_id: u64,
+        max: usize,
+    ) -> Vec<StreamRecord> {
         let Some(topic_log) = self.topics.get(topic) else {
             return Vec::new();
         };
         let mut out = Vec::with_capacity(max);
         for (partition, log) in topic_log.partitions.iter().enumerate() {
             let partition = i32::try_from(partition).expect("memory partition fits i32");
+            let cursor_key = (
+                topic.to_string(),
+                group_id.to_string(),
+                consumer_id,
+                partition,
+            );
             let next = self
-                .committed_next
-                .get(&(topic.to_string(), group_id.to_string(), partition))
+                .cursor_next
+                .get(&cursor_key)
+                .or_else(|| {
+                    self.committed_next
+                        .get(&(topic.to_string(), group_id.to_string(), partition))
+                })
                 .copied()
                 .unwrap_or(0);
             for record in log.iter().skip(next.max(0) as usize) {
+                self.cursor_next
+                    .insert(cursor_key.clone(), record.offset.saturating_add(1));
                 out.push(StreamRecord {
                     partition,
                     offset: record.offset,
@@ -187,6 +209,7 @@ impl MemoryBroker {
         &mut self,
         topic: &str,
         group_id: &str,
+        consumer_id: u64,
         offsets: &[StreamOffset],
     ) -> Result<(), StreamError> {
         for offset in offsets {
@@ -200,6 +223,15 @@ impl MemoryBroker {
                 .entry((topic.to_string(), group_id.to_string(), offset.partition))
                 .and_modify(|stored| *stored = (*stored).max(next))
                 .or_insert(next);
+            self.cursor_next
+                .entry((
+                    topic.to_string(),
+                    group_id.to_string(),
+                    consumer_id,
+                    offset.partition,
+                ))
+                .and_modify(|stored| *stored = (*stored).max(next))
+                .or_insert(next);
         }
         Ok(())
     }
@@ -207,6 +239,10 @@ impl MemoryBroker {
     fn rewind(&mut self, topic: &str, group_id: &str) {
         self.committed_next
             .retain(|(stored_topic, stored_group, _partition), _| {
+                stored_topic != topic || stored_group != group_id
+            });
+        self.cursor_next
+            .retain(|(stored_topic, stored_group, _consumer, _partition), _| {
                 stored_topic != topic || stored_group != group_id
             });
     }
@@ -241,6 +277,11 @@ struct StoredRecord {
 fn broker() -> &'static Mutex<MemoryBroker> {
     static BROKER: OnceLock<Mutex<MemoryBroker>> = OnceLock::new();
     BROKER.get_or_init(|| Mutex::new(MemoryBroker::default()))
+}
+
+fn next_consumer_id() -> u64 {
+    static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_CONSUMER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 fn partition_for(partition_key: &[u8], partitions: usize) -> Result<i32, StreamError> {

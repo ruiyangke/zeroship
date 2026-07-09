@@ -71,9 +71,14 @@ use crate::stripe_client::{Period, StripeApi, StripeClient};
 use crate::AppState;
 
 /// Default tick cadence in seconds (~hourly). The closed-period claim is
-/// idempotent, so a frequent tick is cheap: it no-ops once the previous month
-/// is billed. Hourly bounds the lag between month-close and invoicing.
+/// idempotent, so a frequent tick is cheap: it no-ops while the just-closed
+/// period settles, then again once the previous month is billed.
 pub const DEFAULT_TICK_SECS: u64 = 3600;
+
+/// Closed periods are not invoiced immediately at the UTC month boundary. The
+/// witness recompute must get one post-rollover cadence to rewrite the previous
+/// period, then providers get a small processing cushion before close.
+pub const DEFAULT_SETTLE_WINDOW_SECS: u64 = DEFAULT_TICK_SECS + 5 * 60;
 
 /// Default tick cadence in seconds for the §6.3 reconciliation safety net. This
 /// is a low-cost drift/late-adjustment backstop over already snapshotted period
@@ -300,6 +305,20 @@ pub fn period_end_unix(period_start_unix: i64) -> i64 {
         .map_or(period_start_unix, |d| d.timestamp())
 }
 
+#[must_use]
+pub fn period_settled(
+    now_unix: i64,
+    period_start_unix: i64,
+    settle_window: Duration,
+) -> bool {
+    let Some(settled_at) = period_end_unix(period_start_unix)
+        .checked_add(i64::try_from(settle_window.as_secs()).unwrap_or(i64::MAX))
+    else {
+        return false;
+    };
+    now_unix >= settled_at
+}
+
 /// Deterministic Stripe `Idempotency-Key` for the per-SEGMENT invoice-ITEM create.
 /// Stable for a fixed `(creator, app, period, segment_no)` so a retry replays the
 /// same item. round 4, CRITICAL-1: the key includes `segment_no` — an app posts
@@ -370,6 +389,18 @@ pub async fn tick_with<S: StripeApi>(
     now_unix: i64,
 ) -> Result<usize, RegistryError> {
     let period_start = previous_period_start_unix(now_unix);
+    if !period_settled(
+        now_unix,
+        period_start,
+        Duration::from_secs(DEFAULT_SETTLE_WINDOW_SECS),
+    ) {
+        tracing::debug!(
+            period_start,
+            settle_window_secs = DEFAULT_SETTLE_WINDOW_SECS,
+            "billing_reconcile: closed period is still settling — skipping tick"
+        );
+        return Ok(0);
+    }
 
     // Multi-instance safety: single-flight the sweep fleet-wide. A loser skips
     // this tick (the per-period `invoices(creator_id, period)` UNIQUE claim still
@@ -2196,7 +2227,7 @@ mod tests {
     /// CU/usage metadata) the line carries.
     #[derive(Clone)]
     struct RecordedItem {
-        customer: String,
+        _customer: String,
         amount: u64,
         idempotency_key: String,
         description: String,
@@ -2239,7 +2270,7 @@ mod tests {
             metadata: &[(String, String)],
         ) -> Result<String, StripeError> {
             self.items.borrow_mut().push(RecordedItem {
-                customer: customer.to_string(),
+                _customer: customer.to_string(),
                 amount: amount_cents,
                 idempotency_key: idempotency_key.to_string(),
                 description: description.to_string(),

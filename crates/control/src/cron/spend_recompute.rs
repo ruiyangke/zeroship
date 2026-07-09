@@ -15,7 +15,7 @@ use uuid::Uuid;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_stream::{StreamRecord, StreamTransport};
 
-use crate::metering::{current_period_start_unix, period_start_unix, Metering, UsageAggregate};
+use crate::metering::{period_start_unix, Metering, UsageAggregate};
 use crate::registry::{Registry, RegistryError};
 use crate::AppState;
 
@@ -25,6 +25,7 @@ pub const DEFAULT_BATCH_MAX: usize = 10_000;
 #[derive(Debug, Clone)]
 pub struct SpendRecomputeConfig {
     pub interval: Duration,
+    pub settle_window: Duration,
     pub batch_max: usize,
 }
 
@@ -32,6 +33,9 @@ impl Default for SpendRecomputeConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(DEFAULT_RECOMPUTE_INTERVAL_SECS),
+            settle_window: Duration::from_secs(
+                super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
             batch_max: DEFAULT_BATCH_MAX,
         }
     }
@@ -112,11 +116,47 @@ pub async fn tick(
     stream: &dyn StreamTransport,
     cfg: &SpendRecomputeConfig,
 ) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
-    let period_start = current_period_start_unix();
-    let mut cycle =
-        recompute_usage_aggregates(&state.registry, stream, period_start, cfg).await?;
+    let mut cycle = recompute_unsettled_period_snapshots(
+        &state.registry,
+        stream,
+        chrono::Utc::now().timestamp(),
+        cfg,
+    )
+    .await?;
     cycle.transitions = super::spend_reconcile::tick(state).await?;
     Ok(cycle)
+}
+
+/// Recompute the current period plus the just-closed previous period while that
+/// previous period is still inside the close settle window.
+#[allow(clippy::future_not_send)]
+pub async fn recompute_unsettled_period_snapshots(
+    registry: &Registry,
+    stream: &dyn StreamTransport,
+    now_unix: i64,
+    cfg: &SpendRecomputeConfig,
+) -> Result<SpendRecomputeCycle, SpendRecomputeError> {
+    let mut total = SpendRecomputeCycle::default();
+    for period_start in periods_to_recompute(now_unix, cfg.settle_window) {
+        let next = recompute_usage_aggregates(registry, stream, period_start, cfg).await?;
+        total.polled += next.polled;
+        total.decoded += next.decoded;
+        total.skipped += next.skipped;
+        total.aggregates += next.aggregates;
+        total.written += next.written;
+    }
+    Ok(total)
+}
+
+#[must_use]
+pub fn periods_to_recompute(now_unix: i64, settle_window: Duration) -> Vec<i64> {
+    let current = period_start_unix(now_unix);
+    let previous = super::billing_reconcile::previous_period_start_unix(now_unix);
+    if super::billing_reconcile::period_settled(now_unix, previous, settle_window) {
+        vec![current]
+    } else {
+        vec![current, previous]
+    }
 }
 
 /// Recompute the specified period and overwrite `usage_aggregates`.
@@ -238,6 +278,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use chrono::TimeZone;
     use compio_postgres::{connect, NoTls};
     use zeroship_core::types::SpendState;
     use zeroship_core::usage_event::UsageSubject;
@@ -375,6 +416,9 @@ mod tests {
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(
+                super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
             batch_max: 2,
         };
 
@@ -408,6 +452,70 @@ mod tests {
         assert_state(&client, warn_app, SpendState::Warn).await;
         assert_state(&client, degrade_app, SpendState::Degrade).await;
         assert_state(&client, block_app, SpendState::Block).await;
+    }
+
+    #[test]
+    fn periods_to_recompute_include_previous_until_settle_window_closes() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2035, 7, 1, 0, 10, 0)
+            .unwrap()
+            .timestamp();
+        let current = period_start_unix(now);
+        let previous = super::super::billing_reconcile::previous_period_start_unix(now);
+        assert_eq!(
+            periods_to_recompute(now, Duration::from_secs(3600)),
+            vec![current, previous],
+            "just-closed previous period stays in the witness recompute while settling"
+        );
+
+        let settled = super::super::billing_reconcile::period_end_unix(previous) + 3601;
+        assert_eq!(
+            periods_to_recompute(settled, Duration::from_secs(3600)),
+            vec![period_start_unix(settled)],
+            "after the settle window closes only the current period is recomputed"
+        );
+    }
+
+    #[compio::test]
+    async fn unsettled_period_recompute_rewrites_current_and_previous_snapshots() {
+        let Some(url) = db_url() else {
+            eprintln!("skip: CONTROL_TEST_DB not set");
+            return;
+        };
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let now = chrono::Utc
+            .with_ymd_and_hms(2036, 8, 1, 0, 10, 0)
+            .unwrap()
+            .timestamp();
+        let current = period_start_unix(now);
+        let previous = super::super::billing_reconcile::previous_period_start_unix(now);
+        let plan_id = seed_pricing(&client).await;
+        let app = seed_priced_app(&client, &plan_id, "recompute-prev").await;
+        let creator = Uuid::new_v4();
+        let stream = FakeStream::new(vec![
+            event("evt_prev_unsettled", app, creator, 41, previous + 10),
+            event("evt_current_unsettled", app, creator, 59, current + 10),
+        ]);
+        let cfg = SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(3600),
+            batch_max: 1,
+        };
+
+        let cycle = recompute_unsettled_period_snapshots(&registry, &stream, now, &cfg)
+            .await
+            .expect("recompute unsettled periods");
+        assert_eq!(
+            cycle.polled, 4,
+            "each period recompute scans the retained stream"
+        );
+        assert_eq!(cycle.decoded, 4);
+        assert_eq!(cycle.skipped, 2);
+        assert_eq!(cycle.aggregates, 2);
+        assert_eq!(cycle.written, 2);
+        assert_total(&client, app, previous, 41).await;
+        assert_total(&client, app, current, 59).await;
     }
 
     impl FakeStream {

@@ -126,6 +126,22 @@ struct ControlCli {
     #[arg(long = "stream-config", env = "STREAM_CONFIG", default_value = "{}")]
     stream_config: String,
 
+    /// Stream consumer group for the provider billing forwarder.
+    #[arg(
+        long = "billing-forwarder-group-id",
+        env = "BILLING_FORWARDER_GROUP_ID",
+        default_value = zeroship_control::DEFAULT_BILLING_FORWARDER_GROUP_ID
+    )]
+    billing_forwarder_group_id: String,
+
+    /// Stream consumer group for the local spend recompute witness.
+    #[arg(
+        long = "spend-recompute-group-id",
+        env = "SPEND_RECOMPUTE_GROUP_ID",
+        default_value = zeroship_control::DEFAULT_SPEND_RECOMPUTE_GROUP_ID
+    )]
+    spend_recompute_group_id: String,
+
     /// Interval in seconds for the stream-backed spend recompute cron. Default
     /// is hourly per billing-provider-platform v7 enforcement.
     #[arg(
@@ -1360,13 +1376,32 @@ fn main() -> std::io::Result<()> {
                     std::process::exit(1);
                 }
             };
-            let mut stream_registry = zeroship_stream::StreamRegistry::default();
-            zeroship_stream::adapters::register_builtin(&mut stream_registry);
+            let mut registry = zeroship_stream::StreamRegistry::default();
+            zeroship_stream::adapters::register_builtin(&mut registry);
+            let stream_registry = Arc::new(registry);
             let config = zeroship_stream::StreamConfig::from(stream_config_json);
-            match stream_registry.build(id, &config) {
-                Ok(stream) => {
-                    tracing::info!(stream = stream.id(), "control: billing event stream selected");
-                    Some(stream)
+            match zeroship_control::BillingStreamConfig::new(
+                Arc::clone(&stream_registry),
+                id,
+                config,
+                cli.billing_forwarder_group_id.clone(),
+                cli.spend_recompute_group_id.clone(),
+            ) {
+                Ok(streams) => {
+                    if let Err(e) = streams
+                        .build_forwarder()
+                        .and_then(|_| streams.build_recompute())
+                    {
+                        tracing::error!(error = %e, "control: refusing to start — stream transport invalid");
+                        std::process::exit(1);
+                    }
+                    tracing::info!(
+                        stream = streams.transport_id(),
+                        forwarder_group_id = streams.forwarder_group_id(),
+                        recompute_group_id = streams.recompute_group_id(),
+                        "control: billing event stream selected"
+                    );
+                    Some(streams)
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "control: refusing to start — stream transport invalid");
