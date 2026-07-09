@@ -15,7 +15,7 @@ use zeroship_control::cron::billing_reconcile;
 use zeroship_control::metering::provider::{
     AdjustmentNote, AggregateQuery, BillingPeriod, BillingStack, Capabilities,
     ControlLiteStore, CorrectionCapability, IngestAck, InvoiceRef, LineItem, LiteStore, Meter,
-    MeteringProvider, ProviderError, Rater, RatedInput, Subject, SubjectRef, UsageEvent,
+    MeteringProvider, ProviderError, Rater, RatedInput, SubjectRef, UsageEvent,
 };
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -152,10 +152,6 @@ impl Meter for DbAdjustmentProvider {
 
     async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
         Ok(self.provider_quantity)
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        Ok(SubjectRef(subject.creator_id.to_string()))
     }
 }
 

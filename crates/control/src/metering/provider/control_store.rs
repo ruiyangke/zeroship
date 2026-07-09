@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use uuid::Uuid;
 
 use super::{
-    AdjustmentNote, BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, SubjectRef,
-    UsageEvent,
+    AdjustmentNote, BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, UsageEvent,
 };
 use crate::cron::billing_reconcile;
 use crate::metering::Metering;
@@ -74,29 +72,6 @@ impl LiteStore for ControlLiteStore {
     async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
         billing_reconcile::owned_app_ids_for_registry(&self.registry, creator)
             .await
-            .map_err(ProviderError::from)
-    }
-
-    async fn period_totals(
-        &self,
-        app: &Uuid,
-        period_start: i64,
-    ) -> Result<HashMap<String, i64>, ProviderError> {
-        let conn = self.registry.conn().await?;
-        Metering::period_totals_on(&conn, app, period_start)
-            .await
-            .map_err(ProviderError::from)
-    }
-
-    async fn ensure_customer(
-        &self,
-        creator: &Uuid,
-        _email: &str,
-    ) -> Result<Option<SubjectRef>, ProviderError> {
-        self.stripe_store
-            .get_customer(*creator)
-            .await
-            .map(|c| c.map(SubjectRef))
             .map_err(ProviderError::from)
     }
 

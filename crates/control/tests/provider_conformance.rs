@@ -730,7 +730,6 @@ fn stable_uuid(label: &str) -> Uuid {
 struct FakeLiteStore {
     seen: Mutex<HashSet<(String, String)>>,
     totals: Mutex<HashMap<(Uuid, i64, String), u64>>,
-    app_totals: Mutex<HashMap<(Uuid, i64, String), i64>>,
     invoices: Mutex<HashMap<(Uuid, i64, i64), InvoiceRef>>,
 }
 
@@ -747,7 +746,6 @@ impl LiteStore for FakeLiteStore {
     async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
         let mut seen = self.seen.lock().expect("seen poisoned");
         let mut totals = self.totals.lock().expect("totals poisoned");
-        let mut app_totals = self.app_totals.lock().expect("app totals poisoned");
         let mut accepted = 0usize;
         let mut deduped = 0usize;
         for event in batch {
@@ -765,43 +763,12 @@ impl LiteStore for FakeLiteStore {
             *totals
                 .entry((event.subject.creator, period_start, event.meter.clone()))
                 .or_insert(0) += event.value;
-            if let Some(app) = event.subject.app {
-                let value = i64::try_from(event.value).map_err(|_| {
-                    ProviderError::Store(format!("event {} value exceeds i64", event.event_id))
-                })?;
-                *app_totals
-                    .entry((app, period_start, event.meter.clone()))
-                    .or_insert(0) += value;
-            }
         }
         Ok(IngestAck { accepted, deduped })
     }
 
     async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
         Ok(Vec::new())
-    }
-
-    async fn period_totals(
-        &self,
-        app: &Uuid,
-        period_start: i64,
-    ) -> Result<HashMap<String, i64>, ProviderError> {
-        let app_totals = self.app_totals.lock().expect("app totals poisoned");
-        let mut out = HashMap::new();
-        for ((stored_app, stored_period, meter), total) in app_totals.iter() {
-            if stored_app == app && *stored_period == period_start {
-                out.insert(meter.clone(), *total);
-            }
-        }
-        Ok(out)
-    }
-
-    async fn ensure_customer(
-        &self,
-        creator: &Uuid,
-        _email: &str,
-    ) -> Result<Option<SubjectRef>, ProviderError> {
-        Ok(Some(SubjectRef(creator.to_string())))
     }
 
     async fn period_billable_units(

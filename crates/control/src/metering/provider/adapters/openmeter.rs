@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::metering::provider::{
     AggregateQuery, Capabilities, DedupContract, DedupKey, DedupTtl, IngestAck, Meter,
-    MeteringProvider, ProviderCtx, ProviderError, SecretHandle, Subject, SubjectRef, UsageEvent,
+    MeteringProvider, ProviderCtx, ProviderError, SecretHandle, UsageEvent,
 };
 use crate::openmeter_client::{CloudEvent, OpenMeterApi, OpenMeterClient};
 
@@ -101,13 +101,6 @@ impl Meter for OpenMeterProvider {
         self.client()
             .meter_query(&self.meter_slug, q.subject.as_str(), q.period.start, q.period.end)
             .await
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        if let Some(existing) = &subject.customer {
-            return Ok(existing.clone());
-        }
-        Ok(SubjectRef(subject.creator_id.to_string()))
     }
 }
 

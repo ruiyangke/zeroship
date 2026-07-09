@@ -150,13 +150,6 @@ pub struct OutboxPublishResult {
     pub failed: Vec<OutboxFailure>,
 }
 
-impl OutboxPublishResult {
-    #[must_use]
-    pub fn is_ok(&self) -> bool {
-        self.failed.is_empty()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxFailure {
     pub event_id: String,

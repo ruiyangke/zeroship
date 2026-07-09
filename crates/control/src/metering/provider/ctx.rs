@@ -106,12 +106,6 @@ impl ProviderCtx {
         }
     }
 
-    pub fn parse_config<T: DeserializeOwned>(&self) -> Result<T, ProviderError> {
-        serde_json::from_value(self.raw_config.clone()).map_err(|e| {
-            ProviderError::Config(format!("provider config is invalid: {e}"))
-        })
-    }
-
     pub fn parse_adapter_config<T: DeserializeOwned>(&self, id: &str) -> Result<T, ProviderError> {
         let value = self
             .raw_config

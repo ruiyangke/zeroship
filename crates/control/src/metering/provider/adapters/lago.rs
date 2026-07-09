@@ -18,7 +18,7 @@ use crate::metering::provider::{
     AggregateQuery, Backfiller, BillingPeriod, Capabilities, ClosedPeriodPolicy,
     CorrectionCapability, DedupContract, DedupKey, DedupTtl, HttpClientFactory, IngestAck,
     InvoiceRef, LineItem, Meter, MeteringProvider, ProviderCtx, ProviderError, Rater, RatedInput,
-    SecretHandle, Subject, SubjectRef, UsageEvent, WebhookEvent, WebhookOutcome, WebhookSink,
+    SecretHandle, SubjectRef, UsageEvent, WebhookEvent, WebhookOutcome, WebhookSink,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -206,13 +206,6 @@ impl Meter for LagoProvider {
             &self.billable_metric_code,
             &q.meter,
         ))
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        if let Some(existing) = &subject.customer {
-            return Ok(existing.clone());
-        }
-        Ok(SubjectRef(subject.creator_id.to_string()))
     }
 }
 
