@@ -13,8 +13,6 @@ use super::stripe_webhook::StripeWebhookState;
 
 #[derive(Debug, serde::Deserialize)]
 struct StripeMetersCfg {
-    event_name: String,
-    meter_id: String,
     secret_key: SecretHandle,
     webhook_secret: SecretHandle,
     #[serde(default = "default_stripe_base_url")]
@@ -26,8 +24,6 @@ fn default_stripe_base_url() -> String {
 }
 
 pub struct StripeMetersProvider {
-    event_name: String,
-    meter_id: String,
     secret_key: crate::SecretString,
     base_url: String,
     webhook: StripeWebhookState,
@@ -36,8 +32,6 @@ pub struct StripeMetersProvider {
 impl std::fmt::Debug for StripeMetersProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StripeMetersProvider")
-            .field("event_name", &self.event_name)
-            .field("meter_id", &self.meter_id)
             .field("secret_key", &self.secret_key)
             .field("base_url", &self.base_url)
             .field("webhook", &self.webhook)
@@ -49,16 +43,6 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
     let cfg: StripeMetersCfg = ctx.parse_adapter_config("stripe_meters")?;
     let secret_key = ctx.secrets.resolve(&cfg.secret_key)?;
     let webhook_secret = ctx.secrets.resolve(&cfg.webhook_secret)?;
-    if cfg.event_name.trim().is_empty() {
-        return Err(ProviderError::Config(
-            "stripe_meters: event_name required — refusing to boot".to_string(),
-        ));
-    }
-    if cfg.meter_id.trim().is_empty() {
-        return Err(ProviderError::Config(
-            "stripe_meters: meter_id required for aggregate read-back".to_string(),
-        ));
-    }
     if secret_key.expose_secret().trim().is_empty() {
         return Err(ProviderError::Config(
             "stripe_meters: secret_key resolved empty".to_string(),
@@ -71,8 +55,6 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
     }
     let webhook = StripeWebhookState::new(webhook_secret, ctx.clock)?;
     Ok(Arc::new(StripeMetersProvider {
-        event_name: cfg.event_name,
-        meter_id: cfg.meter_id,
         secret_key,
         base_url: cfg.base_url,
         webhook,
@@ -93,9 +75,16 @@ impl Meter for StripeMetersProvider {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
         let stripe = self.stripe();
         for event in batch {
+            if event.meter.trim().is_empty() {
+                return Err(ProviderError::Config(
+                    "stripe_meters: usage event meter must not be empty".to_string(),
+                ));
+            }
             stripe
                 .create_meter_event(
-                    &self.event_name,
+                    // Direct per-metric mapping: zeroship metric name == Stripe
+                    // meter event name.
+                    &event.meter,
                     &event.creator_subject(),
                     event.value,
                     &event.event_id,
@@ -110,10 +99,17 @@ impl Meter for StripeMetersProvider {
     }
 
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
+        if q.meter.trim().is_empty() {
+            return Err(ProviderError::Config(
+                "stripe_meters: aggregate query meter must not be empty".to_string(),
+            ));
+        }
         Ok(self
             .stripe()
             .meter_event_summary(
-                &self.meter_id,
+                // Direct per-metric mapping: zeroship metric name == Stripe
+                // meter id for read-back.
+                &q.meter,
                 q.subject.as_str(),
                 q.period.start,
                 q.period.end,

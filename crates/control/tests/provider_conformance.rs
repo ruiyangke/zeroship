@@ -23,6 +23,7 @@ use zeroship_control::metering::provider::{
 };
 
 const METER: &str = "compute_units";
+const SECOND_METER: &str = "db_reads";
 const PERIOD: BillingPeriod = BillingPeriod {
     start: 1_783_468_800,
     end: 1_786_147_200,
@@ -166,7 +167,6 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                     "lago": {
                         "api_url": mock.base_url.clone(),
                         "api_key": "lago_api_key",
-                        "billable_metric_code": METER,
                     }
                 }),
                 HashMap::from([("lago_api_key".to_string(), LAGO_API_KEY.to_string())]),
@@ -202,8 +202,6 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                     "openmeter": {
                         "base_url": mock.base_url.clone(),
                         "token": "openmeter_token",
-                        "event_type": METER,
-                        "meter_slug": METER,
                     }
                 }),
                 HashMap::from([(
@@ -225,8 +223,6 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 adapter.id(),
                 serde_json::json!({
                     "stripe_meters": {
-                        "event_name": METER,
-                        "meter_id": "mtr_conformance",
                         "secret_key": "stripe_secret_key",
                         "webhook_secret": "stripe_webhook_secret",
                         "base_url": mock.base_url.clone(),
@@ -368,16 +364,43 @@ fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider
 async fn assert_meter_retry_idempotency(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("retry");
-    let batch = events("retry", subject_uuid(&subject), &[3, 5, 7]);
+    let mut batch = events_for_meter("retry", subject_uuid(&subject), METER, &[3, 5, 7]);
+    batch.extend(events_for_meter(
+        "retry",
+        subject_uuid(&subject),
+        SECOND_METER,
+        &[11, 13],
+    ));
     meter.ingest(&batch).await.expect("first ingest");
-    let q = aggregate_query(&subject);
-    let first = meter.read_aggregate(&q).await.expect("read aggregate after first ingest");
+    let q_primary = aggregate_query_for_meter(&subject, METER);
+    let q_secondary = aggregate_query_for_meter(&subject, SECOND_METER);
+    let first_primary = meter
+        .read_aggregate(&q_primary)
+        .await
+        .expect("read primary aggregate after first ingest");
+    let first_secondary = meter
+        .read_aggregate(&q_secondary)
+        .await
+        .expect("read secondary aggregate after first ingest");
     meter.ingest(&batch).await.expect("retry ingest");
-    let second = meter.read_aggregate(&q).await.expect("read aggregate after retry");
-    assert_eq!(first, 15);
+    let second_primary = meter
+        .read_aggregate(&q_primary)
+        .await
+        .expect("read primary aggregate after retry");
+    let second_secondary = meter
+        .read_aggregate(&q_secondary)
+        .await
+        .expect("read secondary aggregate after retry");
+    assert_eq!(first_primary, 15);
+    assert_eq!(first_secondary, 24);
     assert_eq!(
-        second, first,
-        "{} double-counted a retry with the same event_ids",
+        second_primary, first_primary,
+        "{} double-counted a retry for the primary meter",
+        fx.provider.id()
+    );
+    assert_eq!(
+        second_secondary, first_secondary,
+        "{} double-counted a retry for the secondary meter",
         fx.provider.id()
     );
 }
@@ -385,20 +408,41 @@ async fn assert_meter_retry_idempotency(fx: &Fixture) {
 async fn assert_meter_read_back(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("readback");
-    let batch = events("readback", subject_uuid(&subject), &[11, 13]);
+    let mut batch = events_for_meter("readback", subject_uuid(&subject), METER, &[11, 13]);
+    batch.extend(events_for_meter(
+        "readback",
+        subject_uuid(&subject),
+        SECOND_METER,
+        &[17, 19],
+    ));
     meter.ingest(&batch).await.expect("ingest read-back batch");
-    let got = meter
-        .read_aggregate(&aggregate_query(&subject))
+    let got_primary = meter
+        .read_aggregate(&aggregate_query_for_meter(&subject, METER))
         .await
-        .expect("read aggregate");
-    assert_eq!(got, 24, "{} aggregate read-back drifted", fx.provider.id());
+        .expect("read primary aggregate");
+    let got_secondary = meter
+        .read_aggregate(&aggregate_query_for_meter(&subject, SECOND_METER))
+        .await
+        .expect("read secondary aggregate");
+    assert_eq!(
+        got_primary,
+        24,
+        "{} primary aggregate read-back drifted",
+        fx.provider.id()
+    );
+    assert_eq!(
+        got_secondary,
+        36,
+        "{} secondary aggregate read-back drifted",
+        fx.provider.id()
+    );
 }
 
 async fn assert_dedup_ttl_switchover(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("ttl");
-    let batch = events("ttl", subject_uuid(&subject), &[17]);
-    let q = aggregate_query(&subject);
+    let batch = events_for_meter("ttl", subject_uuid(&subject), METER, &[17]);
+    let q = aggregate_query_for_meter(&subject, METER);
 
     forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
         .await
@@ -552,18 +596,6 @@ async fn assert_fail_closed_config(adapter: Adapter) {
                         "api_key": "lago_api_key",
                     }
                 }),
-                HashMap::from([("lago_api_key".to_string(), LAGO_API_KEY.to_string())]),
-                None,
-            );
-            assert_provider_config_fails(
-                "lago",
-                serde_json::json!({
-                    "lago": {
-                        "api_url": "http://127.0.0.1:1",
-                        "api_key": "lago_api_key",
-                        "billable_metric_code": METER,
-                    }
-                }),
                 HashMap::new(),
                 None,
             );
@@ -587,7 +619,7 @@ async fn assert_fail_closed_config(adapter: Adapter) {
                         "token": "openmeter_token",
                     }
                 }),
-                HashMap::from([("openmeter_token".to_string(), "om".to_string())]),
+                HashMap::new(),
                 None,
             );
         }
@@ -597,8 +629,6 @@ async fn assert_fail_closed_config(adapter: Adapter) {
                 "stripe_meters",
                 serde_json::json!({
                     "stripe_meters": {
-                        "event_name": METER,
-                        "meter_id": "mtr_conf",
                         "secret_key": "stripe_secret_key",
                     }
                 }),
@@ -686,15 +716,15 @@ fn subject_uuid(subject: &SubjectRef) -> Uuid {
     Uuid::parse_str(subject.as_str()).expect("test subject is UUID")
 }
 
-fn aggregate_query(subject: &SubjectRef) -> AggregateQuery {
+fn aggregate_query_for_meter(subject: &SubjectRef, meter: &str) -> AggregateQuery {
     AggregateQuery {
         subject: subject.clone(),
-        meter: METER.to_string(),
+        meter: meter.to_string(),
         period: PERIOD,
     }
 }
 
-fn events(label: &str, creator: Uuid, values: &[u64]) -> Vec<UsageEvent> {
+fn events_for_meter(label: &str, creator: Uuid, meter: &str, values: &[u64]) -> Vec<UsageEvent> {
     values
         .iter()
         .enumerate()
@@ -704,13 +734,13 @@ fn events(label: &str, creator: Uuid, values: &[u64]) -> Vec<UsageEvent> {
             dims.insert("period_start".to_string(), PERIOD.start.to_string());
             dims.insert("period_end".to_string(), PERIOD.end.to_string());
             UsageEvent {
-                event_id: format!("evt_{label}_{idx}"),
+                event_id: format!("evt_{label}_{meter}_{idx}"),
                 source: "provider-conformance".to_string(),
                 subject: UsageSubject {
                     app: Some(app),
                     creator,
                 },
-                meter: METER.to_string(),
+                meter: meter.to_string(),
                 value: *value,
                 event_time: PERIOD.start + i64::try_from(idx).expect("idx fits i64"),
                 dims,
@@ -784,6 +814,19 @@ impl LiteStore for FakeLiteStore {
             })
             .map(|(_, total)| *total)
             .sum())
+    }
+
+    async fn period_meter_units(
+        &self,
+        creator: &Uuid,
+        period_start: i64,
+        meter: &str,
+    ) -> Result<u64, ProviderError> {
+        let totals = self.totals.lock().expect("totals poisoned");
+        Ok(totals
+            .get(&(*creator, period_start, meter.to_string()))
+            .copied()
+            .unwrap_or(0))
     }
 
     async fn close_period_invoice(
@@ -878,7 +921,7 @@ struct MockHttpState {
     kind: HttpKind,
     seen_ids: HashSet<String>,
     dedupe_enabled: bool,
-    totals: HashMap<String, u64>,
+    totals: HashMap<(String, String), u64>,
     idempotency_replies: HashMap<String, String>,
     accepted_ingests: usize,
 }
@@ -1017,7 +1060,7 @@ fn handle_lago_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>)
             );
         }
         st.seen_ids.insert(transaction_id.clone());
-        let total = st.totals.entry(subject).or_insert(0);
+        let total = st.totals.entry((subject, code.clone())).or_insert(0);
         if correct_total {
             *total = value;
         } else {
@@ -1042,18 +1085,23 @@ fn handle_lago_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>>)
             .and_then(|rest| rest.split('/').next())
             .map(percent_decode)
             .unwrap_or_default();
-        let total = state
-            .lock()
-            .expect("mock state poisoned")
-            .totals
-            .get(&subject)
-            .copied()
-            .unwrap_or(0);
+        let charges = {
+            let st = state.lock().expect("mock state poisoned");
+            st.totals
+                .iter()
+                .filter(|((stored_subject, _metric), _)| stored_subject == &subject)
+                .map(|((_, metric), total)| {
+                    format!(
+                        r#"{{"total_aggregated_units":"{total}.0","billable_metric":{{"code":"{}"}}}}"#,
+                        json_escape(metric)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         return http_json(
             200,
-            &format!(
-                r#"{{"customer_usage":{{"charges_usage":[{{"total_aggregated_units":"{total}.0","billable_metric":{{"code":"{METER}"}}}}]}}}}"#
-            ),
+            &format!(r#"{{"customer_usage":{{"charges_usage":[{charges}]}}}}"#),
         );
     }
 
@@ -1068,6 +1116,11 @@ fn handle_openmeter_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpSta
         };
         let source = json.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
         let id = json.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+        let meter = json
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let subject = json
             .get("subject")
             .and_then(serde_json::Value::as_str)
@@ -1084,18 +1137,25 @@ fn handle_openmeter_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpSta
             return http_204();
         }
         st.seen_ids.insert(dedup_key);
-        *st.totals.entry(subject).or_insert(0) += value;
+        *st.totals.entry((subject, meter)).or_insert(0) += value;
         st.accepted_ingests += 1;
         return http_204();
     }
 
     if req.method == "GET" && req.path.contains("/query") {
+        let meter = req
+            .path
+            .split("/api/v1/meters/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .map(percent_decode)
+            .unwrap_or_default();
         let subject = query_param(&req.path, "subject").unwrap_or_default();
         let total = state
             .lock()
             .expect("mock state poisoned")
             .totals
-            .get(&subject)
+            .get(&(subject.clone(), meter))
             .copied()
             .unwrap_or(0);
         return http_json(
@@ -1118,6 +1178,7 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
     }
 
     if req.method == "POST" && req.path.starts_with("/v1/billing/meter_events") {
+        let meter = form_param(&req.body, "event_name").unwrap_or_default();
         let subject = form_param(&req.body, "payload[stripe_customer_id]").unwrap_or_default();
         let value = form_param(&req.body, "payload[value]")
             .and_then(|v| v.parse::<u64>().ok())
@@ -1134,7 +1195,7 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
             return http_json(200, &body);
         }
         st.seen_ids.insert(identifier);
-        *st.totals.entry(subject).or_insert(0) += value;
+        *st.totals.entry((subject, meter)).or_insert(0) += value;
         st.accepted_ingests += 1;
         let body = r#"{"object":"billing.meter_event"}"#.to_string();
         if let Some(key) = &req.idempotency_key {
@@ -1146,12 +1207,19 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
     }
 
     if req.method == "GET" && req.path.contains("/event_summaries") {
+        let meter = req
+            .path
+            .split("/v1/billing/meters/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .map(percent_decode)
+            .unwrap_or_default();
         let subject = query_param(&req.path, "customer").unwrap_or_default();
         let total = state
             .lock()
             .expect("mock state poisoned")
             .totals
-            .get(&subject)
+            .get(&(subject, meter))
             .copied()
             .unwrap_or(0);
         return http_json(

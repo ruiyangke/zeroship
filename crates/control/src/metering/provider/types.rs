@@ -72,6 +72,7 @@ pub struct LineItem {
 pub struct AdjustmentNote {
     pub period: BillingPeriod,
     pub app_id: Option<Uuid>,
+    pub meter: String,
     pub quantity_delta: i64,
     pub correction_seq: u32,
     pub amount_cents: i64,

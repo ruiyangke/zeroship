@@ -105,6 +105,39 @@ impl LiteStore for ControlLiteStore {
         Ok(units)
     }
 
+    async fn period_meter_units(
+        &self,
+        creator: &Uuid,
+        period_start: i64,
+        meter: &str,
+    ) -> Result<u64, ProviderError> {
+        let conn = self.registry.conn().await?;
+        let period = crate::metering::period_date(period_start);
+        let app_ids = self.owned_app_ids(creator).await?;
+        let mut units = 0u64;
+        for app_id in app_ids {
+            let rows = conn
+                .query(
+                    "SELECT total FROM zeroship.usage_aggregates \
+                     WHERE app_id = $1 AND period = $2::date AND metric = $3",
+                    &[&app_id, &period, &meter],
+                )
+                .await?;
+            let Some(row) = rows.first() else {
+                continue;
+            };
+            let raw: i64 = row.get("total");
+            if raw > 0 {
+                units = units.saturating_add(u64::try_from(raw).map_err(|_| {
+                    ProviderError::Store(format!(
+                        "lite: usage aggregate {raw} for {meter} exceeds u64"
+                    ))
+                })?);
+            }
+        }
+        Ok(units)
+    }
+
     async fn close_period_invoice(
         &self,
         creator: &Uuid,
@@ -214,19 +247,33 @@ impl LiteStore for ControlLiteStore {
                     "adjustment_note app {app_id} has no current plan"
                 ))
             })?;
-        let segment_no_u32 = (i16::MAX as u32)
-            .checked_sub(note.correction_seq)
-            .ok_or_else(|| {
-                ProviderError::Config(format!(
-                    "correction_seq {} exceeds invoice line segment range",
-                    note.correction_seq
-                ))
-            })?;
-        let segment_no = i16::try_from(segment_no_u32).map_err(|_| {
-            ProviderError::Config(format!(
-                "correction_seq {} exceeds invoice line segment range",
-                note.correction_seq
-            ))
+        if conn
+            .query(
+                "SELECT 1 FROM zeroship.invoice_lines WHERE correction_dedup_key = $1",
+                &[&note.idempotency_key],
+            )
+            .await?
+            .first()
+            .is_some()
+        {
+            return Ok(InvoiceRef(Some(invoice_id)));
+        }
+        let segment_row = conn
+            .query(
+                "SELECT COALESCE(MIN(segment_no), 32767)::smallint AS next_floor \
+                 FROM zeroship.invoice_lines \
+                 WHERE invoice_id = $1 AND app_id = $2 AND line_kind <> 'usage'",
+                &[&invoice_id, &app_id],
+            )
+            .await?;
+        let floor: i16 = segment_row
+            .first()
+            .map(|r| r.get("next_floor"))
+            .unwrap_or(i16::MAX);
+        let segment_no = floor.checked_sub(1).ok_or_else(|| {
+            ProviderError::Config(
+                "adjustment_note exhausted invoice line segment range".to_string(),
+            )
         })?;
         let line_kind = if note.amount_cents > 0 {
             "debit_note"
@@ -241,6 +288,7 @@ impl LiteStore for ControlLiteStore {
             "kind": "billing_correction",
             "period_start": note.period.start,
             "period_end": note.period.end,
+            "meter": &note.meter,
             "quantity_delta": note.quantity_delta,
             "correction_seq": note.correction_seq,
             "reason": note.reason,

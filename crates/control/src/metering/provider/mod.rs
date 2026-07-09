@@ -77,6 +77,7 @@ pub trait Backfiller {
     async fn backfill(
         &self,
         subject: &SubjectRef,
+        meter: &str,
         period: BillingPeriod,
         correct_total: u64,
     ) -> Result<(), ProviderError>;
@@ -122,6 +123,12 @@ pub trait LiteStore: Send + Sync {
         &self,
         creator: &Uuid,
         period_start: i64,
+    ) -> Result<u64, ProviderError>;
+    async fn period_meter_units(
+        &self,
+        creator: &Uuid,
+        period_start: i64,
+        meter: &str,
     ) -> Result<u64, ProviderError>;
     async fn close_period_invoice(
         &self,
@@ -611,6 +618,15 @@ mod tests {
             &self,
             _creator: &Uuid,
             _period_start: i64,
+        ) -> Result<u64, ProviderError> {
+            Ok(0)
+        }
+
+        async fn period_meter_units(
+            &self,
+            _creator: &Uuid,
+            _period_start: i64,
+            _meter: &str,
         ) -> Result<u64, ProviderError> {
             Ok(0)
         }

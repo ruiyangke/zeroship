@@ -52,7 +52,7 @@
 //! pattern PR5's `spend_reconcile` uses) so two control replicas don't
 //! double-bill.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -668,7 +668,60 @@ pub async fn reconcile_pass(
     state: &AppState,
     period: BillingPeriod,
 ) -> Result<BillingSafetyNetSummary, RegistryError> {
-    reconcile_pass_for_meter(state, period, DEFAULT_RECONCILE_METER, 0).await
+    let meters = reconcile_meters(state, period).await?;
+    let mut total = BillingSafetyNetSummary::default();
+    for meter in meters {
+        add_safety_net_summary(
+            &mut total,
+            reconcile_pass_for_meter(state, period, &meter, 0).await?,
+        );
+    }
+    Ok(total)
+}
+
+#[allow(clippy::future_not_send)]
+async fn reconcile_meters(
+    state: &AppState,
+    period: BillingPeriod,
+) -> Result<Vec<String>, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let period_date = period_date(period.start);
+    let mut meters = BTreeSet::new();
+    let local_rows = conn
+        .query(
+            "SELECT DISTINCT metric FROM zeroship.usage_aggregates WHERE period = $1::date",
+            &[&period_date],
+        )
+        .await?;
+    for row in &local_rows {
+        meters.insert(row.get::<_, String>("metric"));
+    }
+
+    let line_rows = conn
+        .query(
+            "SELECT l.usage_snapshot \
+             FROM zeroship.invoices i \
+             JOIN zeroship.invoice_lines l ON l.invoice_id = i.id \
+             WHERE i.period = $1::date AND i.status = 'finalized' \
+               AND COALESCE(l.line_kind, 'usage') = 'usage'",
+            &[&period_date],
+        )
+        .await?;
+    for row in &line_rows {
+        let usage: serde_json::Value = row.get("usage_snapshot");
+        if let serde_json::Value::Object(map) = usage {
+            for (metric, value) in map {
+                if value.as_i64().is_some() {
+                    meters.insert(metric);
+                }
+            }
+        }
+    }
+
+    if meters.is_empty() {
+        meters.insert(DEFAULT_RECONCILE_METER.to_string());
+    }
+    Ok(meters.into_iter().collect())
 }
 
 #[allow(clippy::future_not_send)]
@@ -705,7 +758,7 @@ pub async fn reconcile_pass_for_meter(
         let witness_quantity: i64 = row.get("witness_quantity");
         subjects
             .entry((creator_id, app_id))
-            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name))
             .witness_quantity = witness_quantity;
     }
 
@@ -724,10 +777,13 @@ pub async fn reconcile_pass_for_meter(
         let app_id: Uuid = row.get("app_id");
         let usage: serde_json::Value = row.get("usage_snapshot");
         let amount_cents: i64 = row.get("amount_cents");
+        let Some(quantity) = invoice_line_quantity_for_meter(&usage, meter_name) else {
+            continue;
+        };
         let subject = subjects
             .entry((creator_id, app_id))
-            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id));
-        subject.invoiced_quantity += invoice_line_quantity(&usage);
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name));
+        subject.invoiced_quantity += quantity;
         subject.invoiced_amount_cents += amount_cents;
     }
 
@@ -767,7 +823,7 @@ pub async fn reconcile_pass_for_meter(
             None => None,
         };
 
-        let entity_id = correction_entity_id(totals.app_id, period);
+        let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
         let history = load_correction_history(&conn, &entity_id).await?;
         let correction_capability = match ownership {
             InvoiceOwnership::OwnedInvoicer => state.billing_stack.invoicer.correction(),
@@ -826,6 +882,7 @@ pub async fn reconcile_pass_for_meter(
                 serde_json::json!({
                     "witness_quantity": totals.witness_quantity,
                     "invoiced_quantity": totals.invoiced_quantity,
+                    "meter": totals.meter,
                     "app_id": totals.app_id,
                     "period_start": period.start,
                     "period_end": period.end,
@@ -846,16 +903,18 @@ pub async fn reconcile_pass_for_meter(
 struct SubjectPeriodTotals {
     creator_id: Uuid,
     app_id: Uuid,
+    meter: String,
     witness_quantity: i64,
     invoiced_quantity: i64,
     invoiced_amount_cents: i64,
 }
 
 impl SubjectPeriodTotals {
-    fn new(creator_id: Uuid, app_id: Uuid) -> Self {
+    fn new(creator_id: Uuid, app_id: Uuid, meter: &str) -> Self {
         Self {
             creator_id,
             app_id,
+            meter: meter.to_string(),
             witness_quantity: 0,
             invoiced_quantity: 0,
             invoiced_amount_cents: 0,
@@ -905,8 +964,13 @@ async fn apply_correction<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let entity_id = correction_entity_id(totals.app_id, period);
-    let dedup_key = correction_dedup_key(totals.app_id, period, correction.correction_seq);
+    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+    let dedup_key = correction_dedup_key(
+        totals.app_id,
+        &totals.meter,
+        period,
+        correction.correction_seq,
+    );
     match correction.kind {
         CorrectionActionKind::AdjustmentNote => {
             let invoicer = state.billing_stack.invoicer.as_invoicer().ok_or_else(|| {
@@ -923,6 +987,7 @@ where
                     &AdjustmentNote {
                         period,
                         app_id: Some(totals.app_id),
+                        meter: totals.meter.clone(),
                         quantity_delta: correction.quantity_delta,
                         correction_seq: correction.correction_seq,
                         amount_cents: correction.amount_cents,
@@ -947,7 +1012,12 @@ where
                 ))
             })?;
             backfiller
-                .backfill(&SubjectRef(totals.creator_id.to_string()), period, correct_total)
+                .backfill(
+                    &SubjectRef(totals.creator_id.to_string()),
+                    &totals.meter,
+                    period,
+                    correct_total,
+                )
                 .await
                 .map_err(RegistryError::from)?;
         }
@@ -962,6 +1032,7 @@ where
             "app_id": totals.app_id,
             "period_start": period.start,
             "period_end": period.end,
+            "meter": totals.meter,
             "witness_quantity": totals.witness_quantity,
             "invoiced_quantity": totals.invoiced_quantity,
             "provider_quantity": provider_quantity,
@@ -1027,7 +1098,7 @@ async fn record_provider_reject_finding<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let entity_id = correction_entity_id(totals.app_id, period);
+    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
     record_safety_net_finding(
         conn,
         ReconcileFindingKind::ProviderReject,
@@ -1037,6 +1108,7 @@ where
             "app_id": totals.app_id,
             "period_start": period.start,
             "period_end": period.end,
+            "meter": totals.meter,
             "witness_quantity": totals.witness_quantity,
             "invoiced_quantity": totals.invoiced_quantity,
         }),
@@ -1044,8 +1116,8 @@ where
             "provider_reject": reason,
         }),
         Some(format!(
-            "provider_reject:{}:{}:{}",
-            totals.app_id, period.start, reason
+            "provider_reject:{}:{}:{}:{}",
+            totals.app_id, period.start, totals.meter, reason
         )),
     )
     .await
@@ -1104,21 +1176,26 @@ fn safety_net_finding_dedup_key(
     format!("{kind}:{entity_id}:{hex}")
 }
 
-fn correction_entity_id(app_id: Uuid, period: BillingPeriod) -> String {
-    format!("billing-correction:{app_id}:{}", period.start)
+fn correction_entity_id(app_id: Uuid, meter: &str, period: BillingPeriod) -> String {
+    format!("billing-correction:{app_id}:{meter}:{}", period.start)
 }
 
-fn correction_dedup_key(app_id: Uuid, period: BillingPeriod, correction_seq: u32) -> String {
-    format!("billing_correction:{app_id}:{}:{correction_seq}", period.start)
+fn correction_dedup_key(
+    app_id: Uuid,
+    meter: &str,
+    period: BillingPeriod,
+    correction_seq: u32,
+) -> String {
+    format!(
+        "billing_correction:{app_id}:{meter}:{}:{correction_seq}",
+        period.start
+    )
 }
 
-fn invoice_line_quantity(usage: &serde_json::Value) -> i64 {
+fn invoice_line_quantity_for_meter(usage: &serde_json::Value, meter: &str) -> Option<i64> {
     match usage {
-        serde_json::Value::Object(map) => map
-            .values()
-            .filter_map(serde_json::Value::as_i64)
-            .sum::<i64>(),
-        _ => 0,
+        serde_json::Value::Object(map) => map.get(meter).and_then(serde_json::Value::as_i64),
+        _ => None,
     }
 }
 

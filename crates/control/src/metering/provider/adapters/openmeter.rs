@@ -10,20 +10,11 @@ use crate::openmeter_client::{CloudEvent, OpenMeterApi, OpenMeterClient};
 struct OpenMeterCfg {
     base_url: String,
     token: SecretHandle,
-    #[serde(default = "default_event_type")]
-    event_type: String,
-    meter_slug: String,
-}
-
-fn default_event_type() -> String {
-    "compute_units".to_string()
 }
 
 pub struct OpenMeterProvider {
     base_url: String,
     token: crate::SecretString,
-    event_type: String,
-    meter_slug: String,
 }
 
 impl std::fmt::Debug for OpenMeterProvider {
@@ -31,8 +22,6 @@ impl std::fmt::Debug for OpenMeterProvider {
         f.debug_struct("OpenMeterProvider")
             .field("base_url", &self.base_url)
             .field("token", &self.token)
-            .field("event_type", &self.event_type)
-            .field("meter_slug", &self.meter_slug)
             .finish()
     }
 }
@@ -45,21 +34,9 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
             "openmeter: base_url + token required — refusing to boot".to_string(),
         ));
     }
-    if cfg.meter_slug.trim().is_empty() {
-        return Err(ProviderError::Config(
-            "openmeter: meter_slug required for aggregate read-back".to_string(),
-        ));
-    }
-    if cfg.event_type.trim().is_empty() {
-        return Err(ProviderError::Config(
-            "openmeter: event_type must not be empty".to_string(),
-        ));
-    }
     Ok(Arc::new(OpenMeterProvider {
         base_url: cfg.base_url,
         token,
-        event_type: cfg.event_type,
-        meter_slug: cfg.meter_slug,
     }))
 }
 
@@ -77,9 +54,16 @@ impl Meter for OpenMeterProvider {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
         let client = self.client();
         for event in batch {
+            if event.meter.trim().is_empty() {
+                return Err(ProviderError::Config(
+                    "openmeter: usage event meter must not be empty".to_string(),
+                ));
+            }
             let cloud = CloudEvent {
                 id: event.event_id.clone(),
-                event_type: self.event_type.clone(),
+                // Direct per-metric mapping: zeroship metric name == OpenMeter
+                // event type and meter slug.
+                event_type: event.meter.clone(),
                 subject: event.creator_subject(),
                 time_unix: event.event_time,
                 value: event.value,
@@ -98,8 +82,13 @@ impl Meter for OpenMeterProvider {
     }
 
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
+        if q.meter.trim().is_empty() {
+            return Err(ProviderError::Config(
+                "openmeter: aggregate query meter must not be empty".to_string(),
+            ));
+        }
         self.client()
-            .meter_query(&self.meter_slug, q.subject.as_str(), q.period.start, q.period.end)
+            .meter_query(&q.meter, q.subject.as_str(), q.period.start, q.period.end)
             .await
     }
 }
