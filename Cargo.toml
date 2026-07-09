@@ -202,6 +202,7 @@ zeroship-plugin-workflow = { path = "crates/plugin-workflow" }
 zeroship-metering = { path = "crates/metering" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-workflow-scheduler = { path = "crates/workflow-scheduler" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }

@@ -756,8 +756,8 @@ fn main() -> std::io::Result<()> {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
             .service(
-                web::resource("/__zeroship/internal/workflow-dispatch")
-                    .route(web::post().to(router::workflow_dispatch_internal)),
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(router::workflow_advance_internal)),
             )
             .service(
                 web::resource("/__zeroship/v1/signal")

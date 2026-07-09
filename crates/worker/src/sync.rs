@@ -869,7 +869,7 @@ mod tests {
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(

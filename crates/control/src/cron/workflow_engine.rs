@@ -18,6 +18,7 @@ use zeroship_plugin_workflow::engine;
 use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::{self, PgStore};
 use zeroship_plugin_workflow::store::{CompensationProgress, StepWriteOutcome};
+use zeroship_workflow_scheduler::WORKFLOW_ADVANCE_PATH;
 
 use crate::registry::RegistryError;
 use crate::workflow_rollout;
@@ -32,7 +33,6 @@ pub use engine::{
 /// Default tick cadence. Workflow wake latency is intentionally a scheduler
 /// knob, not a correctness bound; DW-23 will measure and tune it.
 pub const DEFAULT_TICK_SECS: u64 = 1;
-const GATEWAY_WORKFLOW_DISPATCH_PATH: &str = "/__zeroship/internal/workflow-dispatch";
 const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKPRESSURE_PARK_MS: i64 = 1_000;
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
@@ -102,14 +102,14 @@ impl StepDispatcher for GatewayStepDispatcher {
                 );
             }
         };
-        let url = format!("{}{}", self.gateway_url, GATEWAY_WORKFLOW_DISPATCH_PATH);
+        let url = format!("{}{}", self.gateway_url, WORKFLOW_ADVANCE_PATH);
         let client = cyper::Client::new();
         let builder = match client.post(&url) {
             Ok(builder) => builder,
             Err(e) => {
                 return DispatchOutcome::backpressure(
                     &request,
-                    format!("build gateway workflow dispatch request: {e}"),
+                    format!("build gateway workflow advance request: {e}"),
                 );
             }
         };
@@ -118,7 +118,7 @@ impl StepDispatcher for GatewayStepDispatcher {
             Err(e) => {
                 return DispatchOutcome::backpressure(
                     &request,
-                    format!("set gateway workflow dispatch content-type: {e}"),
+                    format!("set gateway workflow advance content-type: {e}"),
                 );
             }
         };
@@ -132,13 +132,13 @@ impl StepDispatcher for GatewayStepDispatcher {
             Ok(Err(e)) => {
                 return DispatchOutcome::backpressure(
                     &request,
-                    format!("gateway workflow dispatch transport: {e}"),
+                    format!("gateway workflow advance transport: {e}"),
                 );
             }
             Err(_) => {
                 return DispatchOutcome::backpressure(
                     &request,
-                    "gateway workflow dispatch timeout",
+                    "gateway workflow advance timeout",
                 );
             }
         };
@@ -149,7 +149,7 @@ impl StepDispatcher for GatewayStepDispatcher {
             Err(e) => {
                 return DispatchOutcome::backpressure(
                     &request,
-                    format!("read gateway workflow dispatch body: {e}"),
+                    format!("read gateway workflow advance body: {e}"),
                 );
             }
         };
@@ -158,14 +158,14 @@ impl StepDispatcher for GatewayStepDispatcher {
             let body_snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
             return DispatchOutcome::backpressure(
                 &request,
-                format!("gateway workflow dispatch HTTP {status}: {body_snippet}"),
+                format!("gateway workflow advance HTTP {status}: {body_snippet}"),
             );
         }
         if !(200..300).contains(&status) {
             let body_snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
             return DispatchOutcome::backpressure(
                 &request,
-                format!("gateway workflow dispatch rejected HTTP {status}: {body_snippet}"),
+                format!("gateway workflow advance rejected HTTP {status}: {body_snippet}"),
             );
         }
 
@@ -2067,7 +2067,7 @@ mod tests {
             let seen = Arc::clone(&server_seen);
             async move {
                 web::App::new().state(seen).service(
-                    web::resource(GATEWAY_WORKFLOW_DISPATCH_PATH)
+                    web::resource(WORKFLOW_ADVANCE_PATH)
                         .route(web::post().to(capture_step_request)),
                 )
             }
@@ -2096,7 +2096,7 @@ mod tests {
     async fn gateway_step_dispatcher_maps_402_to_backpressure() {
         let gateway = test::server(|| async {
             web::App::new().service(
-                web::resource(GATEWAY_WORKFLOW_DISPATCH_PATH)
+                web::resource(WORKFLOW_ADVANCE_PATH)
                     .route(web::post().to(|| async {
                         web::HttpResponse::PaymentRequired()
                             .json(&serde_json::json!({"code": "SPEND_LIMIT"}))

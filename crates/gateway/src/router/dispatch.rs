@@ -104,13 +104,13 @@ struct WorkflowStepRequest {
     journal: Vec<Value>,
 }
 
-/// Internal durable-workflow dispatch edge.
+/// Internal durable-workflow advance edge.
 ///
 /// This is deliberately mounted before the public app catch-all and rejects
 /// requests whose Host resolves as a creator app. The topology is still one
 /// ntex app today; a dedicated internal listener can mount this same handler
 /// without changing the transport contract.
-pub async fn workflow_dispatch_internal(
+pub async fn workflow_advance_internal(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
     body: Bytes,
@@ -186,7 +186,7 @@ pub async fn workflow_dispatch_internal(
     // accepting this internal StepRequest, then sign the gateway->worker hop.
     // For DW-05b the worker's unsigned test-flag route is the intentional seam.
     let request_id = Uuid::new_v4();
-    let worker_response = match proxy::forward_workflow_dispatch(
+    let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
         &request.app_id,
         &compiled_route.entry.plan_id,
@@ -2798,14 +2798,14 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn internal_workflow_dispatch_routes_to_worker_and_returns_step_result() {
+    async fn internal_workflow_advance_routes_to_worker_and_returns_step_result() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let server_seen = Arc::clone(&seen);
         let worker = ntex::web::test::server(move || {
             let seen = Arc::clone(&server_seen);
             async move {
                 web::App::new().state(seen).service(
-                    web::resource("/workflow-dispatch-unsigned/{app_id}")
+                    web::resource("/workflow-advance-unsigned/{app_id}")
                         .route(web::post().to(workflow_mock_worker)),
                 )
             }
@@ -2822,14 +2822,14 @@ mod tests {
         );
         let app = ntex::web::test::init_service(
             web::App::new().state(state).service(
-                web::resource("/__zeroship/internal/workflow-dispatch")
-                    .route(web::post().to(workflow_dispatch_internal)),
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
             ),
         )
         .await;
 
         let req = ntex::web::test::TestRequest::post()
-            .uri("/__zeroship/internal/workflow-dispatch")
+            .uri("/__zeroship/internal/workflow-advance")
             .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
@@ -3177,7 +3177,7 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn internal_workflow_dispatch_spend_blocked_app_returns_402() {
+    async fn internal_workflow_advance_spend_blocked_app_returns_402() {
         let state = build_test_state_with_workers(Vec::new());
         let app_id = Uuid::new_v4();
         install_workflow_route(
@@ -3188,14 +3188,14 @@ mod tests {
         );
         let app = ntex::web::test::init_service(
             web::App::new().state(state).service(
-                web::resource("/__zeroship/internal/workflow-dispatch")
-                    .route(web::post().to(workflow_dispatch_internal)),
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
             ),
         )
         .await;
 
         let req = ntex::web::test::TestRequest::post()
-            .uri("/__zeroship/internal/workflow-dispatch")
+            .uri("/__zeroship/internal/workflow-advance")
             .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
@@ -3206,7 +3206,7 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn public_vhost_workflow_dispatch_path_is_404() {
+    async fn public_vhost_workflow_advance_path_is_404() {
         let state = build_test_state_with_workers(Vec::new());
         let app_id = Uuid::new_v4();
         install_workflow_route(
@@ -3217,14 +3217,14 @@ mod tests {
         );
         let app = ntex::web::test::init_service(
             web::App::new().state(state).service(
-                web::resource("/__zeroship/internal/workflow-dispatch")
-                    .route(web::post().to(workflow_dispatch_internal)),
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
             ),
         )
         .await;
 
         let req = ntex::web::test::TestRequest::post()
-            .uri("/__zeroship/internal/workflow-dispatch")
+            .uri("/__zeroship/internal/workflow-advance")
             .header("host", "spend-app.zeroship.localhost")
             .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
             .to_request();

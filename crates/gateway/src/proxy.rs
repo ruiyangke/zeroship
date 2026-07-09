@@ -234,7 +234,7 @@ pub async fn forward_dispatch(
 ///
 /// DW-05b intentionally uses the worker's unsigned workflow ingress; signed
 /// gateway→worker workflow transport is a later hardening task.
-pub async fn forward_workflow_dispatch(
+pub async fn forward_workflow_advance(
     ring: &HashRing,
     app_id: &Uuid,
     plan_id: &str,
@@ -248,7 +248,7 @@ pub async fn forward_workflow_dispatch(
 
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
-    let path = format!("/workflow-dispatch-unsigned/{app_id}");
+    let path = format!("/workflow-advance-unsigned/{app_id}");
     let result = forward_to_worker_path(
         worker_url,
         &path,

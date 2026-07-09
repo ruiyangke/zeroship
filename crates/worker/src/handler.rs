@@ -366,9 +366,9 @@ struct WorkflowStepRequest {
 ///
 /// DW-05 deliberately leaves signature/nonce verification to a later task.
 /// Production config never enables this handler; tests can flip
-/// `workflow_dispatch_unsigned` and feed a hand-built StepRequest through the
+/// `workflow_advance_unsigned` and feed a hand-built StepRequest through the
 /// same worker/pinned-isolate path.
-pub async fn workflow_dispatch_unsigned(
+pub async fn workflow_advance_unsigned(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
     envs: web::types::State<SharedEnvs>,
@@ -379,9 +379,9 @@ pub async fn workflow_dispatch_unsigned(
     if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
         return resp;
     }
-    if !config.workflow_dispatch_unsigned {
+    if !config.workflow_advance_unsigned {
         return HttpResponse::Forbidden()
-            .json(&serde_json::json!({"error": "workflow dispatch unsigned disabled"}));
+            .json(&serde_json::json!({"error": "workflow advance unsigned disabled"}));
     }
 
     let app_id = match path.parse::<Uuid>() {
@@ -511,7 +511,7 @@ pub async fn workflow_dispatch_unsigned(
                 }
                 None => {
                     record(0);
-                    make_error_msg(504, "workflow dispatch timed out")
+                    make_error_msg(504, "workflow advance timed out")
                 }
             }
         }
@@ -1091,13 +1091,13 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             blob_store: blob_store.clone(),
             workflow_blob_store: workflow_blob_store.clone(),
             max_step_blob_bytes: 64 * 1024 * 1024,
-            workflow_dispatch_unsigned: true,
+            workflow_advance_unsigned: true,
         });
         (app_id, blob_store, envs, logs, config, meter, blob_root)
     }
 
     #[test]
-    fn workflow_dispatch_first_frontier_returns_step_completed() {
+    fn workflow_advance_first_frontier_returns_step_completed() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1112,14 +1112,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -1138,7 +1138,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     #[test]
-    fn workflow_dispatch_concurrent_frontier_returns_outcomes_batch() {
+    fn workflow_advance_concurrent_frontier_returns_outcomes_batch() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1153,14 +1153,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(
                     serde_json::to_vec(&workflow_request_named(
                         &deploy_hash,
@@ -1195,7 +1195,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     #[test]
-    fn workflow_dispatch_feeds_platform_counters_and_workflow_steps_metric() {
+    fn workflow_advance_feeds_platform_counters_and_workflow_steps_metric() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1211,43 +1211,43 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             let payload = serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap();
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(payload.clone())
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
             let body = test::read_body(resp).await;
-            assert!(!body.is_empty(), "workflow dispatch returned a response body");
+            assert!(!body.is_empty(), "workflow advance returned a response body");
 
             let snap = meter.drain();
             let usage = snap
                 .get(&app_id)
-                .expect("workflow dispatch recorded usage for app");
-            assert_eq!(usage.requests, 1, "workflow dispatch is one metered request");
+                .expect("workflow advance recorded usage for app");
+            assert_eq!(usage.requests, 1, "workflow advance is one metered request");
             assert_eq!(
                 usage.ingress_bytes,
                 payload.len() as u64,
-                "workflow dispatch ingress is the StepRequest JSON body"
+                "workflow advance ingress is the StepRequest JSON body"
             );
             assert_eq!(
                 usage.egress_bytes,
                 body.len() as u64,
-                "workflow dispatch egress is the StepResult JSON body"
+                "workflow advance egress is the StepResult JSON body"
             );
-            assert!(usage.wall_us > 0, "workflow dispatch records wall_us");
-            assert!(usage.cpu_us > 0, "workflow dispatch records cpu_us");
+            assert!(usage.wall_us > 0, "workflow advance records wall_us");
+            assert!(usage.cpu_us > 0, "workflow advance records cpu_us");
             assert_eq!(
                 usage.custom.get("workflow_steps").copied(),
                 Some(1),
-                "workflow dispatch records observability workflow_steps"
+                "workflow advance records observability workflow_steps"
             );
 
             let _ = std::fs::remove_dir_all(blob_root);
@@ -1255,7 +1255,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     #[test]
-    fn workflow_dispatch_replays_journal_hit_without_rerunning_body() {
+    fn workflow_advance_replays_journal_hit_without_rerunning_body() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1270,14 +1270,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             let first_req = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
                 .to_request();
             let first_resp = test::call_service(&app, first_req).await;
@@ -1296,7 +1296,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 "output": first_result["output"],
             })];
             let second_req = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, journal)).unwrap())
                 .to_request();
             let second_resp = test::call_service(&app, second_req).await;
@@ -1317,7 +1317,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     #[test]
-    fn workflow_dispatch_keeps_in_flight_run_on_pinned_deploy_after_redeploy() {
+    fn workflow_advance_keeps_in_flight_run_on_pinned_deploy_after_redeploy() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1334,15 +1334,15 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             for (deploy_hash, expected_mark) in [(&deploy_a, "A"), (&deploy_b, "B"), (&deploy_a, "A")] {
                 let req = test::TestRequest::post()
-                    .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                    .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                     .set_payload(
                         serde_json::to_vec(&workflow_request(deploy_hash, vec![])).unwrap(),
                     )
@@ -1363,7 +1363,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     #[test]
-    fn workflow_dispatch_pinned_isolate_budget_lru_evicts_per_app() {
+    fn workflow_advance_pinned_isolate_budget_lru_evicts_per_app() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -1379,14 +1379,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .state(envs)
                     .state(logs)
                     .service(
-                        web::resource("/workflow-dispatch-unsigned/{app_id}")
-                            .route(web::post().to(workflow_dispatch_unsigned)),
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
                     ),
             )
             .await;
 
             let req_a = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(serde_json::to_vec(&workflow_request(&deploy_a, vec![])).unwrap())
                 .to_request();
             let resp_a = test::call_service(&app, req_a).await;
@@ -1394,7 +1394,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
 
             let req_b = test::TestRequest::post()
-                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(serde_json::to_vec(&workflow_request(&deploy_b, vec![])).unwrap())
                 .to_request();
             let resp_b = test::call_service(&app, req_b).await;
@@ -1517,7 +1517,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(
@@ -1631,7 +1631,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(
@@ -1738,7 +1738,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(
@@ -1860,7 +1860,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(
@@ -2055,7 +2055,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 blob_store,
                 workflow_blob_store,
                 max_step_blob_bytes: 64 * 1024 * 1024,
-                workflow_dispatch_unsigned: false,
+                workflow_advance_unsigned: false,
             });
 
             let app = test::init_service(

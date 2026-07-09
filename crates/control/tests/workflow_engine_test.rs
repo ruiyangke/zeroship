@@ -3589,7 +3589,7 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
     let _timing_guard = timing_test_guard();
     let gateway = test::server(|| async {
         web::App::new().service(
-            web::resource("/__zeroship/internal/workflow-dispatch")
+            web::resource("/__zeroship/internal/workflow-advance")
                 .route(web::post().to(spend_blocked_gateway)),
         )
     })
