@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod authz_fixture;
 pub mod stripe_mock;
 
@@ -20,6 +22,25 @@ use zeroship_control::Registry;
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
+
+pub fn require_control_db() -> Option<String> {
+    if let Ok(url) = std::env::var("CONTROL_TEST_DB") {
+        if !url.trim().is_empty() {
+            return Some(url);
+        }
+    }
+
+    if std::env::var_os("ZEROSHIP_BILLING_GATE").is_some() {
+        panic!("billing gate requires CONTROL_TEST_DB; a skip is NOT a pass");
+    }
+
+    eprintln!(
+        "\n================ BILLING DB TEST SKIPPED ================\n\
+         SKIP: CONTROL_TEST_DB not set (not the billing gate)\n\
+         ==========================================================\n"
+    );
+    None
+}
 
 pub struct PlatformJwks {
     base: String,

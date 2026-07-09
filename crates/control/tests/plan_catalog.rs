@@ -21,7 +21,7 @@ use zeroship_control::Registry;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// `pricing_config (id='global')` is a fleet-wide SINGLETON, and the MAJOR-3
@@ -94,7 +94,6 @@ async fn make_user(client: &compio_postgres::Client) -> Uuid {
 #[compio::test]
 async fn upsert_and_get_round_trips_pure_types() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let _client = pg(&url).await;
@@ -119,7 +118,6 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
     // server-side gate returns a clean InvalidInput (NOT a raw FK violation),
     // and NO app row is left behind.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -150,7 +148,6 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
 #[compio::test]
 async fn create_app_with_real_plan_id_succeeds() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -172,7 +169,6 @@ async fn set_plan_to_archived_plan_is_rejected() {
     // An archived plan stays resolvable (historical FKs) but cannot be ASSIGNED
     // to an app via set_plan.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -217,7 +213,6 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     // table keyed on a plan name would never produce these exact values for a
     // random pln_ id).
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -250,7 +245,6 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
 #[compio::test]
 async fn get_versions_projects_app_net_grants_with_plan_caps() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -317,7 +311,6 @@ async fn upsert_with_none_archived_preserves_existing_archived() {
     // `archived = EXCLUDED.archived` from a `#[serde(default)] -> false`, so a
     // name edit silently UN-archived the plan. Now `None` ⇒ COALESCE-preserve.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let _client = pg(&url).await;
@@ -355,7 +348,6 @@ async fn set_plan_guards_archive_in_one_statement() {
     // the true concurrent race can't be deterministically forced in a unit test,
     // but the guard is what closes the window.)
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -404,7 +396,6 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
     // HARD-ERRORED (creator's whole bill failed) — so a poison plan made an app
     // both uncapped AND unbilled. The two paths now AGREE: both return it.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -460,7 +451,6 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     // period totals via the real Metering reader, load the global weight table
     // via the real PricingStore, price the plan, and assert `total_cents`.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     // Reads the global default FX; serialize against the MAJOR-3 mutator via
@@ -525,7 +515,6 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     // (not a hardcoded const): a metric with NO weight row contributes 0 CU, and
     // a plan with `fx = None` prices at the seeded global default.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     // Reads the global default FX; serialize against the MAJOR-3 mutator (which
@@ -551,7 +540,6 @@ async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
     // `upsert` calls `plan.price.validate()` as defense in depth so even a direct
     // (non-HTTP) caller cannot land a clamped plan.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let _client = pg(&url).await;
@@ -585,7 +573,6 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     // RESTORE the seeded global row + CHECK before returning so siblings see a
     // sane FX even if --test-threads > 1.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let _fx = lock_fx();
@@ -664,7 +651,6 @@ async fn metric_weights_rejects_negative_units_per_op() {
     // weight unrepresentable at the source — a negative weight would credit CU
     // (nonsensical). Without the CHECK this INSERT would succeed.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;

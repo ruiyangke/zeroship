@@ -37,7 +37,7 @@ use zeroship_control::{
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -482,7 +482,6 @@ async fn cleanup(state: &AppState, creators: &[Uuid], pats: &[&Pat]) {
 #[compio::test]
 async fn onboard_returns_real_account_link() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "onboard").await;
@@ -529,7 +528,6 @@ async fn onboard_returns_real_account_link() {
 #[compio::test]
 async fn callback_rejects_acct_not_owned_by_creator() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "callback-forge").await;
@@ -582,7 +580,6 @@ async fn callback_rejects_acct_not_owned_by_creator() {
 #[compio::test]
 async fn callback_accepts_owned_account_and_persists_flags() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "callback-ok").await;
@@ -638,7 +635,6 @@ async fn callback_accepts_owned_account_and_persists_flags() {
 #[compio::test]
 async fn checkout_stamps_server_fee_not_client_value() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "checkout-fee").await;
@@ -716,7 +712,6 @@ async fn checkout_stamps_server_fee_not_client_value() {
 #[compio::test]
 async fn checkout_honors_operator_set_fee_policy() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "checkout-policy").await;
@@ -782,7 +777,6 @@ async fn checkout_honors_operator_set_fee_policy() {
 #[compio::test]
 async fn checkout_rejected_when_charges_not_enabled() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "checkout-not-ready").await;
@@ -858,7 +852,6 @@ async fn checkout_rejected_when_charges_not_enabled() {
 #[compio::test]
 async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "checkout-cartid").await;
@@ -955,7 +948,6 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
 #[compio::test]
 async fn fee_policy_rejects_floor_above_cap() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "fee-floor-cap").await;
@@ -1001,7 +993,6 @@ async fn fee_policy_rejects_floor_above_cap() {
 #[compio::test]
 async fn checkout_rejects_bad_currency() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "checkout-currency").await;
@@ -1049,7 +1040,6 @@ async fn checkout_rejects_bad_currency() {
 #[compio::test]
 async fn fee_policy_set_is_operator_only() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "fee-authz").await;

@@ -350,7 +350,22 @@ mod tests {
     }
 
     fn db_url() -> Option<String> {
-        std::env::var("CONTROL_TEST_DB").ok()
+        if let Ok(url) = std::env::var("CONTROL_TEST_DB") {
+            if !url.trim().is_empty() {
+                return Some(url);
+            }
+        }
+
+        if std::env::var_os("ZEROSHIP_BILLING_GATE").is_some() {
+            panic!("billing gate requires CONTROL_TEST_DB; a skip is NOT a pass");
+        }
+
+        eprintln!(
+            "\n================ BILLING DB TEST SKIPPED ================\n\
+             SKIP: CONTROL_TEST_DB not set (not the billing gate)\n\
+             ==========================================================\n"
+        );
+        None
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -417,7 +432,6 @@ mod tests {
     #[compio::test]
     async fn stream_recompute_replaces_usage_aggregates_and_spend_state_idempotently() {
         let Some(url) = db_url() else {
-            eprintln!("skip: CONTROL_TEST_DB not set");
             return;
         };
         let client = pg(&url).await;
@@ -478,7 +492,6 @@ mod tests {
     #[compio::test]
     async fn stream_recompute_dedups_duplicate_event_ids() {
         let Some(url) = db_url() else {
-            eprintln!("skip: CONTROL_TEST_DB not set");
             return;
         };
         let client = pg(&url).await;
@@ -514,7 +527,6 @@ mod tests {
     #[compio::test]
     async fn stream_recompute_skips_undecodable_records() {
         let Some(url) = db_url() else {
-            eprintln!("skip: CONTROL_TEST_DB not set");
             return;
         };
         let client = pg(&url).await;
@@ -578,7 +590,6 @@ mod tests {
     #[compio::test]
     async fn unsettled_period_recompute_rewrites_current_and_previous_snapshots() {
         let Some(url) = db_url() else {
-            eprintln!("skip: CONTROL_TEST_DB not set");
             return;
         };
         let client = pg(&url).await;

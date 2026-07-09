@@ -40,6 +40,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -56,10 +58,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .or_else(|_| std::env::var("AUTH_DB_URL"))
-        .ok()
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -412,7 +411,6 @@ async fn payment_kind_count(conn: &compio_postgres::Client, inv: &str, kind: &st
 #[compio::test]
 async fn dispute_created_records_debit_and_is_idempotent() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "created-idem").await;
@@ -471,7 +469,6 @@ async fn dispute_created_records_debit_and_is_idempotent() {
 #[compio::test]
 async fn dispute_debit_tightens_over_refund_cap() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "cap-tighten").await;
@@ -537,7 +534,6 @@ async fn dispute_debit_tightens_over_refund_cap() {
 #[compio::test]
 async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "closed").await;
@@ -591,7 +587,6 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
 #[compio::test]
 async fn dispute_produces_exactly_one_disputed_notification() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "notify").await;
@@ -665,7 +660,6 @@ async fn dispute_produces_exactly_one_disputed_notification() {
 #[compio::test]
 async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "credited").await;
@@ -792,7 +786,6 @@ async fn refund_count(conn: &compio_postgres::Client, inv: &str) -> i64 {
 #[compio::test]
 async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "won-then-lost").await;
@@ -844,7 +837,6 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
 #[compio::test]
 async fn dispute_closed_won_before_created_is_order_independent() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "close-first").await;
@@ -962,7 +954,6 @@ async fn pending_dispute_count(conn: &compio_postgres::Client, du: &str) -> i64 
 #[compio::test]
 async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "created-before-paid").await;
@@ -1042,7 +1033,6 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
 #[compio::test]
 async fn dispute_on_never_invoiced_charge_parks_without_poison() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "never-ours").await;
@@ -1080,7 +1070,6 @@ async fn dispute_on_never_invoiced_charge_parks_without_poison() {
 #[compio::test]
 async fn pr8_schema_objects_present() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let conn = side_conn(&url).await;
@@ -1159,7 +1148,6 @@ async fn pr8_schema_objects_present() {
 #[compio::test]
 async fn dispute_created_takes_per_creator_advisory_lock() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "dsp-lock").await;
@@ -1271,7 +1259,6 @@ fn dispute_created_body_no_settling_object(evt: &str, du: &str, amount: i64) -> 
 #[compio::test]
 async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "no-settling-object").await;
@@ -1305,7 +1292,6 @@ async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
 #[compio::test]
 async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "lost-then-won").await;
@@ -1359,7 +1345,6 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
 #[compio::test]
 async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "close-lost-first").await;
@@ -1401,7 +1386,6 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
 #[compio::test]
 async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "close-no-invoice").await;
@@ -1459,7 +1443,6 @@ async fn seed_dispute_row_direct(
 #[compio::test]
 async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "trigger").await;
@@ -1564,7 +1547,6 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 #[compio::test]
 async fn dispute_closed_takes_per_creator_advisory_lock() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = Fixture::new(&url, "dsp-close-lock").await;
@@ -1701,7 +1683,6 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
 #[compio::test]
 async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let conn = side_conn(&url).await;

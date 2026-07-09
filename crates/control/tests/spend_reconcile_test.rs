@@ -21,7 +21,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// `spend_reconcile::tick` single-flights the fleet-wide sweep via
@@ -173,7 +173,6 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
 #[compio::test]
 async fn reconcile_tick_writes_enriched_spend_audit() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_state(&url, "audit").await;
@@ -221,7 +220,6 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
 #[compio::test]
 async fn reconcile_tick_skips_when_advisory_lock_held() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_state(&url, "lock").await;
@@ -292,7 +290,6 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
 #[compio::test]
 async fn reconcile_walks_spend_bands_and_holds_deadband() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_state(&url, "band-walk").await;

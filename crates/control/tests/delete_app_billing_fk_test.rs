@@ -13,15 +13,15 @@
 //! FAITHFUL: drives the REAL `Registry::create_app` / `Registry::delete_app`
 //! against a live, migrated Postgres. Gated on `CONTROL_TEST_DB`; silent skip.
 
+mod common;
+
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_control::registry::RegistryError;
 use zeroship_control::Registry;
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB")
-        .or_else(|_| std::env::var("PG_TEST_URL"))
-        .ok()
+    common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> Client {
@@ -68,7 +68,6 @@ async fn seed_owner_and_plan(client: &Client) -> (Uuid, String) {
 #[compio::test]
 async fn delete_app_with_invoice_history_returns_typed_conflict() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -159,7 +158,6 @@ async fn delete_app_with_invoice_history_returns_typed_conflict() {
 #[compio::test]
 async fn delete_app_with_custom_metric_and_aggregates_succeeds() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;

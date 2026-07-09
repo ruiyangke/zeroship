@@ -30,6 +30,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,7 +48,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// Process-global gate serializing the act of SWEEPING across this binary's tests.
@@ -346,7 +348,6 @@ async fn age_pending(pg: &compio_postgres::Client, creator: Uuid) {
 #[compio::test]
 async fn each_kind_produces_exactly_one_notification() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP each_kind_produces_exactly_one_notification: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "each-kind").await;
@@ -475,7 +476,6 @@ async fn each_kind_produces_exactly_one_notification() {
 #[compio::test]
 async fn concurrent_ticks_send_each_event_once() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP concurrent_ticks_send_each_event_once: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "concurrent").await;
@@ -553,7 +553,6 @@ async fn concurrent_ticks_send_each_event_once() {
 #[compio::test]
 async fn crash_before_flip_redrives_idempotent() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP crash_before_flip_redrives_idempotent: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "redrive").await;
@@ -658,7 +657,6 @@ async fn cbh_id(pg: &compio_postgres::Client, creator: Uuid) -> String {
 #[compio::test]
 async fn history_surrogate_ids_carry_disjoint_prefixes() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP history_surrogate_ids_carry_disjoint_prefixes: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "prefixes").await;
@@ -841,7 +839,6 @@ async fn spend_tick(state: &AppState) {
 #[compio::test]
 async fn spend_band_walk_produces_one_notification_per_transition() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP spend_band_walk_produces_one_notification_per_transition: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "spend-band").await;
@@ -953,7 +950,6 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 #[compio::test]
 async fn spend_band_recovery_walk_sends_no_notifications() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP spend_band_recovery_walk_sends_no_notifications: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "spend-recovery").await;
@@ -1057,7 +1053,6 @@ async fn age_history(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
 #[compio::test]
 async fn aged_transition_past_scan_window_is_not_notified() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP aged_transition_past_scan_window_is_not_notified: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "watermark").await;
@@ -1116,7 +1111,6 @@ async fn aged_transition_past_scan_window_is_not_notified() {
 #[compio::test]
 async fn dunning_tick_skips_when_advisory_lock_held() {
     let Some(url) = db_url() else {
-        eprintln!("SKIP dunning_tick_skips_when_advisory_lock_held: CONTROL_TEST_DB unset");
         return;
     };
     let fx = build_fixture(&url, "dunning-lock").await;
