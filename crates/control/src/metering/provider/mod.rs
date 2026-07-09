@@ -16,9 +16,8 @@ pub use ctx::{Clock, HttpClientFactory, ProviderCtx, SecretHandle, SecretResolve
 pub use registry::{ProviderFactory, ProviderRegistry};
 pub use types::{
     AdjustmentNote, AggregateQuery, BillingPeriod, ClosedPeriodPolicy, CorrectionCapability,
-    CreatorBilling, CustomerRef, DedupContract, DedupKey, DedupTtl, IngestAck, InvoiceRef,
-    LineItem, ProviderError, RatedInput, Subject, SubjectRef, UsageEvent, WebhookEvent,
-    UsageSubject, WebhookOutcome,
+    DedupContract, DedupKey, DedupTtl, IngestAck, InvoiceRef, LineItem, ProviderError, RatedInput,
+    SubjectRef, UsageEvent, WebhookEvent, UsageSubject, WebhookOutcome,
 };
 
 bitflags::bitflags! {
@@ -71,7 +70,6 @@ pub trait MeteringProvider: Send + Sync {
 pub trait Meter {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError>;
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError>;
 }
 
 #[async_trait::async_trait(?Send)]
@@ -120,16 +118,6 @@ pub trait WebhookSink {
 pub trait LiteStore: Send + Sync {
     async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
     async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError>;
-    async fn period_totals(
-        &self,
-        app: &Uuid,
-        period_start: i64,
-    ) -> Result<HashMap<String, i64>, ProviderError>;
-    async fn ensure_customer(
-        &self,
-        creator: &Uuid,
-        email: &str,
-    ) -> Result<Option<SubjectRef>, ProviderError>;
     async fn period_billable_units(
         &self,
         creator: &Uuid,
@@ -300,11 +288,6 @@ pub fn build_stack(
             "provider '{rater_id}' does not expose Rate"
         )));
     }
-    if meter.as_meter().is_some() && invoicer.as_invoicer().is_none() {
-        return Err(ProviderError::Config(
-            "meter-only provider selected without an invoicer".to_string(),
-        ));
-    }
     if invoicer.id() == "stripe_meters" && meter.id() != "stripe_meters" {
         return Err(ProviderError::Config(
             "self-invoicing provider 'stripe_meters' has no meter feed; select it as the meter too"
@@ -352,13 +335,6 @@ impl Meter for TestProvider {
 
     async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
         Ok(0)
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        Ok(subject
-            .customer
-            .clone()
-            .unwrap_or_else(|| SubjectRef(subject.creator_id.to_string())))
     }
 }
 
@@ -539,9 +515,6 @@ mod tests {
         async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
             Ok(0)
         }
-        async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-            Ok(SubjectRef(subject.creator_id.to_string()))
-        }
     }
 
     impl MeteringProvider for MeterOnly {
@@ -632,22 +605,6 @@ mod tests {
 
         async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
             Ok(Vec::new())
-        }
-
-        async fn period_totals(
-            &self,
-            _app: &Uuid,
-            _period_start: i64,
-        ) -> Result<HashMap<String, i64>, ProviderError> {
-            Ok(HashMap::new())
-        }
-
-        async fn ensure_customer(
-            &self,
-            _creator: &Uuid,
-            _email: &str,
-        ) -> Result<Option<SubjectRef>, ProviderError> {
-            Ok(None)
         }
 
         async fn period_billable_units(

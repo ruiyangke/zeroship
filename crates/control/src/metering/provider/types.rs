@@ -9,14 +9,6 @@ pub use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 use crate::registry::RegistryError;
 use crate::stripe_store::StripeError;
 
-/// The app/creator billing subject a provider meters or invoices.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Subject {
-    pub creator_id: Uuid,
-    pub email: String,
-    pub customer: Option<SubjectRef>,
-}
-
 /// Provider-side subject/customer handle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SubjectRef(pub String);
@@ -27,10 +19,6 @@ impl SubjectRef {
         &self.0
     }
 }
-
-/// Temporary aliases while the existing control-side crons are reshaped.
-pub type CreatorBilling = Subject;
-pub type CustomerRef = SubjectRef;
 
 /// The result of a billing close.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -128,7 +116,6 @@ pub enum DedupTtl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosedPeriodPolicy {
-    RegeneratesInvoice,
     OpenPeriodOnly,
 }
 

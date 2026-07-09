@@ -296,7 +296,7 @@ mod tests {
 
     use crate::metering::provider::{
         AggregateQuery, Capabilities, DedupContract, DedupKey, DedupTtl, IngestAck, Meter,
-        MeteringProvider, Subject, SubjectRef, UsageSubject,
+        MeteringProvider, UsageSubject,
     };
     use uuid::Uuid;
     use zeroship_stream::{StreamError, StreamOffset, StreamRecord};
@@ -371,10 +371,6 @@ mod tests {
 
         async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
             Ok(0)
-        }
-
-        async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-            Ok(SubjectRef(subject.creator_id.to_string()))
         }
     }
 

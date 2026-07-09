@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
     DedupTtl, IngestAck, InvoiceRef, LineItem, LiteStore, Meter, MeteringProvider, ProviderCtx,
-    ProviderError, RatedInput, Rater, Subject, SubjectRef, UsageEvent,
+    ProviderError, RatedInput, Rater, SubjectRef, UsageEvent,
 };
 
 #[derive(Clone)]
@@ -44,13 +44,6 @@ impl Meter for LiteProvider {
         self.store
             .period_billable_units(&creator, q.period.start)
             .await
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        if let Some(existing) = &subject.customer {
-            return Ok(existing.clone());
-        }
-        Ok(SubjectRef(subject.creator_id.to_string()))
     }
 }
 

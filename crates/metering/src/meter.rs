@@ -36,11 +36,6 @@ struct AppCounters {
     wall_us: AtomicU64,
     egress_bytes: AtomicU64,
     ingress_bytes: AtomicU64,
-    /// The producer usually has only the server-injected app id. When a caller
-    /// can bind the creator id, it may call `Meter::set_creator`; otherwise
-    /// emitted events carry `Uuid::nil()` and downstream control resolves the
-    /// creator from the app registry before provider forwarding.
-    creator_id: Mutex<Option<Uuid>>,
     /// Platform-emitted resource metrics from the trusted data primitives
     /// (`db_reads`, `db_writes`, `kv_reads`, `kv_writes`, `storage_ops`, ...).
     /// `Mutex` (not per-key atomics) because the key set is open and small;
@@ -88,14 +83,6 @@ impl AppCounters {
                 *slot
             }
         }
-    }
-
-    fn set_creator(&self, creator_id: Uuid) {
-        *self.creator_id.lock().unwrap() = Some(creator_id);
-    }
-
-    fn creator(&self) -> Option<Uuid> {
-        *self.creator_id.lock().unwrap()
     }
 
     /// Take a snapshot of current values AND reset them to zero in one shot
@@ -172,18 +159,6 @@ impl Meter {
         }
     }
 
-    #[must_use]
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-
-    /// Bind creator attribution when the producer has it. Worker S4 usually
-    /// has only `APP_ID`, so missing creator attribution is represented with
-    /// `Uuid::nil()` in emitted events and resolved downstream by control.
-    pub fn set_creator(&self, app_id: &str, creator_id: Uuid) {
-        self.with_app_counters(app_id, |counters| counters.set_creator(creator_id));
-    }
-
     /// Increment `metric` for `app_id` by `n`; returns the metric's new
     /// running total this period. Auto-vivifies the app's counter set on first
     /// touch. A `metric` matching one of the five fixed names lands in that
@@ -249,7 +224,10 @@ impl Meter {
                     continue;
                 }
             };
-            let creator = counters.creator().unwrap_or_else(Uuid::nil);
+            // The worker producer has only the server-injected app id; emitted
+            // events carry `Uuid::nil()` and downstream control resolves the
+            // creator from the app registry before provider forwarding.
+            let creator = Uuid::nil();
             for metric in drained {
                 events.push(UsageEvent {
                     event_id: Uuid::now_v7().to_string(),
@@ -381,20 +359,6 @@ mod tests {
         assert_eq!(event_value(&events, id, "wall_us"), Some(1500));
         assert_eq!(event_value(&events, id, "egress_bytes"), Some(2112));
         assert_eq!(event_value(&events, id, "ingress_bytes"), Some(272));
-    }
-
-    #[test]
-    fn set_creator_stamps_creator_when_meter_has_it() {
-        let m = Meter::new();
-        let a = app();
-        let app_id = Uuid::parse_str(&a).unwrap();
-        let creator_id = Uuid::new_v4();
-        m.set_creator(&a, creator_id);
-        m.increment(&a, "requests", 1);
-
-        let events = m.drain();
-        let request = event(&events, app_id, "requests");
-        assert_eq!(request.subject.creator, creator_id);
     }
 
     #[test]

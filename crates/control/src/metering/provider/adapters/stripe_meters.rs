@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
     DedupTtl, IngestAck, InvoiceRef, LineItem, Meter, MeteringProvider, ProviderCtx,
-    ProviderError, Rater, RatedInput, SecretHandle, Subject, SubjectRef, UsageEvent, WebhookEvent,
+    ProviderError, Rater, RatedInput, SecretHandle, SubjectRef, UsageEvent, WebhookEvent,
     WebhookOutcome, WebhookSink,
 };
 use crate::stripe_client::{StripeApi, StripeClient};
@@ -119,13 +119,6 @@ impl Meter for StripeMetersProvider {
                 q.period.end,
             )
             .await?)
-    }
-
-    async fn ensure_subject(&self, subject: &Subject) -> Result<SubjectRef, ProviderError> {
-        if let Some(existing) = &subject.customer {
-            return Ok(existing.clone());
-        }
-        Ok(SubjectRef(subject.creator_id.to_string()))
     }
 }
 
