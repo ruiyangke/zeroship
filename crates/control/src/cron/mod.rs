@@ -113,13 +113,6 @@ pub fn spawn_all(
         .detach();
     }
     if let Some(streams) = state.billing_stream.as_ref() {
-        let forwarder_stream = match streams.build_forwarder() {
-            Ok(stream) => stream,
-            Err(err) => {
-                tracing::error!(error = %err, "billing forwarder stream consumer build failed");
-                return;
-            }
-        };
         let recompute_stream = match streams.build_recompute() {
             Ok(stream) => stream,
             Err(err) => {
@@ -127,20 +120,40 @@ pub fn spawn_all(
                 return;
             }
         };
-        let forwarder_stack = Arc::clone(&state.billing_stack);
-        let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
-            &state.control_pg,
-        )));
-        compio::runtime::spawn(async move {
-            event_forwarder::run(
-                forwarder_stream,
-                forwarder_stack,
-                forwarder_sink,
-                event_forwarder::EventForwarderConfig::default(),
-            )
-            .await;
-        })
-        .detach();
+
+        // The forwarder only runs for a meter that accepts forwarded events. A
+        // recompute-fed provider (`lite`) bills from `usage_aggregates` via the
+        // recompute rail below, and its `Meter::ingest` errors by design — so
+        // spawning a forwarder for it would perpetually error. Recompute (which
+        // drives enforcement for every provider) always runs.
+        if state.billing_stack.forwards_usage_events() {
+            let forwarder_stream = match streams.build_forwarder() {
+                Ok(stream) => stream,
+                Err(err) => {
+                    tracing::error!(error = %err, "billing forwarder stream consumer build failed");
+                    return;
+                }
+            };
+            let forwarder_stack = Arc::clone(&state.billing_stack);
+            let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
+                &state.control_pg,
+            )));
+            compio::runtime::spawn(async move {
+                event_forwarder::run(
+                    forwarder_stream,
+                    forwarder_stack,
+                    forwarder_sink,
+                    event_forwarder::EventForwarderConfig::default(),
+                )
+                .await;
+            })
+            .detach();
+        } else {
+            tracing::info!(
+                meter = state.billing_stack.meter_id(),
+                "meter provider is fed by the local recompute snapshot; not spawning the stream forwarder"
+            );
+        }
 
         let recompute_state = Arc::clone(&state);
         compio::runtime::spawn(async move {

@@ -133,6 +133,7 @@ async fn run_provider_conformance(adapter: Adapter) {
         assert_meter_retry_idempotency(&fx).await;
         assert_meter_read_back(&fx).await;
         assert_dedup_ttl_switchover(&fx).await;
+        assert_forwarding_model_matches_docs(&fx, adapter);
         if matches!(adapter, Adapter::StripeMeters) {
             assert_stripe_meters_missing_metric_fails_closed(&fx).await;
         }
@@ -264,6 +265,25 @@ fn build_provider(
         store,
     );
     registry.build(id, &ctx)
+}
+
+fn assert_forwarding_model_matches_docs(fx: &Fixture, adapter: Adapter) {
+    let meter = fx.provider.as_meter().expect("meter present");
+    let accepts = meter.accepts_forwarded_events();
+    match adapter {
+        // lite derives usage from the local recompute snapshot and its
+        // `ingest` errors by design; it must NOT accept forwarded events, or the
+        // control plane would spawn a forwarder that perpetually errors on it.
+        Adapter::Lite => assert!(
+            !accepts,
+            "lite is recompute-fed and must not accept forwarded stream events",
+        ),
+        other => assert!(
+            accepts,
+            "{} is forwarder-fed and must accept forwarded stream events",
+            other.id(),
+        ),
+    }
 }
 
 fn assert_capabilities_consistent(provider: &Arc<dyn MeteringProvider>, expected: Capabilities) {
