@@ -28,7 +28,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// Serialize the reconcile-driving tests (same rationale as billing_reconcile_test:
@@ -662,7 +662,6 @@ async fn read_event(
 #[compio::test]
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "twoseg").await;
@@ -789,7 +788,6 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 #[compio::test]
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "segcu").await;
@@ -929,7 +927,6 @@ async fn segment_partition_invariants_hold() {
 #[compio::test]
 async fn no_change_yields_exactly_one_segment_zero_line() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "nochange").await;
@@ -975,7 +972,6 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 #[compio::test]
 async fn reconcile_rerun_does_not_double_post_segments() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "rerun").await;
@@ -1030,7 +1026,6 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 #[compio::test]
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "snap").await;
@@ -1111,7 +1106,6 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 #[compio::test]
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "cap").await;
@@ -1213,7 +1207,6 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 #[compio::test]
 async fn end_missing_metric_does_not_credit_the_bill() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "floor").await;
@@ -1276,7 +1269,6 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 #[compio::test]
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "catalogtime").await;
@@ -1360,7 +1352,6 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 #[compio::test]
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "orphan").await;
@@ -1468,7 +1459,6 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 #[compio::test]
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "corrupt").await;

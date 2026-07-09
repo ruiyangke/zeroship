@@ -24,6 +24,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,7 +41,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// `stripe_reconcile::tick_with` single-flights fleet-wide via `pg_try_advisory_lock` (the
@@ -500,7 +502,7 @@ fn now() -> i64 {
 
 #[compio::test]
 async fn missed_invoice_payment_is_flagged() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "missed-inv").await;
     let creator = make_creator(&fx.state, "missed-inv").await;
@@ -528,7 +530,7 @@ async fn missed_invoice_payment_is_flagged() {
 
 #[compio::test]
 async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "refund-drift").await;
     let creator = make_creator(&fx.state, "refund-drift").await;
@@ -554,7 +556,7 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
 
 #[compio::test]
 async fn stripe_dispute_with_no_internal_row_is_flagged() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "missing-dispute").await;
     let _creator = make_creator(&fx.state, "missing-dispute").await;
@@ -594,7 +596,7 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
 // directly and Σ(invoice_payments) tightens by the disputed amount.
 #[compio::test]
 async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "dispute-heal").await;
     let creator = make_creator(&fx.state, "dispute-heal").await;
@@ -680,7 +682,7 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 
 #[compio::test]
 async fn missing_dispute_backstop_does_not_park_when_unresolved() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "no-park").await;
     let _creator = make_creator(&fx.state, "no-park").await;
@@ -725,7 +727,7 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
 
 #[compio::test]
 async fn backstop_then_live_webhook_does_not_double_apply() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "no-double-apply").await;
     let creator = make_creator(&fx.state, "no-double-apply").await;
@@ -809,7 +811,7 @@ async fn side_conn(url: &str) -> compio_postgres::Client {
 
 #[compio::test]
 async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "status-drift").await;
     let creator = make_creator(&fx.state, "status-drift").await;
@@ -848,7 +850,7 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
 
 #[compio::test]
 async fn fully_consistent_state_produces_no_findings() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "consistent").await;
     let creator = make_creator(&fx.state, "consistent").await;
@@ -894,7 +896,7 @@ async fn fully_consistent_state_produces_no_findings() {
 
 #[compio::test]
 async fn second_sweep_does_not_duplicate_findings() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "idem").await;
     let creator = make_creator(&fx.state, "idem").await;
@@ -921,7 +923,7 @@ async fn second_sweep_does_not_duplicate_findings() {
 
 #[compio::test]
 async fn concurrent_tick_single_flights_under_advisory_lock() {
-    let Some(url) = db_url() else { eprintln!("skip: CONTROL_TEST_DB not set"); return };
+    let Some(url) = db_url() else { return };
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "single-flight").await;
     // Hold the reconcile advisory lock on a SEPARATE session (simulating another instance

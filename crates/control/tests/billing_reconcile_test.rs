@@ -35,7 +35,7 @@ use zeroship_control::{
 };
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// `billing_reconcile::tick_with`/`sweep` single-flights fleet-wide via
@@ -1105,7 +1105,6 @@ async fn read_line_snapshot(
 #[compio::test]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "items").await;
@@ -1160,7 +1159,6 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 #[compio::test]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "cu1seg").await;
@@ -1251,7 +1249,6 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 #[compio::test]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "cucap").await;
@@ -1396,7 +1393,6 @@ async fn every_stripe_call_pins_the_api_version() {
 #[compio::test]
 async fn reconcile_is_idempotent_per_period() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "idem").await;
@@ -1450,7 +1446,6 @@ async fn reconcile_is_idempotent_per_period() {
 #[compio::test]
 async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "hdr").await;
@@ -1501,7 +1496,6 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
 #[compio::test]
 async fn create_invoice_sweeps_pending_items_via_include_behavior() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "d1-sweep").await;
@@ -1558,7 +1552,6 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
 #[compio::test]
 async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "d2-expand").await;
@@ -1605,7 +1598,6 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
 #[compio::test]
 async fn create_refund_omits_currency_and_targets_pi_directly() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "d2-refund").await;
@@ -1663,7 +1655,6 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
 #[compio::test]
 async fn setup_session_creates_customer_once() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "setup").await;
@@ -1705,7 +1696,6 @@ async fn setup_session_creates_customer_once() {
 #[compio::test]
 async fn reconcile_groups_apps_by_owner_via_app_members() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "owner").await;
@@ -1763,7 +1753,6 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
 #[compio::test]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "crash").await;
@@ -1836,7 +1825,6 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 #[compio::test]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "nofx").await;
@@ -2032,7 +2020,6 @@ impl StripeApi for FailAfterFirstItem {
 #[compio::test]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "partial").await;
@@ -2183,7 +2170,6 @@ impl StripeApi for PostThenCrash {
 #[compio::test]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "c1crash").await;
@@ -2258,7 +2244,6 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 #[compio::test]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "c1within").await;
@@ -2382,7 +2367,6 @@ impl StripeApi for CrashOnFinalize {
 #[compio::test]
 async fn crash_before_finalize_finalizes_original_draft_after_24h() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "c2crash").await;
@@ -2484,7 +2468,6 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 #[compio::test]
 async fn billing_setup_is_self_service_and_blocks_cross_creator() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "authz").await;
@@ -2531,7 +2514,6 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
 #[compio::test]
 async fn billing_setup_allows_platform_operator_for_any_creator() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "authz-op").await;
@@ -2583,7 +2565,6 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 #[compio::test]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "force").await;
@@ -2662,7 +2643,6 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 #[compio::test]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "c1replay").await;
@@ -2839,7 +2819,6 @@ impl StripeApi for FinalizeAlreadyFinalized {
 #[compio::test]
 async fn refinalize_already_finalized_converges_locally() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "m2converge").await;
@@ -2977,7 +2956,6 @@ impl StripeApi for FinalizeReturnsFixedId {
 #[compio::test]
 async fn finalize_and_invoice_ref_commit_atomically() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "m1atomic").await;

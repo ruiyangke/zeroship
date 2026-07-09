@@ -2,12 +2,16 @@
 //!
 //! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise.
 
+mod common;
+
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{Registry, StripeStore};
 
-fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
+fn db_url() -> Option<String> {
+    common::require_control_db()
+}
 
 /// MINOR-3: mint a creator id that is BACKED BY A REAL `users` row. The Connect /
 /// payout tables FK creator_id → `users(id)` (`creator_accounts`,
@@ -39,7 +43,6 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 #[compio::test]
 async fn link_account_roundtrip() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let registry = Registry::new(&url).await.expect("registry");

@@ -26,7 +26,7 @@ const METER: &str = "compute_units";
 const SECOND_METER: &str = "db_reads";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -229,7 +229,6 @@ impl MeteringProvider for DbAdjustmentProvider {
 #[compio::test]
 async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "invoice-credit").await;
@@ -269,7 +268,6 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
 #[compio::test]
 async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_reject() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100)
@@ -306,7 +304,6 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
 #[compio::test]
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "multi-metric").await;

@@ -3,6 +3,8 @@
 //! real spend recompute snapshot writer. The provider is recording-only because
 //! this test asserts the boundary call, not an external service.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,27 +20,8 @@ use zeroship_control::metering::provider::{
 use zeroship_control::Registry;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-fn db_url(test_name: &str) -> Option<String> {
-    match std::env::var("CONTROL_TEST_DB") {
-        Ok(url) => Some(url),
-        Err(_) => {
-            loud_control_db_skip(test_name);
-            None
-        }
-    }
-}
-
-fn loud_control_db_skip(test_name: &str) {
-    use std::io::Write as _;
-
-    let msg = format!(
-        "\n================ BILLING DB TEST SKIPPED ================\n\
-         {test_name}: CONTROL_TEST_DB is unset; this test did not exercise Postgres.\n\
-         Export CONTROL_TEST_DB=postgres://postgres:zeroship@localhost:5440/control_billing_test\n\
-         or run tests/run_billing_suite.sh for the billing gate.\n\
-         ==========================================================\n"
-    );
-    let _ = std::io::stderr().write_all(msg.as_bytes());
+fn db_url(_test_name: &str) -> Option<String> {
+    common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> Arc<compio_postgres::Client> {

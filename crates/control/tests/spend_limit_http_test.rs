@@ -33,7 +33,7 @@ use zeroship_control::{
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -139,7 +139,6 @@ fn spend_limit_route(cfg: &mut web::ServiceConfig) {
 #[compio::test]
 async fn get_spend_limit_returns_the_app_spend_limit_override() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let (state, blob_root, deploy_tmp_dir) = build_state(&url).await;

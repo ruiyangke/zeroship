@@ -9,6 +9,8 @@
 //! have changeset 0039 applied (drop+recreate `zeroship_billing_test`, re-run
 //! `ops/db-migrate.sh update`).
 
+mod common;
+
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
@@ -18,7 +20,7 @@ use zeroship_control::Registry;
 use zeroship_core::types::SpendState;
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// `SpendEngine::evaluate_all` is a FLEET-WIDE sweep (`SELECT id FROM apps` →
@@ -128,7 +130,6 @@ async fn read_state(
 #[compio::test]
 async fn evaluate_all_persists_and_returns_transitions() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -178,7 +179,6 @@ async fn evaluate_all_persists_and_returns_transitions() {
 #[compio::test]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -241,7 +241,6 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // i64::MAX)` — a silent clamp that wrote a Block state row, so enforcement
     // Blocked an app that reconcile would skip (unbilled): the two disagreed.
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -310,7 +309,6 @@ async fn raising_limit_recovers_block_immediately() {
     // recovers to Allow on the next tick once `set_limit` raises the cap far
     // above the deadband (deadband would otherwise hold Block at a fixed cap).
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -353,7 +351,6 @@ async fn raising_limit_recovers_block_immediately() {
 #[compio::test]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -408,7 +405,6 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
 #[compio::test]
 async fn transition_history_row_binds_non_null_period() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;

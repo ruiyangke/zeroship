@@ -44,7 +44,7 @@ fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {

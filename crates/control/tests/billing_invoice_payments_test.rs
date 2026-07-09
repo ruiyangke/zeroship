@@ -21,13 +21,15 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::invoice_payments::{append_charge, cash_collected};
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -103,7 +105,6 @@ async fn finalize(client: &compio_postgres::Client, inv: &str, total: i64) {
 #[compio::test]
 async fn invoice_payments_is_append_only() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -148,7 +149,6 @@ async fn invoice_payments_is_append_only() {
 #[compio::test]
 async fn partial_unique_index_releases_period_only_on_void() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -227,7 +227,6 @@ async fn partial_unique_index_releases_period_only_on_void() {
 #[compio::test]
 async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;
@@ -287,7 +286,6 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
 #[compio::test]
 async fn pr1_schema_objects_present() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let client = pg(&url).await;

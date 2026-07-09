@@ -51,7 +51,7 @@ use zeroship_control::tax::{TaxAmount, TaxContext, TaxProvider, TaxProviderKind}
 use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    common::require_control_db()
 }
 
 /// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize the
@@ -499,7 +499,6 @@ async fn insert_grant(
 #[compio::test]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(
@@ -554,7 +553,6 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 #[compio::test]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     // Inject the FAKE provider the SAME way Native is injected (the Arc slot) — (c).
@@ -609,7 +607,6 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 #[compio::test]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fake = Arc::new(FakeTaxProvider::new(250));
@@ -680,7 +677,6 @@ impl TaxProvider for ErrTaxProvider {
 #[compio::test]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(&url, "tax-err", Arc::new(ErrTaxProvider) as Arc<dyn TaxProvider>).await;
@@ -738,7 +734,6 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 #[compio::test]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(
@@ -790,7 +785,6 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 #[compio::test]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fx = build_fixture(
@@ -877,7 +871,6 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 #[compio::test]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
     let fake = Arc::new(FakeTaxProvider::new(200));
