@@ -8,18 +8,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_control::metering::provider::{
     assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
-    DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LineItem, LiteStore,
-    MeteringProvider, ProviderCtx, ProviderError, StaticSecretResolver, SubjectRef, UsageEvent,
-    UsageSubject, WebhookEvent, WebhookOutcome,
+    DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, MeteringProvider,
+    ProviderCtx, ProviderError, StaticSecretResolver, SubjectRef, UsageEvent, UsageSubject,
 };
 
 const METER: &str = "compute_units";
@@ -30,7 +27,6 @@ const PERIOD: BillingPeriod = BillingPeriod {
 };
 const LAGO_API_KEY: &str = "lago_hmac_conformance";
 const STRIPE_SECRET: &str = "sk_test_conformance";
-const STRIPE_WEBHOOK_SECRET: &str = "whsec_conformance";
 
 #[compio::test]
 async fn provider_conformance_lago() {
@@ -79,23 +75,11 @@ impl Adapter {
 
     fn expected_capabilities(self) -> Capabilities {
         match self {
-            Self::Lago => {
-                Capabilities::METER
-                    | Capabilities::RATE
-                    | Capabilities::INVOICE
-                    | Capabilities::WEBHOOK
-            }
-            Self::Lite => Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            Self::Lago => Capabilities::METER | Capabilities::INVOICE,
+            Self::Lite => Capabilities::METER | Capabilities::INVOICE,
             Self::OpenMeter => Capabilities::METER,
-            Self::StripeMeters => {
-                Capabilities::METER
-                    | Capabilities::RATE
-                    | Capabilities::INVOICE
-                    | Capabilities::WEBHOOK
-            }
-            Self::StripeInvoice => {
-                Capabilities::RATE | Capabilities::INVOICE | Capabilities::WEBHOOK
-            }
+            Self::StripeMeters => Capabilities::METER | Capabilities::INVOICE,
+            Self::StripeInvoice => Capabilities::INVOICE,
         }
     }
 }
@@ -152,9 +136,6 @@ async fn run_provider_conformance(adapter: Adapter) {
         assert_invoice_close_idempotent(&fx).await;
     }
 
-    if fx.provider.as_webhook().is_some() {
-        assert_webhook_verify_and_redelivery(&fx).await;
-    }
 }
 
 async fn build_fixture(adapter: Adapter) -> Fixture {
@@ -224,18 +205,11 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 serde_json::json!({
                     "stripe_meters": {
                         "secret_key": "stripe_secret_key",
-                        "webhook_secret": "stripe_webhook_secret",
                         "base_url": mock.base_url.clone(),
                     }
                 }),
-                HashMap::from([
-                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
-                    (
-                        "stripe_webhook_secret".to_string(),
-                        STRIPE_WEBHOOK_SECRET.to_string(),
-                    ),
-                ]),
-                None,
+                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
+                Some(Arc::new(FakeLiteStore::default())),
             )
             .expect("stripe_meters provider builds");
             Fixture {
@@ -251,16 +225,9 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 serde_json::json!({
                     "stripe_invoice": {
                         "secret_key": "stripe_secret_key",
-                        "webhook_secret": "stripe_webhook_secret",
                     }
                 }),
-                HashMap::from([
-                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
-                    (
-                        "stripe_webhook_secret".to_string(),
-                        STRIPE_WEBHOOK_SECRET.to_string(),
-                    ),
-                ]),
+                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 Some(store.clone()),
             )
             .expect("stripe_invoice provider builds");
@@ -297,16 +264,8 @@ fn assert_capabilities_consistent(provider: &Arc<dyn MeteringProvider>, expected
         provider.as_meter().is_some()
     );
     assert_eq!(
-        provider.capabilities().contains(Capabilities::RATE),
-        provider.as_rater().is_some()
-    );
-    assert_eq!(
         provider.capabilities().contains(Capabilities::INVOICE),
         provider.as_invoicer().is_some()
-    );
-    assert_eq!(
-        provider.capabilities().contains(Capabilities::WEBHOOK),
-        provider.as_webhook().is_some()
     );
 }
 
@@ -356,6 +315,11 @@ fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider
         "openmeter" => assert_eq!(provider.correction(), CorrectionCapability::None),
         "stripe_meters" | "stripe_invoice" | "lite" => {
             assert_eq!(provider.correction(), CorrectionCapability::InvoiceCredit);
+            assert!(
+                provider.as_invoicer().is_some(),
+                "{} InvoiceCredit correction must expose Invoicer",
+                provider.id()
+            );
         }
         other => panic!("unexpected provider in conformance suite: {other}"),
     }
@@ -507,12 +471,12 @@ async fn forward_under_contract(
             let _current = meter.read_aggregate(q).await?;
             Ok(IngestAck {
                 accepted: 0,
-                deduped: batch.len(),
+                deduped: Some(batch.len()),
             })
         }
         DedupTtl::NotApplicable => Ok(IngestAck {
             accepted: 0,
-            deduped: batch.len(),
+            deduped: Some(batch.len()),
         }),
     }
 }
@@ -520,19 +484,12 @@ async fn forward_under_contract(
 async fn assert_invoice_close_idempotent(fx: &Fixture) {
     let invoicer = fx.provider.as_invoicer().expect("invoice capability");
     let subject = subject_ref("invoice");
-    let lines = vec![LineItem {
-        app_id: None,
-        description: "Conformance usage".to_string(),
-        amount_cents: 123,
-        quantity: 123,
-        metadata: BTreeMap::new(),
-    }];
     let first = invoicer
-        .close_period(&subject, PERIOD, &lines)
+        .close_period(&subject, PERIOD)
         .await
         .expect("first close period");
     let second = invoicer
-        .close_period(&subject, PERIOD, &lines)
+        .close_period(&subject, PERIOD)
         .await
         .expect("retry close period");
     assert_eq!(second, first, "{} close_period is not idempotent", fx.provider.id());
@@ -544,44 +501,6 @@ async fn assert_invoice_close_idempotent(fx: &Fixture) {
             fx.provider.id()
         );
     }
-}
-
-async fn assert_webhook_verify_and_redelivery(fx: &Fixture) {
-    let webhook = fx.provider.as_webhook().expect("webhook capability");
-    let payload = br#"{"id":"evt_conformance","type":"invoice.paid","data":{"object":{"id":"in_conf"}}}"#;
-    let tampered_payload = br#"{"id":"evt_conformance","type":"invoice.voided"}"#;
-    let (valid, tampered) = match fx.adapter {
-        Adapter::Lago => (
-            lago_signature(payload, LAGO_API_KEY),
-            lago_signature(tampered_payload, LAGO_API_KEY),
-        ),
-        _ => {
-            let now = chrono::Utc::now().timestamp();
-            (
-                stripe_signature(payload, STRIPE_WEBHOOK_SECRET, now),
-                stripe_signature(tampered_payload, STRIPE_WEBHOOK_SECRET, now),
-            )
-        }
-    };
-
-    assert!(
-        webhook.verify(payload, &tampered).is_err(),
-        "{} accepted a tampered webhook signature",
-        fx.provider.id()
-    );
-    webhook
-        .verify(payload, &valid)
-        .expect("valid webhook signature accepted");
-
-    let event = WebhookEvent {
-        provider: fx.provider.id().to_string(),
-        event_type: "invoice.paid".to_string(),
-        payload: serde_json::from_slice(payload).expect("payload JSON"),
-    };
-    let first = webhook.handle(event.clone()).await.expect("first webhook handle");
-    let second = webhook.handle(event).await.expect("redelivery handle");
-    assert_eq!(first, WebhookOutcome::Processed);
-    assert_eq!(second, WebhookOutcome::Ignored);
 }
 
 async fn assert_fail_closed_config(adapter: Adapter) {
@@ -638,7 +557,6 @@ async fn assert_fail_closed_config(adapter: Adapter) {
         }
         Adapter::StripeInvoice => {
             assert_provider_config_fails("stripe_invoice", serde_json::json!({}), HashMap::new(), None);
-            let store = Arc::new(FakeLiteStore::default());
             assert_provider_config_fails(
                 "stripe_invoice",
                 serde_json::json!({
@@ -647,23 +565,6 @@ async fn assert_fail_closed_config(adapter: Adapter) {
                     }
                 }),
                 HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
-                Some(store.clone()),
-            );
-            assert_provider_config_fails(
-                "stripe_invoice",
-                serde_json::json!({
-                    "stripe_invoice": {
-                        "secret_key": "stripe_secret_key",
-                        "webhook_secret": "stripe_webhook_secret",
-                    }
-                }),
-                HashMap::from([
-                    ("stripe_secret_key".to_string(), STRIPE_SECRET.to_string()),
-                    (
-                        "stripe_webhook_secret".to_string(),
-                        STRIPE_WEBHOOK_SECRET.to_string(),
-                    ),
-                ]),
                 None,
             );
         }
@@ -690,22 +591,6 @@ fn expect_provider_error(
         Ok(provider) => panic!("provider factory unexpectedly built {}", provider.id()),
         Err(err) => err,
     }
-}
-
-fn stripe_signature(payload: &[u8], secret: &str, t: i64) -> String {
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts key");
-    mac.update(format!("{t}.").as_bytes());
-    mac.update(payload);
-    let sig = mac.finalize().into_bytes();
-    format!("t={t},v1={}", hex::encode(sig.as_slice()))
-}
-
-fn lago_signature(payload: &[u8], secret: &str) -> String {
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts key");
-    mac.update(payload);
-    BASE64.encode(mac.finalize().into_bytes())
 }
 
 fn subject_ref(label: &str) -> SubjectRef {
@@ -794,7 +679,10 @@ impl LiteStore for FakeLiteStore {
                 .entry((event.subject.creator, period_start, event.meter.clone()))
                 .or_insert(0) += event.value;
         }
-        Ok(IngestAck { accepted, deduped })
+        Ok(IngestAck {
+            accepted,
+            deduped: Some(deduped),
+        })
     }
 
     async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {

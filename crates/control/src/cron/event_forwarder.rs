@@ -41,7 +41,7 @@ impl Default for EventForwarderConfig {
 pub struct EventForwarderCycle {
     pub polled: usize,
     pub ingested: usize,
-    pub deduped: usize,
+    pub deduped: Option<usize>,
     pub dead_lettered: usize,
     pub committed: usize,
 }
@@ -264,7 +264,7 @@ pub async fn run(
                     tracing::info!(
                         polled = cycle.polled,
                         ingested = cycle.ingested,
-                        deduped = cycle.deduped,
+                        deduped = ?cycle.deduped,
                         dead_lettered = cycle.dead_lettered,
                         committed = cycle.committed,
                         "control event_forwarder batch completed"
@@ -348,7 +348,9 @@ pub async fn run_cycle(
         match meter.ingest(&events).await {
             Ok(ack) => {
                 cycle.ingested += ack.accepted;
-                cycle.deduped += ack.deduped;
+                if let Some(deduped) = ack.deduped {
+                    cycle.deduped = Some(cycle.deduped.unwrap_or(0) + deduped);
+                }
             }
             Err(err) if err.is_permanent_reject() => {
                 let reason = err.reject_reason();
@@ -475,7 +477,10 @@ mod tests {
                     deduped += 1;
                 }
             }
-            Ok(IngestAck { accepted, deduped })
+            Ok(IngestAck {
+                accepted,
+                deduped: Some(deduped),
+            })
         }
 
         async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
@@ -557,7 +562,7 @@ mod tests {
         assert_eq!(first.committed, 3);
         assert_eq!(second.polled, 3);
         assert_eq!(second.ingested, 0);
-        assert_eq!(second.deduped, 3);
+        assert_eq!(second.deduped, Some(3));
         assert_eq!(
             meter
                 .accepted_ids

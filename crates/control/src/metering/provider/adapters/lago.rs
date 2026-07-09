@@ -4,24 +4,16 @@
 //! plus the `register_builtin` entry in `adapters/mod.rs`, with no provider
 //! trait, registry, stack-builder, forwarder, or pipeline edits.
 
-use std::collections::HashSet;
-use std::sync::Mutex;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
 
 use crate::metering::provider::{
     AggregateQuery, Backfiller, BillingPeriod, Capabilities, ClosedPeriodPolicy,
     CorrectionCapability, DedupContract, DedupKey, DedupTtl, HttpClientFactory, IngestAck,
-    InvoiceRef, LineItem, Meter, MeteringProvider, ProviderCtx, ProviderError, Rater, RatedInput,
-    SecretHandle, SubjectRef, UsageEvent, WebhookEvent, WebhookOutcome, WebhookSink,
+    InvoiceRef, Meter, MeteringProvider, ProviderCtx, ProviderError, SecretHandle, SubjectRef,
+    UsageEvent,
 };
-
-type HmacSha256 = Hmac<Sha256>;
 
 const LAGO_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -36,7 +28,6 @@ pub struct LagoProvider {
     api_url: String,
     api_key: crate::SecretString,
     http: HttpClientFactory,
-    seen_webhooks: Mutex<HashSet<String>>,
 }
 
 pub fn factory(ctx: &ProviderCtx) -> Result<std::sync::Arc<dyn MeteringProvider>, ProviderError> {
@@ -56,7 +47,6 @@ pub fn factory(ctx: &ProviderCtx) -> Result<std::sync::Arc<dyn MeteringProvider>
         api_url: cfg.api_url.trim_end_matches('/').to_string(),
         api_key,
         http: ctx.http,
-        seen_webhooks: Mutex::new(HashSet::new()),
     }))
 }
 
@@ -191,7 +181,7 @@ impl Meter for LagoProvider {
         }
         Ok(IngestAck {
             accepted: batch.len(),
-            deduped: 0,
+            deduped: None,
         })
     }
 
@@ -239,24 +229,11 @@ impl Backfiller for LagoProvider {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Rater for LagoProvider {
-    async fn rate(
-        &self,
-        _subject: &SubjectRef,
-        _period: BillingPeriod,
-        _input: &RatedInput,
-    ) -> Result<Vec<LineItem>, ProviderError> {
-        Ok(Vec::new())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
 impl crate::metering::provider::Invoicer for LagoProvider {
     async fn close_period(
         &self,
         _subject: &SubjectRef,
         _period: BillingPeriod,
-        _lines: &[LineItem],
     ) -> Result<InvoiceRef, ProviderError> {
         Ok(InvoiceRef(None))
     }
@@ -270,75 +247,20 @@ impl crate::metering::provider::Invoicer for LagoProvider {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl WebhookSink for LagoProvider {
-    fn verify(&self, payload: &[u8], sig: &str) -> Result<(), ProviderError> {
-        let mut mac =
-            HmacSha256::new_from_slice(self.api_key.expose_secret().as_bytes()).map_err(|e| {
-                ProviderError::Config(format!("lago: invalid HMAC key material: {e}"))
-            })?;
-        mac.update(payload);
-        let expected = BASE64.encode(mac.finalize().into_bytes());
-        if expected
-            .as_bytes()
-            .ct_eq(sig.trim().as_bytes())
-            .into()
-        {
-            Ok(())
-        } else {
-            Err(ProviderError::PermanentReject {
-                status: 400,
-                message: "lago webhook signature rejected".to_string(),
-            })
-        }
-    }
-
-    async fn handle(&self, event: WebhookEvent) -> Result<WebhookOutcome, ProviderError> {
-        let event_id = event
-            .payload
-            .get("id")
-            .or_else(|| event.payload.get("webhook_id"))
-            .or_else(|| event.payload.get("lago_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| ProviderError::PermanentReject {
-                status: 400,
-                message: "lago webhook event missing id".to_string(),
-            })?;
-        let mut seen = self.seen_webhooks.lock().map_err(|_| {
-            ProviderError::Store("lago webhook idempotency lock poisoned".to_string())
-        })?;
-        if seen.insert(event_id) {
-            Ok(WebhookOutcome::Processed)
-        } else {
-            Ok(WebhookOutcome::Ignored)
-        }
-    }
-}
-
 impl MeteringProvider for LagoProvider {
     fn id(&self) -> &str {
         "lago"
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE | Capabilities::WEBHOOK
+        Capabilities::METER | Capabilities::INVOICE
     }
 
     fn as_meter(&self) -> Option<&dyn Meter> {
         Some(self)
     }
 
-    fn as_rater(&self) -> Option<&dyn Rater> {
-        Some(self)
-    }
-
     fn as_invoicer(&self) -> Option<&dyn crate::metering::provider::Invoicer> {
-        Some(self)
-    }
-
-    fn as_webhook(&self) -> Option<&dyn WebhookSink> {
         Some(self)
     }
 

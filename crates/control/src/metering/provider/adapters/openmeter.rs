@@ -77,7 +77,7 @@ impl Meter for OpenMeterProvider {
         }
         Ok(IngestAck {
             accepted: batch.len(),
-            deduped: 0,
+            deduped: None,
         })
     }
 
