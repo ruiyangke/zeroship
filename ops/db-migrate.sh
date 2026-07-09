@@ -56,8 +56,11 @@ else
   cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
     -p zeroship-migrate --bin zeroship-migrate-recorder-child
   export ZEROSHIP_RECORDER_CHILD="${ZEROSHIP_RECORDER_CHILD:-$ROOT/target/debug/zeroship-migrate-recorder-child}"
+  # The `zeroship-migrate` CLI bin is behind `required-features = ["standalone-cli"]`
+  # so the crate can be depended on as a pure library without pulling the clap CLI
+  # surface. A from-source run must enable it explicitly.
   RUNNER=(cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
-          -p zeroship-migrate --bin zeroship-migrate --)
+          -p zeroship-migrate --bin zeroship-migrate --features standalone-cli --)
 fi
 
 exec "${RUNNER[@]}" \

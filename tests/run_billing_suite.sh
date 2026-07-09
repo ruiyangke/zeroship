@@ -47,7 +47,9 @@
 #   billing_credit_test, billing_refund_void_test, billing_dispute_test,
 #   billing_notify_test, stripe_webhook_test, stripe_reconcile_test,
 #   spend_reconcile_test, billing_safety_net_test, stream_forwarder_recompute_test,
-#   pricing_config_test, plan_catalog, spend, metering, stripe_store.
+#   pricing_config_test, plan_catalog, spend, stripe_store. (The zeroship-metering
+#   outbox WAL lib tests run separately below — a `-p zeroship-metering --lib`
+#   target, not a zeroship-control integration binary.)
 # This runner runs ALL of them serially (one binary at a time) so the operator
 # never has to remember which bucket a binary is in — it is always correct.
 #
@@ -116,7 +118,6 @@ BILLING_TESTS=(
   pricing_config_test
   plan_catalog
   spend
-  metering
   stripe_store
   provider_conformance
   # --- parallel-safe in principle; run here too for one correct gate ---
