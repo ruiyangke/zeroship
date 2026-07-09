@@ -21,9 +21,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
+use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
+use zeroship_plugin_workflow::errors::WorkflowError;
+use zeroship_plugin_workflow::store::pg;
 
-use crate::registry::RegistryError;
 use crate::cron::workflow_engine;
+use crate::registry::RegistryError;
 use crate::{workflow_limits, AppState};
 
 pub const APP_ID_HEADER: &str = "x-zeroship-app-id";
@@ -247,7 +250,7 @@ impl WorkflowApiError {
                 "message": msg,
             })),
             Self::JournalCapExceeded(msg) => web::HttpResponse::TooManyRequests().json(&json!({
-                "error": workflow_limits::WORKFLOW_STATE_CAP_ERROR_CODE,
+                "error": WORKFLOW_STATE_CAP_ERROR_CODE,
                 "message": msg,
             })),
             Self::PayloadTooLarge(msg) => {
@@ -279,6 +282,16 @@ impl From<RegistryError> for WorkflowApiError {
             RegistryError::AlreadyExists(msg) | RegistryError::Conflict(msg) => Self::Conflict(msg),
             RegistryError::Database(msg) => Self::Database(msg),
             RegistryError::FxUnresolved => Self::Database(value.to_string()),
+        }
+    }
+}
+
+impl From<WorkflowError> for WorkflowApiError {
+    fn from(value: WorkflowError) -> Self {
+        match value {
+            WorkflowError::Invalid(msg) => Self::BadRequest(msg),
+            WorkflowError::Deadlock(msg) => Self::Database(format!("retryable deadlock: {msg}")),
+            WorkflowError::Db(msg) => Self::Database(msg),
         }
     }
 }
@@ -921,10 +934,10 @@ where
     workflow_limits::lock_app_journal_accounting(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    let limits = workflow_limits::limits_for_app(conn, app_id)
+    let limits = pg::limits_for_app(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    if workflow_limits::cap_exceeded(0, input_journal_bytes, limits.run_max_bytes) {
+    if cap_exceeded(0, input_journal_bytes, limits.run_max_bytes) {
         return Err(WorkflowApiError::JournalCapExceeded(format!(
             "workflow run input exceeds per-run journal cap ({} > {})",
             input_journal_bytes, limits.run_max_bytes
@@ -975,7 +988,7 @@ where
     workflow_limits::lock_app_journal_accounting(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    let limits = workflow_limits::limits_for_app(conn, app_id)
+    let limits = pg::limits_for_app(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
     check_app_journal_capacity(conn, app_id, payload_journal_bytes, limits.app_max_bytes).await
@@ -993,7 +1006,7 @@ where
     let current = workflow_limits::app_journal_bytes(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    if workflow_limits::cap_exceeded(current, delta, app_max_bytes) {
+    if cap_exceeded(current, delta, app_max_bytes) {
         return Err(WorkflowApiError::JournalCapExceeded(format!(
             "workflow app journal cap exceeded (current {current} + delta {delta} > {app_max_bytes})"
         )));
@@ -1153,7 +1166,10 @@ where
     let key = normalize_key(Some(dedup_key.to_string()))
         .map_err(workflow_api_error_to_registry)?
         .ok_or_else(|| RegistryError::InvalidInput("scheduled workflow key is missing".to_string()))?;
-    let input_journal_bytes = workflow_limits::json_column_size(tx, input).await?;
+    let input_journal_bytes = pg::json_column_size(tx, input)
+        .await
+        .map_err(WorkflowApiError::from)
+        .map_err(workflow_api_error_to_registry)?;
     workflow_limits::lock_app_journal_accounting(tx, app_id).await?;
     join_or_create_keyed_run(
         tx,
@@ -1213,7 +1229,7 @@ async fn create_run_inner(
 
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
-    let input_journal_bytes = workflow_limits::json_column_size(&tx, &body.input)
+    let input_journal_bytes = pg::json_column_size(&tx, &body.input)
         .await
         .map_err(WorkflowApiError::from)?;
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)
@@ -1379,7 +1395,7 @@ async fn start_many_inner(
     let mut results = Vec::with_capacity(body.items.len());
     let mut seen_keys = BTreeSet::new();
     for item in body.items {
-        let input_journal_bytes = workflow_limits::json_column_size(&tx, &item.input)
+        let input_journal_bytes = pg::json_column_size(&tx, &item.input)
             .await
             .map_err(WorkflowApiError::from)?;
         let key = normalize_key(item.key)?;
@@ -1856,7 +1872,7 @@ pub async fn signal_run(
         Ok(tx) => tx,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
-    let payload_journal_bytes = match workflow_limits::json_column_size(&tx, &body.payload).await {
+    let payload_journal_bytes = match pg::json_column_size(&tx, &body.payload).await {
         Ok(bytes) => bytes,
         Err(e) => return WorkflowApiError::from(e).response(),
     };
@@ -2210,7 +2226,7 @@ async fn deliver_ingress_run_signal(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    let payload_journal_bytes = workflow_limits::json_column_size(&tx, payload)
+    let payload_journal_bytes = pg::json_column_size(&tx, payload)
         .await
         .map_err(WorkflowApiError::from)?;
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)

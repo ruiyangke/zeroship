@@ -141,6 +141,10 @@ impl Registry {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 
+    pub(crate) fn workflow_store_db_url(&self) -> &str {
+        &self.db_url
+    }
+
     /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
     /// Returns a clean [`RegistryError::InvalidInput`] (not a raw FK violation)
     /// for an unknown or archived plan — the server-side gate that closes the

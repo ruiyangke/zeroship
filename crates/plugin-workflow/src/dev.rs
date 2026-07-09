@@ -259,7 +259,7 @@ impl<'de> Deserialize<'de> for StepResult {
         D: serde::Deserializer<'de>,
     {
         let wire = StepResultWire::deserialize(deserializer)?;
-        let (checkpoints, run_update) = fold_outcomes(&wire.outcomes)
+        let (checkpoints, run_update) = fold_dev_outcomes(&wire.outcomes)
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             run_id: wire.run_id,
@@ -849,6 +849,8 @@ impl DevWorkflowEngine {
         {
             return Ok(false);
         }
+
+        reject_child_checkpoints_for_dev(&mut result);
 
         let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
         let mut wrote_checkpoints = 0usize;
@@ -1479,240 +1481,167 @@ fn insert_resolved_step(
     })
 }
 
-fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
-    let mut checkpoints = Vec::new();
-    let mut run_update = RunUpdate::Queued;
-    let mut trailing_seen = false;
-    let mut saw_step_failure = false;
-
-    for (idx, outcome) in outcomes.iter().enumerate() {
-        let is_step_checkpoint = matches!(
-            outcome,
-            StepOutcome::StepCompleted { .. }
-                | StepOutcome::StepFailed { .. }
-                | StepOutcome::RunFailed {
-                    ordinal: Some(_),
-                    name: Some(_),
-                    ..
-                }
-        );
-        if trailing_seen {
-            return Err(
-                "workflow outcome batch has entries after a suspension or terminal outcome"
-                    .to_string(),
-            );
-        }
-        if !is_step_checkpoint {
-            if idx + 1 != outcomes.len() {
-                return Err(
-                    "workflow suspension or terminal outcome must be the trailing batch entry"
-                        .to_string(),
-                );
-            }
-            trailing_seen = true;
-        }
-
-        match outcome {
-            StepOutcome::StepCompleted {
-                ordinal,
-                name,
-                name_occurrence,
-                step_kind,
-                compensable,
-                compensation_max_attempts,
-                output,
-            } => {
-                if !matches!(step_kind.as_str(), "run" | "sideEffect") {
-                    return Err(format!(
-                        "workflow StepCompleted stepKind must be run or sideEffect, got {step_kind:?}"
-                    ));
-                }
-                checkpoints.push(StepCheckpoint {
-                    ordinal: *ordinal,
-                    name: name.clone(),
-                    name_occurrence: *name_occurrence,
-                    kind: step_kind.clone(),
-                    state: "completed".to_string(),
-                    output: output.clone(),
-                    error: None,
-                    wake_at: None,
-                    signal_type: None,
-                    max_signal_age_ms: None,
-                    consumed_signal_id: None,
-                    topic: None,
-                    child_run_id: None,
-                    compensation_state: (*compensable && step_kind == "run")
-                        .then(|| "pending".to_string()),
-                    compensation_max_attempts: (*compensation_max_attempts).max(1),
-                });
-            }
-            StepOutcome::StepFailed {
-                ordinal,
-                name,
-                name_occurrence,
-                error,
-            } => {
-                checkpoints.push(failed_step_checkpoint(
-                    *ordinal,
-                    name.clone(),
-                    *name_occurrence,
-                    error.clone(),
-                ));
-                saw_step_failure = true;
-                run_update = RunUpdate::Queued;
-            }
-            StepOutcome::RunCompleted { output } => {
-                run_update = RunUpdate::Completed {
-                    output: output.clone(),
-                };
-            }
-            StepOutcome::RunFailed {
-                ordinal,
-                name,
-                name_occurrence,
-                error,
-            } => match (ordinal, name) {
-                (Some(ordinal), Some(name)) => {
-                    checkpoints.push(failed_step_checkpoint(
-                        *ordinal,
-                        name.clone(),
-                        *name_occurrence,
-                        error.clone(),
-                    ));
-                    saw_step_failure = true;
-                    run_update = RunUpdate::Queued;
-                }
-                (None, None) => {
-                    run_update = RunUpdate::Failed {
-                        error: error.clone(),
-                    };
-                }
-                _ => {
-                    return Err(
-                        "workflow RunFailed outcome must include both ordinal and name for a failed step, or neither for terminal run failure"
-                            .to_string(),
-                    );
-                }
-            },
-            StepOutcome::Sleep {
-                ordinal,
-                name,
-                name_occurrence,
-                wake_at,
-            } => {
-                checkpoints.push(StepCheckpoint {
-                    ordinal: *ordinal,
-                    name: name.clone(),
-                    name_occurrence: *name_occurrence,
-                    kind: "sleep".to_string(),
-                    state: "running".to_string(),
-                    output: None,
-                    error: None,
-                    wake_at: Some(*wake_at),
-                    signal_type: None,
-                    max_signal_age_ms: None,
-                    consumed_signal_id: None,
-                    topic: None,
-                    child_run_id: None,
-                    compensation_state: None,
-                    compensation_max_attempts: 1,
-                });
-                if !saw_step_failure {
-                    run_update = RunUpdate::Sleeping {
-                        wake_at: Some(*wake_at),
-                    };
-                }
-            }
-            StepOutcome::Wait {
-                ordinal,
-                name,
-                name_occurrence,
-                wake_at,
-                timeout,
-                signal_type,
-                max_signal_age_ms,
-                consumed_signal_id,
-                topic,
-            } => {
-                let wake_at = wake_at.or(*timeout);
-                checkpoints.push(StepCheckpoint {
-                    ordinal: *ordinal,
-                    name: name.clone(),
-                    name_occurrence: *name_occurrence,
-                    kind: "wait_signal".to_string(),
-                    state: "running".to_string(),
-                    output: None,
-                    error: None,
-                    wake_at,
-                    signal_type: signal_type.clone().or_else(|| Some(name.clone())),
-                    max_signal_age_ms: *max_signal_age_ms,
-                    consumed_signal_id: consumed_signal_id.clone(),
-                    topic: topic.clone(),
-                    child_run_id: None,
-                    compensation_state: None,
-                    compensation_max_attempts: 1,
-                });
-                if !saw_step_failure {
-                    run_update = RunUpdate::Waiting { wake_at };
-                }
-            }
-            StepOutcome::Child { ordinal, name, name_occurrence } => {
-                checkpoints.push(StepCheckpoint {
-                    ordinal: *ordinal,
-                    name: name.clone(),
-                    name_occurrence: *name_occurrence,
-                    kind: "child".to_string(),
-                    state: "failed".to_string(),
-                    output: None,
-                    error: Some(json!({
-                        "type": "WorkflowUnsupportedError",
-                        "message": "child workflows are not supported by the local dev engine in this slice",
-                        "retryable": false,
-                    })),
-                    wake_at: None,
-                    signal_type: None,
-                    max_signal_age_ms: None,
-                    consumed_signal_id: None,
-                    topic: None,
-                    child_run_id: None,
-                    compensation_state: None,
-                    compensation_max_attempts: 1,
-                });
-                saw_step_failure = true;
-                run_update = RunUpdate::Queued;
-            }
-        }
-    }
-    if saw_step_failure {
-        run_update = RunUpdate::Queued;
-    }
-    Ok((checkpoints, run_update))
+fn fold_dev_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
+    let shared_outcomes = outcomes
+        .iter()
+        .map(shared_step_outcome)
+        .collect::<Vec<_>>();
+    let (checkpoints, run_update) = crate::engine::fold_outcomes(&shared_outcomes)?;
+    Ok((
+        checkpoints.into_iter().map(dev_step_checkpoint).collect(),
+        dev_run_update(run_update),
+    ))
 }
 
-fn failed_step_checkpoint(
-    ordinal: i32,
-    name: String,
-    name_occurrence: i32,
-    error: Value,
-) -> StepCheckpoint {
+fn shared_step_outcome(outcome: &StepOutcome) -> crate::engine::StepOutcome {
+    match outcome {
+        StepOutcome::StepCompleted {
+            ordinal,
+            name,
+            name_occurrence,
+            step_kind,
+            compensable,
+            compensation_max_attempts,
+            output,
+        } => crate::engine::StepOutcome::StepCompleted {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            step_kind: step_kind.clone(),
+            compensable: *compensable,
+            compensation_max_attempts: *compensation_max_attempts,
+            output: output.clone(),
+            output_ref: None,
+        },
+        StepOutcome::StepFailed {
+            ordinal,
+            name,
+            name_occurrence,
+            error,
+        } => crate::engine::StepOutcome::StepFailed {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            error: error.clone(),
+        },
+        StepOutcome::RunCompleted { output } => crate::engine::StepOutcome::RunCompleted {
+            output: output.clone(),
+            output_ref: None,
+        },
+        StepOutcome::RunFailed {
+            ordinal,
+            name,
+            name_occurrence,
+            error,
+        } => crate::engine::StepOutcome::RunFailed {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            error: error.clone(),
+        },
+        StepOutcome::Sleep {
+            ordinal,
+            name,
+            name_occurrence,
+            wake_at,
+        } => crate::engine::StepOutcome::Sleep {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            wake_at: *wake_at,
+        },
+        StepOutcome::Wait {
+            ordinal,
+            name,
+            name_occurrence,
+            wake_at,
+            timeout,
+            signal_type,
+            max_signal_age_ms,
+            consumed_signal_id,
+            topic,
+        } => crate::engine::StepOutcome::Wait {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            wake_at: *wake_at,
+            timeout: *timeout,
+            signal_type: signal_type.clone(),
+            max_signal_age_ms: *max_signal_age_ms,
+            consumed_signal_id: consumed_signal_id.clone(),
+            topic: topic.clone(),
+        },
+        StepOutcome::Child {
+            ordinal,
+            name,
+            name_occurrence,
+        } => crate::engine::StepOutcome::Child {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+            child_workflow_name: name.clone(),
+            input: Value::Null,
+            options: crate::engine::ChildWorkflowOptions::default(),
+        },
+    }
+}
+
+fn dev_step_checkpoint(checkpoint: crate::engine::StepCheckpoint) -> StepCheckpoint {
     StepCheckpoint {
-        ordinal,
-        name,
-        name_occurrence,
-        kind: "run".to_string(),
-        state: "failed".to_string(),
-        output: None,
-        error: Some(error),
-        wake_at: None,
-        signal_type: None,
-        max_signal_age_ms: None,
-        consumed_signal_id: None,
-        topic: None,
-        child_run_id: None,
-        compensation_state: None,
-        compensation_max_attempts: 1,
+        ordinal: checkpoint.ordinal,
+        name: checkpoint.name,
+        name_occurrence: checkpoint.name_occurrence,
+        kind: checkpoint.kind,
+        state: checkpoint.state,
+        output: checkpoint.output,
+        error: checkpoint.error,
+        wake_at: checkpoint.wake_at,
+        signal_type: checkpoint.signal_type,
+        max_signal_age_ms: checkpoint.max_signal_age_ms,
+        consumed_signal_id: checkpoint.consumed_signal_id,
+        topic: checkpoint.topic,
+        child_run_id: checkpoint.child_run_id,
+        compensation_state: checkpoint.compensation_state,
+        compensation_max_attempts: checkpoint.compensation_max_attempts,
     }
 }
+
+fn dev_run_update(update: crate::engine::RunUpdate) -> RunUpdate {
+    match update {
+        crate::engine::RunUpdate::Queued => RunUpdate::Queued,
+        crate::engine::RunUpdate::Sleeping { wake_at } => RunUpdate::Sleeping { wake_at },
+        crate::engine::RunUpdate::Waiting { wake_at } => RunUpdate::Waiting { wake_at },
+        crate::engine::RunUpdate::Completed { output, .. } => RunUpdate::Completed { output },
+        crate::engine::RunUpdate::Failed { error } => RunUpdate::Failed { error },
+        crate::engine::RunUpdate::Stalled { error } => RunUpdate::Stalled { error },
+        crate::engine::RunUpdate::Cancelled => RunUpdate::Cancelled,
+    }
+}
+
+fn dev_child_unsupported_error() -> Value {
+    json!({
+        "type": "WorkflowUnsupportedError",
+        "message": "child workflows are not supported by the local dev engine in this slice",
+        "retryable": false,
+    })
+}
+
+fn reject_child_checkpoints_for_dev(result: &mut StepResult) {
+    let mut rejected = false;
+    for checkpoint in &mut result.checkpoints {
+        if checkpoint.kind == "child" && checkpoint.state == "running" {
+            checkpoint.state = "failed".to_string();
+            checkpoint.output = None;
+            checkpoint.error = Some(dev_child_unsupported_error());
+            checkpoint.wake_at = None;
+            rejected = true;
+        }
+    }
+    if rejected {
+        result.run_update = RunUpdate::Queued;
+    }
+}
+
 
 fn default_step_kind() -> String {
     "run".to_string()
