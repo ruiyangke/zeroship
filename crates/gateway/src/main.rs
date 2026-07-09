@@ -717,12 +717,11 @@ fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{bind_host}:{port}");
 
-    // Spawn the metering flush task (coverage #27). Drains the gateway's
-    // meter every ~10s and POSTs a `UsageReport` to control's
-    // `/internal/usage` — the SAME idempotent ingest the worker uses. The
-    // restart-unique producer base is `$HOSTNAME` (k8s/compose) else the
-    // bind addr; `boot_worker_id` folds the per-boot nonce. Detached
-    // background task: it never sits on the proxy hot path.
+    // Spawn the metering flush task (coverage #27). Drains the gateway's meter
+    // every ~10s and publishes UsageEvents to the billing stream. The
+    // restart-unique producer base is `$HOSTNAME` (k8s/compose) else the bind
+    // addr; `boot_worker_id` folds the per-boot nonce. Detached background
+    // task: it never sits on the proxy hot path.
     let gate_meter_base = std::env::var("HOSTNAME")
         .ok()
         .filter(|s| !s.is_empty())
