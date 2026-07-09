@@ -36,7 +36,7 @@ pub mod streaming;
 pub mod variants;
 
 // Re-exports for external callers (`main.rs` registers these ntex routes).
-pub use dispatch::{handle, handle_subdomain, workflow_dispatch_internal};
+pub use dispatch::{handle, handle_subdomain, workflow_advance_internal};
 
 // Re-exports for intra-crate callers — kept for API stability while
 // the gateway's outer middleware still spells these names against the

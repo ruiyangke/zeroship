@@ -123,10 +123,10 @@ struct WorkerCli {
     storage_url: String,
 
     /// Test-only unsigned durable-workflow replay ingress. Hidden because
-    /// signed workflow dispatch is the production transport; DW-07 uses this
+    /// signed workflow advance is the production transport; DW-07 uses this
     /// flag to exercise the real replay path before that signing task lands.
-    #[arg(long = "workflow-dispatch-unsigned", hide = true, default_value_t = false)]
-    workflow_dispatch_unsigned: bool,
+    #[arg(long = "workflow-advance-unsigned", hide = true, default_value_t = false)]
+    workflow_advance_unsigned: bool,
 
     /// Maximum persisted bytes for one workflow step output blob.
     #[arg(
@@ -190,7 +190,7 @@ impl std::fmt::Debug for WorkerCli {
             // kv_url may embed `redis://user:pass@host`; redact like the DSNs.
             .field("kv_url", &"<redacted>")
             .field("storage_url", &self.storage_url)
-            .field("workflow_dispatch_unsigned", &self.workflow_dispatch_unsigned)
+            .field("workflow_advance_unsigned", &self.workflow_advance_unsigned)
             .field("max_step_blob_bytes", &self.max_step_blob_bytes)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
@@ -259,9 +259,9 @@ pub struct WorkerConfig {
     pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub max_step_blob_bytes: u64,
     /// Test-only unsigned durable-workflow replay ingress. Production boot
-    /// never exposes a CLI/env switch for this; signed control-plane dispatch
+    /// never exposes a CLI/env switch for this; signed control-plane advance
     /// replaces it in a later durable-workflows task.
-    pub workflow_dispatch_unsigned: bool,
+    pub workflow_advance_unsigned: bool,
 }
 
 fn main() -> std::io::Result<()> {
@@ -534,7 +534,7 @@ fn main() -> std::io::Result<()> {
         blob_store,
         workflow_blob_store,
         max_step_blob_bytes: cli.max_step_blob_bytes,
-        workflow_dispatch_unsigned: cli.workflow_dispatch_unsigned,
+        workflow_advance_unsigned: cli.workflow_advance_unsigned,
     });
 
     let bind_addr = format!("{bind_host}:{port}");
@@ -637,8 +637,8 @@ fn main() -> std::io::Result<()> {
             .state(logs)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
             .service(
-                web::resource("/workflow-dispatch-unsigned/{app_id}")
-                    .route(web::post().to(handler::workflow_dispatch_unsigned)),
+                web::resource("/workflow-advance-unsigned/{app_id}")
+                    .route(web::post().to(handler::workflow_advance_unsigned)),
             )
             .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
             .service(web::resource("/health").route(web::get().to(|| async {

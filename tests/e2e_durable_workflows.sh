@@ -528,7 +528,7 @@ ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
   --poll-interval 1 \
   --max-step-blob-bytes 2097152 \
   --dev-insecure \
-  --workflow-dispatch-unsigned > "$WORK/worker.log" 2>&1 &
+  --workflow-advance-unsigned > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 wait_health worker "http://localhost:$WORKER_PORT/health" "$WORK/worker.log"
 

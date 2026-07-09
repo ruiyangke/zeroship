@@ -6836,6 +6836,7 @@ dependencies = [
  "zeroship-metering",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-workflow-scheduler",
  "zstd",
 ]
 
