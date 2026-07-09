@@ -138,6 +138,65 @@ impl WorkflowSchedulerStore {
     }
 
     #[allow(clippy::future_not_send)]
+    pub async fn claim_due_timers(
+        &self,
+        horizon: DateTime<Utc>,
+        limit: i64,
+        deadline: DateTime<Utc>,
+    ) -> Result<Vec<FiredTimer>, WorkflowSchedulerStoreError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.open_conn().await?;
+        let tx = conn.transaction().await?;
+        let rows = tx
+            .query(
+                "WITH due AS ( \
+                    SELECT run_id \
+                      FROM workflow_scheduler.timers \
+                     WHERE wake_at <= $1 \
+                     ORDER BY wake_at, run_id \
+                     LIMIT $2 \
+                     FOR UPDATE SKIP LOCKED \
+                 ), moved AS ( \
+                    DELETE FROM workflow_scheduler.timers timers \
+                     USING due \
+                     WHERE timers.run_id = due.run_id \
+                     RETURNING timers.run_id, timers.app_id, timers.wake_at, timers.generation \
+                 ), upserted AS ( \
+                    INSERT INTO workflow_scheduler.inflight \
+                        (run_id, app_id, deadline, dispatch_generation, dispatched_at) \
+                    SELECT run_id, app_id, $3, generation, now() \
+                      FROM moved \
+                    ON CONFLICT (run_id) DO UPDATE \
+                       SET app_id = EXCLUDED.app_id, \
+                           deadline = EXCLUDED.deadline, \
+                           dispatch_generation = EXCLUDED.dispatch_generation, \
+                           dispatched_at = now() \
+                    RETURNING run_id \
+                 ) \
+                 SELECT moved.run_id, moved.app_id, moved.wake_at, moved.generation, \
+                        $3::timestamptz AS deadline \
+                   FROM moved \
+                   JOIN upserted ON upserted.run_id = moved.run_id \
+                  ORDER BY moved.wake_at, moved.run_id",
+                &[&horizon, &limit, &deadline],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows
+            .iter()
+            .map(|row| FiredTimer {
+                run_id: row.get("run_id"),
+                app_id: row.get("app_id"),
+                wake_at: row.get("wake_at"),
+                dispatch_generation: row.get("generation"),
+                deadline: row.get("deadline"),
+            })
+            .collect())
+    }
+
+    #[allow(clippy::future_not_send)]
     pub async fn ack_register_next(
         &self,
         run_id: &str,
@@ -177,19 +236,17 @@ impl WorkflowSchedulerStore {
 
     #[allow(clippy::future_not_send)]
     pub async fn ack_terminal(&self, run_id: &str) -> Result<(), WorkflowSchedulerStoreError> {
-        let mut conn = self.open_conn().await?;
-        let tx = conn.transaction().await?;
-        tx.execute(
+        let conn = self.open_conn().await?;
+        conn.execute(
             "DELETE FROM workflow_scheduler.inflight WHERE run_id = $1",
             &[&run_id],
         )
         .await?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM workflow_scheduler.timers WHERE run_id = $1",
             &[&run_id],
         )
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 

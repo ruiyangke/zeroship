@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
+use futures::lock::Mutex as AsyncMutex;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::workflow_blob_gc;
@@ -36,6 +37,7 @@ use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
@@ -59,6 +61,7 @@ const PARENT_CASCADE_WORKFLOW_NAME: &str = "ParentCascadeWorkflow";
 const PARENT_MANY_CASCADE_WORKFLOW_NAME: &str = "ParentManyCascadeWorkflow";
 
 static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
+static SCHEDULER_PROVISIONED_DB: OnceLock<AsyncMutex<Option<String>>> = OnceLock::new();
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -85,6 +88,7 @@ struct Fixture {
     deploy_tmp_dir: PathBuf,
     app_id: Uuid,
     deploy_id: String,
+    scheduler_store: WorkflowSchedulerStore,
 }
 
 impl Drop for Fixture {
@@ -105,6 +109,19 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     client
 }
 
+async fn provision_scheduler_store_once(db_url: &str, store: &WorkflowSchedulerStore) {
+    let lock = SCHEDULER_PROVISIONED_DB.get_or_init(|| AsyncMutex::new(None));
+    let mut provisioned = lock.lock().await;
+    if provisioned.as_deref() == Some(db_url) {
+        return;
+    }
+    store
+        .provision()
+        .await
+        .expect("provision workflow scheduler store");
+    *provisioned = Some(db_url.to_string());
+}
+
 async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id: String) -> Fixture {
     let (blob_root, cleanup_blob_root) = match std::env::var("ZEROSHIP_DW_E2E_BLOB_ROOT") {
         Ok(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
@@ -113,6 +130,8 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
     let deploy_tmp_dir = tmpdir("deploy");
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
+    let scheduler_store = WorkflowSchedulerStore::new(db_url.to_string());
+    provision_scheduler_store_once(db_url, &scheduler_store).await;
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, true).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
@@ -175,6 +194,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
         deploy_tmp_dir,
         app_id,
         deploy_id,
+        scheduler_store,
     }
 }
 
@@ -268,6 +288,7 @@ impl StepDispatcher for DropOnceDispatcher {
 struct CountingDispatcher {
     inner: GatewayStepDispatcher,
     count: Arc<AtomicUsize>,
+    run_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl CountingDispatcher {
@@ -275,11 +296,16 @@ impl CountingDispatcher {
         Self {
             inner: GatewayStepDispatcher::new(gateway_url),
             count: Arc::new(AtomicUsize::new(0)),
+            run_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
+    }
+
+    fn run_ids(&self) -> Vec<String> {
+        self.run_ids.lock().expect("counting run ids").clone()
     }
 }
 
@@ -287,6 +313,10 @@ impl CountingDispatcher {
 impl StepDispatcher for CountingDispatcher {
     async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
         self.count.fetch_add(1, Ordering::SeqCst);
+        self.run_ids
+            .lock()
+            .expect("counting run ids")
+            .push(request.run_id.clone());
         self.inner.dispatch(request).await
     }
 }
@@ -698,6 +728,10 @@ async fn seed_workflow_run(
         )
         .await
         .expect("seed workflow run");
+    fx.scheduler_store
+        .register_timer(&run_id, fx.app_id, wake_at)
+        .await
+        .expect("register seeded workflow timer");
     run_id
 }
 
@@ -708,6 +742,32 @@ async fn seed_run(fx: &Fixture, label: &str) -> String {
         serde_json::json!({ "case": label }),
     )
     .await
+}
+
+async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT app_id, state, wake_at \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load run for scheduler registration");
+    let state: String = row.get("state");
+    let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+    if matches!(
+        state.as_str(),
+        "queued" | "running" | "sleeping" | "waiting" | "compensating"
+    ) {
+        let app_id: Uuid = row.get("app_id");
+        let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
+        fx.scheduler_store
+            .register_timer(run_id, app_id, wake_at)
+            .await
+            .expect("register existing workflow timer");
+    }
 }
 
 fn bench_env_usize(name: &str, default: usize) -> usize {
@@ -840,7 +900,8 @@ fn dw23_workflow_engine_load_bench() {
         let mut total_claimed = 0usize;
         let mut checkpoint_elapsed = None;
         let final_counts = loop {
-            let claimed = workflow_engine::tick_with_dispatcher(
+            let claimed = workflow_engine::fire_once(
+                &fx.scheduler_store,
                 &fx.state,
                 Arc::clone(&dispatcher),
                 cfg.clone(),
@@ -1071,7 +1132,7 @@ async fn drive_until_completed<D>(
     D: StepDispatcher + 'static,
 {
     for _ in 0..260 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("workflow tick");
         let (state, _, _, _) = run_state(&fx.pg, run_id).await;
@@ -1107,7 +1168,8 @@ async fn rollout_switch_drill(
     dispatcher: Arc<GatewayStepDispatcher>,
 ) {
     let enabled_run = seed_run(fx, "dw24-enabled").await;
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("dw24-enabled-claim"),
@@ -1125,7 +1187,8 @@ async fn rollout_switch_drill(
 
     let parked_run = seed_run(fx, "dw24-dispatch-paused").await;
     set_dispatch_paused(fx, true).await;
-    let paused_claims = workflow_engine::tick_with_dispatcher(
+    let paused_claims = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("dw24-dispatch-paused"),
@@ -1182,6 +1245,7 @@ async fn rollout_switch_drill(
         point_signal["id"].as_str().is_some_and(|id| id.starts_with("sig_")),
         "app-scoped run.signal should still work while public ingress is disabled"
     );
+    register_existing_run_timer(fx, &signal_run).await;
     drive_until_completed(
         fx,
         Arc::clone(&dispatcher),
@@ -1206,7 +1270,7 @@ where
     D: StepDispatcher + 'static,
 {
     for _ in 0..120 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
         let (state, _, _, _) = run_state(&fx.pg, run_id).await;
@@ -1245,7 +1309,7 @@ async fn drive_until_cancelled<D>(
     D: StepDispatcher + 'static,
 {
     for _ in 0..160 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
         let (state, _, _, _) = run_state(&fx.pg, run_id).await;
@@ -1276,7 +1340,7 @@ async fn drive_until_sleeping<D>(
     D: StepDispatcher + 'static,
 {
     for _ in 0..160 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
         let (state, _, _, _) = run_state(&fx.pg, run_id).await;
@@ -1325,7 +1389,7 @@ async fn drive_until_compensating<D>(
                     run_debug(fx, run_id).await
                 );
             }
-            workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
                 .await
                 .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
         }
@@ -1346,7 +1410,7 @@ async fn drive_until_waiting<D>(
     D: StepDispatcher + 'static,
 {
     for _ in 0..180 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("workflow tick");
         let (state, _, _, _) = run_state(&fx.pg, run_id).await;
@@ -1795,6 +1859,36 @@ async fn child_states(
         .collect()
 }
 
+async fn run_summaries(
+    fx: &Fixture,
+    run_ids: &[String],
+) -> Vec<(String, String, String, Option<DateTime<Utc>>, serde_json::Value)> {
+    let mut summaries = Vec::new();
+    for run_id in run_ids {
+        let rows = fx
+            .pg
+            .query(
+                "SELECT id, workflow_name, state, wake_at, input \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1",
+                &[run_id],
+            )
+            .await
+            .expect("load run summary");
+        for row in rows {
+            summaries.push((
+                row.get("id"),
+                row.get("workflow_name"),
+                row.get("state"),
+                row.get("wake_at"),
+                row.get::<_, Option<serde_json::Value>>("input")
+                    .unwrap_or(serde_json::Value::Null),
+            ));
+        }
+    }
+    summaries
+}
+
 async fn drive_children_until_sleeping<D>(
     fx: &Fixture,
     dispatcher: Arc<D>,
@@ -1804,7 +1898,7 @@ async fn drive_children_until_sleeping<D>(
     D: StepDispatcher + 'static,
 {
     for _ in 0..180 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("child sleep tick");
         let states = child_states(fx, child_run_ids).await;
@@ -1828,24 +1922,30 @@ async fn drive_children_until_sleeping<D>(
     );
 }
 
-async fn drive_children_until_cancelled<D>(
+async fn drive_children_until_cancelled(
     fx: &Fixture,
-    dispatcher: Arc<D>,
+    dispatcher: Arc<CountingDispatcher>,
     cfg: WorkflowEngineConfig,
     child_run_ids: &[String],
-) where
-    D: StepDispatcher + 'static,
-{
+) {
     for _ in 0..120 {
-        let claimed = workflow_engine::tick_with_dispatcher(
+        let claimed = workflow_engine::fire_once(
+            &fx.scheduler_store,
             &fx.state,
             Arc::clone(&dispatcher),
             cfg.clone(),
         )
         .await
         .expect("child cancel tick");
-        assert_eq!(claimed, 0, "cancel reap must not dispatch child code");
         let states = child_states(fx, child_run_ids).await;
+        let dispatched = dispatcher.run_ids();
+        let dispatched_runs = run_summaries(fx, &dispatched).await;
+        assert_eq!(
+            claimed,
+            0,
+            "cancel reap must not dispatch child code; dispatched={dispatched:?}; \
+             dispatched_runs={dispatched_runs:?}; states={states:?}",
+        );
         if states
             .iter()
             .all(|(_, state, claimed_by, _)| state == "cancelled" && claimed_by.is_none())
@@ -2214,8 +2314,63 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
              claimed_by={claimed_by:?} dispatch_nonce={dispatch_nonce:?}"
         );
     }
+    let child_rows: Vec<(String, String, Option<DateTime<Utc>>, Option<String>, Option<String>)> = fx
+        .pg
+        .query(
+            "SELECT id, state, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1 \
+              ORDER BY created_at, id",
+            &[&run_id],
+        )
+        .await
+        .expect("debug child runs")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("state"),
+                row.get("wake_at"),
+                row.get("claimed_by"),
+                row.get("dispatch_nonce"),
+            )
+        })
+        .collect();
+    let scheduler_rows: Vec<(String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<i64>)> = fx
+        .pg
+        .query(
+            "SELECT run_id, slot, wake_at, deadline, generation \
+               FROM ( \
+                 SELECT run_id, 'timer' AS slot, wake_at, NULL::timestamptz AS deadline, generation \
+                   FROM workflow_scheduler.timers \
+                  WHERE run_id = $1 OR run_id IN ( \
+                    SELECT id FROM zeroship.workflow_runs WHERE parent_run_id = $1 \
+                  ) \
+                 UNION ALL \
+                 SELECT run_id, 'inflight' AS slot, NULL::timestamptz AS wake_at, deadline, dispatch_generation AS generation \
+                   FROM workflow_scheduler.inflight \
+                  WHERE run_id = $1 OR run_id IN ( \
+                    SELECT id FROM zeroship.workflow_runs WHERE parent_run_id = $1 \
+                  ) \
+               ) rows \
+              ORDER BY run_id, slot",
+            &[&run_id],
+        )
+        .await
+        .expect("debug scheduler rows")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("run_id"),
+                row.get("slot"),
+                row.get("wake_at"),
+                row.get("deadline"),
+                row.get("generation"),
+            )
+        })
+        .collect();
     format!(
-        "{run_summary}; steps={:?}; side_counts={:?}",
+        "{run_summary}; steps={:?}; children={child_rows:?}; scheduler={scheduler_rows:?}; side_counts={:?}",
         step_rows(fx, run_id).await,
         side_counts(fx, run_id).await
     )
@@ -2313,6 +2468,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         scheduled_run_for(&fx, &schedule_id, planned)
             .await
             .expect("scheduled run created");
+    register_existing_run_timer(&fx, &scheduled_run).await;
     assert_eq!(scheduled_started_at, planned);
     assert_eq!(scheduled_input, serde_json::json!({"case": "schedule"}));
     drive_until_completed(
@@ -2385,6 +2541,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         scheduled_run_for(&fx, &schedule_id, concurrent_planned)
             .await
             .expect("concurrent scheduled run created");
+    register_existing_run_timer(&fx, &concurrent_scheduled_run).await;
     assert_eq!(concurrent_started_at, concurrent_planned);
     drive_until_completed(
         &fx,
@@ -2396,7 +2553,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
 
     let happy_run = seed_run(&fx, "happy").await;
     for _ in 0..120 {
-        workflow_engine::tick_with_dispatcher(
+        workflow_engine::fire_once(
+            &fx.scheduler_store,
             &fx.state,
             Arc::clone(&real_dispatcher),
             config("dw07-happy"),
@@ -2457,6 +2615,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         ],
         "restart from b should retain only the prefix before b"
     );
+    register_existing_run_timer(&fx, &happy_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -2513,7 +2672,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         CrashOnceDispatcher::new(gateway_url.clone());
     let frontier_dispatcher = Arc::new(frontier_dispatcher);
     let frontier_owner = "dw19-frontier-first";
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&frontier_dispatcher),
         config(frontier_owner),
@@ -2621,7 +2781,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         CrashOnceDispatcher::new(gateway_url.clone());
     let cw1_dispatcher = Arc::new(cw1_dispatcher);
     let cw1_owner = "dw17-cw1-parent";
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&cw1_dispatcher),
         config(cw1_owner),
@@ -2777,8 +2938,13 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(cancel["state"], "cancelled");
+    fx.scheduler_store
+        .ack_terminal(&cw6_parent)
+        .await
+        .expect("retire cancelled CW6 parent scheduler row");
     wait_for_child_cancel_requested(&fx, &cw6_child).await;
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw17-cw6-child-cooperative-cancel"),
@@ -2895,7 +3061,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let (pause_dispatcher, pause_outcome_rx, pause_release_tx) =
         CrashOnceDispatcher::new(gateway_url.clone());
     let pause_dispatcher = Arc::new(pause_dispatcher);
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&pause_dispatcher),
         config("dw07-pause-first"),
@@ -2944,7 +3111,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
         "pause-mid-dispatch should land a checkpoint exactly once"
     );
-    let skipped = workflow_engine::tick_with_dispatcher(
+    let skipped = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw07-paused-skip"),
@@ -2961,6 +3129,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(resume_body["state"], "queued");
+    register_existing_run_timer(&fx, &pause_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -2977,7 +3146,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let (cancel_dispatcher, cancel_outcome_rx, cancel_release_tx) =
         CrashOnceDispatcher::new(gateway_url.clone());
     let cancel_dispatcher = Arc::new(cancel_dispatcher);
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&cancel_dispatcher),
         config("dw07-cancel-first"),
@@ -3003,6 +3173,10 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(cancel_body["state"], "cancelled");
+    fx.scheduler_store
+        .ack_terminal(&cancel_run)
+        .await
+        .expect("retire cancelled run scheduler row");
     let _ = cancel_release_tx.send(());
     compio::time::sleep(Duration::from_millis(150)).await;
     let (state, wake_at, claimed_by, nonce) = run_state(&fx.pg, &cancel_run).await;
@@ -3021,7 +3195,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "the external side effect may have happened before cancel"
     );
     assert_eq!(cancel_counts.get("b").copied(), None);
-    let skipped = workflow_engine::tick_with_dispatcher(
+    let skipped = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw07-cancelled-skip"),
@@ -3035,7 +3210,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         CrashOnceDispatcher::new(gateway_url.clone());
     let crash_dispatcher = Arc::new(crash_dispatcher);
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&crash_dispatcher),
         config("dw07-crash-first"),
@@ -3060,7 +3236,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     );
     assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
 
-    let pre_takeover = workflow_engine::tick_with_dispatcher(
+    let pre_takeover = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw07-pre-ttl"),
@@ -3078,7 +3255,9 @@ async fn durable_workflows_m1_keystone_real_spine() {
     );
 
     compio::time::sleep(Duration::from_millis(1_650)).await;
-    let takeover = workflow_engine::tick_with_dispatcher(
+    register_existing_run_timer(&fx, &crash_run).await;
+    let takeover = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw07-takeover"),
@@ -3122,7 +3301,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let (blob_crash_dispatcher, blob_dropped_rx, blob_release_tx) =
         CrashOnceDispatcher::new(gateway_url.clone());
     let blob_crash_dispatcher = Arc::new(blob_crash_dispatcher);
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&blob_crash_dispatcher),
         config("dw15-blob-crash-first"),
@@ -3154,7 +3334,9 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "dropped blob result must not commit a journal row"
     );
     compio::time::sleep(Duration::from_millis(1_650)).await;
-    let takeover = workflow_engine::tick_with_dispatcher(
+    register_existing_run_timer(&fx, &blob_run).await;
+    let takeover = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw15-blob-takeover"),
@@ -3451,6 +3633,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     );
     assert_eq!(after_signal.get::<_, Option<String>>("consumed_by"), None);
 
+    register_existing_run_timer(&fx, &signal_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -3518,6 +3701,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .as_str()
         .expect("public signal id")
         .to_string();
+    register_existing_run_timer(&fx, &external_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -3588,7 +3772,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         forged.1
     );
 
-    let expired_run = seed_signal_run(&fx, "expired-token", "PT30S", None).await;
+    let expired_run = seed_signal_run(&fx, "expired-token", "PT5M", None).await;
     drive_until_waiting(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -3632,6 +3816,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         serde_json::json!({"ok": true, "source": "internal"}),
     )
     .await;
+    register_existing_run_timer(&fx, &terminal_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -3777,6 +3962,9 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .expect("load completed broadcast state")
         .get("fanout_state");
     assert_eq!(completed_state, "completed");
+    for run_id in &topic_runs {
+        register_existing_run_timer(&fx, run_id).await;
+    }
     let delivered_rows = fx
         .pg
         .query(
@@ -3847,7 +4035,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         timeout_deadline <= Utc::now() + ChronoDuration::seconds(2),
         "short timeout should park within ~1s, got deadline {timeout_deadline:?}"
     );
-    let early_claim = workflow_engine::tick_with_dispatcher(
+    let early_claim = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&real_dispatcher),
         config("dw07-timeout-early"),
@@ -4020,6 +4209,10 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "redeploy should bump the active deploy hash"
     );
     assert_eq!(cancel["state"], "cancelled");
+    fx.scheduler_store
+        .ack_terminal(&cascade_redeploy_parent)
+        .await
+        .expect("retire cancelled cascade parent scheduler row");
     let active_hash: Option<String> = fx
         .pg
         .query_one(
@@ -4131,7 +4324,8 @@ async fn bare_await_body_io_is_rejected() {
     .await;
     let bare_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
     for _ in 0..120 {
-        workflow_engine::tick_with_dispatcher(
+        workflow_engine::fire_once(
+            &fx.scheduler_store,
             &fx.state,
             Arc::clone(&bare_dispatcher),
             config("dw13-bare-await"),
@@ -4263,7 +4457,8 @@ async fn compensation_saga_rollback_real_spine() {
     .await;
     let (drop_dispatcher, dropped_rx) = DropOnceDispatcher::new(gateway_url.clone());
     let drop_dispatcher = Arc::new(drop_dispatcher);
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&drop_dispatcher),
         config("dw18-crash-drop"),
@@ -4382,6 +4577,7 @@ async fn compensation_saga_rollback_real_spine() {
     )
     .await;
     assert_eq!(cancel["state"], "compensating");
+    register_existing_run_timer(&fx, &cancel_run).await;
     drive_until_cancelled(
         &fx,
         Arc::clone(&real_dispatcher),

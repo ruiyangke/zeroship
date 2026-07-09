@@ -116,6 +116,11 @@ for b in zeroship-control zeroship-gate zeroship-worker zeroship-migrate dev-pro
 done
 pass "release binaries built"
 
+echo "=== DW-07 test warmup ==="
+cargo test -p zeroship-control --test durable_workflows_keystone_e2e --no-run
+cargo test -p zeroship-control --test workflow_engine_test --no-run
+pass "test binaries warmed"
+
 echo "=== DW-07 database :$PG_PORT ==="
 case "$PG_DB" in
   *[!A-Za-z0-9_]*)
@@ -626,7 +631,28 @@ ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
 ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
 ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
 ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
-  cargo test -p zeroship-control --test durable_workflows_keystone_e2e -- --nocapture || {
+  cargo test -p zeroship-control --test durable_workflows_keystone_e2e durable_workflows_m1_keystone_real_spine -- --nocapture --test-threads=1 || {
+    fail "DW-07 keystone assertions failed"
+    echo "--- control.log ---"
+    tail -120 "$WORK/control.log" || true
+    echo "--- worker.log ---"
+    tail -160 "$WORK/worker.log" || true
+    echo "--- gate.log ---"
+    tail -120 "$WORK/gate.log" || true
+    exit 1
+  }
+ZEROSHIP_DW_E2E=1 \
+CONTROL_TEST_DB="$DBURL" \
+ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
+ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
+ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
+ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
+ZEROSHIP_DW_E2E_BLOB_ROOT="$WORK/blobs" \
+ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
+ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
+ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
+ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
+  cargo test -p zeroship-control --test durable_workflows_keystone_e2e -- --nocapture --test-threads=1 --skip durable_workflows_m1_keystone_real_spine || {
     fail "DW-07 keystone assertions failed"
     echo "--- control.log ---"
     tail -120 "$WORK/control.log" || true
