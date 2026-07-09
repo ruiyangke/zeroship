@@ -41,6 +41,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # Real Kafka-wire broker so run_billing_suite.sh exercises the real stream
+      # path (rewind/seek + the wired producer->recompute->spend e2e), not just
+      # the in-process memory transport. Launched as a step (not a `services:`
+      # entry) because it needs an explicit --advertise-kafka-addr that GitHub
+      # service containers cannot set. Mirrors the docker-compose `redpanda`.
+      - name: Start Redpanda
+        run: |
+          docker run -d --name redpanda -p 19092:19092 \
+            docker.redpanda.com/redpandadata/redpanda:latest \
+            redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M \
+            --node-id 0 --check=false \
+            --kafka-addr external://0.0.0.0:19092 \
+            --advertise-kafka-addr external://127.0.0.1:19092 \
+            --set redpanda.auto_create_topics_enabled=true
+          for i in $(seq 1 40); do
+            if docker exec redpanda rpk cluster health --exit-when-healthy; then exit 0; fi
+            sleep 3
+          done
+          echo "redpanda failed to become healthy" >&2; docker logs redpanda; exit 1
       - name: Run the billing money-path gate
         run: tests/run_billing_suite.sh
         env:
@@ -48,6 +67,7 @@ jobs:
           PG_PORT: 5440
           PG_USER: postgres
           PG_PASS: zeroship
+          REDPANDA_BROKERS: 127.0.0.1:19092
 
   frontend:
     runs-on: ubuntu-latest

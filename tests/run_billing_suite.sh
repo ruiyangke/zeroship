@@ -195,6 +195,29 @@ else
   failed+=("zeroship-control::cron::spend_recompute")
 fi
 
+# Real-broker path. Rewind/seek and the wired producer->stream->recompute->spend
+# flow behave differently on a real Kafka-wire broker than on the in-process
+# memory transport (a real rewind cold-start seek bug once shipped precisely
+# because this path had no CI). Run them whenever REDPANDA_BROKERS is set; the CI
+# billing-gate job provides a redpanda service. Skipped (loudly) otherwise.
+if [ -n "${REDPANDA_BROKERS:-}" ]; then
+  for t in redpanda_roundtrip; do
+    echo "------------------------------------------------------------------"
+    echo "==> real-broker: zeroship-stream::$t (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
+    if cargo test -p zeroship-stream --test "$t" -- "${THREAD_ARG[@]}"; then :; else
+      fail=1; failed+=("zeroship-stream::$t")
+    fi
+  done
+  echo "------------------------------------------------------------------"
+  echo "==> real-broker: zeroship-control::billing_pipeline_redpanda_e2e"
+  if cargo test -p zeroship-control --test billing_pipeline_redpanda_e2e -- "${THREAD_ARG[@]}"; then :; else
+    fail=1; failed+=("zeroship-control::billing_pipeline_redpanda_e2e")
+  fi
+else
+  echo "------------------------------------------------------------------"
+  echo "==> SKIP real-broker tests: REDPANDA_BROKERS unset (set it + run a redpanda broker to gate the real stream path)"
+fi
+
 echo "=================================================================="
 if [ "$fail" -ne 0 ]; then
   echo "BILLING SUITE FAILED: ${failed[*]}" >&2
