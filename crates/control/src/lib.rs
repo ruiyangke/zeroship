@@ -207,18 +207,13 @@ fn with_stream_group_id(
     config: &StreamConfig,
     group_id: &str,
 ) -> Result<StreamConfig, StreamError> {
-    let mut raw = config.raw().clone();
-    let Some(obj) = raw.as_object_mut() else {
-        return Err(StreamError::Config(
-            "stream config must be a JSON object so cron can set group.id".to_string(),
-        ));
-    };
-    obj.remove("group_id");
-    obj.insert(
-        "group.id".to_string(),
-        serde_json::Value::String(group_id.to_string()),
-    );
-    Ok(StreamConfig::from(raw))
+    config.map_object(|obj| {
+        obj.remove("group_id");
+        obj.insert(
+            "group.id".to_string(),
+            serde_json::Value::String(group_id.to_string()),
+        );
+    })
 }
 
 /// Shared application state injected into every handler.

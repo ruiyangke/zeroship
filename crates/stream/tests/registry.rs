@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 use zeroship_stream::{
     StreamConfig, StreamError, StreamOffset, StreamRecord, StreamRegistry, StreamTransport,
@@ -31,14 +32,20 @@ impl StreamTransport for FakeTransport {
     async fn commit(&self, _offsets: &[StreamOffset]) -> Result<(), StreamError> {
         Ok(())
     }
+
+    async fn rewind(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
 }
 
 fn fake_factory(config: &StreamConfig) -> Result<Arc<dyn StreamTransport>, StreamError> {
-    let require_ok = config
-        .raw()
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    #[derive(Deserialize)]
+    struct FakeConfig {
+        #[serde(default)]
+        ok: bool,
+    }
+
+    let require_ok = config.parse::<FakeConfig>()?.ok;
     if !require_ok {
         return Err(StreamError::Config("fake: ok=true required".into()));
     }

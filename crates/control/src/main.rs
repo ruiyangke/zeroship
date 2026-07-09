@@ -1404,7 +1404,9 @@ fn main() -> std::io::Result<()> {
             }
         }
         None => {
-            tracing::info!("control: billing event stream disabled; legacy metering export cron remains active");
+            tracing::info!(
+                "control: billing event stream disabled; stream forwarding and spend recompute are disabled"
+            );
             None
         }
     };

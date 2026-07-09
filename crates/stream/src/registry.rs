@@ -25,8 +25,19 @@ impl StreamConfig {
         serde_json::from_value(self.raw.clone()).map_err(StreamError::from)
     }
 
-    pub fn raw(&self) -> &serde_json::Value {
-        &self.raw
+    /// Clone this config and mutate its JSON object form.
+    pub fn map_object(
+        &self,
+        f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) -> Result<Self, StreamError> {
+        let mut raw = self.raw.clone();
+        let Some(obj) = raw.as_object_mut() else {
+            return Err(StreamError::Config(
+                "stream config must be a JSON object".to_string(),
+            ));
+        };
+        f(obj);
+        Ok(Self::new(raw))
     }
 }
 

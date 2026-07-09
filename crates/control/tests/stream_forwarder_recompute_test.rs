@@ -18,23 +18,41 @@ use zeroship_control::metering::provider::{
 use zeroship_control::Registry;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url(test_name: &str) -> Option<String> {
+    match std::env::var("CONTROL_TEST_DB") {
+        Ok(url) => Some(url),
+        Err(_) => {
+            loud_control_db_skip(test_name);
+            None
+        }
+    }
 }
 
-async fn pg(db_url: &str) -> compio_postgres::Client {
+fn loud_control_db_skip(test_name: &str) {
+    use std::io::Write as _;
+
+    let msg = format!(
+        "\n================ BILLING DB TEST SKIPPED ================\n\
+         {test_name}: CONTROL_TEST_DB is unset; this test did not exercise Postgres.\n\
+         Export CONTROL_TEST_DB=postgres://postgres:zeroship@localhost:5440/control_billing_test\n\
+         or run tests/run_billing_suite.sh for the billing gate.\n\
+         ==========================================================\n"
+    );
+    let _ = std::io::stderr().write_all(msg.as_bytes());
+}
+
+async fn pg(db_url: &str) -> Arc<compio_postgres::Client> {
     let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
     })
     .detach();
-    client
+    Arc::new(client)
 }
 
 #[compio::test]
 async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(url) = db_url("memory_forwarder_and_recompute_consumers_do_not_interfere") else {
         return;
     };
     let client = pg(&url).await;
@@ -148,12 +166,245 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     );
 }
 
-#[derive(Debug, Default)]
+#[compio::test]
+async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() {
+    let suffix = unique_suffix();
+    let topic = format!("zeroship-control-f4-crash-{suffix}");
+    let group = format!("billing-forwarder-crash-{suffix}");
+    let mut stream_registry = StreamRegistry::default();
+    adapters::register_builtin(&mut stream_registry);
+    let config = StreamConfig::from(json!({
+        "topic": topic.clone(),
+        "group.id": group,
+        "partitions": 1
+    }));
+
+    let initial_stream = stream_registry
+        .build("memory", &config)
+        .expect("initial memory stream");
+    let app = Uuid::new_v4();
+    let creator = Uuid::new_v4();
+    let period = chrono::Utc
+        .with_ymd_and_hms(2042, 5, 1, 0, 0, 0)
+        .unwrap()
+        .timestamp();
+    let events: Vec<_> = (0..5)
+        .map(|i| {
+            event(
+                &format!("evt_f4_crash_{i}"),
+                app,
+                creator,
+                "requests",
+                1,
+                period + i64::from(i),
+            )
+        })
+        .collect();
+    for event in &events {
+        initial_stream
+            .publish(
+                &topic,
+                event.subject.app.unwrap().to_string().as_bytes(),
+                &serde_json::to_vec(event).expect("usage event serializes"),
+            )
+            .await
+            .expect("publish usage event");
+    }
+
+    let provider = Arc::new(CrashAfterProvider::new(2));
+    let provider_for_stack: Arc<dyn MeteringProvider> = provider.clone();
+    let stack = zeroship_control::metering::provider::BillingStack::with_meter_for_tests(
+        provider_for_stack,
+    );
+    let dead_letters = NoopDeadLetters;
+    let forward_cfg = event_forwarder::EventForwarderConfig {
+        batch_max: 100,
+        idle_sleep: Duration::from_millis(1),
+        retry_backoff: Duration::from_millis(1),
+        max_retry_backoff: Duration::from_millis(1),
+    };
+
+    let first = event_forwarder::run_cycle(
+        initial_stream.as_ref(),
+        &stack,
+        &dead_letters,
+        &forward_cfg,
+    )
+    .await
+    .expect_err("first cycle crashes after partially applying the batch");
+    assert!(
+        first.to_string().contains("injected mid-batch crash"),
+        "{first}"
+    );
+    assert_eq!(
+        provider.applied_ids(),
+        events[..2]
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<Vec<_>>(),
+        "the simulated crash applied only the prefix before any offset commit"
+    );
+
+    provider.allow_success();
+    let restarted_stream = stream_registry
+        .build("memory", &config)
+        .expect("fresh memory stream for same group");
+    let second = event_forwarder::run_cycle(
+        restarted_stream.as_ref(),
+        &stack,
+        &dead_letters,
+        &forward_cfg,
+    )
+    .await
+    .expect("restart replays uncommitted batch");
+
+    assert_eq!(second.polled, events.len());
+    assert_eq!(second.ingested, events.len() - 2);
+    assert_eq!(second.deduped, Some(2));
+    assert_eq!(second.committed, events.len());
+    assert_eq!(
+        provider.applied_ids(),
+        events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<Vec<_>>(),
+        "provider dedup avoids double-apply and the unacked tail has no gap"
+    );
+
+    let after_commit = stream_registry
+        .build("memory", &config)
+        .expect("post-commit memory stream for same group");
+    let third = event_forwarder::run_cycle(
+        after_commit.as_ref(),
+        &stack,
+        &dead_letters,
+        &forward_cfg,
+    )
+    .await
+    .expect("post-commit cycle");
+    assert_eq!(third.polled, 0, "committed offsets are not re-forwarded");
+}
+
+#[compio::test]
+async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
+    let Some(url) = db_url("pg_dead_letter_sink_persists_provider_reject_and_decode_failure") else {
+        return;
+    };
+    let client = pg(&url).await;
+    let suffix = unique_suffix();
+    let mut stream_registry = StreamRegistry::default();
+    adapters::register_builtin(&mut stream_registry);
+    let forward_cfg = event_forwarder::EventForwarderConfig {
+        batch_max: 100,
+        idle_sleep: Duration::from_millis(1),
+        retry_backoff: Duration::from_millis(1),
+        max_retry_backoff: Duration::from_millis(1),
+    };
+
+    let reject_topic = format!("zeroship-control-f4-reject-{suffix}");
+    let reject_config = StreamConfig::from(json!({
+        "topic": reject_topic.clone(),
+        "group.id": format!("billing-forwarder-reject-{suffix}"),
+        "partitions": 1
+    }));
+    let reject_stream = stream_registry
+        .build("memory", &reject_config)
+        .expect("reject memory stream");
+    let reject_provider = Arc::new(RejectingProvider {
+        id: format!("rejecting-{suffix}"),
+    });
+    let reject_provider_for_stack: Arc<dyn MeteringProvider> = reject_provider.clone();
+    let reject_stack = zeroship_control::metering::provider::BillingStack::with_meter_for_tests(
+        reject_provider_for_stack,
+    );
+    let app = Uuid::new_v4();
+    let creator = Uuid::new_v4();
+    let event = event(
+        "evt_f4_pg_reject",
+        app,
+        creator,
+        "requests",
+        1,
+        1_783_468_800,
+    );
+    reject_stream
+        .publish(
+            &reject_topic,
+            app.to_string().as_bytes(),
+            &serde_json::to_vec(&event).expect("usage event serializes"),
+        )
+        .await
+        .expect("publish reject event");
+    let sink = event_forwarder::PgDeadLetterSink::new(Arc::clone(&client));
+    let reject_cycle = event_forwarder::run_cycle(
+        reject_stream.as_ref(),
+        &reject_stack,
+        &sink,
+        &forward_cfg,
+    )
+    .await
+    .expect("provider reject is quarantined");
+    assert_eq!(reject_cycle.dead_lettered, 1);
+    assert_eq!(reject_cycle.committed, 1);
+    assert_dead_letter_row(
+        &client,
+        reject_provider.id(),
+        &event.event_id,
+        "provider permanent reject 400: unknown subject",
+    )
+    .await;
+
+    let decode_topic = format!("zeroship-control-f4-decode-{suffix}");
+    let decode_config = StreamConfig::from(json!({
+        "topic": decode_topic.clone(),
+        "group.id": format!("billing-forwarder-decode-{suffix}"),
+        "partitions": 1
+    }));
+    let decode_stream = stream_registry
+        .build("memory", &decode_config)
+        .expect("decode memory stream");
+    let decode_provider = Arc::new(RecordingProvider::with_id(format!("decode-{suffix}")));
+    let decode_provider_for_stack: Arc<dyn MeteringProvider> = decode_provider.clone();
+    let decode_stack = zeroship_control::metering::provider::BillingStack::with_meter_for_tests(
+        decode_provider_for_stack,
+    );
+    decode_stream
+        .publish(&decode_topic, b"decode-key", b"{not-json")
+        .await
+        .expect("publish decode poison");
+    let decode_cycle = event_forwarder::run_cycle(
+        decode_stream.as_ref(),
+        &decode_stack,
+        &sink,
+        &forward_cfg,
+    )
+    .await
+    .expect("decode failure is quarantined");
+    assert_eq!(decode_cycle.dead_lettered, 1);
+    assert_eq!(decode_cycle.committed, 1);
+    assert_dead_letter_row(&client, decode_provider.id(), "decode:0:0", "decode_error").await;
+}
+
+#[derive(Debug)]
 struct RecordingProvider {
+    id: String,
     events: Mutex<Vec<UsageEvent>>,
 }
 
+impl Default for RecordingProvider {
+    fn default() -> Self {
+        Self::with_id("recording".to_string())
+    }
+}
+
 impl RecordingProvider {
+    fn with_id(id: String) -> Self {
+        Self {
+            id,
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
     fn events(&self) -> Vec<UsageEvent> {
         self.events
             .lock()
@@ -182,7 +433,117 @@ impl Meter for RecordingProvider {
 
 impl MeteringProvider for RecordingProvider {
     fn id(&self) -> &str {
-        "recording"
+        &self.id
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::METER
+    }
+
+    fn as_meter(&self) -> Option<&dyn Meter> {
+        Some(self)
+    }
+}
+
+#[derive(Debug)]
+struct RejectingProvider {
+    id: String,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Meter for RejectingProvider {
+    async fn ingest(&self, _batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+        Err(ProviderError::permanent_reject(400, "unknown subject"))
+    }
+
+    async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
+        Ok(0)
+    }
+}
+
+impl MeteringProvider for RejectingProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::METER
+    }
+
+    fn as_meter(&self) -> Option<&dyn Meter> {
+        Some(self)
+    }
+}
+
+#[derive(Debug)]
+struct CrashAfterProvider {
+    fail_after: Mutex<Option<usize>>,
+    applied_ids: Mutex<Vec<String>>,
+}
+
+impl CrashAfterProvider {
+    fn new(fail_after: usize) -> Self {
+        Self {
+            fail_after: Mutex::new(Some(fail_after)),
+            applied_ids: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn allow_success(&self) {
+        *self
+            .fail_after
+            .lock()
+            .expect("crash provider fail_after poisoned") = None;
+    }
+
+    fn applied_ids(&self) -> Vec<String> {
+        self.applied_ids
+            .lock()
+            .expect("crash provider applied ids poisoned")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Meter for CrashAfterProvider {
+    async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+        let fail_after = *self
+            .fail_after
+            .lock()
+            .expect("crash provider fail_after poisoned");
+        let mut applied = self
+            .applied_ids
+            .lock()
+            .expect("crash provider applied ids poisoned");
+        let mut accepted = 0;
+        let mut deduped = 0;
+        for (idx, event) in batch.iter().enumerate() {
+            if fail_after == Some(idx) {
+                return Err(ProviderError::Transport(
+                    "injected mid-batch crash".to_string(),
+                ));
+            }
+            if applied.contains(&event.event_id) {
+                deduped += 1;
+            } else {
+                applied.push(event.event_id.clone());
+                accepted += 1;
+            }
+        }
+        Ok(IngestAck {
+            accepted,
+            deduped: Some(deduped),
+        })
+    }
+
+    async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
+        Ok(0)
+    }
+}
+
+impl MeteringProvider for CrashAfterProvider {
+    fn id(&self) -> &str {
+        "crash_after"
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -212,6 +573,27 @@ impl event_forwarder::DeadLetterSink for NoopDeadLetters {
     ) -> Result<(), event_forwarder::EventForwarderError> {
         Ok(())
     }
+}
+
+async fn assert_dead_letter_row(
+    client: &compio_postgres::Client,
+    provider_id: &str,
+    event_id: &str,
+    reason: &str,
+) {
+    let rows = client
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.provider_dead_letter \
+             WHERE provider_id = $1 AND event_id = $2 AND reason = $3",
+            &[&provider_id, &event_id, &reason],
+        )
+        .await
+        .expect("read provider_dead_letter");
+    assert_eq!(
+        rows[0].get::<_, i64>("n"),
+        1,
+        "one provider_dead_letter row for {provider_id}/{event_id}/{reason}"
+    );
 }
 
 async fn seed_app(client: &compio_postgres::Client) -> Uuid {

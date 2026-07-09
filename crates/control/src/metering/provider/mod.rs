@@ -46,6 +46,20 @@ pub trait MeteringProvider: Send + Sync {
         true
     }
 
+    /// True when this provider owns the provider-side invoice close itself.
+    ///
+    /// A self-invoicing provider must also be the configured meter, because the
+    /// platform has no separate local invoice rail to run for it.
+    fn self_invoices(&self) -> bool {
+        false
+    }
+
+    /// True when this provider writes invoices into zeroship's local invoice
+    /// tables and backs the Stripe-owned invoice reconciliation cron.
+    fn owns_local_invoice(&self) -> bool {
+        false
+    }
+
     fn dedup(&self) -> DedupContract {
         DedupContract {
             key: DedupKey::NotApplicable,
@@ -124,7 +138,9 @@ pub fn assert_capability_consistency(p: &dyn MeteringProvider) -> Result<(), Pro
         && matches!(p.correction(), CorrectionCapability::Backfill { .. })
             == p.as_backfiller().is_some()
         && (!matches!(p.correction(), CorrectionCapability::InvoiceCredit)
-            || p.as_invoicer().is_some());
+            || p.as_invoicer().is_some())
+        && (!p.self_invoices() || (p.as_meter().is_some() && p.as_invoicer().is_some()))
+        && (!p.owns_local_invoice() || p.as_invoicer().is_some());
     if ok {
         Ok(())
     } else {
@@ -163,12 +179,17 @@ impl BillingStack {
 
     #[must_use]
     pub fn metered_by_owned_local_provider(&self) -> bool {
-        self.meter.id() == "lite"
+        self.meter.owns_local_invoice()
     }
 
     #[must_use]
     pub fn self_invoicing(&self) -> bool {
-        self.invoicer.id() == "stripe_meters"
+        self.invoicer.self_invoices()
+    }
+
+    #[must_use]
+    pub fn invoicer_owns_local_invoice(&self) -> bool {
+        self.invoicer.owns_local_invoice()
     }
 
     #[must_use]
@@ -236,11 +257,11 @@ pub fn build_stack(
             "no invoicer configured: usage metered but never billed (provider '{invoicer_id}' does not expose Invoice)"
         )));
     }
-    if invoicer.id() == "stripe_meters" && meter.id() != "stripe_meters" {
-        return Err(ProviderError::Config(
-            "self-invoicing provider 'stripe_meters' has no meter feed; select it as the meter too"
-                .to_string(),
-        ));
+    if invoicer.self_invoices() && meter.id() != invoicer.id() {
+        return Err(ProviderError::Config(format!(
+            "self-invoicing provider '{}' has no meter feed; select it as the meter too",
+            invoicer.id()
+        )));
     }
     if cfg.production && !cfg.allow_unsupported_billing {
         for p in [&meter, &invoicer] {
@@ -455,6 +476,66 @@ mod tests {
         registry.register("meter_only", factory);
     }
 
+    #[derive(Debug)]
+    struct SelfInvoicing;
+
+    #[async_trait::async_trait(?Send)]
+    impl Meter for SelfInvoicing {
+        async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
+            Ok(IngestAck {
+                accepted: batch.len(),
+                deduped: Some(0),
+            })
+        }
+        async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
+            Ok(0)
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl Invoicer for SelfInvoicing {
+        async fn close_period(
+            &self,
+            _subject: &SubjectRef,
+            _period: BillingPeriod,
+        ) -> Result<InvoiceRef, ProviderError> {
+            Ok(InvoiceRef(None))
+        }
+
+        async fn adjustment_note(
+            &self,
+            _subject: &SubjectRef,
+            _note: &AdjustmentNote,
+        ) -> Result<InvoiceRef, ProviderError> {
+            Ok(InvoiceRef(None))
+        }
+    }
+
+    impl MeteringProvider for SelfInvoicing {
+        fn id(&self) -> &str {
+            "self_invoicing"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::METER | Capabilities::INVOICE
+        }
+        fn as_meter(&self) -> Option<&dyn Meter> {
+            Some(self)
+        }
+        fn as_invoicer(&self) -> Option<&dyn Invoicer> {
+            Some(self)
+        }
+        fn self_invoices(&self) -> bool {
+            true
+        }
+    }
+
+    fn register_self_invoicing(registry: &mut ProviderRegistry) {
+        fn factory(_ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
+            Ok(Arc::new(SelfInvoicing))
+        }
+        registry.register("self_invoicing", factory);
+    }
+
     #[test]
     fn build_stack_rejects_meter_only_without_invoicer() {
         let mut registry = ProviderRegistry::default();
@@ -470,6 +551,28 @@ mod tests {
             },
         ));
         assert!(err.to_string().contains("usage metered but never billed"));
+    }
+
+    #[test]
+    fn build_stack_rejects_any_self_invoicer_without_its_meter_feed() {
+        let mut registry = ProviderRegistry::default();
+        register_test(&mut registry);
+        register_self_invoicing(&mut registry);
+        let err = expect_provider_err(build_stack(
+            &registry,
+            &ctx(),
+            &BillingStackConfig {
+                meter_provider: "test".to_string(),
+                invoicer_provider: "self_invoicing".to_string(),
+                production: false,
+                allow_unsupported_billing: false,
+            },
+        ));
+        assert!(
+            err.to_string()
+                .contains("self-invoicing provider 'self_invoicing' has no meter feed"),
+            "{err}"
+        );
     }
 
     #[test]

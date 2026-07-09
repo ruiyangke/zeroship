@@ -447,6 +447,10 @@ mod tests {
                 .extend_from_slice(offsets);
             Ok(())
         }
+
+        async fn rewind(&self) -> Result<(), StreamError> {
+            Ok(())
+        }
     }
 
     #[derive(Debug, Default)]

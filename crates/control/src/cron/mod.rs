@@ -177,7 +177,7 @@ pub fn provider_aware_cron_tasks(
     }
     if !stack.self_invoicing() {
         tasks.push("billing_reconcile");
-        if stack.invoicer_id() == "lite" || stack.invoicer_id() == "stripe_invoice" {
+        if stack.invoicer_owns_local_invoice() {
             tasks.push("stripe_reconcile");
         }
     }
@@ -387,6 +387,8 @@ mod tests {
             id: "stripe_meters",
             capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
+            self_invoices: true,
+            owns_local_invoice: false,
         });
         BillingStack {
             meter: p.clone(),
@@ -399,11 +401,15 @@ mod tests {
             id: "openmeter",
             capabilities: Capabilities::METER,
             correction: CorrectionCapability::None,
+            self_invoices: false,
+            owns_local_invoice: false,
         });
         let invoicer: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
             id: "stripe_invoice",
             capabilities: Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
+            self_invoices: false,
+            owns_local_invoice: true,
         });
         BillingStack {
             meter,
@@ -416,6 +422,8 @@ mod tests {
             id: "lite",
             capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
+            self_invoices: false,
+            owns_local_invoice: true,
         });
         BillingStack {
             meter: p.clone(),
@@ -428,6 +436,8 @@ mod tests {
             id: "lite",
             capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::None,
+            self_invoices: false,
+            owns_local_invoice: true,
         });
         BillingStack {
             meter: p.clone(),
@@ -440,6 +450,8 @@ mod tests {
         id: &'static str,
         capabilities: Capabilities,
         correction: CorrectionCapability,
+        self_invoices: bool,
+        owns_local_invoice: bool,
     }
 
     impl MeteringProvider for CronProvider {
@@ -453,6 +465,14 @@ mod tests {
 
         fn correction(&self) -> CorrectionCapability {
             self.correction
+        }
+
+        fn self_invoices(&self) -> bool {
+            self.self_invoices
+        }
+
+        fn owns_local_invoice(&self) -> bool {
+            self.owns_local_invoice
         }
     }
 }

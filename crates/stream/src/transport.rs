@@ -56,7 +56,5 @@ pub trait StreamTransport: Send + Sync {
     /// dedicated consumer group and rewinds before each full-period snapshot so
     /// reruns overwrite the same `usage_aggregates` totals instead of adding or
     /// reading only a tail.
-    async fn rewind(&self) -> Result<(), StreamError> {
-        Ok(())
-    }
+    async fn rewind(&self) -> Result<(), StreamError>;
 }

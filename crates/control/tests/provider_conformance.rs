@@ -122,6 +122,7 @@ async fn run_provider_conformance(adapter: Adapter) {
     let fx = build_fixture(adapter).await;
 
     assert_capabilities_consistent(&fx.provider, adapter.expected_capabilities());
+    assert_invoice_model_matches_docs(&fx.provider);
     assert_dedup_contract_matches_docs(&fx.provider);
     assert_correction_capability_matches_docs(&fx.provider);
     assert_fail_closed_config(adapter).await;
@@ -296,6 +297,41 @@ fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
     }
 }
 
+fn assert_invoice_model_matches_docs(provider: &Arc<dyn MeteringProvider>) {
+    match provider.id() {
+        "lite" | "stripe_invoice" => {
+            assert!(
+                provider.owns_local_invoice(),
+                "{} must declare local invoice ownership",
+                provider.id()
+            );
+            assert!(
+                !provider.self_invoices(),
+                "{} must not declare provider-side self-invoicing",
+                provider.id()
+            );
+        }
+        "stripe_meters" => {
+            assert!(
+                provider.self_invoices(),
+                "stripe_meters must declare provider-side self-invoicing"
+            );
+            assert!(
+                !provider.owns_local_invoice(),
+                "stripe_meters must not declare local invoice ownership"
+            );
+        }
+        "lago" | "openmeter" => {
+            assert!(
+                !provider.self_invoices() && !provider.owns_local_invoice(),
+                "{} uses the default invoice model in this branch",
+                provider.id()
+            );
+        }
+        other => panic!("unexpected provider in conformance suite: {other}"),
+    }
+}
+
 fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider>) {
     match provider.id() {
         "lago" => match provider.correction() {
@@ -424,7 +460,7 @@ async fn assert_dedup_ttl_switchover(fx: &Fixture) {
     );
 
     let accepted_before = fx.backend.accepted_ingests();
-    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_) | DedupTtl::Unknown) {
+    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_)) {
         fx.backend.expire_dedup_window();
     }
     forward_under_contract(fx.provider.as_ref(), &batch, &q, true)
@@ -438,10 +474,10 @@ async fn assert_dedup_ttl_switchover(fx: &Fixture) {
         fx.provider.id()
     );
 
-    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_) | DedupTtl::Unknown) {
+    if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_)) {
         assert_eq!(
             accepted_after, accepted_before,
-            "{} stale bounded/unknown replay was blindly re-ingested",
+            "{} stale bounded replay was blindly re-ingested",
             fx.provider.id()
         );
     }
@@ -450,7 +486,7 @@ async fn assert_dedup_ttl_switchover(fx: &Fixture) {
 /// Shared §6.2 forwarding decision used by the conformance harness.
 ///
 /// Raw `Meter::ingest` is intentionally a provider primitive. The forwarder owns
-/// the stale-replay switch: bounded/unknown dedup windows use read-back/delta
+/// the stale-replay switch: bounded dedup windows use read-back/delta
 /// instead of naive re-ingest once a replay is older than the provider contract.
 async fn forward_under_contract(
     provider: &dyn MeteringProvider,
@@ -467,7 +503,7 @@ async fn forward_under_contract(
 
     match provider.dedup().ttl {
         DedupTtl::Unbounded => meter.ingest(batch).await,
-        DedupTtl::Bounded(_) | DedupTtl::Unknown => {
+        DedupTtl::Bounded(_) => {
             let _current = meter.read_aggregate(q).await?;
             Ok(IngestAck {
                 accepted: 0,

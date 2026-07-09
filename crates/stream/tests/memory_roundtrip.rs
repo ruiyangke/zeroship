@@ -82,6 +82,56 @@ fn memory_roundtrip_preserves_per_key_order_and_commits_offsets() {
     });
 }
 
+#[test]
+fn memory_rewind_replays_from_retained_beginning_after_commit() {
+    block_on(async move {
+        let suffix = unique_suffix();
+        let topic = format!("zeroship-memory-rewind-{suffix}");
+        let group = format!("zeroship-memory-rewind-group-{suffix}");
+
+        let mut registry = StreamRegistry::default();
+        adapters::register_builtin(&mut registry);
+        let config = StreamConfig::from(json!({
+            "topic": topic.clone(),
+            "group.id": group,
+            "partitions": 1
+        }));
+
+        let transport = registry
+            .build("memory", &config)
+            .expect("memory transport builds");
+        for seq in 0..3 {
+            let payload = format!("payload-{seq}");
+            transport
+                .publish(&topic, b"subject-a", payload.as_bytes())
+                .await
+                .expect("publish memory rewind event");
+        }
+
+        let first = transport.poll(10).await.expect("initial poll");
+        assert_eq!(first.len(), 3);
+        let offsets: Vec<_> = first.iter().map(StreamOffset::from).collect();
+        transport.commit(&offsets).await.expect("commit offsets");
+        drop(transport);
+
+        let verifier = registry
+            .build("memory", &config)
+            .expect("memory verifier transport builds");
+        assert!(
+            verifier.poll(10).await.expect("poll after commit").is_empty(),
+            "committed group should not replay before rewind"
+        );
+
+        verifier.rewind().await.expect("rewind memory group");
+        let replay = verifier.poll(10).await.expect("poll after rewind");
+        assert_eq!(
+            replay.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "rewind must seek back to the retained beginning"
+        );
+    });
+}
+
 fn unique_suffix() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
