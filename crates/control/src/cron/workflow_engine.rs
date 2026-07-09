@@ -18,7 +18,10 @@ use zeroship_plugin_workflow::engine;
 use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::{self, PgStore};
 use zeroship_plugin_workflow::store::{CompensationProgress, StepWriteOutcome};
-use zeroship_workflow_scheduler::WORKFLOW_ADVANCE_PATH;
+use zeroship_workflow_scheduler::{
+    self as workflow_scheduler, FiredTimer, SchedulerConfig, TimerWheel, WakeHandle,
+    WorkflowSchedulerStore, WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,
+};
 
 use crate::registry::RegistryError;
 use crate::workflow_rollout;
@@ -193,10 +196,16 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     }
 }
 
-/// Run one claim/dispatch scheduler pass. Public for deterministic tests.
+/// Retired control-side scan tick. The scheduler store is the timer authority.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
-    tick_with_dispatcher(
+    let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+    store
+        .provision()
+        .await
+        .map_err(scheduler_store_error_to_registry)?;
+    fire_once(
+        &store,
         state,
         Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
         WorkflowEngineConfig::default(),
@@ -204,9 +213,10 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     .await
 }
 
-/// Testable tick variant with an injected dispatch seam.
+/// Fire due scheduler timers and dispatch claimed workflow runs.
 #[allow(clippy::future_not_send)]
-pub async fn tick_with_dispatcher<D>(
+pub async fn fire_once<D>(
+    scheduler_store: &WorkflowSchedulerStore,
     state: &AppState,
     dispatcher: Arc<D>,
     config: WorkflowEngineConfig,
@@ -221,17 +231,63 @@ where
         }
     }
 
-    reap_parked_cancel_requested_batch(&state.registry, &config).await?;
-
-    let current = INFLIGHT_DISPATCHES.load(Ordering::SeqCst);
-    if current >= config.max_inflight_dispatch {
-        return Ok(0);
+    let reaped = reap_parked_cancel_requested_batch(&state.registry, &config).await?;
+    for run_id in reaped {
+        scheduler_store
+            .ack_terminal(&run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
     }
-    let available = config.max_inflight_dispatch - current;
-    let claims = claim_due_batch(&state.registry, &config, available).await?;
-    let claimed = claims.len();
-    for claim in claims {
-        spawn_dispatch(state.registry.clone(), dispatcher.clone(), config.clone(), claim);
+
+    let fair_limit = config
+        .batch_apps
+        .saturating_mul(config.per_app_fair_limit)
+        .max(1);
+    let per_app_fair_limit = config.per_app_fair_limit.max(1);
+    let per_app_fair_limit_usize = usize::try_from(per_app_fair_limit).unwrap_or(usize::MAX);
+    let mut scheduler_config = SchedulerConfig::default();
+    scheduler_config.max_due_per_tick = per_app_fair_limit_usize;
+    scheduler_config.max_loaded_timers = fair_limit;
+
+    let mut wheel = TimerWheel::new(WakeHandle::new());
+    let mut claimed = 0usize;
+    while claimed < per_app_fair_limit_usize {
+        let current = INFLIGHT_DISPATCHES.load(Ordering::SeqCst);
+        let available_dispatch_slots = config.max_inflight_dispatch.saturating_sub(current);
+        if available_dispatch_slots == 0 {
+            break;
+        }
+        scheduler_config.max_due_per_tick =
+            (per_app_fair_limit_usize - claimed).min(available_dispatch_slots);
+        let fired = workflow_scheduler::fire_once(scheduler_store, &mut wheel, &scheduler_config)
+            .await
+            .map_err(scheduler_error_to_registry)?;
+        if fired.is_empty() {
+            break;
+        }
+
+        let mut batch_claimed = 0usize;
+        for timer in fired {
+            match claim_fired_timer(&state.registry, &config, &timer).await? {
+                Some(claim) => {
+                    claimed += 1;
+                    batch_claimed += 1;
+                    spawn_dispatch(
+                        scheduler_store.clone(),
+                        state.registry.clone(),
+                        dispatcher.clone(),
+                        config.clone(),
+                        claim,
+                    );
+                }
+                None => {
+                    sync_scheduler_for_run(scheduler_store, &state.registry, &timer.run_id).await?;
+                }
+            }
+        }
+        if batch_claimed == 0 {
+            break;
+        }
     }
     Ok(claimed)
 }
@@ -255,106 +311,73 @@ struct CandidateRun {
     cancel_requested: bool,
 }
 
-async fn claim_due_batch(
+async fn claim_fired_timer(
     registry: &Registry,
     config: &WorkflowEngineConfig,
-    available: usize,
-) -> Result<Vec<ClaimedRun>, RegistryError> {
+    timer: &FiredTimer,
+) -> Result<Option<ClaimedRun>, RegistryError> {
     let mut conn = registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
-    rearm_waiting_runs_with_pending_signals(&tx).await?;
-    let limit = i64::try_from(available)
-        .unwrap_or(i64::MAX)
-        .min(config.batch_apps.saturating_mul(config.per_app_fair_limit));
-    if limit <= 0 {
-        tx.commit().await.map_err(RegistryError::from)?;
-        return Ok(Vec::new());
-    }
-
     let rows = tx
         .query(
-            "WITH due_apps AS ( \
-               SELECT r.app_id, MIN(r.wake_at) AS first_wake \
-                 FROM zeroship.workflow_runs r \
-                 JOIN zeroship.apps app ON app.id = r.app_id \
-                 JOIN zeroship.plans plan ON plan.id = app.plan_id \
-                WHERE r.wake_at <= now() \
-                  AND r.state IN ('queued','running','sleeping','waiting','compensating') \
-                  AND (r.claimed_by IS NULL OR r.lease_expires IS NULL OR r.lease_expires <= now()) \
-                  AND app.workflows_enabled \
-                  AND plan.workflows_allowed \
-                  AND NOT plan.archived \
-                GROUP BY r.app_id \
-                ORDER BY first_wake, r.app_id \
-                LIMIT $1 \
-             ) \
-             SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
+            "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
                     r.state, r.input, r.started_at, r.waiting_step_key, r.cancel_requested \
-               FROM due_apps a \
-               CROSS JOIN LATERAL ( \
-                 SELECT id, app_id, workflow_name, deploy_id, state, input, started_at, waiting_step_key, wake_at, cancel_requested \
-                   FROM zeroship.workflow_runs \
-                  WHERE app_id = a.app_id \
-                    AND wake_at <= now() \
-                    AND state IN ('queued','running','sleeping','waiting','compensating') \
-                    AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
-                  ORDER BY wake_at, id \
-                  LIMIT $2 \
-                  FOR UPDATE SKIP LOCKED \
-               ) r \
+               FROM zeroship.workflow_runs r \
+               JOIN zeroship.apps app ON app.id = r.app_id \
+               JOIN zeroship.plans plan ON plan.id = app.plan_id \
                JOIN zeroship.app_deploys d ON d.id = r.deploy_id \
-              ORDER BY r.app_id, r.wake_at, r.id \
-              LIMIT $3",
-            &[
-                &config.batch_apps,
-                &config.per_app_fair_limit,
-                &limit,
-            ],
+              WHERE r.id = $1 \
+                AND r.app_id = $2 \
+                AND r.wake_at <= now() \
+                AND r.state IN ('queued','running','sleeping','waiting','compensating') \
+                AND (r.claimed_by IS NULL OR r.lease_expires IS NULL OR r.lease_expires <= now()) \
+                AND app.workflows_enabled \
+                AND plan.workflows_allowed \
+                AND NOT plan.archived \
+              FOR UPDATE SKIP LOCKED",
+            &[&timer.run_id, &timer.app_id],
         )
         .await
         .map_err(RegistryError::from)?;
 
-    let mut claimed = Vec::new();
-    for row in rows {
-        let candidate = CandidateRun {
-            run_id: row.get("id"),
-            app_id: row.get("app_id"),
-            workflow_name: row.get("workflow_name"),
-            deploy_id: row.get("deploy_id"),
-            deploy_hash: row.get("deploy_hash"),
-            state: row.get("state"),
-            input: row.get("input"),
-            started_at: row.get("started_at"),
-            waiting_step_key: row.get("waiting_step_key"),
-            cancel_requested: row.get("cancel_requested"),
-        };
+    let Some(row) = rows.first() else {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(None);
+    };
+    let candidate = CandidateRun {
+        run_id: row.get("id"),
+        app_id: row.get("app_id"),
+        workflow_name: row.get("workflow_name"),
+        deploy_id: row.get("deploy_id"),
+        deploy_hash: row.get("deploy_hash"),
+        state: row.get("state"),
+        input: row.get("input"),
+        started_at: row.get("started_at"),
+        waiting_step_key: row.get("waiting_step_key"),
+        cancel_requested: row.get("cancel_requested"),
+    };
 
-        tx.batch_execute("SAVEPOINT workflow_claim_row")
-            .await
-            .map_err(RegistryError::from)?;
-        match claim_one_locked(&tx, config, candidate).await {
-            Ok(Some(run)) => {
-                tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
-                    .await
-                    .map_err(RegistryError::from)?;
-                claimed.push(run);
-            }
-            Ok(None) => {
-                tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
-                    .await
-                    .map_err(RegistryError::from)?;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "workflow_engine: quarantining poison claim row");
-                tx.batch_execute("ROLLBACK TO SAVEPOINT workflow_claim_row")
-                    .await
-                    .map_err(RegistryError::from)?;
-                tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
-                    .await
-                    .map_err(RegistryError::from)?;
-            }
+    tx.batch_execute("SAVEPOINT workflow_claim_row")
+        .await
+        .map_err(RegistryError::from)?;
+    let claimed = match claim_one_locked(&tx, config, candidate).await {
+        Ok(run) => {
+            tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
+                .await
+                .map_err(RegistryError::from)?;
+            run
         }
-    }
+        Err(e) => {
+            tracing::warn!(error = %e, run_id = %timer.run_id, "workflow_engine: quarantining poison fired timer");
+            tx.batch_execute("ROLLBACK TO SAVEPOINT workflow_claim_row")
+                .await
+                .map_err(RegistryError::from)?;
+            tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
+                .await
+                .map_err(RegistryError::from)?;
+            None
+        }
+    };
 
     tx.commit().await.map_err(RegistryError::from)?;
     Ok(claimed)
@@ -363,11 +386,11 @@ async fn claim_due_batch(
 async fn reap_parked_cancel_requested_batch(
     registry: &Registry,
     config: &WorkflowEngineConfig,
-) -> Result<u64, RegistryError> {
+) -> Result<Vec<String>, RegistryError> {
     let limit = i64::try_from(config.batch_apps.saturating_mul(config.per_app_fair_limit))
         .unwrap_or(i64::MAX);
     if limit <= 0 {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let mut conn = registry.conn().await?;
@@ -380,7 +403,7 @@ async fn reap_parked_cancel_requested_batch(
 async fn reap_parked_cancel_requested_runs<C>(
     tx: &C,
     limit: i64,
-) -> Result<u64, RegistryError>
+) -> Result<Vec<String>, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -403,46 +426,14 @@ where
         .await
         .map_err(RegistryError::from)?;
 
-    let mut reaped = 0;
+    let mut reaped = Vec::new();
     for row in rows {
         let run_id: String = row.get("id");
         if cancel_requested_run(tx, &run_id).await? {
-            reaped += 1;
+            reaped.push(run_id);
         }
     }
     Ok(reaped)
-}
-
-async fn rearm_waiting_runs_with_pending_signals<C>(tx: &C) -> Result<u64, RegistryError>
-where
-    C: GenericClient + Sync,
-{
-    tx.execute(
-        "UPDATE zeroship.workflow_runs r \
-            SET wake_at = now() \
-           FROM zeroship.apps app \
-           JOIN zeroship.plans plan ON plan.id = app.plan_id \
-          WHERE r.state = 'waiting' \
-            AND r.app_id = app.id \
-            AND app.workflows_enabled \
-            AND plan.workflows_allowed \
-            AND NOT plan.archived \
-            AND (r.wake_at IS NULL OR r.wake_at > now()) \
-            AND EXISTS ( \
-                SELECT 1 \
-                  FROM zeroship.workflow_steps s \
-                  JOIN zeroship.workflow_signals sig \
-                    ON sig.run_id = r.id \
-                   AND sig.consumed_by IS NULL \
-                   AND sig.type = s.signal_type \
-                 WHERE s.run_id = r.id \
-                   AND s.state = 'running' \
-                   AND s.kind IN ('wait_signal','child') \
-            )",
-        &[],
-    )
-    .await
-    .map_err(RegistryError::from)
 }
 
 async fn claim_one_locked<C>(
@@ -1135,6 +1126,7 @@ where
 }
 
 fn spawn_dispatch<D>(
+    scheduler_store: WorkflowSchedulerStore,
     registry: Registry,
     dispatcher: Arc<D>,
     config: WorkflowEngineConfig,
@@ -1152,25 +1144,58 @@ fn spawn_dispatch<D>(
         Duration::from_millis(config.heartbeat_ms),
     );
     compio::runtime::spawn(async move {
+        let mut inflight_guard = InflightDispatchGuard::new();
         let outcome = dispatcher.dispatch(claim.request).await;
         heartbeat.store(false, Ordering::SeqCst);
         match outcome {
             DispatchOutcome::Completed(result) => {
                 match apply_step_result_on_registry(&registry, &config, result.clone()).await {
-                    Ok(_) => {}
                     Err(WorkflowError::Deadlock(msg)) => {
                         tracing::warn!(error = %msg, run_id = %result.run_id, "workflow_engine: apply deadlock, requeueing claim");
                         if let Err(e) =
                             requeue_claim(&registry, &config.owner_id, &result.run_id, &result.dispatch_nonce).await
                         {
                             tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: deadlock requeue failed");
+                        } else {
+                            inflight_guard.release();
+                            if let Err(e) =
+                                sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                            {
+                                tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler requeue ack failed");
+                            }
                         }
                     }
                     Err(WorkflowError::Invalid(msg)) => {
                         tracing::error!(error = %msg, run_id = %result.run_id, "workflow_engine: invalid StepResult");
+                        inflight_guard.release();
+                        if let Err(e) =
+                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                        {
+                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler invalid apply sync failed");
+                        }
                     }
                     Err(WorkflowError::Db(e)) => {
                         tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: apply failed");
+                        inflight_guard.release();
+                        if let Err(e) =
+                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                        {
+                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler failed apply sync failed");
+                        }
+                    }
+                    Ok(applied) => {
+                        inflight_guard.release();
+                        if applied {
+                            if let Err(e) =
+                                sync_scheduler_after_apply(&scheduler_store, &registry, &result.run_id).await
+                            {
+                                tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler apply ack failed");
+                            }
+                        } else if let Err(e) =
+                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                        {
+                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler noop apply sync failed");
+                        }
                     }
                 }
             }
@@ -1188,12 +1213,39 @@ fn spawn_dispatch<D>(
                     park_backpressure_claim(&registry, &config.owner_id, &run_id, &dispatch_nonce).await
                 {
                     tracing::error!(error = %e, run_id = %run_id, "workflow_engine: backpressure park failed");
+                } else {
+                    inflight_guard.release();
+                    if let Err(e) = sync_scheduler_for_run(&scheduler_store, &registry, &run_id).await {
+                        tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler backpressure ack failed");
+                    }
                 }
             }
         }
-        INFLIGHT_DISPATCHES.fetch_sub(1, Ordering::SeqCst);
     })
     .detach();
+}
+
+struct InflightDispatchGuard {
+    released: bool,
+}
+
+impl InflightDispatchGuard {
+    fn new() -> Self {
+        Self { released: false }
+    }
+
+    fn release(&mut self) {
+        if !self.released {
+            INFLIGHT_DISPATCHES.fetch_sub(1, Ordering::SeqCst);
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for InflightDispatchGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 fn spawn_heartbeat(
@@ -1261,11 +1313,17 @@ pub async fn apply_step_result(
     owner_id: &str,
     result: StepResult,
 ) -> Result<bool, RegistryError> {
+    let run_id = result.run_id.clone();
     let mut config = WorkflowEngineConfig::default();
     config.owner_id = owner_id.to_string();
-    apply_step_result_on_registry(&state.registry, &config, result)
+    let applied = apply_step_result_on_registry(&state.registry, &config, result)
         .await
-        .map_err(workflow_error_to_registry)
+        .map_err(workflow_error_to_registry)?;
+    if applied {
+        let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+        sync_scheduler_after_apply(&store, &state.registry, &run_id).await?;
+    }
+    Ok(applied)
 }
 
 /// Public deterministic apply path with scheduler config overrides for tests.
@@ -1275,9 +1333,222 @@ pub async fn apply_step_result_with_config(
     config: WorkflowEngineConfig,
     result: StepResult,
 ) -> Result<bool, RegistryError> {
-    apply_step_result_on_registry(&state.registry, &config, result)
+    let run_id = result.run_id.clone();
+    let applied = apply_step_result_on_registry(&state.registry, &config, result)
         .await
-        .map_err(workflow_error_to_registry)
+        .map_err(workflow_error_to_registry)?;
+    if applied {
+        let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+        sync_scheduler_after_apply(&store, &state.registry, &run_id).await?;
+    }
+    Ok(applied)
+}
+
+fn scheduler_error_to_registry(error: workflow_scheduler::SchedulerError) -> RegistryError {
+    RegistryError::Database(format!("workflow scheduler: {error}"))
+}
+
+fn scheduler_store_error_to_registry(error: WorkflowSchedulerStoreError) -> RegistryError {
+    RegistryError::Database(format!("workflow scheduler store: {error}"))
+}
+
+#[allow(clippy::future_not_send)]
+async fn sync_scheduler_after_apply(
+    scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
+    run_id: &str,
+) -> Result<(), RegistryError> {
+    let conn = registry.conn().await?;
+    let rows = conn
+        .query(
+            "WITH RECURSIVE ancestors AS ( \
+                 SELECT id, parent_run_id \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1 \
+                 UNION ALL \
+                 SELECT p.id, p.parent_run_id \
+                   FROM zeroship.workflow_runs p \
+                   JOIN ancestors a ON a.parent_run_id = p.id \
+             ), root AS ( \
+                 SELECT id \
+                   FROM ancestors \
+                  WHERE parent_run_id IS NULL \
+                  LIMIT 1 \
+             ), family AS ( \
+                 SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key, tree_depth \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = (SELECT id FROM root) \
+                 UNION ALL \
+                 SELECT c.id, c.app_id, c.state, c.wake_at, c.claimed_by, c.dispatch_nonce, c.waiting_step_key, c.tree_depth \
+                   FROM zeroship.workflow_runs c \
+                   JOIN family f ON c.parent_run_id = f.id \
+             ) \
+             SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+               FROM family \
+              ORDER BY tree_depth, id",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if rows.is_empty() {
+        scheduler_store
+            .ack_terminal(run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+        return Ok(());
+    }
+    for row in rows {
+        sync_scheduler_row(scheduler_store, &conn, &row).await?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::future_not_send)]
+async fn sync_scheduler_for_run(
+    scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
+    run_id: &str,
+) -> Result<(), RegistryError> {
+    let conn = registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    let Some(row) = rows.first() else {
+        scheduler_store
+            .ack_terminal(run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+        return Ok(());
+    };
+    sync_scheduler_row(scheduler_store, &conn, row).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn sync_scheduler_row<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    conn: &C,
+    row: &compio_postgres::Row,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let run_id: String = row.get("id");
+    let app_id: Uuid = row.get("app_id");
+    let state: String = row.get("state");
+    let mut wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+    let claimed_by: Option<String> = row.get("claimed_by");
+    let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
+    let waiting_step_key: Option<String> = row.get("waiting_step_key");
+    if is_schedulable_state(&state) {
+        if state == "waiting" && wake_at.is_none() {
+            wake_at = rearm_waiting_run_if_pending_signal(conn, &run_id, waiting_step_key.as_deref()).await?;
+        }
+        if claimed_by.is_some() && dispatch_nonce.is_some() {
+            return Ok(());
+        }
+        if let Some(wake_at) = wake_at {
+            scheduler_store
+                .ack_register_next(&run_id, app_id, wake_at)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
+        } else {
+            scheduler_store
+                .ack_terminal(&run_id)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
+        }
+    } else {
+        scheduler_store
+            .ack_terminal(&run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+    }
+    Ok(())
+}
+
+fn is_schedulable_state(state: &str) -> bool {
+    matches!(
+        state,
+        "queued" | "running" | "sleeping" | "waiting" | "compensating"
+    )
+}
+
+async fn rearm_waiting_run_if_pending_signal<C>(
+    conn: &C,
+    run_id: &str,
+    waiting_step_key: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let Some(key) = waiting_step_key else {
+        return Ok(None);
+    };
+    let pending = match parse_waiting_step_key(key)? {
+        WaitingStep::Sleep { .. } => false,
+        WaitingStep::WaitSignal { signal_type, .. } => {
+            let rows = conn
+                .query(
+                    "SELECT id \
+                       FROM zeroship.workflow_signals \
+                      WHERE run_id = $1 \
+                        AND type = $2 \
+                        AND consumed_by IS NULL \
+                      LIMIT 1",
+                    &[&run_id, &signal_type],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+            !rows.is_empty()
+        }
+        WaitingStep::Child { .. } => {
+            let rows = conn
+                .query(
+                    "SELECT sig.id \
+                       FROM zeroship.workflow_steps s \
+                       JOIN zeroship.workflow_signals sig \
+                         ON sig.run_id = s.run_id \
+                        AND sig.type = s.signal_type \
+                        AND sig.consumed_by IS NULL \
+                      WHERE s.run_id = $1 \
+                        AND s.kind = 'child' \
+                        AND s.state = 'running' \
+                      LIMIT 1",
+                    &[&run_id],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+            !rows.is_empty()
+        }
+    };
+    if !pending {
+        return Ok(None);
+    }
+
+    let wake_at = Utc::now();
+    let changed = conn
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET wake_at = $2 \
+              WHERE id = $1 \
+                AND state = 'waiting' \
+                AND wake_at IS NULL",
+            &[&run_id, &wake_at],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if changed > 0 {
+        Ok(Some(wake_at))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn has_due_compensation<C>(conn: &C, run_id: &str) -> Result<bool, RegistryError>

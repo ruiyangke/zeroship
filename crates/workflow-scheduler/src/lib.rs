@@ -63,14 +63,10 @@ pub async fn fire_once(
         .await?;
 
     let deadline = now + chrono::Duration::milliseconds(config.inflight_ttl_ms);
-    let mut fired = Vec::new();
-    while fired.len() < config.max_due_per_tick {
-        let Some(entry) = wheel.pop_due(Utc::now()) else {
-            break;
-        };
-        if let Some(timer) = store.move_timer_to_inflight(&entry, deadline).await? {
-            fired.push(timer);
-        }
+    let due_limit = i64::try_from(config.max_due_per_tick).unwrap_or(i64::MAX);
+    let fired = store.claim_due_timers(now, due_limit, deadline).await?;
+    while wheel.pop_due(now).is_some() {
+        // Store ownership is authoritative; due heap entries may now be stale.
     }
     Ok(fired)
 }

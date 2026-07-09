@@ -25,13 +25,14 @@ use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::{workflow_blob_gc, workflow_retention};
 use zeroship_control::cron::workflow_engine::{
-    self, DispatchOutcome, RunUpdate, StepCheckpoint, StepDispatcher, StepRequest, StepResult,
-    WorkflowEngineConfig,
+    self, DispatchOutcome, GatewayStepDispatcher, RunUpdate, StepCheckpoint, StepDispatcher,
+    StepRequest, StepResult, WorkflowEngineConfig,
 };
 use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -72,6 +73,7 @@ struct Fixture {
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    scheduler_store: WorkflowSchedulerStore,
     _db: TestDatabase,
 }
 
@@ -279,6 +281,12 @@ async fn scrub_cloned_fixture_data(pg: &compio_postgres::Client) {
     pg.batch_execute(
         "DO $$ \
          BEGIN \
+           IF to_regclass('workflow_scheduler.inflight') IS NOT NULL THEN \
+             TRUNCATE TABLE workflow_scheduler.inflight; \
+           END IF; \
+           IF to_regclass('workflow_scheduler.timers') IS NOT NULL THEN \
+             TRUNCATE TABLE workflow_scheduler.timers; \
+           END IF; \
            IF to_regclass('zeroship.workflow_e2e_side_effects') IS NOT NULL THEN \
              TRUNCATE TABLE zeroship.workflow_e2e_side_effects; \
            END IF; \
@@ -304,6 +312,11 @@ async fn build_fixture_with_gateway(
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
+    let scheduler_store = WorkflowSchedulerStore::new(db_url.to_string());
+    scheduler_store
+        .provision()
+        .await
+        .expect("provision workflow scheduler store");
     let setup_pg = pg(db_url).await;
     setup_pg
         .execute(
@@ -376,6 +389,7 @@ async fn build_fixture_with_gateway(
         pg: control_pg,
         blob_root,
         deploy_tmp_dir,
+        scheduler_store,
         _db: test_db,
     }
 }
@@ -490,7 +504,42 @@ async fn seed_run(
         )
         .await
         .expect("insert workflow run");
+    if matches!(
+        state,
+        "queued" | "running" | "sleeping" | "waiting" | "compensating"
+    ) {
+        fx.scheduler_store
+            .register_timer(&run_id, app_id, wake_at)
+            .await
+            .expect("register seeded workflow timer");
+    }
     run_id
+}
+
+async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT app_id, state, wake_at \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load run for scheduler registration");
+    let state: String = row.get("state");
+    let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+    if matches!(
+        state.as_str(),
+        "queued" | "running" | "sleeping" | "waiting" | "compensating"
+    ) {
+        let app_id: Uuid = row.get("app_id");
+        let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
+        fx.scheduler_store
+            .register_timer(run_id, app_id, wake_at)
+            .await
+            .expect("register existing workflow timer");
+    }
 }
 
 fn config(owner: &str) -> WorkflowEngineConfig {
@@ -1060,7 +1109,8 @@ async fn claim_journal_preserves_same_name_child_occurrences() {
     }
 
     let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(dispatcher.clone()),
         config("owner-child-journal-occurrence"),
@@ -1270,7 +1320,22 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         .await
         .expect("simulate lost parent wake");
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    fx.scheduler_store
+        .ack_register_next(&parent, app_id, Utc::now())
+        .await
+        .expect("register lost parent wake safety-net timer");
+    let rearmed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(CompleteDispatcher),
+        config("owner-child-rearm-sync"),
+    )
+    .await
+    .expect("parent rearm sync tick");
+    assert_eq!(rearmed, 0, "first tick should re-register the lost parent wake");
+
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-child-rearm"),
@@ -1346,7 +1411,8 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
     assert_eq!(child_after_cancel.get::<_, String>("state"), "queued");
     assert!(child_after_cancel.get::<_, bool>("cancel_requested"));
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-child-cascade"),
@@ -1461,7 +1527,8 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
             > Utc::now()
     );
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-child-cascade-sleep"),
@@ -2352,7 +2419,8 @@ async fn caught_step_failure_continues_run_to_completion() {
     .await;
     let dispatcher = Arc::new(CaughtStepFailureDispatcher::default());
 
-    let first = workflow_engine::tick_with_dispatcher(
+    let first = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-caught-step-failure"),
@@ -2370,7 +2438,8 @@ async fn caught_step_failure_continues_run_to_completion() {
         vec![(0, "may-fail".to_string(), "run".to_string(), "failed".to_string())]
     );
 
-    let second = workflow_engine::tick_with_dispatcher(
+    let second = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-caught-step-failure-replay"),
@@ -2409,7 +2478,8 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     .await;
     let dispatcher = Arc::new(UncaughtStepFailureDispatcher::default());
 
-    let first = workflow_engine::tick_with_dispatcher(
+    let first = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-uncaught-step-failure"),
@@ -2421,7 +2491,8 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     assert!(wake_at.is_some(), "failed step should schedule exactly one replay");
     assert_eq!(strikes, 0);
 
-    let second = workflow_engine::tick_with_dispatcher(
+    let second = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-uncaught-step-failure-replay"),
@@ -2454,7 +2525,8 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
         .expect("count failed rows");
     assert_eq!(failed_rows.get::<_, i64>("n"), 1);
 
-    let terminal_tick = workflow_engine::tick_with_dispatcher(
+    let terminal_tick = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-uncaught-step-failure-terminal"),
@@ -2487,7 +2559,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
     let mut cfg = config("owner-stuck-strikes");
     cfg.stuck_strike_limit = 2;
 
-    let first = workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+    let first = workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
         .await
         .expect("first zero-progress tick");
     assert_eq!(first, 1);
@@ -2500,7 +2572,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
         "UNSETTLED frontier creates no workflow_steps row"
     );
 
-    let second = workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg)
+    let second = workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg)
         .await
         .expect("second zero-progress tick");
     assert_eq!(second, 1);
@@ -2517,7 +2589,8 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
         "wall-budget UNSETTLED outcomes remain no-row through stall"
     );
 
-    let terminal_tick = workflow_engine::tick_with_dispatcher(
+    let terminal_tick = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-stuck-strikes-terminal"),
@@ -2540,7 +2613,8 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
     .await;
     let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(dispatcher.clone()),
         config("owner-claim"),
@@ -2594,8 +2668,8 @@ async fn concurrent_ticks_claim_disjoint_rows() {
     c2.max_inflight_per_app = 8;
 
     let (a, b) = futures::join!(
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::new(d1.clone()), c1),
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::new(d2.clone()), c2),
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::new(d1.clone()), c1),
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::new(d2.clone()), c2),
     );
     assert_eq!(a.expect("tick a"), 4);
     assert_eq!(b.expect("tick b"), 4);
@@ -2639,7 +2713,8 @@ async fn stale_lease_is_taken_over_after_ttl() {
     .await;
     let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(dispatcher.clone()),
         config("owner-stale"),
@@ -2688,7 +2763,8 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
     )
     .await;
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-lease-b"),
@@ -2775,7 +2851,8 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
     .await;
     let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(dispatcher.clone()),
         config("owner-sleep"),
@@ -3058,7 +3135,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
         );
     }
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-paused-skip"),
@@ -3100,6 +3178,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
                 <= 1,
             "resume should preserve wake_at for {original_state}"
         );
+        register_existing_run_timer(&fx, run_id).await;
     }
 
     let due_runs: Vec<String> = runs
@@ -3107,7 +3186,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
         .filter(|(_, state, _)| state == "queued" || state == "running")
         .map(|(run_id, _, _)| run_id.clone())
         .collect();
-    workflow_engine::tick_with_dispatcher(
+    workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-resumed-complete"),
@@ -3147,7 +3227,8 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     )
     .await;
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-pause-mid"),
@@ -3225,7 +3306,8 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     assert_eq!(steps[0].get::<_, i32>("ordinal"), 0);
     assert_eq!(steps[0].get::<_, String>("name"), "a");
 
-    let skipped = workflow_engine::tick_with_dispatcher(
+    let skipped = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteAfterA),
         config("owner-paused-after-apply"),
@@ -3244,7 +3326,9 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     )
     .await;
     assert_eq!(resp.status(), ntex::http::StatusCode::OK);
-    workflow_engine::tick_with_dispatcher(
+    register_existing_run_timer(&fx, &run_id).await;
+    workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteAfterA),
         config("owner-paused-resume"),
@@ -3299,7 +3383,8 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     )
     .await;
 
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::clone(&dispatcher),
         config("owner-cancel-mid"),
@@ -3321,7 +3406,8 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     assert_eq!(resp.status(), ntex::http::StatusCode::OK);
     let _ = release.send(());
     wait_for_cancelled_without_steps(&fx, &run_id).await;
-    let claimed = workflow_engine::tick_with_dispatcher(
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteDispatcher),
         config("owner-cancelled-skip"),
@@ -3488,6 +3574,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     assert!(rows[0].get::<_, Option<DateTime<Utc>>>("wake_at").is_some());
     assert_eq!(rows[0].get::<_, i32>("next_ordinal"), 1);
     assert_eq!(rows[0].get::<_, Option<i32>>("restarted_from_ordinal"), Some(1));
+    register_existing_run_timer(&fx, &run_id).await;
     let rows = fx
         .pg
         .query(
@@ -3503,7 +3590,8 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     assert_eq!(rows[0].get::<_, i32>("ordinal"), 0);
     assert_eq!(rows[0].get::<_, String>("name"), "a");
 
-    workflow_engine::tick_with_dispatcher(
+    workflow_engine::fire_once(
+        &fx.scheduler_store,
         &fx.state,
         Arc::new(CompleteAfterA),
         config("owner-restart-complete"),
@@ -3550,7 +3638,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
     let dispatcher = Arc::new(CompleteDispatcher);
 
     for _ in 0..200 {
-        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("tick");
         let rows = fx
@@ -3603,7 +3691,14 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
     )
     .await;
 
-    let claimed = workflow_engine::tick(&fx.state).await.expect("tick");
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(GatewayStepDispatcher::new(fx.state.gateway_url.clone())),
+        WorkflowEngineConfig::default(),
+    )
+    .await
+    .expect("fire once");
     assert_eq!(claimed, 1);
 
     for _ in 0..100 {
