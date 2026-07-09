@@ -66,9 +66,11 @@
 #   SKIP_DB_RECREATE (unset)  — set to skip the drop/create/migrate step
 #   TEST_THREADS (unset)      — passed to each binary's `--test-threads`
 #
-# CONTROL_TEST_DB is REQUIRED for the billing gate. This script exports it after
-# creating/migrating TEST_DB. Plain `cargo test` without CONTROL_TEST_DB keeps
-# DB-gated tests as loud skips, but it is not the billing integration gate.
+# CONTROL_TEST_DB selects the DB the tests connect to. This script exports it
+# after creating/migrating an isolated TEST_DB. The tests never skip: with
+# CONTROL_TEST_DB unset they fall back to the dev Postgres DSN
+# (postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test) and fail
+# loudly if it is unreachable — a missing DB can never masquerade as a pass.
 # ============================================================================
 set -euo pipefail
 
@@ -179,6 +181,18 @@ if cargo test -p zeroship-metering --lib outbox -- "${THREAD_ARG[@]}"; then
 else
   fail=1
   failed+=("zeroship-metering::outbox")
+fi
+
+echo "------------------------------------------------------------------"
+echo "==> zeroship-control spend_recompute enforcement lib tests"
+# The stream-recompute enforcement regression tests (event_id dedup + poison
+# skip) + the Warn/Degrade/Block evaluator tests live as lib unit tests, not
+# integration binaries, so they would otherwise miss the gate.
+if cargo test -p zeroship-control --lib cron::spend_recompute -- "${THREAD_ARG[@]}"; then
+  :
+else
+  fail=1
+  failed+=("zeroship-control::cron::spend_recompute")
 fi
 
 echo "=================================================================="
