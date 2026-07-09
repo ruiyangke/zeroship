@@ -258,8 +258,6 @@ pub fn lite_billing_stack(
         .expect("test lite billing provider builds");
     Arc::new(BillingStack {
         meter: Arc::clone(&provider),
-        rater: Arc::clone(&provider),
         invoicer: provider,
-        webhooks: Vec::new(),
     })
 }

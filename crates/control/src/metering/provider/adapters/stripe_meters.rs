@@ -1,20 +1,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
-    DedupTtl, IngestAck, InvoiceRef, LineItem, Meter, MeteringProvider, ProviderCtx,
-    ProviderError, Rater, RatedInput, SecretHandle, SubjectRef, UsageEvent, WebhookEvent,
-    WebhookOutcome, WebhookSink,
+    DedupTtl, IngestAck, InvoiceRef, Meter, MeteringProvider, ProviderCtx, ProviderError,
+    SecretHandle, SubjectRef, UsageEvent,
 };
 use crate::stripe_client::{StripeApi, StripeClient};
-
-use super::stripe_webhook::StripeWebhookState;
 
 #[derive(Debug, serde::Deserialize)]
 struct StripeMetersCfg {
     secret_key: SecretHandle,
-    webhook_secret: SecretHandle,
     #[serde(default = "default_stripe_base_url")]
     base_url: String,
 }
@@ -24,17 +22,17 @@ fn default_stripe_base_url() -> String {
 }
 
 pub struct StripeMetersProvider {
+    store: Arc<dyn crate::metering::provider::LiteStore>,
     secret_key: crate::SecretString,
     base_url: String,
-    webhook: StripeWebhookState,
 }
 
 impl std::fmt::Debug for StripeMetersProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StripeMetersProvider")
+            .field("store", &"<lite store>")
             .field("secret_key", &self.secret_key)
             .field("base_url", &self.base_url)
-            .field("webhook", &self.webhook)
             .finish()
     }
 }
@@ -42,7 +40,6 @@ impl std::fmt::Debug for StripeMetersProvider {
 pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let cfg: StripeMetersCfg = ctx.parse_adapter_config("stripe_meters")?;
     let secret_key = ctx.secrets.resolve(&cfg.secret_key)?;
-    let webhook_secret = ctx.secrets.resolve(&cfg.webhook_secret)?;
     if secret_key.expose_secret().trim().is_empty() {
         return Err(ProviderError::Config(
             "stripe_meters: secret_key resolved empty".to_string(),
@@ -53,11 +50,13 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
             "stripe_meters: base_url must not be empty".to_string(),
         ));
     }
-    let webhook = StripeWebhookState::new(webhook_secret, ctx.clock)?;
+    let store = ctx.store.clone().ok_or_else(|| {
+        ProviderError::Config("stripe_meters: LiteStore is required".to_string())
+    })?;
     Ok(Arc::new(StripeMetersProvider {
+        store,
         secret_key,
         base_url: cfg.base_url,
-        webhook,
     }))
 }
 
@@ -94,7 +93,7 @@ impl Meter for StripeMetersProvider {
         }
         Ok(IngestAck {
             accepted: batch.len(),
-            deduped: 0,
+            deduped: None,
         })
     }
 
@@ -119,47 +118,24 @@ impl Meter for StripeMetersProvider {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Rater for StripeMetersProvider {
-    async fn rate(
-        &self,
-        _subject: &SubjectRef,
-        _period: BillingPeriod,
-        _input: &RatedInput,
-    ) -> Result<Vec<LineItem>, ProviderError> {
-        Ok(Vec::new())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
 impl crate::metering::provider::Invoicer for StripeMetersProvider {
     async fn close_period(
         &self,
         _subject: &SubjectRef,
         _period: BillingPeriod,
-        _lines: &[LineItem],
     ) -> Result<InvoiceRef, ProviderError> {
         Ok(InvoiceRef(None))
     }
 
     async fn adjustment_note(
         &self,
-        _subject: &SubjectRef,
-        _note: &crate::metering::provider::AdjustmentNote,
+        subject: &SubjectRef,
+        note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        Err(ProviderError::Config(
-            "stripe_meters: adjustment notes are not implemented".to_string(),
-        ))
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl WebhookSink for StripeMetersProvider {
-    fn verify(&self, payload: &[u8], sig: &str) -> Result<(), ProviderError> {
-        self.webhook.verify(payload, sig)
-    }
-
-    async fn handle(&self, event: WebhookEvent) -> Result<WebhookOutcome, ProviderError> {
-        self.webhook.handle(event)
+        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("stripe_meters: subject is not a creator UUID: {e}"))
+        })?;
+        self.store.adjustment_note_invoice(&creator, note).await
     }
 }
 
@@ -169,22 +145,14 @@ impl MeteringProvider for StripeMetersProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE | Capabilities::WEBHOOK
+        Capabilities::METER | Capabilities::INVOICE
     }
 
     fn as_meter(&self) -> Option<&dyn Meter> {
         Some(self)
     }
 
-    fn as_rater(&self) -> Option<&dyn Rater> {
-        Some(self)
-    }
-
     fn as_invoicer(&self) -> Option<&dyn crate::metering::provider::Invoicer> {
-        Some(self)
-    }
-
-    fn as_webhook(&self) -> Option<&dyn WebhookSink> {
         Some(self)
     }
 

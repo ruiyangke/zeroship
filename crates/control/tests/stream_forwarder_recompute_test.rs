@@ -171,7 +171,7 @@ impl Meter for RecordingProvider {
             .extend_from_slice(batch);
         Ok(IngestAck {
             accepted: batch.len(),
-            deduped: 0,
+            deduped: Some(0),
         })
     }
 
@@ -202,6 +202,13 @@ impl event_forwarder::DeadLetterSink for NoopDeadLetters {
     async fn record_provider_reject(
         &self,
         _entry: event_forwarder::ProviderDeadLetter,
+    ) -> Result<(), event_forwarder::EventForwarderError> {
+        Ok(())
+    }
+
+    async fn record_decode_error(
+        &self,
+        _entry: event_forwarder::DecodeDeadLetter,
     ) -> Result<(), event_forwarder::EventForwarderError> {
         Ok(())
     }

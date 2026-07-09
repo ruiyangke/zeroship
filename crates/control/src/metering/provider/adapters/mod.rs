@@ -5,7 +5,6 @@ pub mod lite;
 pub mod openmeter;
 pub mod stripe_invoice;
 pub mod stripe_meters;
-mod stripe_webhook;
 
 pub fn register_builtin(registry: &mut ProviderRegistry) {
     registry.register("lago", lago::factory);

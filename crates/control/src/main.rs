@@ -104,10 +104,6 @@ struct ControlCli {
     #[arg(long = "meter-provider", env = "METER_PROVIDER", default_value = "lite")]
     meter_provider: String,
 
-    /// Provider used as the usage rater. Defaults to the invoicer provider.
-    #[arg(long = "rater-provider", env = "RATER_PROVIDER")]
-    rater_provider: Option<String>,
-
     /// Provider used to close and invoice billing periods.
     #[arg(long = "invoicer-provider", env = "INVOICER_PROVIDER", default_value = "lite")]
     invoicer_provider: String,
@@ -1342,7 +1338,6 @@ fn main() -> std::io::Result<()> {
         &provider_ctx,
         &zeroship_control::metering::provider::BillingStackConfig {
             meter_provider: cli.meter_provider.clone(),
-            rater_provider: cli.rater_provider.clone(),
             invoicer_provider: cli.invoicer_provider.clone(),
             production: !insecure_dev,
             allow_unsupported_billing: cli.allow_unsupported_billing,
@@ -1356,7 +1351,6 @@ fn main() -> std::io::Result<()> {
     };
     tracing::info!(
         meter_provider = billing_stack.meter_id(),
-        rater_provider = billing_stack.rater_id(),
         invoicer_provider = billing_stack.invoicer_id(),
         "control: billing provider stack selected"
     );

@@ -1,6 +1,5 @@
 //! Provider-neutral metering/billing value types.
 
-use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -43,7 +42,13 @@ impl From<BillingPeriod> for crate::stripe_client::Period {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IngestAck {
     pub accepted: usize,
-    pub deduped: usize,
+    /// Number of provider-deduped events when the provider reports it.
+    ///
+    /// `None` means the adapter only knows the accepted/requested count. Remote
+    /// provider APIs such as Stripe meter events, OpenMeter event ingest, and Lago
+    /// event ingest do not return an accepted-vs-deduped split for the calls used
+    /// here, so reporting `Some(0)` would be a false metric.
+    pub deduped: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,21 +56,6 @@ pub struct AggregateQuery {
     pub subject: SubjectRef,
     pub meter: String,
     pub period: BillingPeriod,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RatedInput {
-    pub units: u64,
-    pub usage: HashMap<String, i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineItem {
-    pub app_id: Option<Uuid>,
-    pub description: String,
-    pub amount_cents: i64,
-    pub quantity: u64,
-    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,19 +68,6 @@ pub struct AdjustmentNote {
     pub amount_cents: i64,
     pub reason: String,
     pub idempotency_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WebhookEvent {
-    pub provider: String,
-    pub event_type: String,
-    pub payload: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WebhookOutcome {
-    Ignored,
-    Processed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

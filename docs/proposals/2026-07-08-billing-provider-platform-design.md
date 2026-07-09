@@ -57,7 +57,7 @@ Stream 1 (infra usage billing) shipped as an in-house pipeline: workers pre-aggr
 
 The platform owner has decided to **invert this at scale**. The design target is now explicitly **millions of end-users** of creator apps. The pipeline must be a purpose-built high-throughput streaming design, not "Postgres-as-event-store." Two owner decisions define the new shape:
 
-1. **Stream-to-provider only.** zeroship does NOT run its own columnar meter (no ClickHouse, no in-house rating warehouse). The chosen third-party provider **IS** the meter + rater + invoicer at scale. zeroship runs exactly three things on the money path: **producers** (worker + data-primitive counters) → a **durable stream** → an **event-forwarder** that ships events to the provider. Enforcement (v7) is a **periodic local batch** — the per-app stream recompute run at a tunable cadence (default 1h), priced into `app_spend_state`, which the gateway pulls and enforces at the edge — so spend caps never call a provider on the request path and need no Redis counter. That is the whole pipeline.
+1. **Stream-to-provider only.** zeroship does NOT run its own columnar meter (no ClickHouse, no in-house rating warehouse). The chosen third-party provider **IS** the meter + invoicer at scale. zeroship runs exactly three things on the money path: **producers** (worker + data-primitive counters) → a **durable stream** → an **event-forwarder** that ships events to the provider. Enforcement (v7) is a **periodic local batch** — the per-app stream recompute run at a tunable cadence (default 1h), priced into `app_spend_state`, which the gateway pulls and enforces at the edge — so spend caps never call a provider on the request path and need no Redis counter. That is the whole pipeline.
 2. **The provider is the canonical source of truth for usage AND billing; the stream is the buffer; Postgres holds no raw events AND no per-event ledger.** Control Postgres keeps only config, spend limits/state, invoice bookkeeping, reconciliation findings, and the periodic per-app spend state the enforcement batch writes. The v1 idea of an immutable `usage_events` table in Postgres as the SoT is **removed** — it does not scale to millions of subjects × per-request events, and it duplicates what the provider already stores authoritatively. **v5 goes further:** there is no local *exactly-once* aggregate either. The provider is the single canonical number for **billing** (per-creator, settled); enforcement (per-app) is derived by a **periodic local per-app recompute of the retained stream** (§Pillar 4/§6.3 `witness`) — NOT from the provider (the provider lags and meters at the wrong grain for a per-app cap; see §0 governing insight). **v7:** that recompute runs at a tunable cadence into `app_spend_state`; there is no Redis enforcement counter.
 
 This document is the design for that streaming inversion plus the structural fixes the current seam needs.
@@ -75,13 +75,13 @@ zeroship is **pre-launch with an explicit no-back-compat mandate** (`AGENTS.md` 
 3. **Durable STREAM behind a pluggable `StreamTransport` seam** (Redpanda default, `rust-rdkafka`/librdkafka producer — C threads, no async runtime). The seam is honestly **Kafka-family-scoped** (log-structured: partition offsets + consumer groups + partition-key ordering); Kafka / Kinesis-Kafka-API / EventHubs-Kafka-API drop in as one adapter, and a non-Kafka bus must MEET that documented contract or is out of scope (§Pillar 2).
 4. **Keep enforcement (spend caps) simple, per-app, and provider-independent** — a **periodic local per-app recompute at a tunable cadence** (default 1h) priced into `app_spend_state`, pulled by the gateway (~5s) and enforced INSTANTLY at the edge; never a provider call and no Redis counter anywhere on the enforcement path (v7, §0/§Pillar 4/5). Enforcement is a guardrail whose detection lags by at most one cadence and whose overshoot is bounded by a coarse per-app throughput cap — not an exactly-once ledger, not provider-sourced, and no longer a continuously-incremented shared counter.
 5. **Exactly-once billing at the provider** (the single canonical usage/billing SoT): forward at-least-once + provider `event_id` dedup, and a period reconciliation/correction spine that cannot double-bill even when a replay outruns a provider's dedup-identifier TTL (§6). Resolve bill-01/03/06 and bound/address bill-02/04/05.
-6. **Delegate metering/rating/invoicing to a configurable provider in production**; keep the in-house pipeline alive as a real, self-hosted **evaluation-grade `LiteProvider`** (§Pillar 6) — production-readiness-gated, not "dev-only."
+6. **Delegate metering/invoicing to a configurable provider in production**; keep the in-house pipeline alive as a real, self-hosted **evaluation-grade `LiteProvider`** (§Pillar 6) — production-readiness-gated, not "dev-only."
 7. **Zero tokio *runtime* in-process.** Link-level tokio (via cyper→hyper-util, being separately removed) is tolerated; no new component instantiates a tokio reactor. librdkafka = C background threads; provider/stream forwarding over cyper (compio). See §13.
 
 ### Non-goals
 
 - Stream 2 (Connect application-fee on creator revenue). `creator_fee_policy` / `invoice_payments` / the Connect path are orthogonal (but see §12.4 for the customer-model collision note).
-- Building a new metering third party or a hosted rating DSL. Rating lives in the provider or in the Lite rater (the existing `charge_cents` model).
+- Building a new metering third party or a hosted rating DSL. Rating lives inside the invoicer/provider close path (the existing `charge_cents` model for Lite/`stripe_invoice`).
 - Changing the CU pricing model (`crates/control/src/pricing.rs`), the plan catalog, or the FeePolicy shapes.
 - An object-storage/Parquet cold archive of raw events for provider-independence. It is an **Open Question** (OQ-6), NOT built by default under "stream-to-provider only."
 
@@ -92,7 +92,7 @@ zeroship is **pre-launch with an explicit no-back-compat mandate** (`AGENTS.md` 
 | # | Decision | Consequence in this design |
 | --- | --- | --- |
 | A1 | **Scale target: millions of users.** Purpose-built streaming pipeline; new infra is OK. | §Pillar 4. Per-request events collapse to windowed deltas; the stream absorbs volume, not Postgres. |
-| A2 | **Stream-to-provider only.** Provider IS meter+rater+invoicer AND the single canonical usage/billing SoT **for BILLING** (per-creator, settled); zeroship runs producers → durable stream → forwarder. Enforcement (v7) is a **periodic per-app batch recompute** from the retained stream at a tunable cadence → `app_spend_state` → gateway edge (not the provider, no Redis counter — §0 governing insight). | §Pillar 4 + §Event-forwarder. No ClickHouse, no in-house warehouse, no local exactly-once ledger, no Redis enforcement counter. Provider off the enforcement path. |
+| A2 | **Stream-to-provider only.** Provider IS meter+invoicer AND the single canonical usage/billing SoT **for BILLING** (per-creator, settled); zeroship runs producers → durable stream → forwarder. Enforcement (v7) is a **periodic per-app batch recompute** from the retained stream at a tunable cadence → `app_spend_state` → gateway edge (not the provider, no Redis counter — §0 governing insight). | §Pillar 4 + §Event-forwarder. No ClickHouse, no in-house warehouse, no local exactly-once ledger, no Redis enforcement counter. Provider off the enforcement path. |
 | A3 | **Durable STREAM behind a `StreamTransport` seam** (Redpanda default, librdkafka producer). | §Pillar 2 + §7. Second registry, symmetric to the provider registry — scoped to the Kafka log family with a documented offset/consumer-group/partition-key contract. **v5:** Kafka's own offset store holds the consumer position (committed after provider-ship + counter-incr) — there is no PG `stream_offsets` table. |
 | A4 | **Postgres holds NO raw events AND no per-event exactly-once ledger (v5).** Only config, spend limits/state, invoice bookkeeping, reconciliation findings, and the periodic per-app spend state the cadence batch writes. | §9. `usage_events`-as-SoT is DELETED; the exactly-once `usage_aggregates` fold + `stream_offsets` are DELETED; enforcement is a periodic batch writing `app_spend_state` (v7 — no Redis counter). |
 | A5 | **Zero tokio *runtime* in-process.** Link-level tokio tolerated; no new reactor. | §13. librdkafka C threads; cyper HTTP on compio. |
@@ -295,7 +295,7 @@ pub fn register_builtin(r: &mut StreamRegistry) {
 
 ### Pillar 3 — Capability sub-traits + portable, per-thread-safe `ProviderCtx`
 
-Providers differ in what they do. OpenMeter is meter-only; Metronome/Orb/Lago/Stripe-Meters do meter+rate+invoice; a "Stripe-invoice-from-aggregate" role does invoice-only. Model this as a thin **identity** trait composed of **optional capability sub-traits**, replacing the one-size six-verb `&AppState` trait.
+Providers differ in what they do. OpenMeter is meter-only; Metronome/Orb/Lago/Stripe-Meters do meter+invoice; a "Stripe-invoice-from-aggregate" role does invoice-only. Model this as a thin **identity** trait composed of **optional capability sub-traits**, replacing the one-size six-verb `&AppState` trait.
 
 ```rust
 // provider/mod.rs (REWRITTEN)
@@ -304,9 +304,7 @@ pub trait MeteringProvider: Send + Sync {
     fn id(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
     fn as_meter(&self)    -> Option<&dyn Meter>       { None }
-    fn as_rater(&self)    -> Option<&dyn Rater>       { None }
     fn as_invoicer(&self) -> Option<&dyn Invoicer>    { None }
-    fn as_webhook(&self)  -> Option<&dyn WebhookSink> { None }
     fn as_backfiller(&self) -> Option<&dyn Backfiller> { None } // Some ⇔ CorrectionCapability::Backfill
     /// Per-provider dedup contract (resolves R2 critique #2). Declares the identifier
     /// the provider dedups on AND how long its dedup window lasts. The forwarder
@@ -357,7 +355,7 @@ pub enum CorrectionCapability {
 pub enum ClosedPeriodPolicy { RegeneratesInvoice, OpenPeriodOnly }
 
 bitflags::bitflags! {
-    pub struct Capabilities: u8 { const METER=1; const RATE=2; const INVOICE=4; const WEBHOOK=8; }
+    pub struct Capabilities: u8 { const METER=1; const INVOICE=2; }
 }
 
 /// Enforced at REGISTRY BUILD time (resolves critique #9): the bitflags and the
@@ -365,12 +363,12 @@ bitflags::bitflags! {
 pub fn assert_capability_consistency(p: &dyn MeteringProvider) -> Result<(), ProviderError> {
     let c = p.capabilities();
     let ok = c.contains(Capabilities::METER)   == p.as_meter().is_some()
-          && c.contains(Capabilities::RATE)    == p.as_rater().is_some()
           && c.contains(Capabilities::INVOICE) == p.as_invoicer().is_some()
-          && c.contains(Capabilities::WEBHOOK) == p.as_webhook().is_some()
           // correction() and the as_backfiller() downcast must agree: a Backfill
           // provider MUST expose Backfiller; a None/InvoiceCredit one MUST NOT.
-          && matches!(p.correction(), CorrectionCapability::Backfill { .. }) == p.as_backfiller().is_some();
+          && matches!(p.correction(), CorrectionCapability::Backfill { .. }) == p.as_backfiller().is_some()
+          // InvoiceCredit is an invoicer-owned correction and must have a backing Invoicer.
+          && (!matches!(p.correction(), CorrectionCapability::InvoiceCredit) || p.as_invoicer().is_some());
     if ok { Ok(()) } else {
         Err(ProviderError::Config(format!("{}: capabilities() disagree with as_*() downcasts", p.id())))
     }
@@ -414,12 +412,6 @@ pub trait Backfiller {
 }
 
 #[async_trait::async_trait(?Send)]
-pub trait Rater {
-    async fn rate(&self, subject: &SubjectRef, period: BillingPeriod, input: &RatedInput)
-        -> Result<Vec<LineItem>, ProviderError>;
-}
-
-#[async_trait::async_trait(?Send)]
 pub trait Invoicer {
     /// Close + bill a period. Lite / stripe_invoice: create+finalize invoice items.
     /// The close is triggered only AFTER the provider's SETTLE WINDOW (§5.3) has
@@ -432,7 +424,7 @@ pub trait Invoicer {
     /// credit/debit `adjustment_note` on the next invoice, or a terminal true-up at
     /// account close — §5.3), NEVER a silent underbill. stripe_meters / metronome /
     /// orb / lago: no-op — the provider self-invoices from its own meter.
-    async fn close_period(&self, subject: &SubjectRef, period: BillingPeriod, lines: &[LineItem])
+    async fn close_period(&self, subject: &SubjectRef, period: BillingPeriod)
         -> Result<InvoiceRef, ProviderError>;
     /// SIGNED post-finalize adjustment on the NEXT invoice — the `InvoiceCredit`
     /// correction path (§6.3). `AdjustmentNote.amount_cents` is signed: NEGATIVE for
@@ -444,11 +436,6 @@ pub trait Invoicer {
         -> Result<InvoiceRef, ProviderError>;
 }
 
-#[async_trait::async_trait(?Send)]
-pub trait WebhookSink {
-    fn verify(&self, payload: &[u8], sig: &str) -> Result<(), ProviderError>;
-    async fn handle(&self, event: WebhookEvent) -> Result<WebhookOutcome, ProviderError>;
-}
 ```
 
 #### 5.3 The role stack — 3 roles, N ids, explicit fan-out (resolves critique #3)
@@ -470,9 +457,7 @@ The v1 "two ids for a three-role stack" was incoherent: it could not express met
 ```rust
 pub struct BillingStack {
     meter:    Arc<dyn MeteringProvider>,        // exposes Meter — the event sink
-    rater:    Arc<dyn MeteringProvider>,        // exposes Rate  — may equal meter or invoicer
     invoicer: Arc<dyn MeteringProvider>,        // exposes Invoice
-    webhooks: Vec<Arc<dyn MeteringProvider>>,   // all providers exposing Webhook
 }
 ```
 
@@ -481,11 +466,10 @@ Selection is **role-addressed**, so any composition is expressible:
 ```
 # canonical delegated stack — OpenMeter meters, Stripe invoices FROM the aggregate:
 --meter-provider    openmeter
---rater-provider    stripe_invoice     # (defaults to the invoicer if unset)
 --invoicer-provider stripe_invoice
 
-# full-stack single provider — one id fills all three roles:
---provider metronome        # sugar: sets meter=rater=invoicer=metronome
+# full-stack single provider — one id fills both roles:
+--provider metronome        # sugar: sets meter=invoicer=metronome
 
 # evaluation, no external usage-billing account:
 --provider lite
@@ -641,7 +625,7 @@ Spend Warn/Degrade/Block is derived by the **periodic per-app recompute** (rated
 
 v1 mis-framed Lite as "a dev-only test double." It is not. **Lite is a real, self-contained, evaluation-grade billing provider** — the relocated in-house engine — that lets someone stand up the whole platform in a local/self-hosted cluster and **trial zeroship end-to-end with no external billing account**. It is simply **not production-hardened**. The framing is **production-READINESS, not dev-vs-prod**.
 
-- **`lite` adapter** implements `Meter` + `Rater` + `Invoicer` against local Postgres via `LiteStore`. As a self-contained provider, `lite` keeps its OWN meter store (a `lite_usage` aggregate — this is a PROVIDER's event store, dedup'd on `event_id`, NOT the deleted platform enforcement fold); `Meter::ingest` writes it, `Meter::read_aggregate` reads it (the canonical number in a `lite` deployment), `Rater::rate` is the `charge_cents` CU model, and `Invoicer::close_period` rates that store via the relocated `bill_creator` body (§5.5). Enforcement in a `lite` deployment is the same periodic-cadence per-app recompute → `app_spend_state` → gateway edge — not from `lite`'s meter (enforcement is provider-independent by construction, v7).
+- **`lite` adapter** implements `Meter` + `Invoicer` against local Postgres via `LiteStore`. As a self-contained provider, `lite` keeps its OWN meter store (a `lite_usage` aggregate — this is a PROVIDER's event store, dedup'd on `event_id`, NOT the deleted platform enforcement fold); `Meter::ingest` writes it, `Meter::read_aggregate` reads it (the canonical number in a `lite` deployment), and `Invoicer::close_period` rates that store via the relocated `bill_creator` body (§5.5). Enforcement in a `lite` deployment is the same periodic-cadence per-app recompute → `app_spend_state` → gateway edge — not from `lite`'s meter (enforcement is provider-independent by construction, v7).
 - **Zero-external-account evaluation (resolves critique #7/#8a).** Lite's default invoicer uses the **local-only invoice sink** (`LiteStore::record_local_invoice`): it writes `invoices`/`invoice_lines` with **no Stripe call**, so an out-of-the-box trial needs zero external credentials. A Lite operator who *does* want to see real Stripe invoices can opt into the Stripe path by supplying a key — but the default trial is fully local.
 - **Production-readiness guard.** `MeteringProvider::production_ready()` returns `false` for `lite`. Selecting a not-production-ready provider requires an explicit `--allow-unsupported-billing` boot flag; without it `build_stack()` refuses ("the Lite provider is evaluation-grade and not production-hardened; pass --allow-unsupported-billing to run it knowingly"). The rationale is **"not production-hardened,"** not "it's a fake." Because Lite *can* reach real money (if the Stripe path is enabled), this flag is load-bearing and gets a dedicated failure-mode row (§11).
 - **Recording fakes are SEPARATE from Lite (resolves critique #8b).** The conformance suite (§Pillar 7) uses per-adapter **recording fakes** (localhost mock servers), a distinct concept from Lite. Lite is not "the test double"; Lite simply **passes conformance like any real provider**.
@@ -667,9 +651,8 @@ v1 mis-framed Lite as "a dev-only test double." It is not. **Lite is a real, sel
 3. **Aggregate read-back correctness** (the owned-invoicer rating input at close + the §6.3 witness cross-check).
 4. **Invoice close** (if `INVOICE`) — stable `InvoiceRef`, idempotent re-close; owned invoicers rate the provider's SETTLED `read_aggregate` at close (assert the close happens after the settle window, and re-close is idempotent).
 5. **Correction fidelity** (per `correction()`): `Backfill` adapters — `Backfiller::backfill` re-rates a drifted period idempotently; `InvoiceCredit` adapters — a signed `adjustment_note` (debit for under-bill, credit for over-bill) lands on the next invoice; `None` adapters — drift produces a `provider_meter_drift` finding, no phantom API call.
-6. **Webhook verify** (if `WEBHOOK`) — tampered sig rejected; valid accepted once.
-7. **Fail-closed config** — factory rejects empty/partial config and unresolved secret handles.
-8. **Event-time bucketing** — a past-`event_time` event lands in its own period bucket (the enforcement recompute's period grouping + the provider's period).
+6. **Fail-closed config** — factory rejects empty/partial config and unresolved secret handles.
+7. **Event-time bucketing** — a past-`event_time` event lands in its own period bucket (the enforcement recompute's period grouping + the provider's period).
 
 **`docs/reference/adding-a-metering-provider.md`** and **`docs/reference/adding-a-stream-transport.md`** (NEW): copy an adapter, implement the sub-traits, declare + validate config, add 2 index lines, run conformance.
 
@@ -764,15 +747,15 @@ The conformance suite's clock-advancing test (Pillar 7 #2) verifies the §6.2 wi
 
 ## 8. Capability × provider matrix
 
-| Provider (`id`) | Meter | Rater | Invoicer | Webhook | `production_ready` | DedupContract | **Correction** (real API) | Config (self-validated; secrets via `SecretResolver`) | Notes |
-| --- | :---: | :---: | :---: | :---: | :---: | --- | --- | --- | --- |
-| `openmeter` | ✅ | — | — | — | ✅ | `(source,id)`, **Unbounded** | **None** (append-only meter; NO adjust verb) — but the STACK corrects at the owned invoicer | `base_url, token*, event_type, meter_slug` | CloudEvents-native. Meter-only; MUST pair with an invoicer. Correction owned by `stripe_invoice` (InvoiceCredit). |
-| `stripe_meters` | ✅ | ✅¹ | ✅² | ✅ | ✅ | `identifier`, **Bounded ~24h cancel** | **InvoiceCredit** (meter events immutable; `MeterEventAdjustment` cancels an event only within the ~24h cancel window — distinct from the ~35d event-backdate ingest window; a closed-period under-bill → Stripe debit/credit note) | `secret_key*, event_name, meter_id, webhook_secret*` | Stripe self-invoices from its metered Price+Subscription. ¹²provider-side; `close_period` no-op. Do NOT pair with OpenMeter. |
-| `stripe_invoice` | — | ✅ | ✅ | ✅ | ✅ | n/a (no meter) | **InvoiceCredit** (we own the invoice → the §6.3 owned-invoicer correction compares the stream `witness` vs the finalized `invoice_lines`; a straggler/loss → signed `adjustment_note` on next invoice, keyed `(subject,period,correction_seq)`) | `secret_key*, webhook_secret*` (+ `LiteStore`) | **Invoice-only.** Rates the meter provider's **SETTLED `read_aggregate`** at close (the single canonical usage number, v5) into Stripe invoice items. THE correct partner for `openmeter`. Bills Stripe the real amount (resolves critique #3). |
-| `metronome` | ✅ | ✅ | ✅ | ✅ | ✅ | `transaction_id`, **Unbounded** (dedup ≤34d ingest) | **Backfill{window ~34d, closed: RegeneratesInvoice}** (.jsonl amend/void + regenerate finalized invoice) | `api_token*, contract_id` | Full-stack single-id. |
-| `orb` | ✅ | ✅ | ✅ | ✅ | ✅ | `idempotency_key` = our `event_id`, **Unbounded** | **Backfill{window: current period, closed: OpenPeriodOnly}** (backfill archives+replaces events, re-rates; issued invoices → credit note) | `api_key*, external_customer_id_map?` | Full-stack; real Orb backfill API. |
-| `lago` | ✅ | ✅ | ✅ | ✅ | ✅ | `transaction_id` = our `event_id`, **Unbounded** | **Backfill{window: open period, closed: OpenPeriodOnly}** (new `transaction_id` on open period; closed period immutable → Lago credit note) | `api_url, api_key*, billable_metric_code` | OSS, self-hostable; full-stack. |
-| `lite` | ✅ | ✅ | ✅ | ✅³ | **❌** | `event_id`, **Unbounded** (local) | **InvoiceCredit** (local sink → negative/positive `invoice_lines`) | *(none required; local invoice sink)* (+ `LiteStore`) | Evaluation-grade relocated in-house engine. Default invoicer = **local-only** (no Stripe). Refused without `--allow-unsupported-billing`. |
+| Provider (`id`) | Meter | Invoicer | `production_ready` | DedupContract | **Correction** (real API) | Config (self-validated; secrets via `SecretResolver`) | Notes |
+| --- | :---: | :---: | :---: | --- | --- | --- | --- |
+| `openmeter` | ✅ | — | ✅ | `(source,id)`, **Unbounded** | **None** (append-only meter; NO adjust verb) — but the STACK corrects at the owned invoicer | `base_url, token*, event_type, meter_slug` | CloudEvents-native. Meter-only; MUST pair with an invoicer. Correction owned by `stripe_invoice` (InvoiceCredit). |
+| `stripe_meters` | ✅ | ✅ | ✅ | `identifier`, **Bounded ~24h cancel** | **InvoiceCredit** (meter events immutable; `MeterEventAdjustment` cancels an event only within the ~24h cancel window — distinct from the ~35d event-backdate ingest window; a closed-period under-bill → platform debit/credit note) | `secret_key*, event_name, meter_id` (+ `LiteStore`) | Stripe self-invoices from its metered Price+Subscription. `close_period` no-op; correction notes are platform invoice adjustments. Do NOT pair with OpenMeter. |
+| `stripe_invoice` | — | ✅ | ✅ | n/a (no meter) | **InvoiceCredit** (we own the invoice → the §6.3 owned-invoicer correction compares the stream `witness` vs the finalized `invoice_lines`; a straggler/loss → signed `adjustment_note` on next invoice, keyed `(subject,period,correction_seq)`) | `secret_key*` (+ `LiteStore`) | **Invoice-only.** Rates the meter provider's **SETTLED `read_aggregate`** at close (the single canonical usage number, v5) into Stripe invoice items. THE correct partner for `openmeter`. Bills Stripe the real amount (resolves critique #3). |
+| `metronome` | ✅ | ✅ | ✅ | `transaction_id`, **Unbounded** (dedup ≤34d ingest) | **Backfill{window ~34d, closed: RegeneratesInvoice}** (.jsonl amend/void + regenerate finalized invoice) | `api_token*, contract_id` | Full-stack single-id. |
+| `orb` | ✅ | ✅ | ✅ | `idempotency_key` = our `event_id`, **Unbounded** | **Backfill{window: current period, closed: OpenPeriodOnly}** (backfill archives+replaces events, re-rates; issued invoices → credit note) | `api_key*, external_customer_id_map?` | Full-stack; real Orb backfill API. |
+| `lago` | ✅ | ✅ | ✅ | `transaction_id` = our `event_id`, **Unbounded** | **Backfill{window: open period, closed: OpenPeriodOnly}** (new `transaction_id` on open period; closed period immutable → Lago credit note) | `api_url, api_key*, billable_metric_code` | OSS, self-hostable; full-stack. |
+| `lite` | ✅ | ✅ | **❌** | `event_id`, **Unbounded** (local) | **InvoiceCredit** (local sink → negative/positive `invoice_lines`) | *(none required; local invoice sink)* (+ `LiteStore`) | Evaluation-grade relocated in-house engine. Default invoicer = **local-only** (no Stripe). Refused without `--allow-unsupported-billing`. |
 
 `*` = secret handle resolved via the secret backend, never plaintext in `provider_config`.
 
@@ -803,7 +786,7 @@ All in the `zeroship` schema; existing billing tables in `db/migrations-ts/20260
 | **`provider_config`** | **NEW (optional).** `(role, provider_id, config jsonb, updated_at)` — NON-secret blob only; secrets are handles resolved via the secret backend. | Pillar 1 provider-agnostic config. |
 | `app_spend_state` | **KEPT.** UPSERTed by the periodic-cadence recompute batch (priced via `charge_cents`/`derive_state`); pulled by the gateway via `RouteEntry.spend_state` (Decision D1) and enforced instantly at the edge. | The enforcement decision surface (unchanged shape); v7 sources it from the cadence recompute, not a Redis counter. |
 | `billing_reconciliation_findings` | **KEPT + extended.** New kinds: `provider_meter_drift`, `provider_reject`, `late_period_adjustment`, `forwarder_down_exceeds_retention`, `subject_attribution_mismatch`, `terminal_period_trureup` (v6, terminal-period settlement — §5.3/§11). | Pillar 5/7 reconciliation + dead-letter + §6.3 corrective path + honest local-gap alert (§11) + attribution cross-check (OQ-10). |
-| `billing_metrics`, `metric_weights`, `plans`, `pricing_config` | **KEPT unchanged.** | CU pricing + plan catalog out of scope; the Lite/`stripe_invoice` rater + enforcement read them. |
+| `billing_metrics`, `metric_weights`, `plans`, `pricing_config` | **KEPT unchanged.** | CU pricing + plan catalog out of scope; the Lite/`stripe_invoice` invoicer path + enforcement read them. |
 | `invoices`, `invoice_lines`, `billing_provider_refs`, `billing_customer_refs` | **KEPT.** Written by the Lite/`stripe_invoice` invoicer (incl. the local-only sink) and `SubjectRef` mapping. | Invoice bookkeeping provider-neutral. |
 | `creator_fee_policy`, `invoice_payments`, disputes/refunds/payout tables | **UNTOUCHED** by the pipeline, but see §12.2 for the credit-note flow into `invoices`/`invoice_lines`. | Stream 2 / payment-lifecycle. |
 
@@ -856,13 +839,13 @@ Hard orderings: S1→S5 (traits before producer), S3→S4→S5 (stream + consume
 
 ### 12.1 Multi-currency / FX under delegated invoicing (Missing-Concept #1)
 
-Local enforcement + the CU pricing model are **USD-only today**, and `LineItem` carries a `currency`. Under delegation, a provider (Metronome/Orb/Lago) may invoice a creator in the creator's own currency. Rule: **enforcement stays USD** (the spend limit is a USD number against USD-priced CU); the **invoice currency is the provider's/creator's**, and the `stripe_invoice`/Lite rater emits `LineItem.currency` from the creator's billing currency, converting CU→amount at the operator FX rate (the existing `default_fx` in `bill_creator`). Reconciliation compares **CU quantities** (currency-neutral) between the stream `witness` and the provider aggregate, not amounts, so FX never confuses drift detection. Full multi-currency enforcement (non-USD spend limits) is deferred (OQ-5).
+Local enforcement + the CU pricing model are **USD-only today**. Under delegation, a provider (Metronome/Orb/Lago) may invoice a creator in the creator's own currency. Rule: **enforcement stays USD** (the spend limit is a USD number against USD-priced CU); the **invoice currency is the provider's/creator's**, and the `stripe_invoice`/Lite invoicer path converts CU→amount at the operator FX rate (the existing `default_fx` in `bill_creator`). Reconciliation compares **CU quantities** (currency-neutral) between the stream `witness` and the provider aggregate, not amounts, so FX never confuses drift detection. Full multi-currency enforcement (non-USD spend limits) is deferred (OQ-5).
 
 ### 12.2 Refunds / credits / disputes under delegated invoicing (Missing-Concept #2)
 
-Delegating invoicing means credit notes, proration reversals, and dispute webhooks originate at the provider. v2 adds:
+Delegating invoicing means credit notes, proration reversals, and dispute webhooks originate at the provider. The correction surface is:
 - `Invoicer::adjustment_note(subject, AdjustmentNote)` — a SIGNED note flows back into local bookkeeping as an `invoice_lines` entry (negative = `credit_note` for a provider-issued credit/refund; positive = `debit_note` for a late under-bill that adds charge — resolves critique #6's wrong-direction bug) on a linked `invoices` row, so the creator dashboard and local totals reflect it. This is the same verb the §6.3 `InvoiceCredit` correction path uses.
-- `WebhookSink` handles dispute/refund events per provider and maps them to an `adjustment_note`/finding. **Webhook redelivery idempotency (resolves R2 Part 7.6):** provider webhooks are redelivered (Stripe redelivers), so `WebhookSink.handle` dedups on the provider's event id (`billing_reconciliation_findings`/`invoice_lines` carry the provider event id as an idempotency key) — a refund/dispute processed twice applies the note once. Disputes on Stream-1 platform invoices are handled by the existing dunning path (`cron/dunning.rs`); Stream-2 Connect disputes remain orthogonal.
+- Stripe dispute/refund/invoice webhooks are handled by the existing production route (`stripe_handlers::webhook`, wired at `/internal/webhooks/stripe`) with its own signature verification and redelivery idempotency. Provider adapters do not expose a separate webhook capability.
 
 ### 12.3 Provider→provider migration (Missing-Concept #3)
 
@@ -904,7 +887,7 @@ Every new component upholds it:
 | 3 | **Durable buffer** | Replicated Redpanda stream (`acks=all`) + optional worker redb floor for the ship path (§7). |
 | 4 | **Provider is the source of truth (for BILLING)** | No Postgres raw-event table AND no per-event local ledger (A4, v5); the provider stores + aggregates authoritatively for billing. Enforcement is a different grain (per-app) drawn from a LOCAL per-app stream recompute — the provider is NOT its source (§0). Local keeps only a periodic-cadence recompute → `app_spend_state` (no Redis counter, v7). |
 | 5 | **Pluggable transport** | `StreamTransport` registry — Kafka/NATS/managed as one file + 2 lines (Pillar 2). |
-| 6 | **Decoupled rating** | `Rater` sub-trait; rating in the provider or the Lite CU model — never on the hot path. |
+| 6 | **Decoupled rating** | Rating is internal to the provider or owned-invoicer close path — never on the hot path. |
 | 7 | **Fail-toward-underbill** | Outage never blocks traffic; overflow/dead-letter shed with metrics + findings + corrective path (§11); an enforcement-batch outage → the gateway keeps enforcing the last `app_spend_state`, recomputed from the retained stream on resume (no ephemeral state to lose); a runaway app's overshoot is bounded ≤ `R × cadence` by the throughput cap (§Pillar 4/5). |
 | 8 | **Reconciliation + REAL correction (bounded safety net)** | Period-level (§6.3), independent witness = the LOCAL per-app stream recompute — the SAME batch that drives enforcement (one job, two consumers). Owned-invoicer rates the recompute at close (after settle) + corrects `witness` vs finalized `invoice_lines` (a keyed `adjustment_note` on a real straggler/loss; terminal period via a true-up); self-invoicer reconciles `witness` vs the provider meter and dispatches the provider's actual `CorrectionCapability` (`Backfill`/`None`). Every correction keyed `(subject, period, correction_seq)`. Spine UNCHANGED from v4. |
 | 9 | **Event-time bucketing (scoped)** | The recompute buckets by event-time (re-derived each cadence); self-invoicing provider late events corrected via §6.3 per real capability (honest, §Pillar 4/§6). |
@@ -926,7 +909,7 @@ Every new component upholds it:
   - **Recompute fan-out (once per cadence):** at millions of subjects a full-stream re-aggregation per cadence is a batch job. Mitigations: (i) **incremental recompute from a per-partition checkpoint** (re-aggregate only offsets since the last recompute + carry a running per-`(subject,period)` sum), (ii) **shard by app-id range** across control instances, (iii) only recompute subjects with stream activity since the last pass, (iv) cadence tuning (a longer cadence linearly cuts cost and linearly grows the detection-latency bound — §Pillar 5 SLO). The residual PROVIDER reads — §6.3's `read_aggregate` health cross-check and §6.2's closed-period gate — remain per-subject provider calls but are billing-side, slow-cadence, and off the enforcement path. Because the recompute is once-per-cadence and §6.3 is a bounded safety net, this fan-out degrades *timeliness/coverage*, NOT invoice correctness. Much reduced from v6; still the top scaling item on the recompute/reconcile path.
 - **OQ-8 — Hot partition / whale subject (R2 Part 7.4).** Partition-key = subject pins one high-volume creator/app to a single partition → a per-subject throughput ceiling. Options: a composite key `(subject, shard)` with N shards for whale subjects (aggregation still sums across shards per `(app, period)`), or an operator-set whale list. Deferred; documented so the ordering guarantee (§Pillar 2 contract #3) is understood to be per-subject, and sharding a whale trades strict per-subject order for throughput.
 - **OQ-9 — Multi-region (R2 Part 7.5).** v3 assumes one Redpanda cluster + a forwarder consumer group co-located with control. Cross-region stream placement, forwarder region affinity, and provider-region routing are unaddressed and deferred to a scale-out epic.
-- **OQ-4 — Webhook multiplexing.** With multiple `WebhookSink` providers, route inbound webhooks by `/internal/webhooks/<provider_id>` (path) + signature verify.
+- **OQ-4 — Provider webhook expansion.** Stripe platform webhooks use the existing `/internal/webhooks/stripe` route. A future non-Stripe provider webhook path should be designed as a production HTTP route, not as an unused provider capability.
 - **OQ-5 — Non-USD spend limits.** Full multi-currency enforcement (a creator whose spend limit is in EUR) is deferred; v2 keeps enforcement USD, invoice currency provider-side (§12.1).
 - **OQ-6 — Provider-independent cold archive.** An object-storage/Parquet archive of the stream (via the existing compio-s3) would give provider-independence + replayable history for migration. NOT built by default under "stream-to-provider only" (A2); documented as the escape hatch if provider lock-in becomes a concern.
 - **OQ-10 — Subject attribution binding (R2 Part 7.8).** `subject.app_id` is runtime-stamped, not app-asserted, but a compromised worker could forge another app's subject. Evaluate the forwarder-side registry cross-check (worker→app assignment) vs signing the subject into the per-worker credential. Deferred to S2/S4 hardening.
@@ -1015,7 +998,7 @@ R3 scored v3 **64/100 — NOT converged**, with exactly TWO substantive holes (b
 **ADDED (the one new mechanism — a fast approximate enforcement counter):**
 - **A shared fast spend counter in Redis** (`crates/compio-redis`, already exposing `incr_by`/`mget`/`set`/`pexpire`): the forwarder/enforcement consumer best-effort `INCRBY`s a per-`(subject_or_app, period, metric)` key as events flow — no transaction, no offset fence. Shared (not per-gateway-node memory) because CHWBL spreads an app across nodes. §Pillar 4.
 - **Sub-minute enforcement read:** a periodic evaluator `MGET`s the counter, rates it (`pricing::charge_cents`), runs `spend.rs::derive_state`, and UPSERTs `app_spend_state`, which the gateway pulls via the existing 5s `RouteEntry.spend_state` (Decision D1). No provider, no PG-per-event on the fast path. §Pillar 5.
-- **Periodic RE-BASE to canonical truth:** every few minutes a task `SET`s each active counter to `rate(provider.read_aggregate)` (or a stream batch recompute), healing best-effort-`INCRBY` drift and rebuilding after a full Redis loss. The provider read (OQ-7 fan-out) happens only at this SLOW cadence, off the request path. §Pillar 4.
+- **Periodic RE-BASE to canonical truth:** every few minutes a task `SET`s each active counter from provider aggregate rating (or a stream batch recompute), healing best-effort-`INCRBY` drift and rebuilding after a full Redis loss. The provider read (OQ-7 fan-out) happens only at this SLOW cadence, off the request path. §Pillar 4.
 
 **REFRAMED (billing basis follows from decision #1):**
 - **Owned invoicers now rate the provider's SETTLED aggregate at close** (`read_aggregate` after the provider's settle window), NOT a local exactly-once fold (v4 MF#3). The lag MF#3 dodged is handled by closing after settle; post-finalize stragglers are corrected by §6.3. §5.3, Pillar 5, §8 `stripe_invoice` row, `Invoicer`/`Meter` trait docs.
@@ -1034,7 +1017,7 @@ R3 scored v3 **64/100 — NOT converged**, with exactly TWO substantive holes (b
 
 **The governing insight added up front (§0):** *ENFORCEMENT CANNOT BE PROVIDER-SOURCED.* Spend limits are per-app; the provider meters per-creator/subject AND lags — so it cannot source the per-app enforcement re-base. Enforcement gets a LOCAL per-app usage source; billing keeps the provider. Different grains, different freshness, legitimately different sources — this does NOT contradict "provider = single canonical BILLING SoT."
 
-**CRITICAL #1 (re-base DIRECTION was inverted → under-enforce) — FIXED.** v5's `SET counter = rate(provider.read_aggregate)` re-based to a LAGGING number and discarded in-flight `INCRBY`s → SET the counter BELOW true usage → Block fired LATE (under-enforce), the OPPOSITE of the claimed "slightly-early Block is safe." v6 makes the re-base **`counter = MAX(counter, recompute)`** (set-only-if-higher, atomic Lua `eval`) — **monotonic within a period, never lowered below true consumed usage**. Stated as an explicit invariant: **enforcement may Block slightly EARLY, never LATE.** §0, §Pillar 4 (rewritten re-base para + invariant), §Pillar 5, §11 (drift + Redis-loss rows), scorecard 2/7.
+**CRITICAL #1 (re-base DIRECTION was inverted → under-enforce) — FIXED.** v5's provider-aggregate rebase used a LAGGING number and discarded in-flight `INCRBY`s → SET the counter BELOW true usage → Block fired LATE (under-enforce), the OPPOSITE of the claimed "slightly-early Block is safe." v6 makes the re-base **`counter = MAX(counter, recompute)`** (set-only-if-higher, atomic Lua `eval`) — **monotonic within a period, never lowered below true consumed usage**. Stated as an explicit invariant: **enforcement may Block slightly EARLY, never LATE.** §0, §Pillar 4 (rewritten re-base para + invariant), §Pillar 5, §11 (drift + Redis-loss rows), scorecard 2/7.
 
 **CRITICAL #3 (re-base SOURCE must be LOCAL per-app, not the provider) — FIXED.** The re-base source is now a **periodic LOCAL per-app recompute of the retained stream** (`Σ` per `(subject=app, metric, period)` — partition-keyed by subject, so per-app by construction), NOT `provider.read_aggregate`. This dissolves the round-5 grain mismatch (a per-creator provider aggregate can't reconstruct N per-app counters) AND takes the provider **entirely off the enforcement path**. It is the SAME recompute §6.3 uses as its billing `witness` — ONE batch, two consumers (enforcement re-base + provider-loss detection). It stays a periodic BATCH (no per-event exactly-once fold), so PG stays off the per-event path and the v5 concurrency win survives. §0, §Pillar 4, §6.3, §9 (new "Local per-app recompute" batch-job row), OQ-2 (no longer enforcement-load-bearing).
 

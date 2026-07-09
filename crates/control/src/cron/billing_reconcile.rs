@@ -502,7 +502,7 @@ async fn sweep<S: StripeApi>(
 
     for (creator_id, _app_ids) in &apps_by_creator {
         let subject = crate::metering::provider::SubjectRef(creator_id.to_string());
-        match invoicer.close_period(&subject, billing_period, &[]).await.map_err(RegistryError::from)
+        match invoicer.close_period(&subject, billing_period).await.map_err(RegistryError::from)
         {
             Ok(crate::metering::provider::InvoiceRef(Some(_))) => billed += 1,
             Ok(crate::metering::provider::InvoiceRef(None)) => {

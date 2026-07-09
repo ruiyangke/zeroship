@@ -14,8 +14,8 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::metering::provider::{
     AdjustmentNote, AggregateQuery, BillingPeriod, BillingStack, Capabilities,
-    ControlLiteStore, CorrectionCapability, IngestAck, InvoiceRef, LineItem, LiteStore, Meter,
-    MeteringProvider, ProviderError, Rater, RatedInput, SubjectRef, UsageEvent,
+    ControlLiteStore, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, Meter,
+    MeteringProvider, ProviderError, SubjectRef, UsageEvent,
 };
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
@@ -63,6 +63,15 @@ impl Drop for Fixture {
 }
 
 async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    build_fixture_with_provider(db_url, label, "db_adjustment", 125).await
+}
+
+async fn build_fixture_with_provider(
+    db_url: &str,
+    label: &str,
+    provider_id: &'static str,
+    provider_quantity: u64,
+) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -93,14 +102,13 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         tax_provider.clone(),
     ));
     let provider: Arc<dyn MeteringProvider> = Arc::new(DbAdjustmentProvider {
+        id: provider_id,
         store,
-        provider_quantity: 125,
+        provider_quantity,
     });
     let billing_stack = Arc::new(BillingStack {
         meter: Arc::clone(&provider),
-        rater: Arc::clone(&provider),
         invoicer: provider,
-        webhooks: Vec::new(),
     });
 
     let state = Arc::new(AppState {
@@ -151,6 +159,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 }
 
 struct DbAdjustmentProvider {
+    id: &'static str,
     store: Arc<ControlLiteStore>,
     provider_quantity: u64,
 }
@@ -160,7 +169,7 @@ impl Meter for DbAdjustmentProvider {
     async fn ingest(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
         Ok(IngestAck {
             accepted: batch.len(),
-            deduped: 0,
+            deduped: Some(0),
         })
     }
 
@@ -174,24 +183,11 @@ impl Meter for DbAdjustmentProvider {
 }
 
 #[async_trait::async_trait(?Send)]
-impl Rater for DbAdjustmentProvider {
-    async fn rate(
-        &self,
-        _subject: &SubjectRef,
-        _period: BillingPeriod,
-        _input: &RatedInput,
-    ) -> Result<Vec<LineItem>, ProviderError> {
-        Ok(Vec::new())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
 impl zeroship_control::metering::provider::Invoicer for DbAdjustmentProvider {
     async fn close_period(
         &self,
         _subject: &SubjectRef,
         _period: BillingPeriod,
-        _lines: &[LineItem],
     ) -> Result<InvoiceRef, ProviderError> {
         Ok(InvoiceRef(None))
     }
@@ -210,18 +206,14 @@ impl zeroship_control::metering::provider::Invoicer for DbAdjustmentProvider {
 
 impl MeteringProvider for DbAdjustmentProvider {
     fn id(&self) -> &str {
-        "db_adjustment"
+        self.id
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE
+        Capabilities::METER | Capabilities::INVOICE
     }
 
     fn as_meter(&self) -> Option<&dyn Meter> {
-        Some(self)
-    }
-
-    fn as_rater(&self) -> Option<&dyn Rater> {
         Some(self)
     }
 
@@ -272,6 +264,43 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
     assert_eq!(finding_count(&fx.state, app, period).await, 1);
+}
+
+#[compio::test]
+async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_reject() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100)
+        .await;
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period = BillingPeriod {
+        start: period_start,
+        end: billing_reconcile::period_end_unix(period_start),
+    };
+    let creator = make_creator(&fx.state).await;
+    let plan_id = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan_id, creator).await;
+    seed_witness_and_invoice(&fx.state, creator, app, &plan_id, period).await;
+
+    let first = billing_reconcile::reconcile_pass(&fx.state, period)
+        .await
+        .expect("stripe_meters self-invoicing reconcile pass");
+    assert_eq!(first.subjects_checked, 1);
+    assert_eq!(first.corrections_issued, 1);
+    assert_eq!(first.provider_rejects, 0);
+    assert_eq!(first.findings_recorded, 2);
+
+    let (line_count, amount_sum) = correction_lines(&fx.state, app).await;
+    assert_eq!(line_count, 1);
+    assert_eq!(amount_sum, 25);
+    assert_eq!(finding_count(&fx.state, app, period).await, 1);
+    assert_eq!(
+        provider_reject_count(&fx.state, app, period).await,
+        0,
+        "stripe_meters InvoiceCredit drift must not be recorded as provider_reject"
+    );
 }
 
 #[compio::test]
@@ -548,6 +577,22 @@ async fn correction_lines(state: &AppState, app: Uuid) -> (i64, i64) {
 
 async fn finding_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
     finding_count_for_meter(state, app, METER, period).await
+}
+
+async fn provider_reject_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
+    let entity_id = format!("billing-correction:{app}:{METER}:{}", period.start);
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n \
+             FROM zeroship.billing_reconciliation_findings \
+             WHERE kind = 'provider_reject'::text::zeroship.reconciliation_finding_kind \
+               AND entity_id = $1",
+            &[&entity_id],
+        )
+        .await
+        .expect("count provider reject findings");
+    rows[0].get("n")
 }
 
 async fn finding_count_for_meter(

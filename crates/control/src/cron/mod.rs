@@ -385,14 +385,12 @@ mod tests {
     fn stripe_meters_stack() -> BillingStack {
         let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
             id: "stripe_meters",
-            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
         });
         BillingStack {
             meter: p.clone(),
-            rater: p.clone(),
             invoicer: p,
-            webhooks: Vec::new(),
         }
     }
 
@@ -404,42 +402,36 @@ mod tests {
         });
         let invoicer: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
             id: "stripe_invoice",
-            capabilities: Capabilities::RATE | Capabilities::INVOICE,
+            capabilities: Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
         });
         BillingStack {
             meter,
-            rater: invoicer.clone(),
             invoicer,
-            webhooks: Vec::new(),
         }
     }
 
     fn lite_stack() -> BillingStack {
         let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
             id: "lite",
-            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::InvoiceCredit,
         });
         BillingStack {
             meter: p.clone(),
-            rater: p.clone(),
             invoicer: p,
-            webhooks: Vec::new(),
         }
     }
 
     fn no_correction_local_stack() -> BillingStack {
         let p: Arc<dyn MeteringProvider> = Arc::new(CronProvider {
             id: "lite",
-            capabilities: Capabilities::METER | Capabilities::RATE | Capabilities::INVOICE,
+            capabilities: Capabilities::METER | Capabilities::INVOICE,
             correction: CorrectionCapability::None,
         });
         BillingStack {
             meter: p.clone(),
-            rater: p.clone(),
             invoicer: p,
-            webhooks: Vec::new(),
         }
     }
 
