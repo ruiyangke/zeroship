@@ -18,7 +18,6 @@ pub mod billing_notify;
 pub mod billing_reconcile;
 pub mod dunning;
 pub mod event_forwarder;
-pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_recompute;
 pub mod spend_reconcile;
@@ -56,14 +55,9 @@ pub fn spawn_all(
     .detach();
 
     if state.billing_stream.is_none() {
-        // Non-stream fallback for local aggregate fixtures. In stream mode this
-        // is replaced by spend_recompute, which first rewrites usage_aggregates
-        // from UsageEvents and then calls the same spend evaluator.
-        let spend_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
-        })
-        .detach();
+        tracing::warn!(
+            "billing stream transport is not configured; usage metering/enforcement is disabled (no old-model fallback)"
+        );
     }
 
     // Dunning sweep (billing G2) — suspends each `past_due` creator whose
@@ -118,15 +112,6 @@ pub fn spawn_all(
         })
         .detach();
     }
-    if tasks.contains(&"metering_export") {
-        if state.billing_stream.is_none() {
-            let export_state = Arc::clone(&state);
-            compio::runtime::spawn(async move {
-                metering_export::run(export_state, metering_export::DEFAULT_TICK_SECS).await;
-            })
-            .detach();
-        }
-    }
     if let Some(stream) = state.billing_stream.as_ref() {
         let forwarder_stack = Arc::clone(&state.billing_stack);
         let forwarder_stream = Arc::clone(stream);
@@ -164,8 +149,8 @@ pub fn spawn_all(
 }
 
 /// The set of provider-aware cron tasks `spawn_all` would spawn for a given
-/// provider kind (the export/invoice sweeps; the always-on sweeps —
-/// audit-retention, orphaned-app reaper, spend-reconcile — are not listed).
+/// provider kind (the invoice/reconciliation sweeps; the always-on sweeps —
+/// audit-retention, orphaned-app reaper, dunning, billing-notify — are not listed).
 ///
 /// This is the single source of truth the `$0-revenue guard` test asserts on
 /// (blueprint §M5 table / §M9 risk 3) WITHOUT having to spin up the compio
@@ -175,9 +160,6 @@ pub fn provider_aware_cron_tasks(
     stack: &crate::metering::provider::BillingStack,
 ) -> Vec<&'static str> {
     let mut tasks = Vec::new();
-    if !stack.metered_by_owned_local_provider() {
-        tasks.push("metering_export");
-    }
     if billing_reconcile_safety_net_needed(stack) {
         tasks.push("billing_reconcile_safety_net");
     }
@@ -220,18 +202,13 @@ mod tests {
         BillingStack, Capabilities, CorrectionCapability, MeteringProvider,
     };
 
-    /// THE $0-revenue guard (blueprint §M9 risk 3): under `stripe`, the
-    /// `metering_export` cron — where CU is PUSHED — MUST be in the spawned set.
-    /// Forgetting it yields a Stripe deployment that enforces locally but bills
-    /// Stripe $0 (a silent revenue black hole). And `billing_reconcile` (whose
-    /// `invoice` is a no-op under stripe) must NOT be spawned.
     #[test]
-    fn stripe_spawns_metering_export_not_billing_reconcile() {
+    fn stripe_uses_stream_forwarder_not_metering_export_or_billing_reconcile() {
         let stack = stripe_meters_stack();
         let tasks = provider_aware_cron_tasks(&stack);
         assert!(
-            tasks.contains(&"metering_export"),
-            "stripe MUST spawn metering_export (else $0 revenue) — got {tasks:?}"
+            !tasks.contains(&"metering_export"),
+            "stripe must not spawn the deleted old-model metering_export cron — got {tasks:?}"
         );
         assert!(
             tasks.contains(&"billing_reconcile_safety_net"),
@@ -241,10 +218,16 @@ mod tests {
             !tasks.contains(&"billing_reconcile"),
             "stripe must NOT spawn billing_reconcile (invoice is a no-op) — got {tasks:?}"
         );
+        assert!(
+            should_spawn_billing_reconcile_safety_net(&stack, true),
+            "stripe safety-net still requires a configured stream"
+        );
+        assert!(
+            !should_spawn_billing_reconcile_safety_net(&stack, false),
+            "stripe safety-net must not spawn without a stream witness"
+        );
     }
 
-    /// Native is the mirror: `billing_reconcile` (the Native invoice rail) IS
-    /// spawned; `metering_export` (a no-op under native) is NOT (pure waste).
     #[test]
     fn native_spawns_billing_reconcile_not_metering_export() {
         let stack = lite_stack();
@@ -259,7 +242,7 @@ mod tests {
         );
         assert!(
             !tasks.contains(&"metering_export"),
-            "native must NOT spawn metering_export (report_usage is a no-op) — got {tasks:?}"
+            "native must not spawn the deleted old-model metering_export cron — got {tasks:?}"
         );
     }
 
@@ -283,16 +266,13 @@ mod tests {
         );
     }
 
-    /// OpenMeter, like Stripe, is an export backend: the `metering_export` cron —
-    /// where CU is PUSHED (as CloudEvents) — MUST be spawned (else $0 export), and
-    /// `billing_reconcile` (whose `invoice` is a no-op under openmeter) must NOT.
     #[test]
-    fn openmeter_spawns_metering_export_not_billing_reconcile() {
+    fn openmeter_uses_stream_forwarder_not_metering_export() {
         let stack = openmeter_stripe_invoice_stack();
         let tasks = provider_aware_cron_tasks(&stack);
         assert!(
-            tasks.contains(&"metering_export"),
-            "openmeter MUST spawn metering_export (else $0 export) — got {tasks:?}"
+            !tasks.contains(&"metering_export"),
+            "openmeter must not spawn the deleted old-model metering_export cron — got {tasks:?}"
         );
         assert!(
             tasks.contains(&"billing_reconcile_safety_net"),
@@ -301,6 +281,14 @@ mod tests {
         assert!(
             tasks.contains(&"billing_reconcile"),
             "openmeter+stripe_invoice must spawn billing_reconcile — got {tasks:?}"
+        );
+        assert!(
+            should_spawn_billing_reconcile_safety_net(&stack, true),
+            "openmeter+stripe_invoice safety-net still requires a configured stream"
+        );
+        assert!(
+            !should_spawn_billing_reconcile_safety_net(&stack, false),
+            "openmeter+stripe_invoice safety-net must not spawn without a stream witness"
         );
     }
 
