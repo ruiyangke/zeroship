@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use zeroize::Zeroizing;
 use zeroship_bundle::BlobStore;
+use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
@@ -109,6 +110,116 @@ impl std::fmt::Debug for SecretString {
 }
 // Intentionally NO Display, NO serde::Serialize, NO Deref<Target=String>.
 // The only way to read the contents is `.expose_secret()`.
+
+pub const DEFAULT_BILLING_FORWARDER_GROUP_ID: &str = "billing-forwarder";
+pub const DEFAULT_SPEND_RECOMPUTE_GROUP_ID: &str = "spend-recompute-witness";
+
+#[derive(Clone)]
+pub struct BillingStreamConfig {
+    registry: Arc<StreamRegistry>,
+    transport_id: String,
+    base_config: StreamConfig,
+    forwarder_group_id: String,
+    recompute_group_id: String,
+}
+
+impl std::fmt::Debug for BillingStreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BillingStreamConfig")
+            .field("transport_id", &self.transport_id)
+            .field("forwarder_group_id", &self.forwarder_group_id)
+            .field("recompute_group_id", &self.recompute_group_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BillingStreamConfig {
+    pub fn new(
+        registry: Arc<StreamRegistry>,
+        transport_id: impl Into<String>,
+        base_config: StreamConfig,
+        forwarder_group_id: impl Into<String>,
+        recompute_group_id: impl Into<String>,
+    ) -> Result<Self, StreamError> {
+        let forwarder_group_id = forwarder_group_id.into().trim().to_string();
+        let recompute_group_id = recompute_group_id.into().trim().to_string();
+        let this = Self {
+            registry,
+            transport_id: transport_id.into(),
+            base_config,
+            forwarder_group_id,
+            recompute_group_id,
+        };
+        this.validate()?;
+        Ok(this)
+    }
+
+    #[must_use]
+    pub fn transport_id(&self) -> &str {
+        &self.transport_id
+    }
+
+    #[must_use]
+    pub fn forwarder_group_id(&self) -> &str {
+        &self.forwarder_group_id
+    }
+
+    #[must_use]
+    pub fn recompute_group_id(&self) -> &str {
+        &self.recompute_group_id
+    }
+
+    pub fn build_forwarder(&self) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        self.build_for_group(&self.forwarder_group_id)
+    }
+
+    pub fn build_recompute(&self) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        self.build_for_group(&self.recompute_group_id)
+    }
+
+    fn validate(&self) -> Result<(), StreamError> {
+        require_stream_group("billing forwarder group", &self.forwarder_group_id)?;
+        require_stream_group("spend recompute group", &self.recompute_group_id)?;
+        if self.forwarder_group_id == self.recompute_group_id {
+            return Err(StreamError::Config(
+                "billing forwarder and spend recompute stream consumer groups must differ"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn build_for_group(&self, group_id: &str) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        let config = with_stream_group_id(&self.base_config, group_id)?;
+        self.registry.build(&self.transport_id, &config)
+    }
+}
+
+fn require_stream_group(name: &str, value: &str) -> Result<(), StreamError> {
+    if value.trim().is_empty() {
+        Err(StreamError::Config(format!("{name} is required")))
+    } else {
+        Ok(())
+    }
+}
+
+fn with_stream_group_id(
+    config: &StreamConfig,
+    group_id: &str,
+) -> Result<StreamConfig, StreamError> {
+    let mut raw = config.raw().clone();
+    let Some(obj) = raw.as_object_mut() else {
+        return Err(StreamError::Config(
+            "stream config must be a JSON object so cron can set group.id".to_string(),
+        ));
+    };
+    obj.remove("group_id");
+    obj.insert(
+        "group.id".to_string(),
+        serde_json::Value::String(group_id.to_string()),
+    );
+    Ok(StreamConfig::from(raw))
+}
 
 /// Shared application state injected into every handler.
 ///
@@ -220,10 +331,10 @@ pub struct AppState {
     /// Role-addressed billing stack: one provider for metering, one for rating,
     /// one for invoicing, plus webhook sinks.
     pub billing_stack: Arc<metering::provider::BillingStack>,
-    /// Optional durable usage-event stream. When configured, the control
-    /// event-forwarder consumes this stream and the legacy aggregate export cron
-    /// is not spawned.
-    pub billing_stream: Option<Arc<dyn zeroship_stream::StreamTransport>>,
+    /// Optional durable usage-event stream configuration. Cron builds separate
+    /// role-scoped consumers from this spec so forwarder commits and recompute
+    /// rewinds never share a consumer group.
+    pub billing_stream: Option<BillingStreamConfig>,
     /// The configured tax provider, built once at boot (`--tax-provider`, default
     /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
     /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the

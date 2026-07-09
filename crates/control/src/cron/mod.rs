@@ -112,9 +112,22 @@ pub fn spawn_all(
         })
         .detach();
     }
-    if let Some(stream) = state.billing_stream.as_ref() {
+    if let Some(streams) = state.billing_stream.as_ref() {
+        let forwarder_stream = match streams.build_forwarder() {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!(error = %err, "billing forwarder stream consumer build failed");
+                return;
+            }
+        };
+        let recompute_stream = match streams.build_recompute() {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!(error = %err, "spend recompute stream consumer build failed");
+                return;
+            }
+        };
         let forwarder_stack = Arc::clone(&state.billing_stack);
-        let forwarder_stream = Arc::clone(stream);
         let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
             &state.control_pg,
         )));
@@ -130,7 +143,6 @@ pub fn spawn_all(
         .detach();
 
         let recompute_state = Arc::clone(&state);
-        let recompute_stream = Arc::clone(stream);
         compio::runtime::spawn(async move {
             spend_recompute::run(
                 recompute_state,
@@ -198,9 +210,11 @@ fn billing_reconcile_safety_net_needed(
 mod tests {
     use super::{provider_aware_cron_tasks, should_spawn_billing_reconcile_safety_net};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use crate::metering::provider::{
         BillingStack, Capabilities, CorrectionCapability, MeteringProvider,
     };
+    use zeroship_stream::{adapters, StreamConfig, StreamOffset, StreamRegistry};
 
     #[test]
     fn stripe_uses_stream_forwarder_not_metering_export_or_billing_reconcile() {
@@ -309,6 +323,63 @@ mod tests {
             !should_spawn_billing_reconcile_safety_net(&noop, true),
             "a local stack with no provider drift/correction surface should not spawn the safety net"
         );
+    }
+
+    #[test]
+    fn billing_stream_config_builds_independent_forwarder_and_recompute_consumers() {
+        futures::executor::block_on(async {
+            let suffix = unique_suffix();
+            let topic = format!("zeroship-cron-groups-{suffix}");
+            let mut registry = StreamRegistry::default();
+            adapters::register_builtin(&mut registry);
+            let streams = crate::BillingStreamConfig::new(
+                Arc::new(registry),
+                "memory",
+                StreamConfig::from(serde_json::json!({
+                    "topic": topic.clone(),
+                    "group.id": "base-group-that-must-be-overridden",
+                    "partitions": 1
+                })),
+                format!("billing-forwarder-{suffix}"),
+                format!("spend-recompute-witness-{suffix}"),
+            )
+            .expect("billing stream config builds");
+
+            let forwarder = streams.build_forwarder().expect("forwarder stream builds");
+            let recompute = streams.build_recompute().expect("recompute stream builds");
+            forwarder
+                .publish(&topic, b"app-1", b"record-1")
+                .await
+                .expect("publish record");
+            let forwarded = forwarder.poll(10).await.expect("forwarder poll");
+            assert_eq!(forwarded.len(), 1);
+            let offsets: Vec<_> = forwarded.iter().map(StreamOffset::from).collect();
+            forwarder.commit(&offsets).await.expect("forwarder commit");
+
+            recompute.rewind().await.expect("recompute rewind");
+            let witness = recompute.poll(10).await.expect("recompute poll");
+            assert_eq!(witness.len(), 1, "recompute gets its own full witness read");
+
+            let fresh_forwarder = streams
+                .build_forwarder()
+                .expect("fresh forwarder stream builds");
+            let after_recompute = fresh_forwarder
+                .poll(10)
+                .await
+                .expect("fresh forwarder poll");
+            assert!(
+                after_recompute.is_empty(),
+                "recompute rewind must not clobber the forwarder group's committed offset"
+            );
+        });
+    }
+
+    fn unique_suffix() -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_millis();
+        format!("{}-{now}", std::process::id())
     }
 
     fn stripe_meters_stack() -> BillingStack {
