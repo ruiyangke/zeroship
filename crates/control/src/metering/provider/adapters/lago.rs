@@ -29,14 +29,12 @@ const LAGO_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 struct LagoCfg {
     api_url: String,
     api_key: SecretHandle,
-    billable_metric_code: String,
 }
 
 #[derive(Debug)]
 pub struct LagoProvider {
     api_url: String,
     api_key: crate::SecretString,
-    billable_metric_code: String,
     http: HttpClientFactory,
     seen_webhooks: Mutex<HashSet<String>>,
 }
@@ -54,16 +52,9 @@ pub fn factory(ctx: &ProviderCtx) -> Result<std::sync::Arc<dyn MeteringProvider>
             "lago: api_key resolved empty".to_string(),
         ));
     }
-    if cfg.billable_metric_code.trim().is_empty() {
-        return Err(ProviderError::Config(
-            "lago: billable_metric_code required for event ingest/read-back".to_string(),
-        ));
-    }
-
     Ok(std::sync::Arc::new(LagoProvider {
         api_url: cfg.api_url.trim_end_matches('/').to_string(),
         api_key,
-        billable_metric_code: cfg.billable_metric_code,
         http: ctx.http,
         seen_webhooks: Mutex::new(HashSet::new()),
     }))
@@ -151,10 +142,16 @@ impl LagoProvider {
         &self,
         transaction_id: &str,
         subject: &str,
+        metric: &str,
         timestamp: i64,
         value: u64,
         correction: bool,
     ) -> Result<(), ProviderError> {
+        if metric.trim().is_empty() {
+            return Err(ProviderError::Config(
+                "lago: usage event meter must not be empty".to_string(),
+            ));
+        }
         let mut properties = serde_json::Map::new();
         properties.insert("value".to_string(), json!(value));
         if correction {
@@ -165,7 +162,9 @@ impl LagoProvider {
                 "transaction_id": transaction_id,
                 "external_customer_id": subject,
                 "external_subscription_id": subject,
-                "code": self.billable_metric_code,
+                // Direct per-metric mapping: zeroship metric name == Lago
+                // billable_metric code.
+                "code": metric,
                 "timestamp": timestamp,
                 "properties": properties,
             }
@@ -183,6 +182,7 @@ impl Meter for LagoProvider {
             self.post_usage_event(
                 &event.event_id,
                 &event.creator_subject(),
+                &event.meter,
                 event.event_time,
                 event.value,
                 false,
@@ -196,16 +196,17 @@ impl Meter for LagoProvider {
     }
 
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
+        if q.meter.trim().is_empty() {
+            return Err(ProviderError::Config(
+                "lago: aggregate query meter must not be empty".to_string(),
+            ));
+        }
         let subject = encode_query_component(q.subject.as_str());
         let path = format!(
             "/api/v1/customers/{subject}/current_usage?external_subscription_id={subject}"
         );
         let json = self.get_json(&path).await?;
-        Ok(parse_current_usage_total(
-            &json,
-            &self.billable_metric_code,
-            &q.meter,
-        ))
+        Ok(parse_current_usage_total(&json, &q.meter))
     }
 }
 
@@ -214,6 +215,7 @@ impl Backfiller for LagoProvider {
     async fn backfill(
         &self,
         subject: &SubjectRef,
+        meter: &str,
         period: BillingPeriod,
         correct_total: u64,
     ) -> Result<(), ProviderError> {
@@ -227,6 +229,7 @@ impl Backfiller for LagoProvider {
         self.post_usage_event(
             &transaction_id,
             subject.as_str(),
+            meter,
             period.end.saturating_sub(1),
             correct_total,
             true,
@@ -358,7 +361,7 @@ impl MeteringProvider for LagoProvider {
     }
 }
 
-fn parse_current_usage_total(json: &serde_json::Value, code: &str, meter: &str) -> u64 {
+fn parse_current_usage_total(json: &serde_json::Value, meter: &str) -> u64 {
     let Some(charges) = json
         .get("customer_usage")
         .and_then(|usage| usage.get("charges_usage"))
@@ -374,7 +377,7 @@ fn parse_current_usage_total(json: &serde_json::Value, code: &str, meter: &str) 
                 .get("billable_metric")
                 .and_then(|m| m.get("code"))
                 .and_then(serde_json::Value::as_str);
-            charge_code == Some(code) || charge_code == Some(meter)
+            charge_code == Some(meter)
         })
         .filter_map(|charge| {
             charge

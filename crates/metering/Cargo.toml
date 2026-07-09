@@ -11,10 +11,13 @@ compio = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+redb = { version = "4.1" }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "record_request"

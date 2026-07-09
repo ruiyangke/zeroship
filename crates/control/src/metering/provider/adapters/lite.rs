@@ -42,7 +42,7 @@ impl Meter for LiteProvider {
             ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
         })?;
         self.store
-            .period_billable_units(&creator, q.period.start)
+            .period_meter_units(&creator, q.period.start, &q.meter)
             .await
     }
 }

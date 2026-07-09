@@ -236,7 +236,14 @@ fn build_usage_outbox_from_env(
         topic: topic.clone(),
         interval: zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
     };
-    Ok(Some((zeroship_metering::UsageOutbox::new(stream, topic), config)))
+    let wal_path = std::env::var("USAGE_OUTBOX_WAL_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(".zeroship/usage-outbox.redb"));
+    let outbox = zeroship_metering::UsageOutbox::new(stream, topic, wal_path)
+        .map_err(|e| e.to_string())?;
+    Ok(Some((outbox, config)))
 }
 
 #[allow(missing_debug_implementations)]

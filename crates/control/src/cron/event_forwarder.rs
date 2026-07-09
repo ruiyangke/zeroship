@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use zeroship_stream::{StreamOffset, StreamRecord, StreamTransport};
 
 use crate::metering::provider::{BillingStack, ProviderError, UsageEvent};
@@ -54,9 +55,22 @@ pub struct ProviderDeadLetter {
     pub offset: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeDeadLetter {
+    pub provider_id: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub key: Vec<u8>,
+    pub payload: Vec<u8>,
+    pub error: String,
+}
+
 #[async_trait::async_trait(?Send)]
 pub trait DeadLetterSink: Send + Sync {
     async fn record_provider_reject(&self, entry: ProviderDeadLetter)
+        -> Result<(), EventForwarderError>;
+
+    async fn record_decode_error(&self, entry: DecodeDeadLetter)
         -> Result<(), EventForwarderError>;
 }
 
@@ -145,6 +159,64 @@ impl DeadLetterSink for PgDeadLetterSink {
 
         Ok(())
     }
+
+    #[allow(clippy::future_not_send)]
+    async fn record_decode_error(
+        &self,
+        entry: DecodeDeadLetter,
+    ) -> Result<(), EventForwarderError> {
+        let id = zeroship_core::typed_id::new_provider_dead_letter_id();
+        let event_id = decode_dead_letter_event_id(entry.partition, entry.offset);
+        let subject = serde_json::json!({
+            "stream_key_base64": BASE64.encode(&entry.key),
+        });
+        let dims = serde_json::json!({
+            "stream_partition": entry.partition,
+            "stream_offset": entry.offset,
+            "raw_payload_base64": BASE64.encode(&entry.payload),
+            "decode_error": entry.error,
+        });
+        self.conn
+            .query(
+                "INSERT INTO zeroship.provider_dead_letter \
+                   (id, provider_id, event_id, source, subject, meter, event_time, value, dims, reason) \
+                 VALUES ($1, $2, $3, 'stream', $4, 'decode_error', 0, 0, $5, 'decode_error') \
+                 ON CONFLICT (provider_id, event_id) DO NOTHING",
+                &[&id, &entry.provider_id, &event_id, &subject, &dims],
+            )
+            .await
+            .map_err(|e| EventForwarderError::DeadLetter(e.to_string()))?;
+
+        let finding_id = zeroship_core::typed_id::new_reconcile_finding_id();
+        let entity_id = format!(
+            "{}:{}:{}",
+            entry.provider_id, entry.partition, entry.offset
+        );
+        let dedup_key = format!("decode_error:{entity_id}");
+        let our_value = serde_json::json!({
+            "partition": entry.partition,
+            "offset": entry.offset,
+            "raw_payload_base64": BASE64.encode(&entry.payload),
+        });
+        let provider_value = serde_json::json!({
+            "provider": entry.provider_id,
+            "reason": "decode_error",
+            "error": entry.error,
+        });
+        self.conn
+            .query(
+                "INSERT INTO zeroship.billing_reconciliation_findings \
+                   (id, kind, severity, entity_id, our_value, stripe_value, dedup_key) \
+                 VALUES ($1, 'provider_reject'::text::zeroship.reconciliation_finding_kind, \
+                         'high'::text::zeroship.reconciliation_finding_severity, $2, $3, $4, $5) \
+                 ON CONFLICT (dedup_key) DO NOTHING",
+                &[&finding_id, &entity_id, &our_value, &provider_value, &dedup_key],
+            )
+            .await
+            .map_err(|e| EventForwarderError::DeadLetter(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -227,8 +299,44 @@ pub async fn run_cycle(
     }
 
     let mut events = Vec::with_capacity(records.len());
+    let mut event_records = Vec::with_capacity(records.len());
+    let mut cycle = EventForwarderCycle {
+        polled: records.len(),
+        ..EventForwarderCycle::default()
+    };
     for record in &records {
-        events.push(decode_record(record)?);
+        match decode_record(record) {
+            Ok(event) => {
+                events.push(event);
+                event_records.push(record);
+            }
+            Err(EventForwarderError::Decode {
+                partition,
+                offset,
+                source,
+            }) => {
+                let error = source.to_string();
+                dead_letters
+                    .record_decode_error(DecodeDeadLetter {
+                        provider_id: stack.meter.id().to_string(),
+                        partition,
+                        offset,
+                        key: record.key.clone(),
+                        payload: record.payload.clone(),
+                        error: error.clone(),
+                    })
+                    .await?;
+                cycle.dead_lettered += 1;
+                tracing::warn!(
+                    provider = stack.meter.id(),
+                    partition,
+                    offset,
+                    error = %error,
+                    "usage event decode failed; quarantined raw stream record"
+                );
+            }
+            Err(other) => return Err(other),
+        }
     }
 
     let meter = stack
@@ -236,42 +344,39 @@ pub async fn run_cycle(
         .as_meter()
         .ok_or(EventForwarderError::NoMeterProvider)?;
 
-    let mut cycle = EventForwarderCycle {
-        polled: records.len(),
-        ..EventForwarderCycle::default()
-    };
-
-    match meter.ingest(&events).await {
-        Ok(ack) => {
-            cycle.ingested += ack.accepted;
-            cycle.deduped += ack.deduped;
-        }
-        Err(err) if err.is_permanent_reject() => {
-            let reason = err.reject_reason();
-            for (event, record) in events.iter().zip(records.iter()) {
-                dead_letters
-                    .record_provider_reject(ProviderDeadLetter {
-                        provider_id: stack.meter.id().to_string(),
-                        event: event.clone(),
-                        reason: reason.clone(),
-                        partition: record.partition,
-                        offset: record.offset,
-                    })
-                    .await?;
-                cycle.dead_lettered += 1;
+    if !events.is_empty() {
+        match meter.ingest(&events).await {
+            Ok(ack) => {
+                cycle.ingested += ack.accepted;
+                cycle.deduped += ack.deduped;
             }
-            tracing::warn!(
-                provider = stack.meter.id(),
-                reason = %reason,
-                dead_lettered = events.len(),
-                "billing provider permanently rejected usage batch; committed after quarantine"
-            );
-        }
-        Err(source) => {
-            return Err(EventForwarderError::Provider {
-                provider_id: stack.meter.id().to_string(),
-                source,
-            });
+            Err(err) if err.is_permanent_reject() => {
+                let reason = err.reject_reason();
+                for (event, record) in events.iter().zip(event_records.iter()) {
+                    dead_letters
+                        .record_provider_reject(ProviderDeadLetter {
+                            provider_id: stack.meter.id().to_string(),
+                            event: event.clone(),
+                            reason: reason.clone(),
+                            partition: record.partition,
+                            offset: record.offset,
+                        })
+                        .await?;
+                    cycle.dead_lettered += 1;
+                }
+                tracing::warn!(
+                    provider = stack.meter.id(),
+                    reason = %reason,
+                    dead_lettered = events.len(),
+                    "billing provider permanently rejected usage batch; committed after quarantine"
+                );
+            }
+            Err(source) => {
+                return Err(EventForwarderError::Provider {
+                    provider_id: stack.meter.id().to_string(),
+                    source,
+                });
+            }
         }
     }
 
@@ -287,6 +392,10 @@ fn decode_record(record: &StreamRecord) -> Result<UsageEvent, EventForwarderErro
         offset: record.offset,
         source,
     })
+}
+
+fn decode_dead_letter_event_id(partition: i32, offset: i64) -> String {
+    format!("decode:{partition}:{offset}")
 }
 
 #[cfg(test)]
@@ -398,6 +507,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingDeadLetters {
         entries: Mutex<Vec<ProviderDeadLetter>>,
+        decode_entries: Mutex<Vec<DecodeDeadLetter>>,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -409,6 +519,17 @@ mod tests {
             self.entries
                 .lock()
                 .expect("dead letters poisoned")
+                .push(entry);
+            Ok(())
+        }
+
+        async fn record_decode_error(
+            &self,
+            entry: DecodeDeadLetter,
+        ) -> Result<(), EventForwarderError> {
+            self.decode_entries
+                .lock()
+                .expect("decode dead letters poisoned")
                 .push(entry);
             Ok(())
         }
@@ -497,6 +618,87 @@ mod tests {
                 partition: 0,
                 offset: 0,
             }]
+        );
+    }
+
+    #[compio::test]
+    async fn decode_error_dead_letters_record_and_commits_offsets_without_wedging() {
+        let good_a = usage_event("evt_good_a");
+        let good_b = usage_event("evt_good_b");
+        let records = vec![
+            StreamRecord {
+                partition: 0,
+                offset: 0,
+                key: good_a.creator_subject().into_bytes(),
+                payload: serde_json::to_vec(&good_a).expect("event serializes"),
+            },
+            StreamRecord {
+                partition: 0,
+                offset: 1,
+                key: b"poison".to_vec(),
+                payload: b"{not-json".to_vec(),
+            },
+            StreamRecord {
+                partition: 0,
+                offset: 2,
+                key: good_b.creator_subject().into_bytes(),
+                payload: serde_json::to_vec(&good_b).expect("event serializes"),
+            },
+        ];
+        let stream = FakeStream {
+            records: Mutex::new(records),
+            committed: Mutex::new(Vec::new()),
+        };
+        let meter = Arc::new(RecordingMeter::default());
+        let meter_provider: Arc<dyn MeteringProvider> = meter.clone();
+        let stack = BillingStack::with_meter_for_tests(meter_provider);
+        let dead_letters = Arc::new(RecordingDeadLetters::default());
+        let cfg = EventForwarderConfig::default();
+
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &cfg)
+            .await
+            .expect("decode poison is quarantined");
+
+        assert_eq!(cycle.polled, 3);
+        assert_eq!(cycle.ingested, 2);
+        assert_eq!(cycle.dead_lettered, 1);
+        assert_eq!(cycle.committed, 3);
+        assert_eq!(
+            meter
+                .accepted_ids
+                .lock()
+                .expect("accepted ids poisoned")
+                .as_slice(),
+            &["evt_good_a".to_string(), "evt_good_b".to_string()]
+        );
+        let decode_entries = dead_letters
+            .decode_entries
+            .lock()
+            .expect("decode dead letters poisoned");
+        assert_eq!(decode_entries.len(), 1);
+        assert_eq!(decode_entries[0].partition, 0);
+        assert_eq!(decode_entries[0].offset, 1);
+        assert_eq!(decode_entries[0].payload, b"{not-json".to_vec());
+        assert_eq!(
+            stream
+                .committed
+                .lock()
+                .expect("commits poisoned")
+                .as_slice(),
+            &[
+                StreamOffset {
+                    partition: 0,
+                    offset: 0,
+                },
+                StreamOffset {
+                    partition: 0,
+                    offset: 1,
+                },
+                StreamOffset {
+                    partition: 0,
+                    offset: 2,
+                }
+            ]
         );
     }
 

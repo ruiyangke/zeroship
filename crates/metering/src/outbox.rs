@@ -1,11 +1,15 @@
 //! Usage-event outbox for the worker producer.
 //!
-//! S4 publishes directly to the injected stream transport. A later slice will
-//! measure and optionally add the bounded redb WAL floor for the pre-ack window.
+//! Drained events are persisted to a worker-local redb WAL before publish. A
+//! successful stream publish trims only that event's WAL sequence; failures leave
+//! the event in place so the next drain or process restart replays the same
+//! `event_id`.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError};
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_stream::StreamTransport;
 
@@ -33,6 +37,7 @@ impl Default for OutboxConfig {
 pub struct UsageOutbox {
     stream: Arc<dyn StreamTransport>,
     topic: String,
+    wal: Arc<UsageWal>,
 }
 
 impl std::fmt::Debug for UsageOutbox {
@@ -40,17 +45,22 @@ impl std::fmt::Debug for UsageOutbox {
         f.debug_struct("UsageOutbox")
             .field("stream", &self.stream.id())
             .field("topic", &self.topic)
+            .field("wal_path", &self.wal.path)
             .finish()
     }
 }
 
 impl UsageOutbox {
-    #[must_use]
-    pub fn new(stream: Arc<dyn StreamTransport>, topic: impl Into<String>) -> Self {
-        Self {
+    pub fn new(
+        stream: Arc<dyn StreamTransport>,
+        topic: impl Into<String>,
+        wal_path: impl AsRef<Path>,
+    ) -> Result<Self, OutboxWalError> {
+        Ok(Self {
             stream,
             topic: topic.into(),
-        }
+            wal: Arc::new(UsageWal::open(wal_path)?),
+        })
     }
 
     #[must_use]
@@ -58,19 +68,64 @@ impl UsageOutbox {
         &self.topic
     }
 
-    /// Publish a drained window. Each `UsageEvent` is one stream record because
-    /// the landed forwarder decodes each record payload as a single event.
-    ///
-    /// TODO(S5 redb floor): append each event to a bounded local redb segment
-    /// before publish and trim it from the librdkafka delivery report callback.
-    /// S4 intentionally publishes directly while the fsync cost is unmeasured.
+    /// Persist a drained window, then publish every unacked WAL event. Each
+    /// `UsageEvent` is one stream record because the forwarder decodes each
+    /// record payload as a single event.
     pub async fn publish_events(&self, events: &[UsageEvent]) -> OutboxPublishResult {
+        let append_failures = match self.wal.append(events) {
+            Ok(()) => Vec::new(),
+            Err(error) => {
+                let error = error.to_string();
+                tracing::error!(
+                    attempted = events.len(),
+                    error = %error,
+                    "meter outbox WAL append failed; refusing unprotected publish"
+                );
+                return OutboxPublishResult {
+                    attempted: events.len(),
+                    published: 0,
+                    failed: events
+                        .iter()
+                        .map(|event| OutboxFailure {
+                            event_id: event.event_id.clone(),
+                            app_id: event.subject.app,
+                            meter: event.meter.clone(),
+                            error: format!("wal append: {error}"),
+                        })
+                        .collect(),
+                };
+            }
+        };
+        let pending = match self.wal.load_pending() {
+            Ok(pending) => pending,
+            Err(error) => {
+                let error = error.to_string();
+                tracing::error!(
+                    error = %error,
+                    "meter outbox WAL read failed; refusing unprotected publish"
+                );
+                return OutboxPublishResult {
+                    attempted: events.len(),
+                    published: 0,
+                    failed: append_failures
+                        .into_iter()
+                        .chain(events.iter().map(|event| OutboxFailure {
+                            event_id: event.event_id.clone(),
+                            app_id: event.subject.app,
+                            meter: event.meter.clone(),
+                            error: format!("wal read: {error}"),
+                        }))
+                        .collect(),
+                };
+            }
+        };
         let mut result = OutboxPublishResult {
-            attempted: events.len(),
+            attempted: pending.len(),
             ..OutboxPublishResult::default()
         };
 
-        for event in events {
+        for pending_event in pending {
+            let event = &pending_event.event;
             let Some(app_id) = event.subject.app else {
                 let failure = OutboxFailure {
                     event_id: event.event_id.clone(),
@@ -116,7 +171,29 @@ impl UsageOutbox {
                 .await
             {
                 Ok(()) => {
-                    result.published += 1;
+                    match self.wal.remove(pending_event.seq) {
+                        Ok(()) => {
+                            result.published += 1;
+                        }
+                        Err(error) => {
+                            let failure = OutboxFailure {
+                                event_id: event.event_id.clone(),
+                                app_id: Some(app_id),
+                                meter: event.meter.clone(),
+                                error: format!("wal trim: {error}"),
+                            };
+                            tracing::error!(
+                                stream = self.stream.id(),
+                                topic = %self.topic,
+                                event_id = %failure.event_id,
+                                app_id = %app_id,
+                                meter = %failure.meter,
+                                error = %failure.error,
+                                "meter outbox published but failed to trim WAL; event will replay"
+                            );
+                            result.failed.push(failure);
+                        }
+                    }
                 }
                 Err(error) => {
                     let failure = OutboxFailure {
@@ -141,6 +218,153 @@ impl UsageOutbox {
 
         result
     }
+}
+
+const WAL_EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("usage_events");
+const WAL_META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+const NEXT_SEQ_KEY: &str = "next_seq";
+
+#[derive(Debug)]
+struct UsageWal {
+    db: Database,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct PendingWalEvent {
+    seq: u64,
+    event: UsageEvent,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutboxWalError {
+    #[error("{0}")]
+    Redb(String),
+    #[error("serialize usage event {event_id}: {source}")]
+    Serialize {
+        event_id: String,
+        source: serde_json::Error,
+    },
+    #[error("decode WAL event at seq {seq}: {source}")]
+    Decode { seq: u64, source: serde_json::Error },
+}
+
+impl UsageWal {
+    fn open(path: impl AsRef<Path>) -> Result<Self, OutboxWalError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                OutboxWalError::Redb(format!(
+                    "create usage outbox WAL dir '{}': {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let db = Database::create(&path).map_err(|e| {
+            OutboxWalError::Redb(format!("open usage outbox WAL '{}': {e}", path.display()))
+        })?;
+        Ok(Self { db, path })
+    }
+
+    fn append(&self, events: &[UsageEvent]) -> Result<(), OutboxWalError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = Vec::with_capacity(events.len());
+        for event in events {
+            let payload = serde_json::to_vec(event).map_err(|source| {
+                OutboxWalError::Serialize {
+                    event_id: event.event_id.clone(),
+                    source,
+                }
+            })?;
+            encoded.push(payload);
+        }
+
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| OutboxWalError::Redb(format!("wal append begin_write: {e}")))?;
+        let mut next_seq = {
+            let meta = tx
+                .open_table(WAL_META)
+                .map_err(|e| OutboxWalError::Redb(format!("wal append open meta: {e}")))?;
+            let guard = meta
+                .get(NEXT_SEQ_KEY)
+                .map_err(|e| OutboxWalError::Redb(format!("wal append read next_seq: {e}")))?;
+            let next_seq = guard.as_ref().map(|v| v.value()).unwrap_or(0);
+            next_seq
+        };
+        {
+            let mut table = tx
+                .open_table(WAL_EVENTS)
+                .map_err(|e| OutboxWalError::Redb(format!("wal append open events: {e}")))?;
+            for payload in &encoded {
+                table
+                    .insert(next_seq, payload.as_slice())
+                    .map_err(|e| OutboxWalError::Redb(format!("wal append insert: {e}")))?;
+                next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                    OutboxWalError::Redb("wal append sequence overflow".to_string())
+                })?;
+            }
+        }
+        {
+            let mut meta = tx
+                .open_table(WAL_META)
+                .map_err(|e| OutboxWalError::Redb(format!("wal append reopen meta: {e}")))?;
+            meta.insert(NEXT_SEQ_KEY, next_seq)
+                .map_err(|e| OutboxWalError::Redb(format!("wal append write next_seq: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| OutboxWalError::Redb(format!("wal append commit: {e}")))
+    }
+
+    fn load_pending(&self) -> Result<Vec<PendingWalEvent>, OutboxWalError> {
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| OutboxWalError::Redb(format!("wal read begin_read: {e}")))?;
+        let table = match tx.open_table(WAL_EVENTS) {
+            Ok(table) => table,
+            Err(e) if is_missing_table(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(OutboxWalError::Redb(format!("wal read open events: {e}"))),
+        };
+        let mut out = Vec::new();
+        let iter = table
+            .iter()
+            .map_err(|e| OutboxWalError::Redb(format!("wal read iter: {e}")))?;
+        for entry in iter {
+            let (seq, payload) =
+                entry.map_err(|e| OutboxWalError::Redb(format!("wal read row: {e}")))?;
+            let seq = seq.value();
+            let event = serde_json::from_slice(payload.value()).map_err(|source| {
+                OutboxWalError::Decode { seq, source }
+            })?;
+            out.push(PendingWalEvent { seq, event });
+        }
+        Ok(out)
+    }
+
+    fn remove(&self, seq: u64) -> Result<(), OutboxWalError> {
+        let tx = self
+            .db
+            .begin_write()
+            .map_err(|e| OutboxWalError::Redb(format!("wal trim begin_write: {e}")))?;
+        {
+            let mut table = tx
+                .open_table(WAL_EVENTS)
+                .map_err(|e| OutboxWalError::Redb(format!("wal trim open events: {e}")))?;
+            table
+                .remove(seq)
+                .map_err(|e| OutboxWalError::Redb(format!("wal trim remove: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| OutboxWalError::Redb(format!("wal trim commit: {e}")))
+    }
+}
+
+fn is_missing_table(err: &TableError) -> bool {
+    matches!(err, TableError::TableDoesNotExist(_))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -222,6 +446,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeStream {
         published: Mutex<Vec<Published>>,
+        fail_next: Mutex<usize>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +468,12 @@ mod tests {
             partition_key: &[u8],
             payload: &[u8],
         ) -> Result<(), StreamError> {
+            let mut fail_next = self.fail_next.lock().unwrap();
+            if *fail_next > 0 {
+                *fail_next -= 1;
+                return Err(StreamError::Unavailable("injected publish failure"));
+            }
+            drop(fail_next);
             let event: UsageEvent = serde_json::from_slice(payload).map_err(StreamError::from)?;
             self.published.lock().unwrap().push(Published {
                 topic: topic.to_string(),
@@ -283,7 +514,13 @@ mod tests {
             }
 
             let stream = Arc::new(FakeStream::default());
-            let outbox = UsageOutbox::new(stream.clone(), "usage-events-test");
+            let dir = tempfile::tempdir().expect("tempdir");
+            let outbox = UsageOutbox::new(
+                stream.clone(),
+                "usage-events-test",
+                dir.path().join("outbox.redb"),
+            )
+            .expect("open outbox WAL");
             let result = outbox.publish_events(&events).await;
             assert_eq!(result.attempted, 3);
             assert_eq!(result.published, 3);
@@ -302,6 +539,51 @@ mod tests {
                 meter.drain().is_empty(),
                 "second drain without new increments yields nothing"
             );
+        });
+    }
+
+    #[test]
+    fn publish_failure_retains_event_and_retries_next_attempt() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let meter = Meter::with_source("worker-test");
+            let app = Uuid::new_v4();
+            meter.increment(&app.to_string(), "requests", 2);
+            let events = meter.drain();
+            assert_eq!(events.len(), 1);
+
+            let stream = Arc::new(FakeStream {
+                published: Mutex::new(Vec::new()),
+                fail_next: Mutex::new(1),
+            });
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal_path = dir.path().join("outbox.redb");
+            let outbox = UsageOutbox::new(stream.clone(), "usage-events-test", &wal_path)
+                .expect("open outbox WAL");
+
+            let first = outbox.publish_events(&events).await;
+            assert_eq!(first.attempted, 1);
+            assert_eq!(first.published, 0);
+            assert_eq!(first.failed.len(), 1);
+            assert!(
+                stream.published.lock().unwrap().is_empty(),
+                "failed publish did not reach the stream"
+            );
+            drop(outbox);
+
+            let restarted = UsageOutbox::new(stream.clone(), "usage-events-test", &wal_path)
+                .expect("reopen outbox WAL");
+            let second = restarted.publish_events(&[]).await;
+            assert_eq!(second.attempted, 1);
+            assert_eq!(second.published, 1);
+            assert!(second.failed.is_empty());
+            let published = stream.published.lock().unwrap().clone();
+            assert_eq!(published.len(), 1);
+            assert_eq!(published[0].event.event_id, events[0].event_id);
+
+            let third = restarted.publish_events(&[]).await;
+            assert_eq!(third.attempted, 0);
+            assert_eq!(third.published, 0);
+            assert!(third.failed.is_empty());
         });
     }
 

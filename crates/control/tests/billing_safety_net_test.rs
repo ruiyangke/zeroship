@@ -23,6 +23,7 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const METER: &str = "compute_units";
+const SECOND_METER: &str = "db_reads";
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -33,6 +34,19 @@ fn tmpdir(label: &str) -> PathBuf {
     p.push(format!("zs-safety-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&p).expect("mk tmpdir");
     p
+}
+
+fn unique_closed_period_now() -> i64 {
+    use chrono::TimeZone;
+
+    let offset = (Uuid::new_v4().as_u128() % 2400) as i32;
+    let year = 2035 + offset / 12;
+    let month = (offset % 12) as u32 + 1;
+    chrono::Utc
+        .with_ymd_and_hms(year, month, 15, 12, 0, 0)
+        .single()
+        .expect("valid isolated billing period")
+        .timestamp()
 }
 
 struct Fixture {
@@ -150,8 +164,12 @@ impl Meter for DbAdjustmentProvider {
         })
     }
 
-    async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
-        Ok(self.provider_quantity)
+    async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
+        if q.meter == SECOND_METER {
+            Ok(60)
+        } else {
+            Ok(self.provider_quantity)
+        }
     }
 }
 
@@ -223,7 +241,7 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
         return;
     };
     let fx = build_fixture(&url, "invoice-credit").await;
-    let period_start = billing_reconcile::previous_period_start_unix(common::isolated_closed_period_now());
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -256,6 +274,75 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     assert_eq!(finding_count(&fx.state, app, period).await, 1);
 }
 
+#[compio::test]
+async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let fx = build_fixture(&url, "multi-metric").await;
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period = BillingPeriod {
+        start: period_start,
+        end: billing_reconcile::period_end_unix(period_start),
+    };
+    let creator = make_creator(&fx.state).await;
+    let plan_id = make_plan(&fx.state).await;
+    seed_metric(&fx.state, SECOND_METER).await;
+    let app = make_owned_app(&fx.state, &plan_id, creator).await;
+    seed_multi_metric_witness_and_invoice(&fx.state, creator, app, &plan_id, period).await;
+
+    let first = billing_reconcile::reconcile_pass(&fx.state, period)
+        .await
+        .expect("first multi-metric reconcile pass");
+    assert_eq!(first.subjects_checked, 2);
+    assert_eq!(first.corrections_issued, 2);
+    assert_eq!(first.findings_recorded, 2);
+
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT usage_snapshot \
+             FROM zeroship.invoice_lines \
+             WHERE app_id = $1 AND line_kind = 'debit_note' \
+             ORDER BY correction_dedup_key",
+            &[&app],
+        )
+        .await
+        .expect("read correction lines");
+    assert_eq!(rows.len(), 2);
+    let deltas: std::collections::BTreeMap<String, i64> = rows
+        .iter()
+        .map(|row| {
+            let usage: serde_json::Value = row.get("usage_snapshot");
+            let meter = usage
+                .get("meter")
+                .and_then(serde_json::Value::as_str)
+                .expect("meter recorded")
+                .to_string();
+            let delta = usage
+                .get("quantity_delta")
+                .and_then(serde_json::Value::as_i64)
+                .expect("delta recorded");
+            (meter, delta)
+        })
+        .collect();
+    assert_eq!(deltas.get(METER), Some(&25));
+    assert_eq!(deltas.get(SECOND_METER), Some(&10));
+    assert_eq!(finding_count_for_meter(&fx.state, app, METER, period).await, 1);
+    assert_eq!(
+        finding_count_for_meter(&fx.state, app, SECOND_METER, period).await,
+        1
+    );
+
+    let second = billing_reconcile::reconcile_pass(&fx.state, period)
+        .await
+        .expect("second multi-metric reconcile pass");
+    assert_eq!(second.corrections_issued, 0);
+    assert_eq!(second.findings_recorded, 0);
+}
+
 async fn make_creator(state: &AppState) -> Uuid {
     let email = format!("safety-{}@example.test", Uuid::new_v4().simple());
     let rows = state
@@ -280,16 +367,7 @@ async fn make_creator(state: &AppState) -> Uuid {
 }
 
 async fn make_plan(state: &AppState) -> String {
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
-             VALUES ($1, 'platform', 'op') \
-             ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
-            &[&METER],
-        )
-        .await
-        .expect("seed metric");
+    seed_metric(state, METER).await;
     let plan_id = format!("pln_safety_{}", Uuid::new_v4().simple());
     state
         .control_pg
@@ -305,6 +383,19 @@ async fn make_plan(state: &AppState) -> String {
         .await
         .expect("seed plan");
     plan_id
+}
+
+async fn seed_metric(state: &AppState, metric: &str) {
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
+             VALUES ($1, 'platform', 'op') \
+             ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
+            &[&metric],
+        )
+        .await
+        .expect("seed metric");
 }
 
 async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
@@ -383,6 +474,64 @@ async fn seed_witness_and_invoice(
         .expect("finalize seeded invoice");
 }
 
+async fn seed_multi_metric_witness_and_invoice(
+    state: &AppState,
+    creator: Uuid,
+    app: Uuid,
+    plan_id: &str,
+    period: BillingPeriod,
+) {
+    let period_date = common::period_date(period.start);
+    for (metric, total) in [(METER, 125_i64), (SECOND_METER, 60_i64)] {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
+                 VALUES ($1, $2::date, $3, $4)",
+                &[&app, &period_date, &metric, &total],
+            )
+            .await
+            .expect("seed local multi-metric witness");
+    }
+    let invoice_id = zeroship_core::typed_id::new_invoice_id();
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoices \
+               (id, creator_id, period, status, subtotal_cents, total_cents) \
+             VALUES ($1, $2, $3::date, 'draft', 150, 150)",
+            &[&invoice_id, &creator, &period_date],
+        )
+        .await
+        .expect("seed draft invoice");
+    let mut usage_map = serde_json::Map::new();
+    usage_map.insert(METER.to_string(), serde_json::json!(100));
+    usage_map.insert(SECOND_METER.to_string(), serde_json::json!(50));
+    let usage = serde_json::Value::Object(usage_map);
+    let weights = serde_json::json!({});
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.invoice_lines \
+               (invoice_id, app_id, segment_no, plan_id, included_units, \
+                fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
+             VALUES ($1, $2, 0, $3, 0, 1000, 0, 150, $4, $5)",
+            &[&invoice_id, &app, &plan_id, &usage, &weights],
+        )
+        .await
+        .expect("seed multi-metric invoiced usage line");
+    state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.invoices \
+             SET status = 'finalized', finalized_at = NOW(), updated_at = NOW() \
+             WHERE id = $1",
+            &[&invoice_id],
+        )
+        .await
+        .expect("finalize seeded invoice");
+}
+
 async fn correction_lines(state: &AppState, app: Uuid) -> (i64, i64) {
     let rows = state
         .control_pg
@@ -398,7 +547,16 @@ async fn correction_lines(state: &AppState, app: Uuid) -> (i64, i64) {
 }
 
 async fn finding_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
-    let entity_id = format!("billing-correction:{app}:{}", period.start);
+    finding_count_for_meter(state, app, METER, period).await
+}
+
+async fn finding_count_for_meter(
+    state: &AppState,
+    app: Uuid,
+    meter: &str,
+    period: BillingPeriod,
+) -> i64 {
+    let entity_id = format!("billing-correction:{app}:{meter}:{}", period.start);
     let rows = state
         .control_pg
         .query(
