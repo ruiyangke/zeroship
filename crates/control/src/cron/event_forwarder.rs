@@ -382,6 +382,13 @@ pub async fn run_cycle(
         }
     }
 
+    // Forward-then-commit ordering is deliberately at-least-once and a commit
+    // failure here is SAFE, not a lost/skipped batch: the events were already
+    // ingested by the provider above, commits are cumulative (a later cycle's
+    // commit covers these offsets), and on a crash before the next commit the
+    // consumer resumes from the last committed offset and re-forwards — the
+    // provider dedups by `event_id` (its `DedupContract`). So a transient commit
+    // error costs at most a re-forward, never a billing gap.
     let offsets: Vec<_> = records.iter().map(StreamOffset::from).collect();
     stream.commit(&offsets).await?;
     cycle.committed = records.len();
