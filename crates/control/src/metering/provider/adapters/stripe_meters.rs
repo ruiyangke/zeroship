@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use crate::stripe_client::{StripeApi, StripeClient};
 #[derive(Debug, serde::Deserialize)]
 struct StripeMetersCfg {
     secret_key: SecretHandle,
+    meters: HashMap<String, String>,
     #[serde(default = "default_stripe_base_url")]
     base_url: String,
 }
@@ -24,6 +26,7 @@ fn default_stripe_base_url() -> String {
 pub struct StripeMetersProvider {
     store: Arc<dyn crate::metering::provider::LiteStore>,
     secret_key: crate::SecretString,
+    meters: HashMap<String, String>,
     base_url: String,
 }
 
@@ -32,6 +35,7 @@ impl std::fmt::Debug for StripeMetersProvider {
         f.debug_struct("StripeMetersProvider")
             .field("store", &"<lite store>")
             .field("secret_key", &self.secret_key)
+            .field("meters", &self.meters)
             .field("base_url", &self.base_url)
             .finish()
     }
@@ -50,12 +54,31 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
             "stripe_meters: base_url must not be empty".to_string(),
         ));
     }
+    if cfg.meters.is_empty() {
+        return Err(ProviderError::Config(
+            "stripe_meters: meters must map at least one zeroship metric to a Stripe meter id"
+                .to_string(),
+        ));
+    }
+    for (metric, meter_id) in &cfg.meters {
+        if metric.trim().is_empty() {
+            return Err(ProviderError::Config(
+                "stripe_meters: meters contains an empty zeroship metric name".to_string(),
+            ));
+        }
+        if meter_id.trim().is_empty() {
+            return Err(ProviderError::Config(format!(
+                "stripe_meters: meters[{metric}] must not be empty"
+            )));
+        }
+    }
     let store = ctx.store.clone().ok_or_else(|| {
         ProviderError::Config("stripe_meters: LiteStore is required".to_string())
     })?;
     Ok(Arc::new(StripeMetersProvider {
         store,
         secret_key,
+        meters: cfg.meters,
         base_url: cfg.base_url,
     }))
 }
@@ -103,12 +126,16 @@ impl Meter for StripeMetersProvider {
                 "stripe_meters: aggregate query meter must not be empty".to_string(),
             ));
         }
+        let meter_id = self.meters.get(&q.meter).ok_or_else(|| {
+            ProviderError::Config(format!(
+                "stripe_meters: no Stripe meter id configured for metric {}",
+                q.meter
+            ))
+        })?;
         Ok(self
             .stripe()
             .meter_event_summary(
-                // Direct per-metric mapping: zeroship metric name == Stripe
-                // meter id for read-back.
-                &q.meter,
+                meter_id,
                 q.subject.as_str(),
                 q.period.start,
                 q.period.end,

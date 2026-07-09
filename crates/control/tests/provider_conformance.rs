@@ -21,6 +21,8 @@ use zeroship_control::metering::provider::{
 
 const METER: &str = "compute_units";
 const SECOND_METER: &str = "db_reads";
+const STRIPE_METER_ID: &str = "mtr_compute_units_conformance";
+const STRIPE_SECOND_METER_ID: &str = "mtr_db_reads_conformance";
 const PERIOD: BillingPeriod = BillingPeriod {
     start: 1_783_468_800,
     end: 1_786_147_200,
@@ -131,6 +133,9 @@ async fn run_provider_conformance(adapter: Adapter) {
         assert_meter_retry_idempotency(&fx).await;
         assert_meter_read_back(&fx).await;
         assert_dedup_ttl_switchover(&fx).await;
+        if matches!(adapter, Adapter::StripeMeters) {
+            assert_stripe_meters_missing_metric_fails_closed(&fx).await;
+        }
     }
 
     if fx.provider.as_invoicer().is_some() {
@@ -207,6 +212,10 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                     "stripe_meters": {
                         "secret_key": "stripe_secret_key",
                         "base_url": mock.base_url.clone(),
+                        "meters": {
+                            METER: STRIPE_METER_ID,
+                            SECOND_METER: STRIPE_SECOND_METER_ID,
+                        },
                     }
                 }),
                 HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
@@ -579,7 +588,12 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             );
         }
         Adapter::StripeMeters => {
-            assert_provider_config_fails("stripe_meters", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails(
+                "stripe_meters",
+                serde_json::json!({}),
+                HashMap::new(),
+                None,
+            );
             assert_provider_config_fails(
                 "stripe_meters",
                 serde_json::json!({
@@ -590,9 +604,27 @@ async fn assert_fail_closed_config(adapter: Adapter) {
                 HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 None,
             );
+            assert_provider_config_fails(
+                "stripe_meters",
+                serde_json::json!({
+                    "stripe_meters": {
+                        "secret_key": "stripe_secret_key",
+                        "meters": {
+                            METER: "",
+                        },
+                    }
+                }),
+                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
+                Some(Arc::new(FakeLiteStore::default())),
+            );
         }
         Adapter::StripeInvoice => {
-            assert_provider_config_fails("stripe_invoice", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails(
+                "stripe_invoice",
+                serde_json::json!({}),
+                HashMap::new(),
+                None,
+            );
             assert_provider_config_fails(
                 "stripe_invoice",
                 serde_json::json!({
@@ -627,6 +659,23 @@ fn expect_provider_error(
         Ok(provider) => panic!("provider factory unexpectedly built {}", provider.id()),
         Err(err) => err,
     }
+}
+
+async fn assert_stripe_meters_missing_metric_fails_closed(fx: &Fixture) {
+    let meter = fx.provider.as_meter().expect("meter capability");
+    let subject = subject_ref("missing-stripe-meter");
+    let err = meter
+        .read_aggregate(&aggregate_query_for_meter(&subject, "storage_ops"))
+        .await
+        .expect_err("unmapped stripe_meters metric must fail closed");
+    assert!(
+        matches!(err, ProviderError::Config(_)),
+        "unmapped stripe_meters metric failed with unexpected error: {err}"
+    );
+    assert!(
+        err.to_string().contains("storage_ops"),
+        "unmapped stripe_meters metric error should name the metric: {err}"
+    );
 }
 
 fn subject_ref(label: &str) -> SubjectRef {
@@ -1102,7 +1151,8 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
     }
 
     if req.method == "POST" && req.path.starts_with("/v1/billing/meter_events") {
-        let meter = form_param(&req.body, "event_name").unwrap_or_default();
+        let event_name = form_param(&req.body, "event_name").unwrap_or_default();
+        let meter_id = stripe_meter_id_for_event_name(&event_name);
         let subject = form_param(&req.body, "payload[stripe_customer_id]").unwrap_or_default();
         let value = form_param(&req.body, "payload[value]")
             .and_then(|v| v.parse::<u64>().ok())
@@ -1119,7 +1169,7 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
             return http_json(200, &body);
         }
         st.seen_ids.insert(identifier);
-        *st.totals.entry((subject, meter)).or_insert(0) += value;
+        *st.totals.entry((subject, meter_id)).or_insert(0) += value;
         st.accepted_ingests += 1;
         let body = r#"{"object":"billing.meter_event"}"#.to_string();
         if let Some(key) = &req.idempotency_key {
@@ -1153,6 +1203,14 @@ fn handle_stripe_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpState>
     }
 
     http_json(200, r#"{"id":"obj_mock","object":"unknown"}"#)
+}
+
+fn stripe_meter_id_for_event_name(event_name: &str) -> String {
+    match event_name {
+        METER => STRIPE_METER_ID.to_string(),
+        SECOND_METER => STRIPE_SECOND_METER_ID.to_string(),
+        other => format!("mtr_unmapped_{other}"),
+    }
 }
 
 fn query_param(path: &str, name: &str) -> Option<String> {
