@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-workflow-scheduler"
+version = "0.1.0"
+edition = "2024"
+description = "zeroship durable-workflow scheduler tier: self-provisioned timer store and compio timer wheel"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+clap = { workspace = true, features = ["derive", "env"] }
+compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-uuid-1"] }
+flume = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serial_test = "3"
+
+[[bin]]
+name = "zeroship-workflow-scheduler"
+path = "src/main.rs"
