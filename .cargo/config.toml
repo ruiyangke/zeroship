@@ -1,0 +1,17 @@
+# Vendored-C symbol collision resolution.
+#
+# Two vendored C libraries in the workspace both bundle a copy of xxhash and
+# export its symbols (`XXH_versionNumber`, `XXH*`) with external linkage:
+#   * libpg_query  — the SQL parser behind `env.db` / zeroship-migrate
+#   * librdkafka   — the Redpanda usage-event producer/consumer (zeroship-stream)
+#
+# Any binary that links BOTH (the worker: env.db + usage producer; the CLI and
+# zeroship-migrate: pg_query + rdkafka pulled transitively via
+# zeroship-runtime -> zeroship-metering -> zeroship-stream) fails to link with
+# "multiple definition of `XXH_versionNumber`". The two copies are ABI-identical
+# (xxhash has a frozen, versioned ABI), so instructing the GNU linker to take the
+# first definition is safe and is the standard resolution for this well-known
+# libpg_query/librdkafka collision. The flag is a no-op for binaries without the
+# duplicate, so scoping it to the linux GNU-ld targets we build on is sufficient.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
