@@ -12,6 +12,43 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
 
+  # The billing & metering money-path integration suite talks to a real
+  # Postgres and drives the REAL fleet-wide cron sweeps (reconcile, spend
+  # recompute, stream forwarder). Its tests are DB-gated: without CONTROL_TEST_DB
+  # they self-skip, so `cargo test --workspace` above never exercises them.
+  # tests/run_billing_suite.sh provisions the DB, exports CONTROL_TEST_DB, and
+  # runs each money-path binary SERIALLY (the fleet sweeps are advisory-locked
+  # single-flight and cannot run two-at-a-time). This job is what actually gates
+  # the F1-F5 billing regression tests on push/PR.
+  billing-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: zeroship
+        ports:
+          - 5440:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run the billing money-path gate
+        run: tests/run_billing_suite.sh
+        env:
+          PG_HOST: localhost
+          PG_PORT: 5440
+          PG_USER: postgres
+          PG_PASS: zeroship
+
   frontend:
     runs-on: ubuntu-latest
     steps:
