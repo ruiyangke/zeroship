@@ -32,10 +32,14 @@ const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";
 const PLATFORM_KID: &str = "platform-control-authz-kid";
 const PLATFORM_KEY_SEED: u8 = 31;
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -114,10 +118,7 @@ async fn fixture_with_auth_provider(
     auth_provider: Arc<AuthProvider>,
     jwks: Option<PlatformJwksMock>,
 ) -> Option<Fixture> {
-    let Some(db_url) = db_url() else {
-        eprintln!("[authz_guard_oauth_test] AUTH_DB_URL not set - skipping");
-        return None;
-    };
+    let db_url = db_url();
 
     let (control_pg_client, control_pg_conn) = connect(&db_url, NoTls).await.expect("control-pg connect");
     compio::runtime::spawn(async move {

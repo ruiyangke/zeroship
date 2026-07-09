@@ -32,7 +32,7 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -138,9 +138,7 @@ fn spend_limit_route(cfg: &mut web::ServiceConfig) {
 
 #[compio::test]
 async fn get_spend_limit_returns_the_app_spend_limit_override() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let (state, blob_root, deploy_tmp_dir) = build_state(&url).await;
     let pat = common::authz_fixture::admin_pat(&state).await;
 

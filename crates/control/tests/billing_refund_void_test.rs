@@ -48,7 +48,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -532,9 +532,7 @@ async fn set_customer(state: &AppState, creator: Uuid) {
 
 #[compio::test]
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "launder").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -625,9 +623,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 /// real out-of-band-paid invoice has none → the refund 500s).
 #[compio::test]
 async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "refund-target").await;
     let creator = make_user(&fx.state, "refund-target").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -691,9 +687,7 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 
 #[compio::test]
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -808,9 +802,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 
 #[compio::test]
 async fn refund_replay_is_idempotent_exactly_one() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -881,9 +873,7 @@ async fn refund_replay_is_idempotent_exactly_one() {
 
 #[compio::test]
 async fn tax_split_refund_returns_proportional_tax() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "taxsplit").await;
 
     let creator = make_user(&fx.state, "taxsplit").await;
@@ -1021,9 +1011,7 @@ fn billing_self() -> Policy {
 
 #[compio::test]
 async fn refund_endpoint_operator_only_and_idempotency_conflict() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "endpoint").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1139,9 +1127,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
 
 #[compio::test]
 async fn void_reversal_conserves_credit_balance() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1209,9 +1195,7 @@ async fn void_reversal_conserves_credit_balance() {
 
 #[compio::test]
 async fn true_up_subtracts_already_issued_cash_refunds() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1309,9 +1293,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 
 #[compio::test]
 async fn true_up_recomputes_over_collection_under_the_lock() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "trueup-lock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -1448,9 +1430,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 
 #[compio::test]
 async fn one_active_invoice_per_period_void_releases_claim() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "claim").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1517,9 +1497,7 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 
 #[compio::test]
 async fn issue_refund_takes_per_creator_advisory_lock() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1602,9 +1580,7 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
 
 #[compio::test]
 async fn two_refunds_summing_over_cash_second_is_rejected() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1665,9 +1641,7 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 
 #[compio::test]
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1745,9 +1719,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 
 #[compio::test]
 async fn void_reissue_is_redrivable_after_phase1_crash() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1876,9 +1848,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 
 #[compio::test]
 async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap5-nonfinal").await;
 
     let creator = make_user(&fx.state, "gap5").await;
@@ -1959,9 +1929,7 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
 
 #[compio::test]
 async fn refund_on_nonexistent_invoice_is_invalid() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap6-missing").await;
 
     // An invoice id that was never inserted.
@@ -2007,9 +1975,7 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
 
 #[compio::test]
 async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap7-immut").await;
 
     let creator = make_user(&fx.state, "gap7").await;
@@ -2139,9 +2105,7 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 
 #[compio::test]
 async fn true_up_noop_when_over_collection_not_positive() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap23-noop").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -2252,9 +2216,7 @@ async fn true_up_noop_when_over_collection_not_positive() {
 
 #[compio::test]
 async fn true_up_redrive_converges_noop_after_issue() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap4-redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -2327,9 +2289,7 @@ async fn true_up_redrive_converges_noop_after_issue() {
 
 #[compio::test]
 async fn true_up_claim_key_conflict_on_moved_anchor() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap4-conflict").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 

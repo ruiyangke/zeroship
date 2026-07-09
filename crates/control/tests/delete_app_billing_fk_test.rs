@@ -20,7 +20,7 @@ use uuid::Uuid;
 use zeroship_control::registry::RegistryError;
 use zeroship_control::Registry;
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -67,9 +67,7 @@ async fn seed_owner_and_plan(client: &Client) -> (Uuid, String) {
 
 #[compio::test]
 async fn delete_app_with_invoice_history_returns_typed_conflict() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let (owner, plan_id) = seed_owner_and_plan(&client).await;
@@ -157,9 +155,7 @@ async fn delete_app_with_invoice_history_returns_typed_conflict() {
 
 #[compio::test]
 async fn delete_app_with_custom_metric_and_aggregates_succeeds() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let (owner, plan_id) = seed_owner_and_plan(&client).await;

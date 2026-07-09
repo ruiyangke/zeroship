@@ -47,7 +47,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -478,9 +478,7 @@ async fn insert_grant(
 
 #[compio::test]
 async fn credit_ledger_is_append_only_and_kind_sign_checked() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "appendonly").await;
     let creator = make_user(&fx.state, "appendonly").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -550,9 +548,7 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
 
 #[compio::test]
 async fn finalize_consumes_oldest_first_and_balances() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "consume").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -627,9 +623,7 @@ async fn finalize_consumes_oldest_first_and_balances() {
 
 #[compio::test]
 async fn reconcile_rerun_does_not_double_consume() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -688,9 +682,7 @@ async fn reconcile_rerun_does_not_double_consume() {
 
 #[compio::test]
 async fn consume_helper_is_idempotent_on_draft_redrive() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "draftredrive").await;
     let creator = make_user(&fx.state, "draftredrive").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -734,9 +726,7 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 
 #[compio::test]
 async fn expired_grant_is_not_consumed() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "expired").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -776,9 +766,7 @@ async fn expired_grant_is_not_consumed() {
 
 #[compio::test]
 async fn non_usd_grant_is_not_drawn_against_usd_bill() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "currency").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -824,9 +812,7 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
 
 #[compio::test]
 async fn grant_helper_idempotency_key_and_fingerprint() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "granthelper").await;
     let creator = make_user(&fx.state, "granthelper").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -961,9 +947,7 @@ fn billing_self() -> Policy {
 
 #[compio::test]
 async fn grant_endpoint_operator_only_and_idempotency_conflict() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "endpoint").await;
     let creator = make_user(&fx.state, "endpoint").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1062,9 +1046,7 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
 
 #[compio::test]
 async fn grant_note_change_is_a_conflict() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "notefp").await;
     let creator = make_user(&fx.state, "notefp").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1155,9 +1137,7 @@ async fn grant_note_change_is_a_conflict() {
 
 #[compio::test]
 async fn grant_idempotency_key_is_creator_scoped() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "xtenant").await;
     let creator_a = make_user(&fx.state, "xtenant-a").await;
     let creator_b = make_user(&fx.state, "xtenant-b").await;
@@ -1225,9 +1205,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
 
 #[compio::test]
 async fn grant_kind_is_case_insensitive() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "kindcase").await;
     let creator = make_user(&fx.state, "kindcase").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1284,9 +1262,7 @@ async fn grant_kind_is_case_insensitive() {
 
 #[compio::test]
 async fn grant_endpoint_unknown_creator_is_fk_400() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "fk400").await;
     let op_user = make_user(&fx.state, "operator-fk").await;
     let op_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_any()).await;
@@ -1342,9 +1318,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
 
 #[compio::test]
 async fn consume_takes_per_creator_advisory_lock() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "lock").await;
     let creator = make_user(&fx.state, "lock").await;
     let other = make_user(&fx.state, "lock-other").await;
@@ -1472,9 +1446,7 @@ async fn consume_takes_per_creator_advisory_lock() {
 
 #[compio::test]
 async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "emptyledger").await;
     let creator = make_user(&fx.state, "emptyledger").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1525,9 +1497,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
 
 #[compio::test]
 async fn consume_with_zero_subtotal_short_circuits() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "zerosub").await;
     let creator = make_user(&fx.state, "zerosub").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1582,9 +1552,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
 
 #[compio::test]
 async fn late_grant_is_not_drawn_by_an_earlier_consume() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "lategrant").await;
     let creator = make_user(&fx.state, "lategrant").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1652,9 +1620,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
 
 #[compio::test]
 async fn grant_rejects_non_operator_kinds_at_the_boundary() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "kindreject").await;
     let creator = make_user(&fx.state, "kindreject").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1703,9 +1669,7 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
 
 #[compio::test]
 async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "grantref").await;
     let creator = make_user(&fx.state, "grantref").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1769,9 +1733,7 @@ async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
 
 #[compio::test]
 async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "creditcap").await;
     let creator = make_user(&fx.state, "creditcap").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1835,9 +1797,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
 
 #[compio::test]
 async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "consume-vs-planchange").await;
     let creator = make_user(&fx.state, "cvp").await;
     ensure_creator_billing(&fx.state, creator).await;

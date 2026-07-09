@@ -47,7 +47,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -347,9 +347,7 @@ async fn age_pending(pg: &compio_postgres::Client, creator: Uuid) {
 // ===========================================================================
 #[compio::test]
 async fn each_kind_produces_exactly_one_notification() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "each-kind").await;
     let st = &*fx.state;
 
@@ -475,9 +473,7 @@ async fn each_kind_produces_exactly_one_notification() {
 // ===========================================================================
 #[compio::test]
 async fn concurrent_ticks_send_each_event_once() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "concurrent").await;
     let st = &*fx.state;
 
@@ -552,9 +548,7 @@ async fn concurrent_ticks_send_each_event_once() {
 // ===========================================================================
 #[compio::test]
 async fn crash_before_flip_redrives_idempotent() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let st = &*fx.state;
 
@@ -656,9 +650,7 @@ async fn cbh_id(pg: &compio_postgres::Client, creator: Uuid) -> String {
 // ===========================================================================
 #[compio::test]
 async fn history_surrogate_ids_carry_disjoint_prefixes() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "prefixes").await;
     let st = &*fx.state;
 
@@ -838,9 +830,7 @@ async fn spend_tick(state: &AppState) {
 
 #[compio::test]
 async fn spend_band_walk_produces_one_notification_per_transition() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "spend-band").await;
     let st = &*fx.state;
 
@@ -949,9 +939,7 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // ===========================================================================
 #[compio::test]
 async fn spend_band_recovery_walk_sends_no_notifications() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "spend-recovery").await;
     let st = &*fx.state;
 
@@ -1052,9 +1040,7 @@ async fn age_history(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
 
 #[compio::test]
 async fn aged_transition_past_scan_window_is_not_notified() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "watermark").await;
     let st = &*fx.state;
     let _gate = lock_tick_gate(); // own the sweep so a sibling can't claim my aged row
@@ -1110,9 +1096,7 @@ async fn aged_transition_past_scan_window_is_not_notified() {
 // ===========================================================================
 #[compio::test]
 async fn dunning_tick_skips_when_advisory_lock_held() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "dunning-lock").await;
     let st = &*fx.state;
 

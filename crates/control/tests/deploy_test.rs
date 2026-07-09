@@ -27,10 +27,14 @@ use zeroship_control::deploy::{self, IngestError};
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir() -> PathBuf {
@@ -198,55 +202,59 @@ async fn deploy_round_trip() {
         })
     );
 
-    // DB-side assert (only when CONTROL_TEST_DB is set).
-    if let Some(url) = db_url() {
-        use zeroship_control::Registry;
-        let registry = Registry::new(&url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
-        // create_app binds an owner membership (FK → zeroship.users); seed one.
-        let owner_id = Uuid::new_v4();
-        let (pg, pg_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
-            .await
-            .expect("owner-seed connect");
-        compio::runtime::spawn(async move {
-            let _ = pg_conn.run().await;
-        })
-        .detach();
-        pg.execute(
-            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[
-                &owner_id,
-                &format!("deploy-owner-{owner_id}@zeroship.test"),
-                &"deploy-owner",
-            ],
+    // DB-side assert.
+    let url = db_url();
+    use zeroship_control::Registry;
+    let registry = Registry::new(&url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+    // create_app binds an owner membership (FK → zeroship.users); seed one.
+    let owner_id = Uuid::new_v4();
+    let (pg, pg_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("owner-seed connect");
+    compio::runtime::spawn(async move {
+        let _ = pg_conn.run().await;
+    })
+    .detach();
+    pg.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id,
+            &format!("deploy-owner-{owner_id}@zeroship.test"),
+            &"deploy-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
+    let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let record = registry
+        .create_app(
+            &name,
+            &zeroship_control::bootstrap_console::free_plan_id(),
+            &owner_id,
         )
         .await
-        .expect("seed owner user");
-        let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
-        let record = registry
-            .create_app(&name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
-            .await
-            .expect("create");
-        let app_id2 = record.id;
+        .expect("create");
+    let app_id2 = record.id;
 
-        // Re-run ingest under the real app id, then update the DB.
-        let success2 = deploy::ingest(&bs, &app_id2, &body)
-            .await
-            .expect("ingest2");
-        let updated = registry
-            .set_deploy_with_manifest(
-                &app_id2,
-                &success2.deploy_hash,
-                &success2.manifest_json,
-            )
-            .await
-            .expect("set deploy");
-        assert!(updated);
+    // Re-run ingest under the real app id, then update the DB.
+    let success2 = deploy::ingest(&bs, &app_id2, &body)
+        .await
+        .expect("ingest2");
+    let updated = registry
+        .set_deploy_with_manifest(&app_id2, &success2.deploy_hash, &success2.manifest_json)
+        .await
+        .expect("set deploy");
+    assert!(updated);
 
-        let row = registry.get_app(&app_id2).await.expect("get_app").unwrap();
-        assert_eq!(row.deploy_hash.as_deref(), Some(success2.deploy_hash.as_str()));
-        registry.delete_app(&app_id2).await.ok();
-    }
+    let row = registry.get_app(&app_id2).await.expect("get_app").unwrap();
+    assert_eq!(
+        row.deploy_hash.as_deref(),
+        Some(success2.deploy_hash.as_str())
+    );
+    registry.delete_app(&app_id2).await.ok();
 
     let _ = std::fs::remove_dir_all(&root);
 }

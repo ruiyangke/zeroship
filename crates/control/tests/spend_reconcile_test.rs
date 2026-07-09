@@ -20,7 +20,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -172,9 +172,7 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
 /// the sweep; a single instance acquires it and proceeds.)
 #[compio::test]
 async fn reconcile_tick_writes_enriched_spend_audit() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_state(&url, "audit").await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -219,9 +217,7 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
 /// no-ops even though an over-limit app is present.
 #[compio::test]
 async fn reconcile_tick_skips_when_advisory_lock_held() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_state(&url, "lock").await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -289,9 +285,7 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
 /// then tick and assert the persisted state advanced + the history row was appended.
 #[compio::test]
 async fn reconcile_walks_spend_bands_and_holds_deadband() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_state(&url, "band-walk").await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 

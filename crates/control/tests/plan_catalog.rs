@@ -20,7 +20,7 @@ use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanP
 use zeroship_control::Registry;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -93,9 +93,7 @@ async fn make_user(client: &compio_postgres::Client) -> Uuid {
 
 #[compio::test]
 async fn upsert_and_get_round_trips_pure_types() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let _client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry);
@@ -117,9 +115,7 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
     // CT-A1: an app can no longer pick a plan that is not in the catalog. The
     // server-side gate returns a clean InvalidInput (NOT a raw FK violation),
     // and NO app row is left behind.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let owner = make_user(&client).await;
@@ -147,9 +143,7 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
 
 #[compio::test]
 async fn create_app_with_real_plan_id_succeeds() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -168,9 +162,7 @@ async fn create_app_with_real_plan_id_succeeds() {
 async fn set_plan_to_archived_plan_is_rejected() {
     // An archived plan stays resolvable (historical FKs) but cannot be ASSIGNED
     // to an app via set_plan.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -212,9 +204,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     // bespoke limit matrix and assert get_versions reflects it (a hardcoded
     // table keyed on a plan name would never produce these exact values for a
     // random pln_ id).
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -244,9 +234,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
 
 #[compio::test]
 async fn get_versions_projects_app_net_grants_with_plan_caps() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -310,9 +298,7 @@ async fn upsert_with_none_archived_preserves_existing_archived() {
     // (the PUT-without-archived case), MUST STAY archived. The old code set
     // `archived = EXCLUDED.archived` from a `#[serde(default)] -> false`, so a
     // name edit silently UN-archived the plan. Now `None` ⇒ COALESCE-preserve.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let _client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry);
@@ -347,9 +333,7 @@ async fn set_plan_guards_archive_in_one_statement() {
     // the app's plan is unchanged. (A direct test of the single-statement guard;
     // the true concurrent race can't be deterministically forced in a unit test,
     // but the guard is what closes the window.)
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry.clone());
@@ -395,9 +379,7 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
     // Pre-fix: `list()` SKIPPED the poison row (app ran UNCAPPED) and `get()`
     // HARD-ERRORED (creator's whole bill failed) — so a poison plan made an app
     // both uncapped AND unbilled. The two paths now AGREE: both return it.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry);
@@ -450,9 +432,7 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     // the REAL global `metric_weights` table: write usage for an app, fetch the
     // period totals via the real Metering reader, load the global weight table
     // via the real PricingStore, price the plan, and assert `total_cents`.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     // Reads the global default FX; serialize against the MAJOR-3 mutator via
     // FX_LOCK so the price is computed against a stable, seeded global FX.
     let _fx = lock_fx();
@@ -514,9 +494,7 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     // Prove the global weight table + default FX are actually loaded from the DB
     // (not a hardcoded const): a metric with NO weight row contributes 0 CU, and
     // a plan with `fx = None` prices at the seeded global default.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     // Reads the global default FX; serialize against the MAJOR-3 mutator (which
     // transiently drops it below floor) via FX_LOCK so this never observes None.
     let _fx = lock_fx();
@@ -539,9 +517,7 @@ async fn upsert_hard_errors_on_out_of_range_price_not_silent_clamp() {
     // ceiling) must be a HARD ERROR at `upsert` — not a silent clamp to i64::MAX.
     // `upsert` calls `plan.price.validate()` as defense in depth so even a direct
     // (non-HTTP) caller cannot land a clamped plan.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let _client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let catalog = PlanCatalog::new(registry);
@@ -572,9 +548,7 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     // concurrent reader never observes the transient below-floor/None state. We
     // RESTORE the seeded global row + CHECK before returning so siblings see a
     // sane FX even if --test-threads > 1.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let _fx = lock_fx();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
@@ -650,9 +624,7 @@ async fn metric_weights_rejects_negative_units_per_op() {
     // MINOR-2 REGRESSION: the 0041 CHECK (units_per_op >= 0) makes a negative
     // weight unrepresentable at the source — a negative weight would credit CU
     // (nonsensical). Without the CHECK this INSERT would succeed.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let metric = format!("neg_w_{}", Uuid::now_v7().simple());
     let res = client

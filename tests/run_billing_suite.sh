@@ -96,7 +96,6 @@ if [ -z "$PSQL" ]; then
 fi
 
 export CONTROL_TEST_DB="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-export ZEROSHIP_BILLING_GATE=1
 
 # The billing test binaries (excluding the *_live_test binaries, which require
 # real Stripe/OpenMeter credentials — they self-skip without creds, so they are

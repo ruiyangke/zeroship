@@ -47,7 +47,7 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -502,9 +502,7 @@ fn full_router() -> impl Fn(&mut web::ServiceConfig) + Clone {
 
 #[compio::test]
 async fn invoice_history_is_creator_scoped_operator_sees_any() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "history").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -588,9 +586,7 @@ async fn invoice_history_is_creator_scoped_operator_sees_any() {
 
 #[compio::test]
 async fn unauthorized_token_is_forbidden_on_billing_reads() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "unauth").await;
     let pg = fx.state.control_pg.clone();
 
@@ -636,9 +632,7 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
 
 #[compio::test]
 async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "linedetail").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -731,9 +725,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
 
 #[compio::test]
 async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "projected").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -791,9 +783,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
 
 #[compio::test]
 async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "credit").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -990,9 +980,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
 
 #[compio::test]
 async fn invoice_detail_denies_a_different_creator() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "invdetail-authz").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -1072,9 +1060,7 @@ async fn invoice_detail_denies_a_different_creator() {
 
 #[compio::test]
 async fn invoice_read_denied_via_shared_app_membership() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "shared-membership").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();
@@ -1151,9 +1137,7 @@ async fn invoice_read_denied_via_shared_app_membership() {
 
 #[compio::test]
 async fn app_invoice_history_denied_to_non_owner_member() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "history-nonowner").await;
     let pg = fx.state.control_pg.clone();
     let period = current_period();

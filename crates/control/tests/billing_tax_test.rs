@@ -50,7 +50,7 @@ use zeroship_control::stripe_store::StripeError;
 use zeroship_control::tax::{TaxAmount, TaxContext, TaxProvider, TaxProviderKind};
 use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -498,9 +498,7 @@ async fn insert_grant(
 
 #[compio::test]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "native",
@@ -552,9 +550,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 
 #[compio::test]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     // Inject the FAKE provider the SAME way Native is injected (the Arc slot) — (c).
     let fake = Arc::new(FakeTaxProvider::new(123));
     let fx = build_fixture(&url, "fake", fake.clone() as Arc<dyn TaxProvider>).await;
@@ -606,9 +602,7 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 
 #[compio::test]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(250));
     let fx = build_fixture(&url, "fake-nocredit", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -676,9 +670,7 @@ impl TaxProvider for ErrTaxProvider {
 
 #[compio::test]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "tax-err", Arc::new(ErrTaxProvider) as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A DISTINCT far-back period so this test's permanent 'draft' leftover (the finalize
@@ -733,9 +725,7 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 
 #[compio::test]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "nocust",
@@ -784,9 +774,7 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 
 #[compio::test]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "fullcredit",
@@ -870,9 +858,7 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 
 #[compio::test]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(200));
     let fx = build_fixture(&url, "tax-multiseg", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

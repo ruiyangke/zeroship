@@ -25,7 +25,7 @@ const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const METER: &str = "compute_units";
 const SECOND_METER: &str = "db_reads";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -228,9 +228,7 @@ impl MeteringProvider for DbAdjustmentProvider {
 
 #[compio::test]
 async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "invoice-credit").await;
     let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
     let period = BillingPeriod {
@@ -267,9 +265,7 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
 
 #[compio::test]
 async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_reject() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100)
         .await;
     let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
@@ -303,9 +299,7 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
 
 #[compio::test]
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "multi-metric").await;
     let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
     let period = BillingPeriod {

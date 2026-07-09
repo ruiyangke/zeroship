@@ -22,10 +22,14 @@ mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -123,10 +127,7 @@ async fn worker_logs(path: web::types::Path<String>) -> web::HttpResponse {
 
 #[ntex::test]
 async fn app_logs_route_proxies_worker_lines() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[app_logs_http_test] CONTROL_TEST_DB not set - skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let app_id = Uuid::new_v4();
     let worker = test::server(async || {

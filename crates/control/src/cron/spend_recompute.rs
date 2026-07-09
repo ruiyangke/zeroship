@@ -349,23 +349,13 @@ mod tests {
         }
     }
 
-    fn db_url() -> Option<String> {
-        if let Ok(url) = std::env::var("CONTROL_TEST_DB") {
-            if !url.trim().is_empty() {
-                return Some(url);
-            }
-        }
-
-        if std::env::var_os("ZEROSHIP_BILLING_GATE").is_some() {
-            panic!("billing gate requires CONTROL_TEST_DB; a skip is NOT a pass");
-        }
-
-        eprintln!(
-            "\n================ BILLING DB TEST SKIPPED ================\n\
-             SKIP: CONTROL_TEST_DB not set (not the billing gate)\n\
-             ==========================================================\n"
-        );
-        None
+    fn db_url() -> String {
+        std::env::var("CONTROL_TEST_DB")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| {
+                "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+            })
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -431,9 +421,7 @@ mod tests {
 
     #[compio::test]
     async fn stream_recompute_replaces_usage_aggregates_and_spend_state_idempotently() {
-        let Some(url) = db_url() else {
-            return;
-        };
+        let url = db_url();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -491,9 +479,7 @@ mod tests {
 
     #[compio::test]
     async fn stream_recompute_dedups_duplicate_event_ids() {
-        let Some(url) = db_url() else {
-            return;
-        };
+        let url = db_url();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -526,9 +512,7 @@ mod tests {
 
     #[compio::test]
     async fn stream_recompute_skips_undecodable_records() {
-        let Some(url) = db_url() else {
-            return;
-        };
+        let url = db_url();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let period = current_period_start_unix();
@@ -589,9 +573,7 @@ mod tests {
 
     #[compio::test]
     async fn unsettled_period_recompute_rewrites_current_and_previous_snapshots() {
-        let Some(url) = db_url() else {
-            return;
-        };
+        let url = db_url();
         let client = pg(&url).await;
         let registry = Registry::new(&url).await.expect("registry");
         let now = chrono::Utc

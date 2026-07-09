@@ -19,7 +19,7 @@ use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
 use zeroship_core::types::SpendState;
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -129,9 +129,7 @@ async fn read_state(
 
 #[compio::test]
 async fn evaluate_all_persists_and_returns_transitions() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -178,9 +176,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
 /// versa) would fail this consistency check.
 #[compio::test]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -240,9 +236,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // an app too). Pre-fix the sweep did `i64::try_from(spend_cents).unwrap_or(
     // i64::MAX)` — a silent clamp that wrote a Block state row, so enforcement
     // Blocked an app that reconcile would skip (unbilled): the two disagreed.
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -308,9 +302,7 @@ async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
     // recovers to Allow on the next tick once `set_limit` raises the cap far
     // above the deadband (deadband would otherwise hold Block at a fixed cap).
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -350,9 +342,7 @@ async fn raising_limit_recovers_block_immediately() {
 
 #[compio::test]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -404,9 +394,7 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
 
 #[compio::test]
 async fn transition_history_row_binds_non_null_period() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");

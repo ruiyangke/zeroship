@@ -46,10 +46,14 @@ mod common;
 // Test gating
 // ---------------------------------------------------------------------------
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -323,10 +327,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
 
 #[compio::test]
 async fn deploy_happy_path_returns_200_with_deploy_hash() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "happy").await;
 
@@ -430,10 +431,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
 
 #[compio::test]
 async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "ct").await;
     let app_id = Uuid::new_v4(); // route never reaches DB lookup
@@ -477,10 +475,7 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
 
 #[compio::test]
 async fn deploy_missing_auth_returns_401_without_consuming_body() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "auth").await;
     let app_id = Uuid::new_v4();
@@ -537,10 +532,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
 
 #[compio::test]
 async fn deploy_manifest_not_first_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "mf").await;
 
@@ -617,10 +609,7 @@ async fn deploy_manifest_not_first_returns_400() {
 /// the collision guard has to run in the handler before the manifest commit.
 #[compio::test]
 async fn deploy_colliding_scope_returns_400_invalid_scope() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "scopecollide").await;
 
@@ -709,10 +698,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
 /// vocabulary) deploys cleanly with a 200.
 #[compio::test]
 async fn deploy_noncolliding_scope_returns_200() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
 
     let fx = build_test_state(&db_url, "scopeok").await;
 
@@ -849,10 +835,7 @@ async fn schema_exists(conn: &compio_postgres::Client, app_id: &Uuid) -> bool {
 
 #[compio::test]
 async fn deploy_rejects_legacy_migration_approval_query() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-query").await;
     let app = deploy_service(fx.state.clone()).await;
     let owner_id = seed_owner(&fx.state, "legacy-query").await;
@@ -894,10 +877,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 
 #[compio::test]
 async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-manifest").await;
     let app = deploy_service(fx.state.clone()).await;
     let owner_id = seed_owner(&fx.state, "legacy-manifest").await;
