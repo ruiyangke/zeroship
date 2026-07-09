@@ -89,7 +89,6 @@ registry maps a string id to a provider factory. Boot builds a role-addressed
 `BillingStack`:
 
 - `--meter-provider` / `METER_PROVIDER`
-- `--rater-provider` / `RATER_PROVIDER`
 - `--invoicer-provider` / `INVOICER_PROVIDER`
 - `--provider-config` / `PROVIDER_CONFIG`
 - `--allow-unsupported-billing` / `ALLOW_UNSUPPORTED_BILLING`
@@ -97,9 +96,7 @@ registry maps a string id to a provider factory. Boot builds a role-addressed
 Each provider declares its capabilities:
 
 - `Meter`: ingest usage events, read provider aggregates, ensure subjects.
-- `Rater`: rate a period into line items.
 - `Invoicer`: close periods and record adjustment notes.
-- `WebhookSink`: verify and handle provider webhooks.
 - `Backfiller`: submit corrected totals when the provider supports backfill.
 
 The built-in adapters are:
@@ -108,8 +105,7 @@ The built-in adapters are:
 - `stripe_meters`: Stripe Billing Meters provider.
 - `stripe_invoice`: Stripe invoice provider backed by the platform invoice
   store.
-- `lago`: full-stack provider with meter, rater, invoicer, webhook, and backfill
-  capability.
+- `lago`: full-stack provider with meter, invoicer, and backfill capability.
 - `lite`: evaluation-grade self-hosted provider backed by platform storage.
 
 Factories parse opaque JSON config and resolve secrets through `SecretResolver`.
@@ -215,8 +211,7 @@ For production billing:
    for spend recompute and reconciliation.
 2. Configure `STREAM_TRANSPORT=redpanda` and a `STREAM_CONFIG` JSON object with
    broker, topic, and consumer group fields.
-3. Select provider roles with `METER_PROVIDER`, `RATER_PROVIDER`, and
-   `INVOICER_PROVIDER`.
+3. Select provider roles with `METER_PROVIDER` and `INVOICER_PROVIDER`.
 4. Put provider config in `PROVIDER_CONFIG` using secret handles, not plaintext
    secrets.
 5. Keep plan catalog pricing, included quotas, spend-limit defaults, and network

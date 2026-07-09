@@ -20,8 +20,8 @@ Every adapter implements:
 
 - `id() -> &str`: the stable registry id, such as `openmeter` or `lago`.
 - `capabilities() -> Capabilities`: the roles this adapter serves.
-- `as_meter()`, `as_rater()`, `as_invoicer()`, `as_webhook()`, and
-  `as_backfiller()`: downcasts for the capability traits.
+- `as_meter()`, `as_invoicer()`, and `as_backfiller()`: downcasts for the
+  capability traits.
 - `dedup() -> DedupContract`: the provider's idempotency key and TTL semantics.
 - `correction() -> CorrectionCapability`: how reconciliation can correct drift.
 - `production_ready() -> bool`: return `false` for evaluation-only providers.
@@ -33,9 +33,7 @@ but returns `None` from `as_meter()` fails closed before the server starts.
 Implement only the sub-traits your provider actually supports:
 
 - `Meter`: `ingest`, `read_aggregate`, and `ensure_subject`.
-- `Rater`: converts provider or platform usage into invoiceable line items.
 - `Invoicer`: closes a billing period and records adjustment notes.
-- `WebhookSink`: verifies signatures and handles idempotent webhook delivery.
 - `Backfiller`: sends a corrected total when `CorrectionCapability::Backfill`
   is declared.
 
@@ -127,10 +125,9 @@ backfill unless the provider actually guarantees it.
 `crates/control/src/metering/provider/adapters/lago.rs`.
 
 - Config: `api_url`, `api_key`, and `billable_metric_code`.
-- Capabilities: `METER | RATE | INVOICE | WEBHOOK`.
+- Capabilities: `METER | INVOICE`.
 - `ingest` posts usage events with transaction ids.
 - `read_aggregate` reads current usage for the configured billable metric.
-- `WebhookSink` verifies the HMAC signature and dedups webhook ids.
 - `Backfiller` posts a corrected total within its declared backfill window.
 - Dedup contract: transaction id with unbounded provider-side storage.
 
