@@ -19,6 +19,7 @@ ALTER DOMAIN zeroship.reconciliation_finding_kind
     'provider_reject',
     'provider_meter_drift',
     'late_period_adjustment',
+    'correction_unpriceable',
     'forwarder_down_exceeds_retention',
     'subject_attribution_mismatch',
     'terminal_period_trueup'

@@ -298,6 +298,45 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
 }
 
 #[compio::test]
+async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
+    // A self-invoicing provider (stripe_meters) prices the meter at the provider
+    // and writes NO local invoice lines, so there is no monetary basis. A drift
+    // must NOT be "corrected" with a credit priced at the old ~1¢/unit fallback:
+    // it is flagged `correction_unpriceable` for provider-authoritative repricing.
+    let url = db_url();
+    let fx = build_fixture_with_provider(&url, "stripe-meters-unpriceable", "stripe_meters", 100)
+        .await;
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period = BillingPeriod {
+        start: period_start,
+        end: billing_reconcile::period_end_unix(period_start),
+    };
+    let creator = make_creator(&fx.state).await;
+    let plan_id = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan_id, creator).await;
+    // Witness only — deliberately NO invoice / invoice_lines seeded.
+    seed_witness_only(&fx.state, app, period).await;
+
+    let summary = billing_reconcile::reconcile_pass(&fx.state, period)
+        .await
+        .expect("stripe_meters unpriceable reconcile pass");
+    assert_eq!(summary.subjects_checked, 1);
+    assert_eq!(
+        summary.corrections_issued, 0,
+        "an unpriceable drift must not issue a (mispriced) correction"
+    );
+    assert_eq!(summary.provider_rejects, 0);
+
+    let (line_count, _) = correction_lines(&fx.state, app).await;
+    assert_eq!(line_count, 0, "no credit/debit line may be written");
+    assert_eq!(
+        unpriceable_finding_count(&fx.state, app, period).await,
+        1,
+        "the drift must be flagged correction_unpriceable for operator repricing"
+    );
+}
+
+#[compio::test]
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let url = db_url();
     let fx = build_fixture(&url, "multi-metric").await;
@@ -439,6 +478,21 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
         .await
         .expect("insert owner membership");
     app_id
+}
+
+/// Seed only the local witness (usage_aggregates) with no invoice/invoice_lines —
+/// the shape a self-invoicing provider produces (it bills at the provider).
+async fn seed_witness_only(state: &AppState, app: Uuid, period: BillingPeriod) {
+    let period_date = common::period_date(period.start);
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
+             VALUES ($1, $2::date, $3, 125)",
+            &[&app, &period_date, &METER],
+        )
+        .await
+        .expect("seed witness only");
 }
 
 async fn seed_witness_and_invoice(
@@ -583,6 +637,22 @@ async fn provider_reject_count(state: &AppState, app: Uuid, period: BillingPerio
         )
         .await
         .expect("count provider reject findings");
+    rows[0].get("n")
+}
+
+async fn unpriceable_finding_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
+    let entity_id = format!("billing-correction:{app}:{METER}:{}", period.start);
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n \
+             FROM zeroship.billing_reconciliation_findings \
+             WHERE kind = 'correction_unpriceable'::text::zeroship.reconciliation_finding_kind \
+               AND entity_id = $1",
+            &[&entity_id],
+        )
+        .await
+        .expect("count correction_unpriceable findings");
     rows[0].get("n")
 }
 

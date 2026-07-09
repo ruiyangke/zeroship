@@ -125,6 +125,12 @@ pub enum ReconcileFindingKind {
     ProviderMeterDrift,
     LatePeriodAdjustment,
     ProviderReject,
+    /// A monetary correction (`InvoiceCredit`) is owed but its per-unit price
+    /// cannot be derived from a real invoiced basis — e.g. a self-invoicing
+    /// provider prices the meter itself and writes no local invoice lines. We
+    /// refuse to guess an amount (the old fallback silently priced at 1¢/unit);
+    /// the drift is flagged for operator/provider-authoritative repricing.
+    CorrectionUnpriceable,
 }
 
 impl ReconcileFindingKind {
@@ -133,6 +139,7 @@ impl ReconcileFindingKind {
             Self::ProviderMeterDrift => "provider_meter_drift",
             Self::LatePeriodAdjustment => "late_period_adjustment",
             Self::ProviderReject => "provider_reject",
+            Self::CorrectionUnpriceable => "correction_unpriceable",
         }
     }
 }
@@ -166,7 +173,9 @@ pub struct ReconcileInputs<'a> {
     pub invoiced_quantity: i64,
     pub provider_quantity: Option<i64>,
     pub tolerance: i64,
-    pub cents_per_unit: i64,
+    /// Per-unit price for a monetary correction, or `None` when it cannot be
+    /// derived from a real invoiced basis (see `ReconcileFindingKind::CorrectionUnpriceable`).
+    pub cents_per_unit: Option<i64>,
     pub history: &'a [CorrectionHistory],
 }
 
@@ -245,13 +254,33 @@ pub fn reconcile_decision(input: ReconcileInputs<'_>) -> ReconcileDecision {
             findings,
         };
     };
+    // An `InvoiceCredit` posts a real monetary amount, so it MUST have a
+    // per-unit price. When the price cannot be derived from an invoiced basis
+    // (a self-invoicing provider prices the meter itself and writes no local
+    // lines), refuse to guess: flag the drift for repricing rather than emit a
+    // silently-mispriced credit. `Backfill` is quantity-only (the provider
+    // reprices), so a missing local price is informational there.
+    let amount_cents = match kind {
+        CorrectionActionKind::AdjustmentNote => {
+            let Some(unit_price) = input.cents_per_unit else {
+                findings.push(ReconcileFindingKind::CorrectionUnpriceable);
+                return ReconcileDecision {
+                    correction: None,
+                    findings,
+                };
+            };
+            quantity_delta.saturating_mul(unit_price)
+        }
+        CorrectionActionKind::Backfill => {
+            quantity_delta.saturating_mul(input.cents_per_unit.unwrap_or(1))
+        }
+    };
     let Some(correction_seq) = next_correction_seq(input.history, input.witness_quantity) else {
         return ReconcileDecision {
             correction: None,
             findings,
         };
     };
-    let amount_cents = quantity_delta.saturating_mul(input.cents_per_unit.max(1));
     if !findings.contains(&ReconcileFindingKind::LatePeriodAdjustment) {
         findings.push(ReconcileFindingKind::LatePeriodAdjustment);
     }
@@ -389,6 +418,14 @@ pub async fn tick_with<S: StripeApi>(
     now_unix: i64,
 ) -> Result<usize, RegistryError> {
     let period_start = previous_period_start_unix(now_unix);
+    // The settle gate is wall-clock, not a per-period "witness recompute landed"
+    // marker, on purpose: DEFAULT_SETTLE_WINDOW_SECS is sized to be ≥ one recompute
+    // cadence past period_end (see its definition), so the closed period is
+    // re-derived into usage_aggregates before we bill. A recompute that is late
+    // beyond the window (an outage) is not lost billing — this same safety-net
+    // sweep re-derives the witness and issues an idempotent correction on the
+    // next tick. Time-based gate + correction spine together cover late data
+    // without an extra cross-cron coordination marker.
     if !period_settled(
         now_unix,
         period_start,
@@ -921,11 +958,16 @@ impl SubjectPeriodTotals {
         }
     }
 
-    fn cents_per_unit(&self) -> i64 {
+    /// The effective per-unit price implied by what was actually invoiced this
+    /// period, or `None` when no monetary basis exists (nothing finalized-and-
+    /// invoiced for this subject — the norm for a self-invoicing provider that
+    /// bills at the provider and writes no local lines). `None` makes a monetary
+    /// `InvoiceCredit` correction fail closed instead of pricing it at ~1¢/unit.
+    fn cents_per_unit(&self) -> Option<i64> {
         if self.invoiced_quantity <= 0 || self.invoiced_amount_cents <= 0 {
-            return 1;
+            return None;
         }
-        (self.invoiced_amount_cents / self.invoiced_quantity).max(1)
+        Some((self.invoiced_amount_cents / self.invoiced_quantity).max(1))
     }
 }
 
@@ -2182,7 +2224,7 @@ mod tests {
             invoiced_quantity: 100,
             provider_quantity: Some(80),
             tolerance: 0,
-            cents_per_unit: 2,
+            cents_per_unit: Some(2),
             history: &[],
         });
         assert_eq!(
@@ -2201,7 +2243,7 @@ mod tests {
             invoiced_quantity: 100,
             provider_quantity: Some(100),
             tolerance: 0,
-            cents_per_unit: 2,
+            cents_per_unit: Some(2),
             history: &[],
         });
         assert_eq!(
@@ -2228,7 +2270,7 @@ mod tests {
             invoiced_quantity: 90,
             provider_quantity: Some(100),
             tolerance: 0,
-            cents_per_unit: 3,
+            cents_per_unit: Some(3),
             history: &[],
         });
         assert_eq!(
@@ -2249,13 +2291,60 @@ mod tests {
             invoiced_quantity: 0,
             provider_quantity: Some(100),
             tolerance: 0,
-            cents_per_unit: 3,
+            cents_per_unit: Some(3),
             history: &[],
         });
         assert_eq!(no_api.correction, None);
         assert_eq!(
             no_api.findings,
             vec![ReconcileFindingKind::ProviderMeterDrift]
+        );
+    }
+
+    #[test]
+    fn safety_net_unpriceable_invoice_credit_flags_instead_of_mispricing() {
+        // A self-invoicing provider writes no local invoice lines, so there is
+        // no monetary basis (`cents_per_unit == None`). The drift is real and
+        // the capability is InvoiceCredit, but we must NOT emit a credit priced
+        // at the old ~1¢/unit fallback — flag it for repricing instead.
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(90),
+            tolerance: 0,
+            cents_per_unit: None,
+            history: &[],
+        });
+        assert_eq!(
+            decision.correction, None,
+            "an unpriceable InvoiceCredit must not post a guessed amount"
+        );
+        assert!(
+            decision
+                .findings
+                .contains(&ReconcileFindingKind::CorrectionUnpriceable),
+            "the unpriceable drift must be flagged for operator repricing, got {:?}",
+            decision.findings
+        );
+
+        // Sanity: with a real per-unit basis the SAME drift DOES issue a credit
+        // (proves the guard is the price, not the drift).
+        let priced = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(90),
+            tolerance: 0,
+            cents_per_unit: Some(4),
+            history: &[],
+        });
+        assert_eq!(
+            priced.correction.map(|c| c.amount_cents),
+            Some(120),
+            "30-unit delta × 4¢ = 120¢ once a real per-unit price exists"
         );
     }
 
@@ -2283,7 +2372,7 @@ mod tests {
             invoiced_quantity: 100,
             provider_quantity: Some(125),
             tolerance: 0,
-            cents_per_unit: 1,
+            cents_per_unit: Some(1),
             history: &history,
         });
         assert_eq!(rerun.correction, None);
