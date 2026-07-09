@@ -19,7 +19,8 @@ use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::{self, PgStore};
 use zeroship_plugin_workflow::store::{CompensationProgress, StepWriteOutcome};
 use zeroship_workflow_scheduler::{
-    self as workflow_scheduler, FiredTimer, SchedulerConfig, TimerWheel, WakeHandle,
+    self as workflow_scheduler, FiredTimer, LapsedInflightTimer, SchedulerConfig, TimerWheel,
+    WakeHandle,
     WorkflowSchedulerStore, WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,
 };
 
@@ -196,6 +197,33 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     }
 }
 
+/// Low-frequency safety net for lost scheduler acks.
+#[allow(clippy::future_not_send)]
+pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
+    tracing::info!(tick_secs, "control workflow inflight reaper starting");
+    let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+    if let Err(e) = store.provision().await {
+        tracing::error!(error = %e, "workflow inflight reaper provision failed");
+        return;
+    }
+    loop {
+        match reap_lapsed_inflight_once(
+            &store,
+            &state,
+            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
+            WorkflowEngineConfig::default(),
+            64,
+        )
+        .await
+        {
+            Ok(n) if n > 0 => tracing::info!(redispatched = n, "workflow inflight reaper redispatched runs"),
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "workflow inflight reaper tick failed"),
+        }
+        compio::time::sleep(Duration::from_secs(tick_secs)).await;
+    }
+}
+
 /// Retired control-side scan tick. The scheduler store is the timer authority.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
@@ -268,7 +296,7 @@ where
 
         let mut batch_claimed = 0usize;
         for timer in fired {
-            match claim_fired_timer(&state.registry, &config, &timer).await? {
+            match claim_fired_timer(&state.registry, &config, &timer, true).await? {
                 Some(claim) => {
                     claimed += 1;
                     batch_claimed += 1;
@@ -292,6 +320,51 @@ where
     Ok(claimed)
 }
 
+/// Re-dispatch scheduler rows whose dispatch/apply/register ack was lost.
+///
+/// The recurring scan reads only `workflow_scheduler.inflight`; each lapsed row
+/// then goes through the normal per-run claim/dispatch/apply path.
+#[allow(clippy::future_not_send)]
+pub async fn reap_lapsed_inflight_once<D>(
+    scheduler_store: &WorkflowSchedulerStore,
+    state: &AppState,
+    dispatcher: Arc<D>,
+    config: WorkflowEngineConfig,
+    limit: i64,
+) -> Result<usize, RegistryError>
+where
+    D: StepDispatcher + 'static,
+{
+    if limit <= 0 {
+        return Ok(0);
+    }
+    let now = Utc::now();
+    let next_deadline = now + chrono::Duration::milliseconds(config.claim_ttl_ms);
+    let lapsed = scheduler_store
+        .claim_lapsed_inflight(now, limit, next_deadline)
+        .await
+        .map_err(scheduler_store_error_to_registry)?;
+    let mut redispatched = 0usize;
+    for timer in lapsed {
+        match claim_lapsed_inflight_timer(&state.registry, &config, &timer).await? {
+            Some(claim) => {
+                redispatched = redispatched.saturating_add(1);
+                spawn_dispatch(
+                    scheduler_store.clone(),
+                    state.registry.clone(),
+                    dispatcher.clone(),
+                    config.clone(),
+                    claim,
+                );
+            }
+            None => {
+                sync_scheduler_for_run(scheduler_store, &state.registry, &timer.run_id).await?;
+            }
+        }
+    }
+    Ok(redispatched)
+}
+
 #[derive(Debug, Clone)]
 struct ClaimedRun {
     request: StepRequest,
@@ -309,12 +382,14 @@ struct CandidateRun {
     started_at: DateTime<Utc>,
     waiting_step_key: Option<String>,
     cancel_requested: bool,
+    require_due: bool,
 }
 
 async fn claim_fired_timer(
     registry: &Registry,
     config: &WorkflowEngineConfig,
     timer: &FiredTimer,
+    require_due: bool,
 ) -> Result<Option<ClaimedRun>, RegistryError> {
     let mut conn = registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
@@ -328,14 +403,14 @@ async fn claim_fired_timer(
                JOIN zeroship.app_deploys d ON d.id = r.deploy_id \
               WHERE r.id = $1 \
                 AND r.app_id = $2 \
-                AND r.wake_at <= now() \
+                AND ($3::bool = false OR r.wake_at <= now()) \
                 AND r.state IN ('queued','running','sleeping','waiting','compensating') \
                 AND (r.claimed_by IS NULL OR r.lease_expires IS NULL OR r.lease_expires <= now()) \
                 AND app.workflows_enabled \
                 AND plan.workflows_allowed \
                 AND NOT plan.archived \
               FOR UPDATE SKIP LOCKED",
-            &[&timer.run_id, &timer.app_id],
+            &[&timer.run_id, &timer.app_id, &require_due],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -355,6 +430,7 @@ async fn claim_fired_timer(
         started_at: row.get("started_at"),
         waiting_step_key: row.get("waiting_step_key"),
         cancel_requested: row.get("cancel_requested"),
+        require_due,
     };
 
     tx.batch_execute("SAVEPOINT workflow_claim_row")
@@ -381,6 +457,21 @@ async fn claim_fired_timer(
 
     tx.commit().await.map_err(RegistryError::from)?;
     Ok(claimed)
+}
+
+async fn claim_lapsed_inflight_timer(
+    registry: &Registry,
+    config: &WorkflowEngineConfig,
+    timer: &LapsedInflightTimer,
+) -> Result<Option<ClaimedRun>, RegistryError> {
+    let fired = FiredTimer {
+        run_id: timer.run_id.clone(),
+        app_id: timer.app_id,
+        wake_at: Utc::now(),
+        dispatch_generation: timer.dispatch_generation,
+        deadline: timer.deadline,
+    };
+    claim_fired_timer(registry, config, &fired, false).await
 }
 
 async fn reap_parked_cancel_requested_batch(
@@ -494,7 +585,7 @@ where
                     terminal_at = NULL, \
                     last_dispatch_at = now() \
               WHERE id = $4 \
-                AND wake_at <= now() \
+                AND ($5::bool = false OR wake_at <= now()) \
                 AND state IN ('queued','running','sleeping','waiting','compensating') \
                 AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
               RETURNING id",
@@ -503,6 +594,7 @@ where
                 &lease_expires,
                 &dispatch_nonce,
                 &candidate.run_id,
+                &candidate.require_due,
             ],
         )
         .await
@@ -1342,6 +1434,13 @@ pub async fn apply_step_result_with_config(
         sync_scheduler_after_apply(&store, &state.registry, &run_id).await?;
     }
     Ok(applied)
+}
+
+/// Register the run's current durable wake with the scheduler store.
+#[allow(clippy::future_not_send)]
+pub async fn register_run_timer(state: &AppState, run_id: &str) -> Result<(), RegistryError> {
+    let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+    sync_scheduler_for_run(&store, &state.registry, run_id).await
 }
 
 fn scheduler_error_to_registry(error: workflow_scheduler::SchedulerError) -> RegistryError {

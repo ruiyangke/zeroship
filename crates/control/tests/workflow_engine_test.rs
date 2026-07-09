@@ -32,7 +32,10 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_workflow_scheduler::WorkflowSchedulerStore;
+use zeroship_workflow_scheduler::{
+    self as scheduler_store_engine, SchedulerConfig as StoreSchedulerConfig, TimerWheel,
+    WakeHandle, WorkflowSchedulerStore, WorkflowSchedulerStoreMetrics,
+};
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -71,6 +74,7 @@ fn set_local_workflow_blob_mtime(root: &std::path::Path, hash: &str, modified: S
 struct Fixture {
     state: Arc<AppState>,
     pg: Arc<compio_postgres::Client>,
+    db_url: String,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     scheduler_store: WorkflowSchedulerStore,
@@ -387,6 +391,7 @@ async fn build_fixture_with_gateway(
             ),
         }),
         pg: control_pg,
+        db_url: db_url.to_string(),
         blob_root,
         deploy_tmp_dir,
         scheduler_store,
@@ -1073,6 +1078,85 @@ fn child_dedup_key_is_parent_and_ordinal_deterministic() {
     assert_ne!(
         workflow_engine::child_dedup_key("run_parent", 7),
         workflow_engine::child_dedup_key("run_parent", 8)
+    );
+}
+
+#[compio::test]
+#[serial]
+async fn scheduler_boot_reconcile_seeds_from_journal() {
+    let Some(fx) = isolated_fixture("scheduler-boot-reconcile").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "scheduler-boot-reconcile").await;
+    let due_run = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let future_run = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "sleeping",
+        60_000,
+        Some("sleep:0:later"),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    fx.pg
+        .batch_execute("TRUNCATE TABLE workflow_scheduler.inflight, workflow_scheduler.timers")
+        .await
+        .expect("clear scheduler store before boot reconcile");
+    let metrics = Arc::new(WorkflowSchedulerStoreMetrics::default());
+    let store = WorkflowSchedulerStore::new(fx.db_url.clone()).with_metrics(Arc::clone(&metrics));
+    store.provision().await.expect("provision scheduler store");
+
+    let seeded = store
+        .boot_reconcile_from_workflow_runs()
+        .await
+        .expect("boot reconcile");
+    assert_eq!(seeded, 2);
+    assert_eq!(metrics.workflow_runs_reads(), 1);
+    assert!(store.timer(&due_run).await.expect("due timer").is_some());
+    assert!(store.timer(&future_run).await.expect("future timer").is_some());
+
+    let mut wheel = TimerWheel::new(WakeHandle::new());
+    let fired = scheduler_store_engine::fire_once(
+        &store,
+        &mut wheel,
+        &StoreSchedulerConfig::default(),
+    )
+    .await
+    .expect("store fire once");
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].run_id, due_run);
+    assert_eq!(
+        metrics.workflow_runs_reads(),
+        1,
+        "steady-state timer fire must not scan workflow_runs"
+    );
+
+    let now = Utc::now() + ChronoDuration::milliseconds(180_000);
+    let next_deadline = now + ChronoDuration::milliseconds(120_000);
+    let lapsed = store
+        .claim_lapsed_inflight(now, 16, next_deadline)
+        .await
+        .expect("claim lapsed inflight");
+    assert_eq!(lapsed.len(), 1);
+    assert_eq!(
+        metrics.workflow_runs_reads(),
+        1,
+        "inflight reaper must not scan workflow_runs"
     );
 }
 

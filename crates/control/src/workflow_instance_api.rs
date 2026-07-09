@@ -1359,6 +1359,9 @@ async fn create_run_inner(
     tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    workflow_engine::register_run_timer(state, &run_id)
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     Ok((StatusCode::CREATED, json!({ "id": run_id, "state": "queued" })))
 }
 
@@ -1393,6 +1396,7 @@ async fn start_many_inner(
         .map_err(WorkflowApiError::from)?;
 
     let mut results = Vec::with_capacity(body.items.len());
+    let mut run_ids = Vec::with_capacity(body.items.len());
     let mut seen_keys = BTreeSet::new();
     for item in body.items {
         let input_journal_bytes = pg::json_column_size(&tx, &item.input)
@@ -1423,6 +1427,9 @@ async fn start_many_inner(
                         "created": created,
                         "conflict": if created { Value::Null } else { json!("duplicate") },
                     }));
+                    if created {
+                        run_ids.push(run_id);
+                    }
                 }
                 ConflictPolicy::Reject => {
                     if existing.is_some() || duplicate_in_batch {
@@ -1453,6 +1460,7 @@ async fn start_many_inner(
                         "runId": run_id,
                         "created": true,
                     }));
+                    run_ids.push(run_id);
                 }
                 ConflictPolicy::Replace => {
                     let cancelled = tx.query(
@@ -1503,6 +1511,7 @@ async fn start_many_inner(
                         "created": true,
                         "conflict": if existing.is_some() || duplicate_in_batch { json!("replaced") } else { Value::Null },
                     }));
+                    run_ids.push(run_id);
                 }
             }
         } else {
@@ -1526,12 +1535,18 @@ async fn start_many_inner(
                 "runId": run_id,
                 "created": true,
             }));
+            run_ids.push(run_id);
         }
     }
 
     tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    for run_id in run_ids {
+        workflow_engine::register_run_timer(state, &run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
     Ok(json!({ "results": results }))
 }
 
@@ -1913,9 +1928,9 @@ pub async fn signal_run(
     {
         return WorkflowApiError::Database(e.to_string()).response();
     }
-    if run_state == "waiting"
-        && waiting_key_matches_signal(waiting_step_key.as_deref(), &body.signal_type)
-    {
+    let wakes_run = run_state == "waiting"
+        && waiting_key_matches_signal(waiting_step_key.as_deref(), &body.signal_type);
+    if wakes_run {
         if let Err(e) = tx
             .execute(
                 "UPDATE zeroship.workflow_runs \
@@ -1930,6 +1945,11 @@ pub async fn signal_run(
     }
     if let Err(e) = tx.commit().await {
         return WorkflowApiError::Database(e.to_string()).response();
+    }
+    if wakes_run {
+        if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
+            return WorkflowApiError::from(e).response();
+        }
     }
     web::HttpResponse::Accepted().json(&json!({ "id": signal_id }))
 }
@@ -2287,8 +2307,9 @@ async fn deliver_ingress_run_signal(
         }
         return Err(WorkflowApiError::Database(e.to_string()));
     }
-    if run_state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type)
-    {
+    let wakes_run =
+        run_state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type);
+    if wakes_run {
         tx.execute(
             "UPDATE zeroship.workflow_runs \
                 SET wake_at = now() \
@@ -2301,6 +2322,11 @@ async fn deliver_ingress_run_signal(
     tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    if wakes_run {
+        workflow_engine::register_run_timer(state, run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
     Ok(json!({ "id": signal_id, "runId": run_id }))
 }
 
