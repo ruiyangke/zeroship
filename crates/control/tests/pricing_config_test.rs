@@ -43,7 +43,7 @@ fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
     FX_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -286,7 +286,7 @@ async fn current_fx(state: &AppState) -> u64 {
 /// the actor + old→new is written.
 #[compio::test]
 async fn operator_put_updates_and_get_reflects_with_audit() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "op-put").await;
     let seed = current_fx(&fx.state).await;
@@ -363,7 +363,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
 /// stored value is unchanged. This is the operator-only invariant.
 #[compio::test]
 async fn creator_put_is_forbidden_and_value_unchanged() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "creator-403").await;
     let seed = current_fx(&fx.state).await;
@@ -415,7 +415,7 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
 /// closed — the floor is enforced at the handler, not just the DB CHECK).
 #[compio::test]
 async fn below_floor_put_is_rejected_400_value_unchanged() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "below-floor").await;
     let seed = current_fx(&fx.state).await;

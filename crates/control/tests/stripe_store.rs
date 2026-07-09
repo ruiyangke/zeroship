@@ -9,7 +9,7 @@ use uuid::Uuid;
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{Registry, StripeStore};
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -42,9 +42,7 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 
 #[compio::test]
 async fn link_account_roundtrip() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -71,7 +69,7 @@ async fn link_account_roundtrip() {
 
 #[compio::test]
 async fn reject_bad_account_id_shape() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -99,7 +97,7 @@ async fn reject_bad_account_id_shape() {
 
 #[compio::test]
 async fn record_payout_idempotent() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -153,7 +151,7 @@ async fn record_payout_idempotent() {
 
 #[compio::test]
 async fn total_earnings_aggregates_correctly() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -185,7 +183,7 @@ async fn total_earnings_aggregates_correctly() {
 
 #[compio::test]
 async fn recent_payouts_newest_first_with_limit() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -234,7 +232,7 @@ async fn recent_payouts_newest_first_with_limit() {
 
 #[compio::test]
 async fn per_creator_isolation() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let a = fresh_creator_id(&url).await;
@@ -266,7 +264,7 @@ async fn per_creator_isolation() {
 
 #[compio::test]
 async fn empty_creator_totals_are_zero() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -282,7 +280,7 @@ async fn empty_creator_totals_are_zero() {
 
 #[compio::test]
 async fn payload_hash_mismatch_rejects_duplicate() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -329,7 +327,7 @@ async fn payload_hash_mismatch_rejects_duplicate() {
 
 #[compio::test]
 async fn payout_ledger_check_constraints_reject_impossible_rows() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -354,7 +352,7 @@ async fn payout_ledger_check_constraints_reject_impossible_rows() {
 
 #[compio::test]
 async fn unlink_is_soft_delete_payouts_preserved() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -379,7 +377,7 @@ async fn unlink_is_soft_delete_payouts_preserved() {
 
 #[compio::test]
 async fn double_unlink_returns_false_second_time() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -392,7 +390,7 @@ async fn double_unlink_returns_false_second_time() {
 
 #[compio::test]
 async fn same_account_link_is_idempotent_no_history_pollution() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -412,7 +410,7 @@ async fn same_account_link_is_idempotent_no_history_pollution() {
 
 #[compio::test]
 async fn creator_history_allows_only_one_open_row_per_creator() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     Registry::new(&url).await.expect("registry");
     let pg = pg(&url).await;
     let creator = fresh_creator_id(&url).await;
@@ -443,7 +441,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
 
 #[compio::test]
 async fn relink_clears_unlinked_at_and_records_history() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id(&url).await;
@@ -490,7 +488,7 @@ async fn make_real_user(client: &compio_postgres::Client) -> Uuid {
 
 #[compio::test]
 async fn set_customer_relocates_to_refs_and_reverse_lookup_round_trips() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
@@ -548,7 +546,7 @@ async fn set_customer_relocates_to_refs_and_reverse_lookup_round_trips() {
 
 #[compio::test]
 async fn set_customer_is_idempotent_on_reset() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);

@@ -27,7 +27,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -661,9 +661,7 @@ async fn read_event(
 /// segments collapse to ONE Stripe item / ONE line (segment 1 under-billed).
 #[compio::test]
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "twoseg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -787,9 +785,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 /// POST carried NO `compute_units`/`usage` metadata — every assertion below fails.
 #[compio::test]
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "segcu").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -926,9 +922,7 @@ async fn segment_partition_invariants_hold() {
 /// item, one line, one provider-ref).
 #[compio::test]
 async fn no_change_yields_exactly_one_segment_zero_line() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "nochange").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -971,9 +965,7 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 /// EXACTLY once.
 #[compio::test]
 async fn reconcile_rerun_does_not_double_post_segments() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1025,9 +1017,7 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 /// FINALIZED attributes to the NEXT period.
 #[compio::test]
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "snap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = chrono::Utc::now().timestamp();
@@ -1105,9 +1095,7 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 /// (MAJOR-4) — never under a cheaper recorded plan.
 #[compio::test]
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1206,9 +1194,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 /// metric never credits the bill (faithful, end-to-end through the reconcile).
 #[compio::test]
 async fn end_missing_metric_does_not_credit_the_bill() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "floor").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1268,9 +1254,7 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 /// gated, open-period-floats-until-finalize) behaviour.
 #[compio::test]
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "catalogtime").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1351,9 +1335,7 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 /// the current segment set persists, and the DB subtotal == the Stripe item total.
 #[compio::test]
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "orphan").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1458,9 +1440,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 /// creator is NOT billed, no Stripe item is posted, and no finalized invoice.
 #[compio::test]
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "corrupt").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();

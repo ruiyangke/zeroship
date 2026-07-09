@@ -20,7 +20,7 @@ use zeroship_control::metering::provider::{
 use zeroship_control::Registry;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-fn db_url(_test_name: &str) -> Option<String> {
+fn db_url(_test_name: &str) -> String {
     common::require_control_db()
 }
 
@@ -35,9 +35,7 @@ async fn pg(db_url: &str) -> Arc<compio_postgres::Client> {
 
 #[compio::test]
 async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
-    let Some(url) = db_url("memory_forwarder_and_recompute_consumers_do_not_interfere") else {
-        return;
-    };
+    let url = db_url("memory_forwarder_and_recompute_consumers_do_not_interfere");
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let app = seed_app(&client).await;
@@ -270,9 +268,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
 
 #[compio::test]
 async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
-    let Some(url) = db_url("pg_dead_letter_sink_persists_provider_reject_and_decode_failure") else {
-        return;
-    };
+    let url = db_url("pg_dead_letter_sink_persists_provider_reject_and_decode_failure");
     let client = pg(&url).await;
     let suffix = unique_suffix();
     let mut stream_registry = StreamRegistry::default();

@@ -13,8 +13,13 @@ use uuid::Uuid;
 use zeroship_control::cron::audit_retention;
 use zeroship_control::Registry;
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    std::env::var("CONTROL_TEST_DB")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 async fn raw_conn(dsn: &str) -> compio_postgres::Client {
@@ -28,10 +33,7 @@ async fn raw_conn(dsn: &str) -> compio_postgres::Client {
 
 #[compio::test]
 async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     zeroship_control::bootstrap_console::seed_plans(&registry)
         .await

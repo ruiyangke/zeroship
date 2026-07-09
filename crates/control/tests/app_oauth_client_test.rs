@@ -13,10 +13,14 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 async fn pg(db_url: &str) -> Client {
@@ -75,10 +79,7 @@ async fn scopes(pg: &Client, client_id: &str) -> Vec<String> {
 
 #[compio::test]
 async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
-    let Some(url) = db_url() else {
-        eprintln!("[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let url = db_url();
 
     let registry = Registry::new(&url).await.expect("registry");
     zeroship_control::bootstrap_console::seed_plans(&registry)
@@ -334,10 +335,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
 
 #[compio::test]
 async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
-    let Some(url) = db_url() else {
-        eprintln!("[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let url = db_url();
 
     let app_base_domain = "zeroship.localhost";
     let state = build_state(&url, app_base_domain).await;

@@ -12,10 +12,14 @@ use zeroship_control::bootstrap_builder::{
     BUILDER_CLIENT_ID, BUILDER_CLIENT_NAME, DEFAULT_BUILDER_REDIRECT_URI,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 /// All three bootstrap tests operate on the *same* singleton OAuth client row
@@ -82,10 +86,7 @@ async fn count_builder_rows(pg: &Client) -> i64 {
 
 #[compio::test]
 async fn bootstrap_inserts_builder_client_first_run() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let root = tmpdir("first");
@@ -153,10 +154,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
 
 #[compio::test]
 async fn bootstrap_is_idempotent_on_second_run() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let root = tmpdir("idempotent");
@@ -183,10 +181,7 @@ async fn bootstrap_is_idempotent_on_second_run() {
 
 #[compio::test]
 async fn bootstrap_disabled_does_nothing() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let _serial = bootstrap_guard();
     let pg = pg(&db_url).await;
     let root = tmpdir("disabled");

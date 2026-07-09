@@ -34,8 +34,13 @@ use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    std::env::var("CONTROL_TEST_DB")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -244,10 +249,7 @@ async fn app_plan_id(pg: &Client, app_id: Uuid) -> String {
 
 #[compio::test]
 async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_test_state(&url, "major4").await;
     let pg = fx.state.control_pg.clone();
     let catalog = PlanCatalog::new(fx.state.registry.clone());

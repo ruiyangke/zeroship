@@ -24,10 +24,14 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -185,10 +189,7 @@ async fn seed_owner_user(state: &AppState) -> Uuid {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn reaper_deletes_ownerless_app_and_its_bundle() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
@@ -233,10 +234,7 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn reaper_leaves_owned_app_untouched() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "owned").await;
     let state = &fx.state;
@@ -271,10 +269,7 @@ async fn reaper_leaves_owned_app_untouched() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn reaper_never_touches_system_app() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
@@ -302,10 +297,7 @@ async fn reaper_never_touches_system_app() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn reaper_respects_grace_window() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
@@ -331,10 +323,7 @@ async fn reaper_respects_grace_window() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn purge_app_removes_db_row_and_vfs_blob() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;

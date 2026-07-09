@@ -25,10 +25,14 @@ mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -304,10 +308,7 @@ macro_rules! init_control {
 
 #[compio::test]
 async fn unauthenticated_request_returns_401() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "unauth").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-unauth-{}", Uuid::new_v4().simple());
@@ -323,10 +324,7 @@ async fn unauthenticated_request_returns_401() {
 
 #[compio::test]
 async fn non_admin_request_returns_403() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "non-admin").await;
     let pat = non_admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -345,10 +343,7 @@ async fn non_admin_request_returns_403() {
 
 #[compio::test]
 async fn admin_can_register_oauth_client_in_native_store() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "register").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -417,10 +412,7 @@ async fn admin_can_register_oauth_client_in_native_store() {
 
 #[compio::test]
 async fn skip_consent_is_derived_from_whitelist_not_body() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "trusted-client").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -443,10 +435,7 @@ async fn skip_consent_is_derived_from_whitelist_not_body() {
 
 #[compio::test]
 async fn arbitrary_client_gets_skip_consent_false() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "untrusted-client").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -469,10 +458,7 @@ async fn arbitrary_client_gets_skip_consent_false() {
 
 #[compio::test]
 async fn invalid_scope_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "invalid-scope").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -494,10 +480,7 @@ async fn invalid_scope_returns_400() {
 
 #[compio::test]
 async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "redirect-uri-validation").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -558,10 +541,7 @@ async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http
 
 #[compio::test]
 async fn duplicate_client_id_returns_409() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "duplicate").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -591,10 +571,7 @@ async fn duplicate_client_id_returns_409() {
 
 #[compio::test]
 async fn list_returns_registered_clients() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "list").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);
@@ -638,10 +615,7 @@ async fn list_returns_registered_clients() {
 
 #[compio::test]
 async fn delete_removes_from_native_store() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "delete").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app = init_control!(fx);

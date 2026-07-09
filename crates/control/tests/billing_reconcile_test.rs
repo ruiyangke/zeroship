@@ -34,7 +34,7 @@ use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     common::require_control_db()
 }
 
@@ -1104,9 +1104,7 @@ async fn read_line_snapshot(
 /// client hitting the mock server. Records on `billing_runs`.
 #[compio::test]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "items").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1158,9 +1156,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 /// before and after: the money is provably unchanged).
 #[compio::test]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1248,9 +1244,7 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 /// check (the keys are absent), so the test fails on the first metadata lookup.
 #[compio::test]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1392,9 +1386,7 @@ async fn every_stripe_call_pins_the_api_version() {
 /// idempotency guard is what makes this GREEN.
 #[compio::test]
 async fn reconcile_is_idempotent_per_period() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "idem").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1445,9 +1437,7 @@ async fn reconcile_is_idempotent_per_period() {
 /// server's recorded requests — proving the wire path, not a stubbed client.
 #[compio::test]
 async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "hdr").await;
 
     // Drive the REAL client directly against the mock.
@@ -1495,9 +1485,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
 /// `invoice_swept_total` is 0 (≠ 1234+766) and the body lacks the param.
 #[compio::test]
 async fn create_invoice_sweeps_pending_items_via_include_behavior() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d1-sweep").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1551,9 +1539,7 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
 /// returns nothing — proving the expand is load-bearing.
 #[compio::test]
 async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d2-expand").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1597,9 +1583,7 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
 /// refund fails (the exact real-Stripe 400 the e2e hit).
 #[compio::test]
 async fn create_refund_omits_currency_and_targets_pi_directly() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d2-refund").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1654,9 +1638,7 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
 /// through the store + mock; asserts the store persisted one customer id.
 #[compio::test]
 async fn setup_session_creates_customer_once() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "setup").await;
     let creator = make_user(&fx.state, "setup").await;
 
@@ -1695,9 +1677,7 @@ async fn setup_session_creates_customer_once() {
 /// skipped (an unowned app gets no invoice).
 #[compio::test]
 async fn reconcile_groups_apps_by_owner_via_app_members() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "owner").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1752,9 +1732,7 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
 /// the SAME deterministic idempotency key and the row is completed.
 #[compio::test]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1824,9 +1802,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// `Ok`; here it returns `Err` and writes nothing.
 #[compio::test]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2019,9 +1995,7 @@ impl StripeApi for FailAfterFirstItem {
 /// GREEN: count_created == 2 total (A once + B once), never 3.
 #[compio::test]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "partial").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2169,9 +2143,7 @@ impl StripeApi for PostThenCrash {
 /// (double-bill). The claim-then-call fix makes it count_created == 1.
 #[compio::test]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2243,9 +2215,7 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 /// so the deterministic Idempotency-Key path also yields exactly one created item.
 #[compio::test]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2366,9 +2336,7 @@ impl StripeApi for CrashOnFinalize {
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
 #[compio::test]
 async fn crash_before_finalize_finalizes_original_draft_after_24h() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2467,9 +2435,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// `:id` to the principal. The fix makes own-id OK and keeps foreign-id 403.
 #[compio::test]
 async fn billing_setup_is_self_service_and_blocks_cross_creator() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "authz").await;
 
     // A normal (non-operator) creator principal. Its PAT user_id IS the creator.
@@ -2513,9 +2479,7 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
 /// creator's billing (foreign id) — the admin PAT carries BillingWrite.
 #[compio::test]
 async fn billing_setup_allows_platform_operator_for_any_creator() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "authz-op").await;
 
     let operator = common::authz_fixture::admin_pat(&fx.state).await;
@@ -2564,9 +2528,7 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 /// makes the no-bearer case 401 while the keyed case still reconciles.
 #[compio::test]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "force").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2642,9 +2604,7 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 
 #[compio::test]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2818,9 +2778,7 @@ impl StripeApi for FinalizeAlreadyFinalized {
 
 #[compio::test]
 async fn refinalize_already_finalized_converges_locally() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2955,9 +2913,7 @@ impl StripeApi for FinalizeReturnsFixedId {
 
 #[compio::test]
 async fn finalize_and_invoice_ref_commit_atomically() {
-    let Some(url) = db_url() else {
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "m1atomic").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
