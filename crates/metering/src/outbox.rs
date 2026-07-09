@@ -490,6 +490,10 @@ mod tests {
         async fn commit(&self, _offsets: &[StreamOffset]) -> Result<(), StreamError> {
             Ok(())
         }
+
+        async fn rewind(&self) -> Result<(), StreamError> {
+            Ok(())
+        }
     }
 
     #[test]

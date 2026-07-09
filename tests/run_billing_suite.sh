@@ -6,8 +6,9 @@
 # WHY THIS SCRIPT EXISTS (the constraint)
 # ----------------------------------------
 # The billing test binaries share one Postgres DB (:5440) and exercise the REAL
-# fleet-wide cron sweeps — `billing_reconcile`, `metering_export`,
-# `stripe_reconcile`, `billing_notify`, `spend_reconcile`. Each of those sweeps
+# fleet-wide cron sweeps — `billing_reconcile`, `stripe_reconcile`,
+# `billing_notify`, `spend_reconcile`, plus the stream forwarder/recompute
+# billing rail. Each of those sweeps
 # is single-flighted FLEET-WIDE in production by a session-scoped
 # `pg_try_advisory_lock(<stable key>)`: a second concurrent sweep LOSES the lock
 # and returns `Ok(0)` (it does nothing this tick). That advisory lock is a
@@ -45,7 +46,7 @@
 #   billing_reconcile_test, billing_proration_test, billing_tax_test,
 #   billing_credit_test, billing_refund_void_test, billing_dispute_test,
 #   billing_notify_test, stripe_webhook_test, stripe_reconcile_test,
-#   spend_reconcile_test, metering_export_test, metering_export_openmeter_test,
+#   spend_reconcile_test, billing_safety_net_test, stream_forwarder_recompute_test,
 #   pricing_config_test, plan_catalog, spend, metering, stripe_store.
 # This runner runs ALL of them serially (one binary at a time) so the operator
 # never has to remember which bucket a binary is in — it is always correct.
@@ -62,6 +63,10 @@
 #   PSQL    (auto-detected; override with an explicit psql path)
 #   SKIP_DB_RECREATE (unset)  — set to skip the drop/create/migrate step
 #   TEST_THREADS (unset)      — passed to each binary's `--test-threads`
+#
+# CONTROL_TEST_DB is REQUIRED for the billing gate. This script exports it after
+# creating/migrating TEST_DB. Plain `cargo test` without CONTROL_TEST_DB keeps
+# DB-gated tests as loud skips, but it is not the billing integration gate.
 # ============================================================================
 set -euo pipefail
 
@@ -105,13 +110,14 @@ BILLING_TESTS=(
   stripe_webhook_test
   stripe_reconcile_test
   spend_reconcile_test
-  metering_export_test
-  metering_export_openmeter_test
+  billing_safety_net_test
+  stream_forwarder_recompute_test
   pricing_config_test
   plan_catalog
   spend
   metering
   stripe_store
+  provider_conformance
   # --- parallel-safe in principle; run here too for one correct gate ---
   account_status_test
   billing_invoice_payments_test
@@ -164,6 +170,15 @@ for t in "${BILLING_TESTS[@]}"; do
     failed+=("$t")
   fi
 done
+
+echo "------------------------------------------------------------------"
+echo "==> zeroship-metering outbox WAL unit tests"
+if cargo test -p zeroship-metering --lib outbox -- "${THREAD_ARG[@]}"; then
+  :
+else
+  fail=1
+  failed+=("zeroship-metering::outbox")
+fi
 
 echo "=================================================================="
 if [ "$fail" -ne 0 ]; then

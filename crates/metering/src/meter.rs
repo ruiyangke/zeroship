@@ -66,21 +66,29 @@ impl AppCounters {
         }
     }
 
-    /// Bump a counter by `n` and return the metric's new running total
-    /// (this period, pre-drain). A fixed-metric name routes to its atomic;
-    /// any other name lands in `custom`.
-    fn add(&self, metric: &str, n: u64) -> u64 {
+    /// Bump a counter by `n`. A fixed-metric name routes to its atomic; any
+    /// other name lands in `custom`.
+    fn add(&self, metric: &str, n: u64) {
         match metric {
-            "requests" => self.requests.fetch_add(n, Ordering::Relaxed) + n,
-            "cpu_us" => self.cpu_us.fetch_add(n, Ordering::Relaxed) + n,
-            "wall_us" => self.wall_us.fetch_add(n, Ordering::Relaxed) + n,
-            "egress_bytes" => self.egress_bytes.fetch_add(n, Ordering::Relaxed) + n,
-            "ingress_bytes" => self.ingress_bytes.fetch_add(n, Ordering::Relaxed) + n,
+            "requests" => {
+                self.requests.fetch_add(n, Ordering::Relaxed);
+            }
+            "cpu_us" => {
+                self.cpu_us.fetch_add(n, Ordering::Relaxed);
+            }
+            "wall_us" => {
+                self.wall_us.fetch_add(n, Ordering::Relaxed);
+            }
+            "egress_bytes" => {
+                self.egress_bytes.fetch_add(n, Ordering::Relaxed);
+            }
+            "ingress_bytes" => {
+                self.ingress_bytes.fetch_add(n, Ordering::Relaxed);
+            }
             other => {
                 let mut c = self.custom.lock().unwrap();
                 let slot = c.entry(other.to_string()).or_insert(0);
                 *slot += n;
-                *slot
             }
         }
     }
@@ -159,12 +167,11 @@ impl Meter {
         }
     }
 
-    /// Increment `metric` for `app_id` by `n`; returns the metric's new
-    /// running total this period. Auto-vivifies the app's counter set on first
-    /// touch. A `metric` matching one of the five fixed names lands in that
-    /// fixed field; everything else is a custom metric.
-    pub fn increment(&self, app_id: &str, metric: &str, n: u64) -> u64 {
-        self.with_app_counters(app_id, |counters| counters.add(metric, n))
+    /// Increment `metric` for `app_id` by `n`. Auto-vivifies the app's counter
+    /// set on first touch. A `metric` matching one of the five fixed names lands
+    /// in that fixed field; everything else is a custom metric.
+    pub fn increment(&self, app_id: &str, metric: &str, n: u64) {
+        self.with_app_counters(app_id, |counters| counters.add(metric, n));
     }
 
     fn with_app_counters<R>(&self, app_id: &str, f: impl FnOnce(&AppCounters) -> R) -> R {

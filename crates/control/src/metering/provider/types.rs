@@ -88,7 +88,6 @@ pub enum DedupKey {
 pub enum DedupTtl {
     Bounded(Duration),
     Unbounded,
-    Unknown,
     NotApplicable,
 }
 

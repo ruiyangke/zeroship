@@ -81,6 +81,10 @@ impl MeteringProvider for StripeInvoiceProvider {
         Some(self)
     }
 
+    fn owns_local_invoice(&self) -> bool {
+        true
+    }
+
     fn correction(&self) -> CorrectionCapability {
         CorrectionCapability::InvoiceCredit
     }

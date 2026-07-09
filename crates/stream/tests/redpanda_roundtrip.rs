@@ -98,6 +98,75 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
     });
 }
 
+#[test]
+fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
+    let Some(brokers) = std::env::var_os("REDPANDA_BROKERS") else {
+        println!("skipping redpanda rewind: REDPANDA_BROKERS is unset");
+        return;
+    };
+    let brokers = brokers.to_string_lossy().to_string();
+
+    block_on(async move {
+        let suffix = unique_suffix();
+        let topic = format!("zeroship-stream-rewind-{suffix}");
+        let group = format!("zeroship-stream-rewind-group-{suffix}");
+
+        let mut registry = StreamRegistry::default();
+        adapters::register_builtin(&mut registry);
+        let config = StreamConfig::from(json!({
+            "brokers": brokers,
+            "topic": topic.clone(),
+            "group.id": group,
+            "client_id": format!("zeroship-stream-rewind-test-{suffix}"),
+            "message_timeout_ms": 10000,
+            "publish_timeout_ms": 10000,
+            "poll_timeout_ms": 250,
+            "auto_offset_reset": "earliest"
+        }));
+
+        let transport = registry
+            .build("redpanda", &config)
+            .expect("redpanda transport builds");
+        for seq in 0..3 {
+            let payload = format!("payload-{seq}");
+            transport
+                .publish(&topic, b"subject-a", payload.as_bytes())
+                .await
+                .expect("publish redpanda rewind event");
+        }
+
+        let mut first = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while first.len() < 3 && Instant::now() < deadline {
+            first.extend(transport.poll(3).await.expect("initial poll"));
+        }
+        assert_eq!(first.len(), 3, "expected to consume every published record");
+        let offsets: Vec<_> = first.iter().map(StreamOffset::from).collect();
+        transport.commit(&offsets).await.expect("commit offsets");
+        drop(transport);
+
+        let verifier = registry
+            .build("redpanda", &config)
+            .expect("redpanda verifier transport builds");
+        assert!(
+            verifier.poll(3).await.expect("poll after commit").is_empty(),
+            "committed group should not replay before rewind"
+        );
+
+        verifier.rewind().await.expect("rewind redpanda group");
+        let mut replay = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while replay.len() < 3 && Instant::now() < deadline {
+            replay.extend(verifier.poll(3).await.expect("poll after rewind"));
+        }
+        assert_eq!(
+            replay.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "rewind must seek back to the retained beginning"
+        );
+    });
+}
+
 fn unique_suffix() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

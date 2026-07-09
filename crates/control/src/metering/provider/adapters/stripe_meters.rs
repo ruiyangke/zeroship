@@ -156,6 +156,10 @@ impl MeteringProvider for StripeMetersProvider {
         Some(self)
     }
 
+    fn self_invoices(&self) -> bool {
+        true
+    }
+
     fn dedup(&self) -> DedupContract {
         DedupContract {
             key: DedupKey::Identifier,

@@ -93,6 +93,10 @@ impl MeteringProvider for LiteProvider {
         false
     }
 
+    fn owns_local_invoice(&self) -> bool {
+        true
+    }
+
     fn dedup(&self) -> DedupContract {
         DedupContract {
             key: DedupKey::SourceAndId,
