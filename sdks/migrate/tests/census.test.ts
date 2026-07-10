@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { table, t } from "../src/index.js";
 import { __begin, __drain, opProducerRegistry } from "../src/ops.js";
-import { pgTable } from "../src/pg.js";
 
 function record(up: () => void): any[] {
   __begin();
@@ -62,8 +61,8 @@ test("tier-2 addConstraint byte collision check covers serialized constraint kin
       references: { table: "customers", columns: ["id"] },
     });
     table("users").unique("users_email_key").add({ columns: ["email"] });
-    table("users").check("users_email_present").add({ expr: (c) => c("email").isNotNull() });
-    pgTable("bookings").exclusion("bookings_room_excl").add({
+    table("users").check("users_email_present").add({ expr: (col) => col("email").isNotNull() });
+    table("bookings").exclusion("bookings_room_excl").add({
       using: "gist",
       elements: [{ target: "room_id", operator: "=" }],
     });

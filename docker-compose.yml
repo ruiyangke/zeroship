@@ -104,6 +104,11 @@ services:
       - --database-url=postgres://postgres:zeroship@postgres:5432/zeroship
       - --profile=platform
       - --yes
+    # zeroship-migrate is a compio/io_uring binary like every other service;
+    # io_uring_setup is blocked by Docker's default seccomp, so this one-shot
+    # needs the same unconfined profile the long-running services use.
+    security_opt:
+      - seccomp:unconfined
     restart: on-failure
 
   control:

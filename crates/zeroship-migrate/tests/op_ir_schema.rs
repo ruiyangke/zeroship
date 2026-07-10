@@ -81,6 +81,7 @@ fn op_variant_names_from_schema() {
     found.sort();
 
     let mut expected: Vec<String> = [
+        "dialectal",
         "createTable",
         "dropTable",
         "createPartition",
@@ -118,7 +119,7 @@ fn op_variant_names_from_schema() {
         "dropSequence",
         "createTrigger",
         "dropTrigger",
-        // VENDOR (`@zeroship/migrate/pg`) — the Postgres-only privileged primitives.
+        // VENDOR (`@zeroship/migrate`) — the Postgres-only privileged primitives.
         "createSchema",
         "dropSchema",
         "createExtension",

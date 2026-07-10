@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import {
   t,
   table,
+  view,
   minValue,
   maxValue,
   nextval,
@@ -24,13 +25,20 @@ import {
   decimal,
   byteValue,
   dialect,
+  now,
+  currentSetting,
+  currentUser,
+  interval,
+  concatWs,
+  countStar,
+  domain,
+  sequence,
 } from "../src/index.js";
-import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is now the COMPILED artifact
 // (`dist/embedded-recorder.js`) the `zeroship-migrate` crate `include_str!`s —
-// the same `tsup` build output of `src/{ops,pg}.ts`. Importing it here (instead
+// the same `tsup` build output of `src/ops.ts`. Importing it here (instead
 // of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
 // the SDK source and the shipped engine artifact record byte-identically.
 import {
@@ -53,10 +61,7 @@ function record(up: () => void): any[] {
 async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const pgUrl = pathToFileURL(resolve(process.cwd(), "src/pg.js")).href;
-  const source = (await readFile(sourcePath, "utf8"))
-    .replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`)
-    .replaceAll(`from "@zeroship/migrate/pg"`, `from "${pgUrl}"`);
+  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`);
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
   return import(dataUrl) as Promise<{ up(): void }>;
 }
@@ -67,10 +72,21 @@ function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any
   return engDrain();
 }
 
-test("@zeroship/migrate core exports enumType and omits pg-only/old names", async () => {
+test("@zeroship/migrate core exports enumType, pg vendor names, and omits old names", async () => {
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
+  assert.equal(typeof imported.now, "function");
+  assert.equal(typeof imported.genRandomUuid, "function");
+  assert.equal(typeof imported.currentSetting, "function");
+  assert.equal(typeof imported.currentUser, "function");
+  assert.equal(typeof imported.interval, "function");
+  assert.equal(typeof imported.countStar, "function");
+  assert.equal(typeof imported.domain, "function");
+  assert.equal(typeof imported.sequence, "function");
+  assert.equal(typeof imported.table, "function");
+  assert.equal(typeof imported.grant, "function");
+  assert.equal(typeof imported.raw, "function");
   assert.equal((imported as any).p, undefined);
   assert.equal((imported as any).partition, undefined);
   assert.equal((imported as any).dropPartition, undefined);
@@ -79,11 +95,8 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal((imported as any).and, undefined);
   assert.equal((imported as any).or, undefined);
   assert.equal((imported as any).not, undefined);
-  assert.equal((imported as any).interval, undefined);
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
-  assert.equal((imported as any).domain, undefined);
-  assert.equal((imported as any).sequence, undefined);
 });
 
 test("SA-7: enumType.create rejects an empty values[] at authoring time", () => {
@@ -183,10 +196,10 @@ test("default expression callbacks record IrDefault::Expr", () => {
   const ops = record(() => {
     table("u").create({
       columns: {
-        created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+        created_at: t.timestamp().notNull().default(now()),
       },
     });
-    table("u").column("updated_at").setDefault((c) => c.fn.now());
+    table("u").column("updated_at").setDefault(now());
   });
   const expr = { node: "fnSynth", fn: "now", args: [] };
   assert.deepEqual(ops[0].columns[0].default, { expr });
@@ -585,7 +598,7 @@ test("insert normalizes decimal() to {decimal} and Uint8Array to {bytes:base64}"
 test("update set records scalar RHS as IrValue scalar and callback RHS as IrValue expr", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ a: 1 }] });
-    table("t").update({ set: { a: 1, b: (c) => c("x").add(1) } });
+    table("t").update({ set: { a: 1, b: (col) => col("x").add(1) } });
   });
 
   assert.deepEqual(ops[1].set.a, ops[0].rows[0][0], "set scalar must match insert scalar wire shape");
@@ -605,7 +618,7 @@ test("decimal() validates decimal strings and records byte-identical IR", () => 
       rows: [{ id: 1 }],
       onConflict: { columns: ["id"], doUpdate: { price: decimal("9007199254740993") } as any },
     });
-    table("t").check("price_chk").add({ expr: (c) => c("price").ge(decimal("0.00")) });
+    table("t").check("price_chk").add({ expr: (col) => col("price").ge(decimal("0.00")) });
     lit(decimal("1.25"));
   });
 
@@ -640,7 +653,7 @@ test("byteValue() validates bytes inputs and records byte-identical IR", () => {
       rows: [{ id: 1 }],
       onConflict: { columns: ["id"], doUpdate: { raw: byteValue(new Uint8Array([1, 2, 3])) } as any },
     });
-    table("t").check("raw_chk").add({ expr: (c) => c("raw").eq(byteValue("AQID")) });
+    table("t").check("raw_chk").add({ expr: (col) => col("raw").eq(byteValue("AQID")) });
     lit(byteValue("AQID"));
   });
 
@@ -766,12 +779,11 @@ test("non-native function values fail closed instead of recording as JSON null",
       ),
     (e: any) => e.code === "OP_INVALID" && /column default cannot reference a column/.test(e.message),
   );
-  assert.throws(
-    () =>
-      record(() =>
-        table("t").create({ columns: { v: t.int().default((() => ({ node: "agg", func: "count" })) as any) } }),
-      ),
-    (e: any) => e.code === "OP_INVALID" && /column default cannot use an aggregate/.test(e.message),
+  assert.deepEqual(
+    record(() =>
+      table("t").create({ columns: { v: t.int().default((() => ({ node: "agg", func: "count" })) as any) } }),
+    )[0].columns[0].default,
+    { expr: { node: "agg", func: "count" } },
   );
   assert.throws(
     () =>
@@ -801,13 +813,13 @@ test("non-native function values fail closed instead of recording as JSON null",
     isInvalidFunction,
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { v: (c) => c.fn.lower((() => "x") as any) } })),
+    () => record(() => table("t").update({ set: { v: () => lit((() => "x") as any).lower() } })),
     isInvalidFunction,
   );
   assert.throws(
     () =>
       record(() =>
-        table("t").update({ set: { v: (c) => c.fn.coalesce({ doc: { a: () => 1 } } as any, "x") } }),
+        table("t").update({ set: { v: () => lit({ doc: { a: () => 1 } } as any).coalesce("x") } }),
       ),
     isInvalidFunction,
   );
@@ -954,97 +966,126 @@ test("onConflict.doUpdate normalizes decimal()/Uint8Array scalar assignments", (
   });
 });
 
-test("update accepts a batch knob (parity with the engine recorder)", () => {
+test("update records a plain one-shot op with no batch field", () => {
   const ops = record(() =>
     table("t").update({
-      set: { x: (c) => c.fn.now() },
-      where: (c) => c("id").isNotNull(),
-      batch: { cursorColumn: "id", batchSize: 500 },
+      set: { x: now() },
+      where: (col) => col("id").isNotNull(),
     }),
   );
-  assert.deepEqual(ops[0].batch, { cursorColumn: "id", batchSize: 500 });
+  assert.equal(ops[0].op, "update");
+  assert.equal("batch" in ops[0], false);
+});
+
+test("backfill remains the batched-write spelling", () => {
+  const ops = record(() =>
+    table("t").backfill({
+      set: { x: now() },
+      where: (col) => col("id").isNotNull(),
+      cursorColumn: "id",
+      batchSize: 500,
+    }),
+  );
+  assert.equal(ops[0].op, "backfill");
+  assert.equal(ops[0].cursorColumn, "id");
+  assert.equal(ops[0].batchSize, 500);
 });
 
 test("del records the 'delete' wire tag and requires where", () => {
-  const ops = record(() => table("t").delete({ where: (c) => c("code").isNull(), limit: 5 }));
+  const ops = record(() => table("t").delete({ where: (col) => col("code").isNull(), limit: 5 }));
   assert.equal(ops[0].op, "delete");
   assert.equal(ops[0].limit, 5);
   assert.throws(() => record(() => table("t").delete({} as any)), /where is mandatory/);
 });
 
-test("the (c) => Expr builder constructs the closed AST", () => {
+test("the (col) => Expr builder constructs the closed AST", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        a: (c) => c("x").add(1).mul(2).cast("integer"),
-        b: (c) => c.fn.concatWs(" ", c("p"), c("q")),
-        d: (c) => c.case({ branches: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
+        a: (col) => col("x").add(1).mul(2).cast({ to: "int" }),
+        b: (col) => concatWs(" ", col("p"), col("q")),
+        d: (col) => col.case({ branches: [{ when: col("x").lt(0), then: col("y") }], else: col("z") }),
+        e: (col) => col("payload").cast({ to: "bytes" }),
+        f: (col) => col("label").cast({ to: "text" }),
       },
-      where: (c) => c("x").gt(0).and(c("y").isNotNull()),
+      where: (col) => col("x").gt(0).and(col("y").isNotNull()),
     }),
   );
   const set = ops[0].set;
   assert.equal(set.a.node, "cast");
-  assert.equal(set.a.target, "integer");
+  assert.equal(set.a.target, "int");
   assert.equal(set.a.operand.op, "mul");
   assert.equal(set.b.node, "fnSynth");
   assert.equal(set.b.fn, "concatWs");
   assert.equal(set.d.node, "case");
+  assert.equal(set.e.target, "bytes");
+  assert.equal(set.f.target, "text");
   assert.equal(ops[0].where.op, "and");
 });
 
-test("c.case validates the object branch shape", () => {
+test("cast fails closed on positional calls and old affinity tokens", () => {
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (col) => col("x").cast("text" as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be \{ to \}/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (col) => col("x").cast({ to: "blob" } as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /to must be one of/.test(e.message),
+  );
+});
+
+test("col.case validates the object branch shape", () => {
   assert.throws(
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ branches: [] }) },
-          where: (c) => c("id").isNotNull(),
+          set: { x: (col) => col.case({ branches: [] }) },
+          where: (col) => col("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches must be a non-empty array/,
+    /col\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches must be a non-empty array/,
   );
   assert.throws(
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ branches: [[c("a"), c("b")]] as any }) },
-          where: (c) => c("id").isNotNull(),
+          set: { x: (col) => col.case({ branches: [[col("a"), col("b")]] as any }) },
+          where: (col) => col("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches\[0\] must be an object with when and then/,
+    /col\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches\[0\] must be an object with when and then/,
   );
 });
 
 test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull() (P4)", () => {
   assert.throws(
-    () => record(() => table("t").check("c_eq").add({ expr: (c) => c("a").eq(null) })),
+    () => record(() => table("t").check("c_eq").add({ expr: (col) => col("a").eq(null) })),
     /eq\(null\) is always UNKNOWN in SQL — use isNull\(\)/,
   );
   assert.throws(
-    () => record(() => table("t").check("c_ne").add({ expr: (c) => c("a").ne(null) })),
+    () => record(() => table("t").check("c_ne").add({ expr: (col) => col("a").ne(null) })),
     /ne\(null\) is always UNKNOWN in SQL — use isNotNull\(\)/,
   );
   // the steer target itself still records without error
-  const ops = record(() => table("t").check("c_ok").add({ expr: (c) => c("a").isNull() }));
+  const ops = record(() => table("t").check("c_ok").add({ expr: (col) => col("a").isNull() }));
   assert.equal(ops.length, 1);
   assert.equal(JSON.stringify(ops[0]).includes('"isNull"'), true);
 });
 
-test("the two-arg c('table','col') records a qualified colRef; one-arg stays unqualified", () => {
-  // §3.4 the join-ON fix: `c("orders", "customer_id")` records a colRef carrying
-  // an optional `table`; `c("id")` records the pre-qualification unqualified shape
+test("the two-arg col('table','col') records a qualified colRef; one-arg stays unqualified", () => {
+  // §3.4 the join-ON fix: `col("orders", "customer_id")` records a colRef carrying
+  // an optional `table`; `col("id")` records the pre-qualification unqualified shape
   // (no `table` key at all — byte-identical to today).
   const ops = record(() =>
     table("t").update({
       set: {
         // qualified two-arg form on both sides of the predicate-shaped value
-        q: (c) => c("orders", "customer_id"),
+        q: (col) => col("orders", "customer_id"),
         // one-arg form is untouched
-        u: (c) => c("id"),
-        // the callable two-arg spelling replaces the old c.col("table", "col")
-        cq: (c) => c("users", "id"),
-        tx: (c) => c("t", "x"),
+        u: (col) => col("id"),
+        // the callable two-arg spelling replaces the old col.col("table", "col")
+        cq: (col) => col("users", "id"),
+        tx: (col) => col("t", "x"),
       },
     }),
   );
@@ -1060,10 +1101,10 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
 test("variadic boolean chains record the old free-combinator left fold", () => {
   const ops = record(() =>
     table("t").check("wide_bool").add({
-      expr: (c) =>
-        c("a").eq(1)
-          .and(c("b").eq(2), c("c").eq(3))
-          .or(c("d").eq(4), c("e").eq(5)),
+      expr: (col) =>
+        col("a").eq(1)
+          .and(col("b").eq(2), col("c").eq(3))
+          .or(col("d").eq(4), col("e").eq(5)),
     }),
   );
 
@@ -1090,27 +1131,27 @@ test("variadic boolean chains record the old free-combinator left fold", () => {
   });
 });
 
-test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
+test("PG-first chain methods and root RLS scalar constructors record PG-only nodes", () => {
   const ops = record(() => {
-    pgTable("t").create({
+    table("t").create({
       columns: {
         status: t.text().notNull(),
         name: t.text().notNull(),
         data: t.json().notNull(),
       },
       checks: [
-        { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
-        { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) },
+        { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
+        { name: "data_size", expr: (col) => col("data").columnSize().le(8192) },
       ],
     });
     table("t").update({
       set: {
-        setting: (c) => c.pg.currentSetting("tenant.id", true),
-        user: (c) => c.pg.currentUser(),
+        setting: currentSetting("tenant.id", { missingOk: true }),
+        user: currentUser(),
       },
     });
   });
-  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  const checks = ops[0].constraints.map((constraint: any) => constraint.kind.expr);
   assert.deepEqual(checks[0], {
     node: "pgRegexMatch",
     expr: { node: "colRef", name: "name" },
@@ -1133,18 +1174,12 @@ test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
   assert.deepEqual(ops[1].set.user, { node: "fnCall", fn: "currentUser", args: [] });
 });
 
-test("core CHECK expressions reject vendor, aggregate, and volatile nodes at record time", () => {
-  assert.throws(
-    () => record(() => table("t").check("no_pg").add({
-      expr: (() => ({ node: "pgColumnSize", expr: { node: "colRef", name: "data" } })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /PG-vendor/.test(e.message),
-  );
-  assert.throws(
-    () => record(() => table("t").check("no_agg").add({
+test("CHECK expressions record aggregate nodes for validate and reject volatile nodes", () => {
+  assert.deepEqual(
+    record(() => table("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+    }))[0].constraint.kind.expr,
+    { node: "agg", func: "count" },
   );
   assert.throws(
     () => record(() => table("t").check("no_now").add({
@@ -1154,10 +1189,10 @@ test("core CHECK expressions reject vendor, aggregate, and volatile nodes at rec
   );
 });
 
-test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile nodes", () => {
+test("table CHECK expressions allow immutable PG nodes, record aggregates, and reject volatile nodes", () => {
   const ops = record(() =>
-    pgTable("t").check("data_small").add({
-      expr: (c) => c.pg.pgColumnSize(c("data")).lt(1000),
+    table("t").check("data_small").add({
+      expr: (col) => col("data").columnSize().lt(1000),
     }),
   );
   assert.deepEqual(ops[0], {
@@ -1177,20 +1212,20 @@ test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile
     },
   });
 
-  assert.throws(
-    () => record(() => pgTable("t").check("no_agg").add({
+  assert.deepEqual(
+    record(() => table("t").check("no_agg").add({
       expr: (() => ({ node: "agg", func: "count" })) as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+    }))[0].constraint.kind.expr,
+    { node: "agg", func: "count" },
   );
   assert.throws(
-    () => record(() => pgTable("t").check("no_now").add({
+    () => record(() => table("t").check("no_now").add({
       expr: (() => ({ node: "fnSynth", fn: "now", args: [] })) as any,
     })),
     (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /volatile/.test(e.message),
   );
   assert.throws(
-    () => record(() => pgTable("t").check("no_current_setting").add({
+    () => record(() => table("t").check("no_current_setting").add({
       expr: (() => ({
         node: "fnCall",
         fn: "currentSetting",
@@ -1209,12 +1244,14 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
   const ops = record(() =>
     table("t").update({
       set: {
-        b: (c) => c("age").between(18, 65),
-        l: (c) => c("name").like("A%"),
-        i: (c) => c("status").in(["a", "b"]),
-        ni: (c) => c("status").notIn(["x"]),
-        empty: (c) => c("status").in([]),
-        d: (c) => c("a").distinctFrom(c("b")),
+        b: (col) => col("age").between(18, 65),
+        l: (col) => col("name").like("A%"),
+        i: (col) => col("status").in(["a", "b"]),
+        ni: (col) => col("status").notIn(["x"]),
+        empty: (col) => col("status").in([]),
+        codes: (col) => col("http_status").in([200, 404, 500]),
+        bools: (col) => col("enabled").in([true, false]),
+        d: (col) => col("a").distinctFrom(col("b")),
       },
     }),
   );
@@ -1246,6 +1283,18 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
     node: "inList",
     expr: { node: "colRef", name: "status" },
     elems: [],
+    negated: false,
+  });
+  assert.deepEqual(set.codes, {
+    node: "inList",
+    expr: { node: "colRef", name: "http_status" },
+    elems: [200, 404, 500],
+    negated: false,
+  });
+  assert.deepEqual(set.bools, {
+    node: "inList",
+    expr: { node: "colRef", name: "enabled" },
+    elems: [true, false],
     negated: false,
   });
   assert.deepEqual(set.d, {
@@ -1288,17 +1337,76 @@ test("dialect() rejects an empty leg set at record time", () => {
   assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
 });
 
-test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)", () => {
-  // §3.4/§3.6 portable aggregate nodes. count()/sum/avg/min/max render identically
-  // on all three dialects; count() (no arg) is COUNT(*); { distinct: true } sets the
-  // flag. `distinct` is skipped on the wire when false (byte-minimal).
+test("dialect() records op-level thunk legs by sub-recording normal ops", () => {
+  const ops = record(() => {
+    table("docs").create({
+      columns: {
+        id: t.uuid().primaryKey(),
+        embedding: t.vector({ dimensions: 3, metric: "cosine" }),
+      },
+    });
+    dialect({
+      pg: () => table("docs").index("docs_embedding_hnsw_idx").add({ on: ["embedding"], using: "hnsw" }),
+      sqlite: () => {},
+    });
+  });
+
+  assert.equal(ops.length, 2);
+  assert.equal(ops[1].op, "dialectal");
+  assert.deepEqual(Object.keys(ops[1]), ["op", "pg", "sqlite"]);
+  assert.deepEqual(ops[1].pg, [
+    {
+      op: "createIndex",
+      table: "docs",
+      columns: [{ kind: "column", name: "embedding" }],
+      name: "docs_embedding_hnsw_idx",
+      using: "hnsw",
+    },
+  ]);
+  assert.deepEqual(ops[1].sqlite, []);
+  assert.equal("mysql" in ops[1], false);
+});
+
+test("dialect() rejects mixed op thunk and expression legs", () => {
+  assert.throws(
+    () => record(() => dialect({ pg: () => table("docs").column("title").add({ type: t.text() }), sqlite: lit(0) })),
+    (e: any) => e.code === "OP_INVALID" && /cannot mix op thunk legs/.test(e.message),
+  );
+});
+
+test("dialect() still treats bare native synth symbols as expression legs", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        n: (c) => c.agg.count(),
-        s: (c) => c.agg.sum(c("x")),
-        d: (c) => c.agg.count(c("x"), { distinct: true }),
-        a: (c) => c.agg.avg(c("x")),
+        ts: () => dialect({ pg: Date.now, sqlite: now() }),
+      },
+    }),
+  );
+  assert.deepEqual(ops[0].set.ts, {
+    node: "dialect",
+    pg: { node: "fnSynth", fn: "now", args: [] },
+    sqlite: { node: "fnSynth", fn: "now", args: [] },
+  });
+});
+
+test("aggregate chain methods and countStar record aggregate nodes", () => {
+  // §3.4/§3.6 aggregate nodes. count()/sum/avg/min/max render on all three
+  // dialects; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
+  // off-PG in Rust validate. countStar() is COUNT(*); { distinct: true } sets
+  // the flag for receiver aggregates. `distinct` is skipped on the wire when false.
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        n: () => countStar(),
+        s: (col) => col("x").sum(),
+        d: (col) => col("x").count({ distinct: true }),
+        a: (col) => col("x").avg(),
+        lo: (col) => col("x").min(),
+        hi: (col) => col("x").max(),
+        names: (col) => col("name").stringAgg(", "),
+        ids: (col) => col("id").arrayAgg(),
+        all_ok: (col) => col("ok").boolAnd(),
+        any_ok: (col) => col("ok").boolOr(),
       },
     }),
   );
@@ -1321,11 +1429,42 @@ test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)"
     func: "avg",
     arg: { node: "colRef", name: "x" },
   });
+  assert.deepEqual(set.lo, {
+    node: "agg",
+    func: "min",
+    arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.hi, {
+    node: "agg",
+    func: "max",
+    arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.names, {
+    node: "agg",
+    func: "stringAgg",
+    arg: { node: "colRef", name: "name" },
+    delimiter: { node: "literal", value: ", " },
+  });
+  assert.deepEqual(set.ids, {
+    node: "agg",
+    func: "arrayAgg",
+    arg: { node: "colRef", name: "id" },
+  });
+  assert.deepEqual(set.all_ok, {
+    node: "agg",
+    func: "boolAnd",
+    arg: { node: "colRef", name: "ok" },
+  });
+  assert.deepEqual(set.any_ok, {
+    node: "agg",
+    func: "boolOr",
+    arg: { node: "colRef", name: "ok" },
+  });
 });
 
 test("check helper and expression helpers build the frozen Expr IR nodes", () => {
   const ops = record(() => {
-    pgTable("expr_checks").create({
+    table("expr_checks").create({
       columns: {
         pkce_method: t.text().notNull(),
         user_id: t.text().notNull(),
@@ -1341,22 +1480,22 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         visible: t.boolean().notNull(),
       },
       checks: [
-        check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
-        { name: "user_id_fmt", expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") },
-        check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-        { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).lt(262144) },
-        check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-        check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
-        check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
-        { name: "expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
-        check("not_archived", (c) => c("kind").eq(lit("archived")).not()),
-        check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
+        check("pkce_method_check", (col) => col("pkce_method").eq("S256")),
+        { name: "user_id_fmt", expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") },
+        check("kind_ok", (col) => col("kind").in(["a", "b", "c"])),
+        { name: "data_size", expr: (col) => col("data").columnSize().lt(262144) },
+        check("total_matches", (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")))),
+        check("floor_nonneg_or_null", (col) => col("floor_cents").isNull().or(col("floor_cents").ge(0))),
+        check("enabled_and_visible", (col) => col("enabled").and(col("visible"))),
+        { name: "expires_window", expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) },
+        check("not_archived", (col) => col("kind").eq(lit("archived")).not()),
+        check("kind_not_reserved", (col) => col("kind").notIn(["x", "y"])),
       ],
     });
-    table("expr_checks").check("score_nonnegative").add({ expr: (c) => c("total_cents").ge(0) });
+    table("expr_checks").check("score_nonnegative").add({ expr: (col) => col("total_cents").ge(0) });
   });
 
-  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  const checks = ops[0].constraints.map((constraint: any) => constraint.kind.expr);
   assert.deepEqual(checks[0], {
     node: "binOp",
     op: "eq",
@@ -1563,7 +1702,67 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
   assert.equal(JSON.stringify(domainOps), JSON.stringify(expected));
 });
 
-test("domain check validation rejects smuggled volatile functions and aggregates", () => {
+test("view builder records groupBy and having in the structured SelectAst", () => {
+  const ops = record(() => {
+    view("order_totals").create({
+      as: (q) => q
+        .from("orders")
+        .select([
+          "customer_id",
+          { kind: "expr", alias: "n", expr: () => countStar() },
+          { kind: "expr", alias: "revenue", expr: (col) => col("amount").sum() },
+        ])
+        .where((col) => col("status").eq("paid"))
+        .groupBy(["customer_id"])
+        .having((col) => col("id").count().gt(5)),
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createView",
+      name: "order_totals",
+      query: {
+        kind: "structured",
+        select: {
+          from: { name: "orders" },
+          projection: [
+            { kind: "colRef", name: "customer_id" },
+            { kind: "expr", expr: { node: "agg", func: "count" }, alias: "n" },
+            {
+              kind: "expr",
+              expr: {
+                node: "agg",
+                func: "sum",
+                arg: { node: "colRef", name: "amount" },
+              },
+              alias: "revenue",
+            },
+          ],
+          where: {
+            node: "binOp",
+            op: "eq",
+            lhs: { node: "colRef", name: "status" },
+            rhs: { node: "literal", value: "paid" },
+          },
+          groupBy: [{ node: "colRef", name: "customer_id" }],
+          having: {
+            node: "binOp",
+            op: "gt",
+            lhs: {
+              node: "agg",
+              func: "count",
+              arg: { node: "colRef", name: "id" },
+            },
+            rhs: { node: "literal", value: 5 },
+          },
+        },
+      },
+    },
+  ]);
+});
+
+test("domain check validation rejects smuggled volatile functions and records aggregates for validate", () => {
   assert.throws(
     () => record(() => domain("bad_now").create({
       as: t.timestamp(),
@@ -1571,30 +1770,30 @@ test("domain check validation rejects smuggled volatile functions and aggregates
     })),
     (e: any) => e.code === "OP_INVALID" && /now is volatile/.test(e.message),
   );
-  assert.throws(
-    () => record(() => domain("bad_agg").create({
+  assert.deepEqual(
+    record(() => domain("bad_agg").create({
       as: t.int(),
       check: { node: "agg", func: "count" } as any,
-    })),
-    (e: any) => e.code === "OP_INVALID" && /aggregates are not allowed/.test(e.message),
+    }))[0].check,
+    { node: "agg", func: "count" },
   );
 });
 
-test("c.fn and c.pg build portable extract, pgExtract, and structured interval nodes", () => {
+test("chain extract and root interval build extract and interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
-      check: (v) => v.pg.extract("day", v).eq(1),
+      check: (v) => v.extract("day").eq(1),
     });
     table("events").update({
       set: {
-        year_part: (c) => c.fn.extract("year", c("created_at")),
+        year_part: (col) => col("created_at").extract("year"),
       },
     });
-    pgTable("epoch_events").check("epoch_positive").add({
-      expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
+    table("epoch_events").check("epoch_positive").add({
+      expr: (col) => col("created_at").extract("epoch").gt(0),
     });
-    pgTable("oauth_device_codes").create({
+    table("oauth_device_codes").create({
       columns: {
         issued_at: t.timestamp().notNull(),
         expires_at: t.timestamp().notNull(),
@@ -1602,7 +1801,7 @@ test("c.fn and c.pg build portable extract, pgExtract, and structured interval n
       checks: [
         {
           name: "expires_window",
-          expr: (c) => c("expires_at").le(c("issued_at").add(c.pg.interval({ minutes: 1 }))),
+          expr: (col) => col("expires_at").le(col("issued_at").add(interval({ minutes: 1 }))),
         },
       ],
     });
@@ -1640,42 +1839,46 @@ test("c.fn and c.pg build portable extract, pgExtract, and structured interval n
   });
 });
 
-test("inList rejects malformed text arrays and c.pg rejects regex patterns", () => {
+test("inList rejects malformed scalar arrays and chain regex rejects bad patterns", () => {
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").in(["ok", 7 as any]) } })),
-    (e: any) => e.code === "OP_INVALID" && /must be a string/.test(e.message),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in(["ok", 7 as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /homogeneous/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c("x").notIn([""]) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in([byteValue("AQID") as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (col) => col("x").in([{ value: "ok" } as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (col) => col("x").notIn([""]) } })),
     (e: any) => e.code === "OP_INVALID" && /must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.regex(c("x"), "") } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").regex("") } })),
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.fn.extract("epoch" as any, c("x")) } })),
+    () => record(() => table("t").update({ set: { x: (col) => col("x").extract("bogus" as any) } })),
     (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.extract("bogus" as any, c("x")) } })),
-    (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
-  );
-  assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({}) } })),
+    () => record(() => table("t").update({ set: { x: interval({}) } })),
     (e: any) => e.code === "OP_INVALID" && /at least one duration field/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({ minutes: 1.5 }) } })),
+    () => record(() => table("t").update({ set: { x: interval({ minutes: 1.5 }) } })),
     (e: any) => e.code === "OP_INVALID" && /minutes must be an integer/.test(e.message),
   );
 });
 
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
-    pgTable("users").index("users_email_lower_idx").add({
-      on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
-      where: (c) => c("active").isTrue(),
+    table("users").index("users_email_lower_idx").add({
+      on: ["email", { expr: (col) => col("email").lower() }],
+      where: (col) => col("active").isTrue(),
     }),
   );
   assert.deepEqual(ops[0].columns, [
@@ -1692,7 +1895,7 @@ test("index columns normalize to closed column/expression elements", () => {
   });
 });
 
-test("immutable-only slots reject forced volatile, aggregate, and vendor nodes at record time", () => {
+test("immutable-only slots reject forced volatile/vendor nodes and record aggregates for validate", () => {
   assert.throws(
     () =>
       record(() =>
@@ -1705,14 +1908,13 @@ test("immutable-only slots reject forced volatile, aggregate, and vendor nodes a
     (e: any) => e.code === "OP_INVALID" && /generated column expression/.test(e.message) && /now is volatile/.test(e.message),
   );
 
-  assert.throws(
-    () =>
-      record(() =>
-        table("users").index("users_bad_agg_idx").add({
-          on: [{ expr: { node: "agg", func: "count" } as any }],
-        }),
-      ),
-    (e: any) => e.code === "OP_INVALID" && /index expression element/.test(e.message) && /aggregates/.test(e.message),
+  assert.deepEqual(
+    record(() =>
+      table("users").index("users_bad_agg_idx").add({
+        on: [{ expr: { node: "agg", func: "count" } as any }],
+      }),
+    )[0].columns[0],
+    { kind: "expr", expr: { node: "agg", func: "count" } },
   );
 
   assert.throws(
@@ -1733,7 +1935,7 @@ test("immutable-only slots reject forced volatile, aggregate, and vendor nodes a
   assert.throws(
     () =>
       record(() =>
-        pgTable("bookings").exclusion("bookings_bad_excl").add({
+        table("bookings").exclusion("bookings_bad_excl").add({
           using: "gist",
           elements: [{ target: "room", operator: "=" }],
           where: { node: "fnCall", fn: "currentUser", args: [] } as any,
@@ -1769,7 +1971,7 @@ test("index column order records DESC and omits ASC/default order", () => {
 
 test("index records PG-vendor nullsNotDistinct + per-element opclass/collation", () => {
   const ops = record(() =>
-    pgTable("accounts").index("accounts_email_uq").add({
+    table("accounts").index("accounts_email_uq").add({
       on: [{ column: "email", opclass: "text_pattern_ops", collation: "C" }],
       unique: true,
       nullsNotDistinct: true,
@@ -1781,20 +1983,20 @@ test("index records PG-vendor nullsNotDistinct + per-element opclass/collation",
   ]);
 });
 
-test("pgTable index widening records the same createIndex op as the shared runtime selector", () => {
+test("table index widening records the same createIndex op as the shared runtime selector", () => {
   const args = {
     on: [{ column: "email", opclass: "text_pattern_ops" }],
     using: "gin",
-    where: (c: any) => c("active").isTrue(),
+    where: (col: any) => col("active").isTrue(),
     include: ["id"],
     with: { fillfactor: 90 },
     only: true,
     unique: true,
     nullsNotDistinct: true,
   } as const;
-  const viaPgTable = record(() => pgTable("accounts").index("accounts_email_uq").add(args));
+  const viaTable = record(() => table("accounts").index("accounts_email_uq").add(args));
   const viaSharedSelector = record(() => (table("accounts").index("accounts_email_uq") as any).add(args));
-  assert.deepEqual(viaPgTable, viaSharedSelector);
+  assert.deepEqual(viaTable, viaSharedSelector);
 });
 
 test("index omits nullsNotDistinct/opclass/collation when absent (byte-neutral)", () => {
@@ -1953,9 +2155,9 @@ test("table().partition().create records list and hash createPartition ops", () 
   ]);
 });
 
-test("pgTable().partition().attach records attachPartition with range bounds", () => {
+test("table().partition().attach records attachPartition with range bounds", () => {
   const ops = record(() => {
-    pgTable("events", { schema: "app" }).partition("events_2026_06").attach({
+    table("events", { schema: "app" }).partition("events_2026_06").attach({
       from: ["2026-06-01T00:00:00Z"],
       to: ["2026-07-01T00:00:00Z"],
     });
@@ -1985,7 +2187,7 @@ test("table().trigger().create/drop record legacy trigger op payloads", () => {
         events: ["insert", "update"],
         forEach: "row",
         execute: "audit_events_fn",
-        when: (c) => c("id").isNotNull(),
+        when: (col) => col("id").isNotNull(),
       })
       .trigger("audit_events_trg")
       .drop({ ifExists: true }),
@@ -2017,9 +2219,9 @@ test("table().trigger().create/drop record legacy trigger op payloads", () => {
   ]);
 });
 
-test("pgTable().partition().detach records legacy detachPartition payload", () => {
+test("table().partition().detach records legacy detachPartition payload", () => {
   const ops = record(() =>
-    pgTable("events", { schema: "app" }).partition("events_2026_05").detach({
+    table("events", { schema: "app" }).partition("events_2026_05").detach({
       concurrently: true,
     }),
   );
@@ -2035,9 +2237,9 @@ test("pgTable().partition().detach records legacy detachPartition payload", () =
   ]);
 });
 
-test("pgTable().constraint().validate records legacy validateConstraint payload", () => {
+test("table().constraint().validate records legacy validateConstraint payload", () => {
   const ops = record(() =>
-    pgTable("line_items", { schema: "app" }).constraint("line_items_order_fkey").validate({ ifExists: true }),
+    table("line_items", { schema: "app" }).constraint("line_items_order_fkey").validate({ ifExists: true }),
   );
 
   assert.deepEqual(ops, [
@@ -2070,7 +2272,7 @@ test("table().partition().drop records parent-scoped dropPartition", () => {
 
 test("index builder records include/with/brin/only", () => {
   const ops = record(() =>
-    pgTable("events").index("events_ts_brin_idx").add({
+    table("events").index("events_ts_brin_idx").add({
       on: ["ts"],
       using: "brin",
       include: ["tenant_id"],
@@ -2126,33 +2328,33 @@ test("comment records closed COMMENT ON targets through handles and top-level AP
 });
 
 test("backfill defaults cursorColumn to 'id' and batchSize to the engine default", () => {
-  const ops = record(() => table("u").backfill({ set: { x: (c) => c.fn.now() } }));
+  const ops = record(() => table("u").backfill({ set: { x: now() } }));
   assert.equal(ops[0].cursorColumn, "id");
   assert.equal(typeof ops[0].batchSize, "number");
   assert.equal(ops[0].name, "backfill_u");
   assert.equal(ops[0].set.x.fn, "now");
 });
 
-test("c.fn.splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
+test("chain splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
   const isExprNotPortable = (e: any) => e.code === "EXPR_NOT_PORTABLE";
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), "", 1) } })), isExprNotPortable);
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), " ", 0) } })), isExprNotPortable);
-  const ops = record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), " ", 1) } }));
+  assert.throws(() => record(() => table("u").update({ set: { x: (col) => col("n").splitPart("", 1) } })), isExprNotPortable);
+  assert.throws(() => record(() => table("u").update({ set: { x: (col) => col("n").splitPart(" ", 0) } })), isExprNotPortable);
+  const ops = record(() => table("u").update({ set: { x: (col) => col("n").splitPart(" ", 1) } }));
   assert.equal(ops[0].set.x.fn, "splitPart");
 });
 
-test("c.fn.{mod,round,floor,ceil,substr,replace} record the right portable fnCall node", () => {
+test("chain {mod,round,floor,ceil,substr,replace} record the right portable fnCall node", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        m: (c) => c.fn.mod(c("n"), 3),
-        r1: (c) => c.fn.round(c("x")),
-        r2: (c) => c.fn.round(c("x"), 2),
-        fl: (c) => c.fn.floor(c("x")),
-        ce: (c) => c.fn.ceil(c("x")),
-        s2: (c) => c.fn.substr(c("s"), 1),
-        s3: (c) => c.fn.substr(c("s"), 1, 3),
-        rp: (c) => c.fn.replace(c("s"), "a", "b"),
+        m: (col) => col("n").mod(3),
+        r1: (col) => col("x").round(),
+        r2: (col) => col("x").round(2),
+        fl: (col) => col("x").floor(),
+        ce: (col) => col("x").ceil(),
+        s2: (col) => col("s").substr(1),
+        s3: (col) => col("s").substr(1, 3),
+        rp: (col) => col("s").replace("a", "b"),
       },
     }),
   );
@@ -2200,7 +2402,7 @@ test("determinism lint flags Date.now()/Math.random()/new Date(); clean source i
     assert.ok(findings.length >= 1, `${frag} must be flagged`);
     assert.equal(findings[0].code, "NONDETERMINISTIC_OP_ARG");
   }
-  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: c => c.fn.now() } });`), []);
+  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: col => now() } });`), []);
 });
 
 test("determinism lint is a coarse whole-source scan (over-flags, never under-flags)", () => {

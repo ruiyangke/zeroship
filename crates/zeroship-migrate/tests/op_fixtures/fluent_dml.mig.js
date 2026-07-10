@@ -1,15 +1,15 @@
 // op.* migration fixture — the FULL FLUENT DML + EXPRESSION surface, authored via
 // the SOLE public `table()` entry. Exercises the row-object `insert({ rows })`
 // form, `update`/`delete`/`backfill` with the one `where` keyword, and the
-// single-handle `(c) => Expr` builder (`c("name")` + the chainable operator methods
-// + the `c.fn.*` namespace).
+// single-handle `(col) => Expr` builder (`col("name")` + the chainable operator methods
+// + the scalar chain methods).
 //
 // Exercises EVERY Expr node + operator:
 //   colRef, literal (auto-wrapped bare value), binOp {eq,ne,lt,le,gt,ge,and,or,
 //   add,sub,mul,div,concat}, unaryOp {not,isNull,isNotNull,isTrue,isFalse},
 //   case, fnCall {coalesce,nullif,lower,upper,trim,length,abs}, fnSynth
 //   {concatWs,splitPart,now,genRandomUuid}, cast.
-import { table } from "@zeroship/migrate";
+import { table, now, genRandomUuid, concatWs } from "@zeroship/migrate";
 
 export default {
   name: "fluent_dml",
@@ -26,35 +26,35 @@ export default {
       ],
     });
 
-    // update({ set, where }) — `set` values + `where` are `(c) => Expr`.
+    // update({ set, where }) — `set` values + `where` are `(col) => Expr`.
     sc.update({
       set: {
-        label: (c) => c.fn.coalesce(c("label"), "unknown"),
-        norm: (c) => c.fn.lower(c.fn.trim(c("label"))),
-        shout: (c) => c.fn.upper(c("label")),
-        len: (c) => c.fn.length(c("label")),
-        mag: (c) => c.fn.abs(c("code").sub(500)),
-        canon: (c) => c.fn.nullif(c("label"), ""),
-        score: (c) => c("code").add(1).mul(2).sub(3).div(1),
-        joined: (c) => c("label").concat(" ", c("code").cast("text")),
-        code_txt: (c) => c("code").cast("text"),
+        label: (col) => col("label").coalesce("unknown"),
+        norm: (col) => col("label").trim().lower(),
+        shout: (col) => col("label").upper(),
+        len: (col) => col("label").length(),
+        mag: (col) => col("code").sub(500).abs(),
+        canon: (col) => col("label").nullif(""),
+        score: (col) => col("code").add(1).mul(2).sub(3).div(1),
+        joined: (col) => col("label").concat(" ", col("code").cast({ to: "text" })),
+        code_txt: (col) => col("code").cast({ to: "text" }),
       },
-      where: (c) => c("code").gt(0).and(c("label").isNotNull()),
+      where: (col) => col("code").gt(0).and(col("label").isNotNull()),
     });
 
     // delete({ where, limit }) — mandatory `where`; ne/le/ge/or/not + isNull/isFalse +
     // a searched CASE predicate.
     sc.delete({
-      where: (c) =>
-        c("code")
+      where: (col) =>
+        col("code")
           .ne(0)
-          .or(c("code").le(0))
-          .or(c("code").ge(999))
-          .or(c("label").isNull())
-          .or(c("active").isFalse())
+          .or(col("code").le(0))
+          .or(col("code").ge(999))
+          .or(col("label").isNull())
+          .or(col("active").isFalse())
           .and(
-            c
-              .case({ branches: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
+            col
+              .case({ branches: [{ when: col("code").lt(100), then: col("code").isNull() }], else: col("label").isNull() })
               .isTrue(),
           ),
       limit: 100,
@@ -64,12 +64,12 @@ export default {
     // concatWs/splitPart/now/genRandomUuid.
     sc.backfill({
       set: {
-        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast("text")),
-        first: (c) => c.fn.splitPart(c("label"), " ", 1),
-        touched: (c) => c.fn.now(),
-        token: (c) => c.fn.genRandomUuid(),
+        full: (col) => concatWs(" ", col("label"), col("code").cast({ to: "text" })),
+        first: (col) => col("label").splitPart(" ", 1),
+        touched: now(),
+        token: genRandomUuid(),
       },
-      where: (c) => c("code").gt(0),
+      where: (col) => col("code").gt(0),
       cursorColumn: "code",
       batchSize: 500,
       name: "fluent_backfill",

@@ -4,13 +4,12 @@
 // VALIDATE CONSTRAINT …`). Gates the new `not_valid` FK/CHECK facet + the new
 // `Op::ValidateConstraint` through the REAL recorder → frozen wire ops.
 import { table } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "constraint_not_valid";
 
 export function up() {
   const lineItems = table("line_items");
-  const pgLineItems = pgTable("line_items");
+  const pgLineItems = table("line_items");
   // FK added NOT VALID — skip the add-time full-table scan.
   lineItems.foreignKey("line_items_order_fkey").add({
     columns: ["order_id"],
@@ -19,7 +18,7 @@ export function up() {
   });
   // CHECK added NOT VALID via the selector form.
   lineItems.check("line_items_qty_positive").add({
-    expr: (c) => c("qty").gt(0),
+    expr: (col) => col("qty").gt(0),
     notValid: true,
   });
   // …then validate both later under a weaker lock.

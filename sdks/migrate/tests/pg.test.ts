@@ -1,21 +1,22 @@
-// `@zeroship/migrate/pg` package-boundary + op-shape tests.
+// Rooted Postgres vendor op-shape tests.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { __begin, __drain } from "../src/ops.js";
 import {
   createFunction,
   dropFunction,
   dropOwnedBy,
   extension,
   grant,
-  pgTable,
+  table,
   raw,
   revoke,
   role,
   schema,
-} from "../src/pg.js";
+  currentSetting,
+} from "../src/index.js";
+import { __begin, __drain } from "../src/ops.js";
 
 function record(up: () => void): any[] {
   __begin();
@@ -23,17 +24,18 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-test("@zeroship/migrate/pg subpath resolves through package exports", async () => {
+test("@zeroship/migrate root exports vendor names and /pg subpath is retired", async () => {
   const resolveImport = (import.meta as ImportMeta & { resolve(specifier: string): string }).resolve;
-  const resolved = resolveImport("@zeroship/migrate/pg");
-  assert.match(resolved, /\/dist\/pg\.js$/);
-  const imported = await import("@zeroship/migrate/pg");
+  const resolved = resolveImport("@zeroship/migrate");
+  assert.match(resolved, /\/dist\/index\.js$/);
+  assert.throws(() => resolveImport("@zeroship/migrate/pg"), /Package subpath|ERR_PACKAGE_PATH_NOT_EXPORTED/);
+  const imported = await import("@zeroship/migrate");
   assert.equal((imported as any).pg, undefined);
   assert.equal(typeof imported.schema, "function");
   assert.equal(typeof imported.raw, "function");
   assert.equal(typeof imported.createFunction, "function");
   assert.equal(typeof imported.domain, "function");
-  assert.equal(typeof imported.pgTable, "function");
+  assert.equal(typeof imported.table, "function");
   assert.equal(typeof imported.sequence, "function");
   assert.equal(imported.dropSchema, undefined);
   assert.equal(imported.dropExtension, undefined);
@@ -59,15 +61,15 @@ test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object tar
   );
 });
 
-test("pgTable().policy().create requires using and rejects an explicit empty to[]", () => {
+test("table().policy().create requires using and rejects an explicit empty to[]", () => {
   assert.throws(
-    () => record(() => pgTable("u").policy("p").create({} as any)),
+    () => record(() => table("u").policy("p").create({} as any)),
     (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
   );
   assert.throws(
     () =>
       record(() =>
-        pgTable("u").policy("p").create({ to: [], using: (c: any) => c("x").isNotNull() } as any),
+        table("u").policy("p").create({ to: [], using: (col: any) => col("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
@@ -104,13 +106,13 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
       on: { kind: "table", names: ["users"], schema: "zs" },
       from: ["public"],
     });
-    pgTable("users", { schema: "zs" }).policy("tenant_only").create({
+    table("users", { schema: "zs" }).policy("tenant_only").create({
       for: "select",
       to: ["app_role"],
-      using: (c) => c("app_id").eq("app_demo"),
-      withCheck: (c) => c("app_id").isNotNull(),
+      using: (col) => col("app_id").eq("app_demo"),
+      withCheck: (col) => col("app_id").isNotNull(),
     });
-    pgTable("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
+    table("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
     createFunction({
       name: "tenant_guard",
       schema: "zs",
@@ -215,10 +217,10 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
 
 test("table-scoped pg methods record setRls and legacy policy op payloads", () => {
   const ops = record(() => {
-    pgTable("secrets", { schema: "zs" })
+    table("secrets", { schema: "zs" })
       .setRls({ enabled: true, forced: true })
       .policy("tenant_only").create({
-        using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
+        using: (col) => col("tenant_id").eq(currentSetting("tenant.id", { missingOk: true })),
       })
       .policy("tenant_only").drop({ ifExists: true })
       .setRls({ enabled: false, forced: false });
@@ -253,11 +255,11 @@ test("table-scoped pg methods record setRls and legacy policy op payloads", () =
 
 test("setRls omits absent fields and rejects empty patches", () => {
   assert.deepEqual(
-    record(() => pgTable("secrets", { schema: "zs" }).setRls({ enabled: true })),
+    record(() => table("secrets", { schema: "zs" }).setRls({ enabled: true })),
     [{ op: "setRls", table: "secrets", schema: "zs", enabled: true }],
   );
   assert.throws(
-    () => record(() => pgTable("secrets", { schema: "zs" }).setRls({})),
+    () => record(() => table("secrets", { schema: "zs" }).setRls({})),
     (e: any) => e.code === "OP_INVALID" && /\.setRls needs at least one/.test(e.message),
   );
 });
@@ -276,7 +278,7 @@ test("raw requires reason and never records binds", () => {
 });
 
 test("sql is not exposed", async () => {
-  const imported = await import("../src/pg.js");
+  const imported = await import("../src/index.js");
   assert.equal((imported as any).sql, undefined);
   assert.equal((imported as any).pg, undefined);
 });

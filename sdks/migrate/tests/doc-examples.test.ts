@@ -6,7 +6,7 @@
 // doc, assembles them into ONE synthesized TypeScript module that imports the
 // real `@zeroship/migrate` surface, and runs `tsc --noEmit` over it. A snippet
 // that no longer compiles (a renamed op, a dropped `t.*` factory, a changed
-// signature, a removed `c.fn` member) is a hard test failure — the doc cannot
+// signature, a removed scalar-namespace member) is a hard test failure — the doc cannot
 // silently rot.
 //
 //   - A block that is itself a module (`export default …` / `export interface …`)
@@ -44,8 +44,9 @@ const VOCAB_PREAMBLE = `import {
   enumType,
   comment,
   t, fromDb, lintDeterminism,
+  now, genRandomUuid, currentSetting, currentUser, interval, concatWs,
+  dialect,
 } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
 import { t as dbT } from "@zeroship/db";
 `;
 

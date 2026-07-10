@@ -43,12 +43,12 @@ use zeroship_migrate::frontend::{
 };
 
 const HAPPY_MIGRATION: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, genRandomUuid } from "@zeroship/migrate";
 export const name = "e2e_happy";
 export function up() {
   table("widgets").create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       label: t.text(),
     },
   });
@@ -289,7 +289,7 @@ fn rlimit_cpu_or_wall_bounds_an_infinite_loop() {
     // A migration whose up() never returns (busy loop). RLIMIT_CPU (SIGXCPU) or the
     // wall watchdog (SIGKILL) must bound it. Either way => BUILD_RECORDER_BUDGET_EXCEEDED.
     let loop_src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, genRandomUuid } from "@zeroship/migrate";
         export function up() { table("t").create({ columns: { id: t.int().notNull() } }); while (true) {} }
     "#;
     let req = RecordRequest {
@@ -593,7 +593,7 @@ fn concurrent_records_get_separate_sandbox_children() {
     // concurrently and assert each IR carries its OWN owner_app + ops (no bleed).
     let mk = |owner: &'static str, table: &'static str| {
         let src = format!(
-            r#"import {{ table, t }} from "@zeroship/migrate";
+            r#"import {{ table, t, genRandomUuid }} from "@zeroship/migrate";
                export function up() {{ table("{table}").create({{ columns: {{ id: t.int().notNull() }} }}); }}"#
         );
         std::thread::spawn(move || {
@@ -639,7 +639,7 @@ fn untrusted_up_cannot_forge_owner_app() {
     // owner is stamped in Rust on the parsed IR after eval, not read from a global the
     // untrusted scope can reach.
     let forge_src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           // Attempt to forge the tenant-identifying owner via every reachable name.
           try { globalThis.__zsOwnerApp = "app_VICTIM"; } catch (_) {}
@@ -692,7 +692,7 @@ fn large_migration_ir_exceeding_pipe_buffer_records() {
     // wall-killed as a SPURIOUS BUILD_RECORDER_BUDGET_EXCEEDED. With concurrent
     // draining the legitimate large migration records cleanly.
     let big_src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           for (let i = 0; i < 4000; i++) {
             table("tbl_" + i).create({
@@ -992,7 +992,7 @@ fn recorder_process_stub_invariants_are_pinned() {
     // assertion fails. (We avoid calling process.exit even if present — we only read
     // `typeof`.)
     let probe_src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, genRandomUuid } from "@zeroship/migrate";
         export function up() {
           const p = globalThis.process;
           const envIsEmpty = !!p && typeof p.env === "object" && p.env !== null
