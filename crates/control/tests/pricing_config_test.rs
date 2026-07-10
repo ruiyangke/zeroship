@@ -129,6 +129,12 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         ),
     });
 
+    // Migrations seed no pricing catalog (operator data; fail-closed when
+    // absent), so ensure the global FX row + platform counters exist — these
+    // tests read/restore them and must not depend on another binary seeding
+    // first (see common::seed_pricing_catalog).
+    common::seed_pricing_catalog(&state.control_pg).await;
+
     Fixture { state, blob_root, deploy_tmp_dir }
 }
 

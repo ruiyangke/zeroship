@@ -213,6 +213,39 @@ pub async fn seed_metric_catalog(pg: &compio_postgres::Client, metric: &str) {
     .expect("seed billing metric");
 }
 
+/// Idempotently seed the platform pricing-catalog singletons that billing tests
+/// assume already exist: the global `pricing_config` FX row (`FX_SCALE` = 1c per
+/// unit, well above the floor) plus the `requests` platform counter in
+/// `billing_metrics` + `metric_weights`.
+///
+/// Migrations create these tables but seed NO rows — the FX is operator data and
+/// the pricing engine fails CLOSED when it's absent (see
+/// `missing_default_fx_aborts_sweep_and_bills_no_one`). So a fixture that reads
+/// the global FX / platform weights must seed them itself instead of depending
+/// on some other test binary having run first (nondeterministic under the
+/// suite's per-binary parallel runner, and impossible on a freshly-migrated DB).
+/// Uses `ON CONFLICT DO NOTHING` so it never clobbers a concurrent test's
+/// in-flight FX/weight mutation.
+#[allow(dead_code)]
+pub async fn seed_pricing_catalog(pg: &compio_postgres::Client) {
+    seed_metric_catalog(pg, "requests").await;
+    pg.execute(
+        "INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) \
+         VALUES ('requests', 1, 1) ON CONFLICT (metric) DO NOTHING",
+        &[],
+    )
+    .await
+    .expect("seed metric weight");
+    // FX_SCALE = 1_000_000_000_000 (10^12) — the canonical 1c/unit default FX.
+    pg.execute(
+        "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
+         VALUES ('global', 1000000000000) ON CONFLICT (id) DO NOTHING",
+        &[],
+    )
+    .await
+    .expect("seed global pricing_config");
+}
+
 #[allow(dead_code)]
 pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
     use chrono::{Datelike, TimeZone};

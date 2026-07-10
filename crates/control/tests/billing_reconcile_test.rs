@@ -1812,6 +1812,10 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
 
     // Weights present (so usage WOULD accrue CU), but the plan inherits the FX
     // (NULL) and we delete the global default — leaving the FX unresolvable.
+    // Seed billing_metrics('requests') first so the metric_weights FK holds even
+    // when this test races a sibling under the suite's parallel runner (the FK
+    // target isn't guaranteed present otherwise).
+    common::seed_metric_catalog(&fx.state.control_pg, "requests").await;
     fx.state
         .control_pg
         .execute(

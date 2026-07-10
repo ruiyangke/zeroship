@@ -498,7 +498,11 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     // Reads the global default FX; serialize against the MAJOR-3 mutator (which
     // transiently drops it below floor) via FX_LOCK so this never observes None.
     let _fx = lock_fx();
-    let _client = pg(&url).await;
+    let client = pg(&url).await;
+    // Self-seed the pricing catalog: migrations seed no global FX / platform
+    // weights (operator data, fail-closed when absent), so don't depend on
+    // another test binary having seeded first.
+    common::seed_pricing_catalog(&client).await;
     let registry = Registry::new(&url).await.expect("registry");
     let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
     let weights = pricing.weights().await.expect("weights");
@@ -551,6 +555,9 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
     let url = db_url();
     let _fx = lock_fx();
     let client = pg(&url).await;
+    // Self-seed the pricing catalog (see common::seed_pricing_catalog): this
+    // test snapshots + restores the seeded global FX, so it must exist first.
+    common::seed_pricing_catalog(&client).await;
     let registry = Registry::new(&url).await.expect("registry");
     let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
 
