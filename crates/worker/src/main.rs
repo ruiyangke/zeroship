@@ -15,7 +15,6 @@ use zeroship_core::config::{
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
-use zeroship_stream::{StreamConfig, StreamRegistry};
 
 use crate::sync::{SharedEnvs, SharedVersions};
 
@@ -194,57 +193,9 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
     zeroship_core::db_url::is_sqlite_url(db_url)
 }
 
-fn usage_stream_config_from_env(meter_source: &str) -> Option<serde_json::Value> {
-    let brokers = std::env::var("REDPANDA_BROKERS")
-        .ok()
-        .filter(|s| !s.trim().is_empty())?;
-    let topic = std::env::var("USAGE_EVENTS_TOPIC")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_string());
-    let group_id = std::env::var("REDPANDA_PRODUCER_GROUP_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("zeroship-worker-producer-{meter_source}"));
-    let client_id = format!("zeroship-worker-{meter_source}");
-    Some(serde_json::json!({
-        "brokers": brokers,
-        "topic": topic,
-        "group_id": group_id,
-        "client_id": client_id,
-    }))
-}
-
-fn build_usage_outbox_from_env(
-    meter_source: &str,
-) -> Result<Option<(zeroship_metering::UsageOutbox, zeroship_metering::OutboxConfig)>, String> {
-    let Some(raw_config) = usage_stream_config_from_env(meter_source) else {
-        return Ok(None);
-    };
-    let topic = raw_config
-        .get("topic")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC)
-        .to_string();
-
-    let mut registry = StreamRegistry::default();
-    zeroship_stream::adapters::register_builtin(&mut registry);
-    let stream = registry
-        .build("redpanda", &StreamConfig::new(raw_config))
-        .map_err(|e| e.to_string())?;
-    let config = zeroship_metering::OutboxConfig {
-        topic: topic.clone(),
-        interval: zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
-    };
-    let wal_path = std::env::var("USAGE_OUTBOX_WAL_PATH")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(".zeroship/usage-outbox.redb"));
-    let outbox = zeroship_metering::UsageOutbox::new(stream, topic, wal_path)
-        .map_err(|e| e.to_string())?;
-    Ok(Some((outbox, config)))
-}
+// The usage-stream producer wiring (`usage_stream_config_from_env` +
+// `build_usage_outbox_from_env`) is shared with the gateway producer; it lives in
+// `zeroship_metering`.
 
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
@@ -601,7 +552,19 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
     let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
-    match build_usage_outbox_from_env(&meter_source) {
+    // Resolve the usage-stream producer config: env wins, the `[metering]` file
+    // overlay back-fills (so the billing stream is fully configurable in
+    // zeroship.toml, not env-only).
+    let fm = &boot.overlay.config.metering;
+    let stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
+        zeroship_metering::UsageStreamSettings {
+            brokers: fm.redpanda_brokers.clone(),
+            topic: fm.usage_events_topic.clone(),
+            group_id: fm.producer_group_id.clone(),
+            wal_path: fm.outbox_wal_path.clone(),
+        },
+    );
+    match zeroship_metering::build_usage_outbox(&meter_source, &stream_settings) {
         Ok(Some((outbox, outbox_config))) => {
             let topic = outbox.topic().to_string();
             let stream = format!("{outbox:?}");
