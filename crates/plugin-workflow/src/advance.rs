@@ -17,6 +17,14 @@ pub enum WorkflowAdvanceNackKind {
     Invalid,
     ApplyFailed,
     Backpressure,
+    ClaimLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunDispatchRequest {
+    pub run_id: String,
+    pub app_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -715,7 +723,7 @@ where
     let rows = conn
         .query(
             &format!(
-                "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+                "SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key \
                    FROM {} \
                   WHERE id = $1",
                 tables.runs
@@ -752,15 +760,15 @@ where
                   WHERE parent_run_id IS NULL \
                   LIMIT 1 \
              ), family AS ( \
-                 SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key, tree_depth \
+                 SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key, tree_depth \
                    FROM {runs} \
                   WHERE id = (SELECT id FROM root) \
                  UNION ALL \
-                 SELECT c.id, c.app_id, c.state, c.wake_at, c.claimed_by, c.dispatch_nonce, c.waiting_step_key, c.tree_depth \
+                 SELECT c.id, c.app_id, c.state, c.wake_at, c.cancel_requested, c.claimed_by, c.dispatch_nonce, c.waiting_step_key, c.tree_depth \
                    FROM {runs} c \
                    JOIN family f ON c.parent_run_id = f.id \
              ) \
-             SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+             SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key \
                FROM family \
               ORDER BY tree_depth, id",
         runs = tables.runs
@@ -814,7 +822,7 @@ where
     let parent_rows = conn
         .query(
             &format!(
-                "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+                "SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key \
                    FROM {} \
                   WHERE id = $1",
                 tables.runs
@@ -842,9 +850,13 @@ where
     let app_id: Uuid = row.get("app_id");
     let state: String = row.get("state");
     let mut wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+    let cancel_requested: bool = row.get("cancel_requested");
     let waiting_step_key: Option<String> = row.get("waiting_step_key");
 
     if is_schedulable_state(&state) {
+        if cancel_requested {
+            return Ok(WorkflowAdvanceRegistration::next(run_id, app_id, Utc::now()));
+        }
         if state == "waiting" && wake_at.is_none() {
             wake_at =
                 rearm_waiting_run_if_pending_signal(conn, tables, &run_id, waiting_step_key.as_deref())

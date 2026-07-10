@@ -18,10 +18,11 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use chrono::{DateTime, Utc};
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -86,34 +87,11 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
     Some(subdomain.to_string())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowStepRequest {
     run_id: String,
     app_id: Uuid,
-    workflow_name: String,
-    deploy_id: String,
-    deploy_hash: String,
-    dispatch_nonce: String,
-    #[serde(default)]
-    phase: Option<String>,
-    #[serde(default)]
-    input: Option<Value>,
-    started_at: DateTime<Utc>,
-    #[serde(default)]
-    journal: Vec<Value>,
-    #[serde(default)]
-    owner_id: String,
-    #[serde(default)]
-    stuck_strike_limit: Option<i16>,
-    #[serde(default)]
-    max_child_depth: Option<i16>,
-    #[serde(default)]
-    max_live_descendants: Option<i64>,
-    #[serde(default)]
-    max_start_many_batch: Option<usize>,
-    #[serde(default)]
-    journal_limits: Value,
 }
 
 /// Internal durable-workflow advance edge.
@@ -138,17 +116,12 @@ pub async fn workflow_advance_internal(
         Ok(request) => request,
         Err(e) => {
             return HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": format!("invalid StepRequest: {e}")}));
+                .json(&serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}));
         }
     };
-    if request.run_id.is_empty()
-        || request.workflow_name.is_empty()
-        || request.deploy_id.is_empty()
-        || request.deploy_hash.is_empty()
-        || request.dispatch_nonce.is_empty()
-    {
+    if request.run_id.is_empty() {
         return HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "StepRequest requires runId, appId, workflowName, deployId, deployHash, and dispatchNonce"
+            "error": "workflow dispatch request requires runId and appId"
         }));
     }
 
@@ -163,40 +136,11 @@ pub async fn workflow_advance_internal(
         return resp;
     }
 
-    let worker_envelope = serde_json::json!({
-        "runId": &request.run_id,
-        "workflowName": &request.workflow_name,
-        "trigger": {
-            "input": request.input.clone().unwrap_or(Value::Null),
-            "startedAt": request.started_at.to_rfc3339(),
-            "runId": &request.run_id,
-            "workflowName": &request.workflow_name,
-        },
-        "journal": request.journal.clone(),
-        "phase": request.phase.as_deref().unwrap_or("running"),
-        "deployHash": &request.deploy_hash,
-        "attempt": 0,
-        "nonce": &request.dispatch_nonce,
-        "ownerId": &request.owner_id,
-        "stuckStrikeLimit": request.stuck_strike_limit,
-        "maxChildDepth": request.max_child_depth,
-        "maxLiveDescendants": request.max_live_descendants,
-        "maxStartManyBatch": request.max_start_many_batch,
-        "journalLimits": request.journal_limits.clone(),
-        "outputRead": {
-            "controlUrl": &state.config.control_url,
-            "token": zeroship_core::auth::derive_app_scoped_control_token(
-                &state.config.control_key,
-                &request.app_id.to_string(),
-            ),
-            "appId": request.app_id.to_string(),
-        },
-    });
-    let worker_body = match serde_json::to_vec(&worker_envelope) {
+    let worker_body = match serde_json::to_vec(&request) {
         Ok(body) => body,
         Err(e) => {
             return HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": format!("encode worker StepRequest: {e}")}));
+                .json(&serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}));
         }
     };
 
@@ -277,7 +221,7 @@ fn workflow_worker_result_to_step_result(
             "dispatchNonce": normalized
                 .get("dispatchNonce")
                 .and_then(Value::as_str)
-                .unwrap_or(request.dispatch_nonce.as_str()),
+                .unwrap_or(""),
             "outcomes": outcomes,
         }));
     }
@@ -290,7 +234,7 @@ fn workflow_worker_result_to_step_result(
         .get("dispatchNonce")
         .or_else(|| result.get("nonce"))
         .and_then(Value::as_str)
-        .unwrap_or(request.dispatch_nonce.as_str());
+        .unwrap_or("");
 
     let outcomes = if let Some(outcomes) = result.get("outcomes") {
         let outcomes = outcomes
@@ -2806,13 +2750,6 @@ mod tests {
         serde_json::json!({
             "runId": "run_test",
             "appId": app_id,
-            "workflowName": "Checkout",
-            "deployId": "dep_test",
-            "deployHash": "hash_test",
-            "dispatchNonce": "wfd_test",
-            "input": {"orderId": "ord_1"},
-            "startedAt": "2026-07-06T00:00:00Z",
-            "journal": [],
         })
     }
 
@@ -2827,7 +2764,7 @@ mod tests {
             "runId": request["runId"],
             "registrations": [{
                 "runId": request["runId"],
-                "appId": request["outputRead"]["appId"],
+                "appId": request["appId"],
                 "terminal": true
             }]
         }))
@@ -2896,9 +2833,9 @@ mod tests {
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0]["runId"], "run_test");
-        assert_eq!(seen[0]["nonce"], "wfd_test");
-        assert_eq!(seen[0]["deployHash"], "hash_test");
-        assert_eq!(seen[0]["trigger"]["input"]["orderId"], "ord_1");
+        assert_eq!(seen[0]["appId"], app_id.to_string());
+        let keys = seen[0].as_object().expect("worker request object");
+        assert_eq!(keys.len(), 2);
     }
 
     #[test]
