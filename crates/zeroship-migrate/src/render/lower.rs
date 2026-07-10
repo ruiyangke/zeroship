@@ -5148,7 +5148,7 @@ fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::model::migration::Migratio
     let uuid = uuid::Uuid::from_bytes(bytes);
     crate::model::migration::MigrationId::parse(&format!(
         "mig_{}",
-        zeroship_core::typed_id::uuid_to_base62(&uuid)
+        crate::id::uuid_to_base62(&uuid)
     ))
     .expect("derived DML id is a valid mig_ typed id")
 }
