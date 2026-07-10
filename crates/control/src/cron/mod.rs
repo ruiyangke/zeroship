@@ -33,14 +33,29 @@ use crate::AppState;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnOptions {
-    pub workflow_engine: bool,
+    pub workflow_scan: bool,
+    pub workflow_reaper: bool,
+    pub workflow_sweeps: bool,
+    pub scheduler_authoritative: bool,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
         Self {
-            workflow_engine: true,
+            workflow_scan: false,
+            workflow_reaper: true,
+            workflow_sweeps: true,
+            scheduler_authoritative: true,
         }
+    }
+}
+
+impl SpawnOptions {
+    fn assert_no_dual_workflow_timer_authority(self) {
+        assert!(
+            !(self.scheduler_authoritative && self.workflow_scan),
+            "durable workflow startup refused: control workflow scan cannot run while the scheduler tier is authoritative"
+        );
     }
 }
 
@@ -64,6 +79,8 @@ pub fn spawn_all_with_options(
     retention_check_secs: u64,
     options: SpawnOptions,
 ) {
+    options.assert_no_dual_workflow_timer_authority();
+
     // Audit-retention sweep — needs only the registry (cheap clone of the
     // db-url handle inside `AppState`).
     let registry = Arc::new(state.registry.clone());
@@ -89,16 +106,33 @@ pub fn spawn_all_with_options(
     })
     .detach();
 
-    // Durable-workflow scheduler family — multi-replica correctness is row
-    // claiming with `FOR UPDATE SKIP LOCKED` + per-row leases, not a
-    // fleet-wide advisory-lock leader.
-    if options.workflow_engine {
+    // Retired control-side due-run scan. It stays behind an explicit guard so
+    // startup fails if both timer authorities are requested in one process.
+    if options.workflow_scan {
         let workflow_state = Arc::clone(&state);
         compio::runtime::spawn(async move {
             workflow_engine::run(workflow_state, workflow_engine::DEFAULT_TICK_SECS).await;
         })
         .detach();
+    }
 
+    // Lost-ack recovery reads only workflow_scheduler.inflight, then goes
+    // through the normal dispatch/apply/register path for the claimed run.
+    if options.workflow_reaper {
+        let workflow_reaper_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            workflow_engine::run_inflight_reaper(
+                workflow_reaper_state,
+                workflow_engine::DEFAULT_TICK_SECS,
+            )
+            .await;
+        })
+        .detach();
+    }
+
+    // Durable-workflow control sweeps remain in control. They create or wake
+    // runs, then register scheduler timers instead of scanning workflow_runs.
+    if options.workflow_sweeps {
         let schedule_state = Arc::clone(&state);
         compio::runtime::spawn(async move {
             workflow_schedules::run(schedule_state, workflow_schedules::DEFAULT_TICK_SECS).await;

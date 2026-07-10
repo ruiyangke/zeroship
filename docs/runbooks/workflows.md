@@ -40,9 +40,45 @@ UPDATE zeroship.apps
 ```
 
 Effects: new `start()` calls are refused, public signal ingress for the app is
-refused, schedule fan-out is skipped, and the dispatch claim sweep no longer
-advances queued, sleeping, waiting, or compensating runs for that app. Existing
-journal rows are left in place.
+refused, schedule fan-out is skipped, and scheduler dispatch no longer advances
+queued, sleeping, waiting, or compensating runs for that app. Existing journal
+rows are left in place.
+
+## Scheduler Tier
+
+Run a separate workflow scheduler process for timer authority:
+
+```bash
+zeroship-workflow-scheduler \
+  --db "$DATABASE_URL" \
+  --scheduler-schema workflow_scheduler \
+  --gateway-url "$GATEWAY_URL" \
+  --control-apply-url "$CONTROL_APPLY_URL" \
+  --tick-secs 1 \
+  --reaper-interval-secs 30
+```
+
+The scheduler self-provisions `workflow_scheduler.timers` and
+`workflow_scheduler.inflight`. On process start it performs one cutover/recovery
+reconcile from non-terminal workflow runs with `wake_at` set, then switches to
+the register model:
+
+- `start()` registers a due-now timer after the run row commits.
+- schedule sweeps create runs and register each new fire.
+- direct signals and broadcast fan-out write the mailbox, set `wake_at = now()`,
+  and register the wake.
+- apply commits ack terminal runs or register the next wake.
+
+The startup reconcile is not a polling loop. In steady state, the scheduler does
+not scan `zeroship.workflow_runs` for due work. Lost dispatch/apply/register acks
+are recovered by the inflight reaper, which reads only
+`workflow_scheduler.inflight` rows whose deadline has elapsed and re-dispatches
+those runs through the normal claim path.
+
+Control still owns the workflow schedules, signal fan-out, blob reference GC,
+blob orphan GC, and workflow retention sweeps. These sweeps are independent from
+the retired control-side due-run scan; do not enable the control scan while the
+scheduler tier is authoritative.
 
 ## Dispatch Pause
 
@@ -66,9 +102,9 @@ UPDATE zeroship.workflow_rollout_config
  WHERE id = 'global';
 ```
 
-Effect: `workflow_engine` ticks return zero before cancel reaping, waiting-run
-rearm, or due-run claiming. In-flight dispatches finish their commit; everything
-else remains durably parked in the journal.
+Effect: scheduler dispatch ticks return zero before cancel reaping,
+waiting-run rearm, or due-run claiming. In-flight dispatches finish their
+commit; everything else remains durably parked in the journal.
 
 ## Ingress Disable
 
@@ -221,16 +257,15 @@ SELECT
 
 ## Dashboards And Alerts
 
-- Lease-reclaim rate: count dispatches that claim rows with expired leases. To
-  add: counter in `workflow_engine::claim_due_batch` when `lease_expires <= now()`
-  on the selected row. Alert on sustained elevation.
+- Lease-reclaim rate: count dispatches that claim rows with expired leases in
+  the scheduler dispatch path. Alert on sustained elevation.
 - `stuck_strikes` / stalled rate: query rows with `stuck_strikes > 0` and count
   terminal `state = 'stalled'` per window. Alert on any unexplained stalled run.
-- Sweep lag: track oldest due item for claim, schedule, fan-out, and GC sweeps.
-  Claim lag is `min(wake_at)` for eligible runs; schedule lag is
-  `min(next_fire_at)` for eligible schedules; fan-out lag is oldest pending
-  broadcast; GC lag is oldest unreferenced blob past grace. To add: per-sweep
-  lag gauges emitted after each tick.
+- Sweep lag: track oldest due item for scheduler timers, schedules, fan-out,
+  and GC sweeps. Timer lag is `min(wake_at)` in `workflow_scheduler.timers`;
+  schedule lag is `min(next_fire_at)` for eligible schedules; fan-out lag is
+  oldest pending broadcast; GC lag is oldest unreferenced blob past grace. To
+  add: per-sweep lag gauges emitted after each tick.
 - Journal and blob growth: sum `workflow_runs.journal_bytes`,
   `workflow_runs.blob_bytes`, and `workflow_blobs.size` by app and total.
   Alert on growth rate outside the measured launch envelope.
