@@ -109,11 +109,16 @@ struct ControlCli {
     )]
     gateway_url: String,
 
-    /// Test harness only: do not spawn the background durable-workflow
-    /// scheduler. DW-07 drives the real engine explicitly from its test process
-    /// while this control process serves sync/deploy state.
+    /// Test harness only: do not spawn durable-workflow background work.
+    /// The e2e harness drives the scheduler path explicitly from its test
+    /// process while this control process serves sync/deploy state.
     #[arg(long = "disable-workflow-engine", hide = true, default_value_t = false)]
     disable_workflow_engine: bool,
+
+    /// Test harness only: re-enable the retired control-side due-run scan.
+    /// This must never be combined with the scheduler tier as timer authority.
+    #[arg(long = "enable-workflow-scan", hide = true, default_value_t = false)]
+    enable_workflow_scan: bool,
 
     /// Metering/billing provider backend (M6). `native` (default) runs the
     /// control-side aggregation → CU×FX → Stripe reconciler. `stripe` (Stripe
@@ -1524,7 +1529,10 @@ fn main() -> std::io::Result<()> {
         audit_retention_months,
         audit_retention_check_secs,
         zeroship_control::cron::SpawnOptions {
-            workflow_engine: !cli.disable_workflow_engine,
+            workflow_scan: cli.enable_workflow_scan,
+            workflow_reaper: !cli.disable_workflow_engine,
+            workflow_sweeps: !cli.disable_workflow_engine,
+            scheduler_authoritative: true,
         },
     );
     tracing::info!(
