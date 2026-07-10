@@ -1,163 +1,183 @@
 #!/usr/bin/env bash
 # ============================================================================
-# e2e_openmeter_export.sh — FAITHFUL end-to-end test of the zeroship OpenMeter
-# metering-export provider against a REAL, locally-running OpenMeter (NOT the
-# in-test mock).
+# e2e_openmeter_export.sh — FAITHFUL multi-node E2E of the forwarder->PROVIDER
+# rail against a REAL, locally-running OpenMeter (kafka + clickhouse + sink).
+# OpenMeter is a forwarder-fed METER provider (like Lago), so this drives the
+# SAME stream path the lite e2e cannot:
 #
-# This is the [[feedback_faithful_e2e_tests]] capstone for the OpenMeter rail:
-# it drives the SAME hardened `metering_export` cron through the REAL
-# `OpenMeterProvider`/`OpenMeterClient` (cyper over the wire) against a live
-# OpenMeter stack:
+#   real traffic -> gateway -> worker (Meter) -> redpanda
+#     -> control event_forwarder (resolves app->creator) -> REAL OpenMeter
+#        POST /api/v1/events (CloudEvents, subject=creator)
+#     -> OpenMeter /api/v1/meters/requests/query aggregates it   (provider rail)
+#     -> control spend_recompute -> usage_aggregates -> 402       (enforcement)
 #
-#   ingest_at (usage) ─► metering_export::tick_at
-#        │  report_usage → POST /api/v1/events (CloudEvents)   ─► OpenMeter API
-#        │                                                        │ kafka
-#        │                                                        ▼ sink-worker
-#        │  reported_total → GET /meters/<slug>/query  ◄── ClickHouse aggregate
-#        ▼
-#   exported_units high-water (Postgres)
+# OpenMeter is METER-only (never invoices), so the stack pairs it with `lite` as
+# the (unused-here) invoicer. The `requests` meter is in ops/openmeter-config.yaml.
 #
-# FAITHFUL by construction — NOTHING under test is stubbed:
-#   * Real OpenMeter (CloudEvents ingest → Kafka → sink-worker → ClickHouse →
-#     /query aggregate), stood up by docker-compose.openmeter.yml.
-#   * Real zeroship OpenMeterProvider/OpenMeterClient (cyper) pointed at it.
-#   * Real ephemeral zeroship Postgres + the full zeroship-migrate platform set
-#     (the cron reads/writes usage_aggregates + metering_exports).
-#
-# DO NO HARM: the zeroship PG here is a DEDICATED ephemeral container on its own
-# port (NOT :5440 — the billing PG the cargo integration tests use). The
-# OpenMeter stack is a SEPARATE compose project (zeroship-openmeter) on its own
-# 127.0.0.1 port band. This harness never touches :5440 or the main stack.
-#
-# Skips CLEANLY (exit 0) when docker is unavailable.
-#
-# Usage:
-#   ./tests/e2e_openmeter_export.sh
-#   KEEP_OPENMETER=1 ./tests/e2e_openmeter_export.sh   # leave the OM stack up
-#
-# Requires (when docker IS available): docker (compose v2), cargo. The OpenMeter
-# images are pulled on first run (~1 GB).
+# Skips CLEANLY (exit 0) when docker is unavailable. KEEP_WORK=1 preserves logs.
 # ============================================================================
 set -uo pipefail
-
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-KEEP_OPENMETER="${KEEP_OPENMETER:-0}"
-
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 PASS=0; FAIL=0
-pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
-fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
+pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 
 echo "============================================"
-echo "  zeroship E2E — OpenMeter metering export (REAL OpenMeter, not the mock)"
+echo "  zeroship E2E — forwarder -> REAL OpenMeter provider rail"
 echo "============================================"
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then echo "  ⚠ SKIP: docker unavailable."; exit 0; fi
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
+command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
+PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
+JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"; [ -f "$JOSE" ] || { echo "missing jose"; exit 2; }
 
-# --- docker gate: skip cleanly when unavailable ----------------------------
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker unavailable — OpenMeter E2E needs the OpenMeter stack + an ephemeral PG."
-  exit 0
-fi
-
-# --- DEDICATED ephemeral zeroship PG (NOT :5440) ---------------------------
-PG_PORT=5481
-PG_CONTAINER="zs-e2e-openmeter-pg"
-DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-# The OpenMeter API host endpoint published by docker-compose.openmeter.yml.
+CONTROL_PORT=9173; WORKER_PORT=8073; GATE_PORT=8063; PG_PORT=5473; RP_PORT=19173
 OM_URL="http://127.0.0.1:48888"
-OM_PROJECT="zeroship-openmeter"
-COMPOSE_FILE="$ROOT/docker-compose.openmeter.yml"
+PGC=zs-e2e-om-pg; RPC=zs-e2e-om-redpanda
+DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"; CONTROL_URL="http://localhost:$CONTROL_PORT"
+RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-om-e2e"
+WORK="$(mktemp -d -t zs-e2e-om-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
+jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);console.log(o$1??'')}catch(e){console.log('')}})"; }
+psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 
-WORK="$(mktemp -d -t zs-e2e-om-XXXXXX)"
-
-cleanup() {
-  echo ""
-  echo "=== Cleanup ==="
-  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  if [ "$KEEP_OPENMETER" = "1" ]; then
-    echo "  KEEP_OPENMETER=1 → leaving the OpenMeter stack up ($OM_URL)"
+cleanup(){
+  echo ""; echo "=== Cleanup ==="
+  [ -f "$PIDFILE" ] && while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
+  wait 2>/dev/null || true
+  if [ "${KEEP_WORK:-0}" = "1" ]; then
+    echo "  KEEP_WORK=1 → PG/$PGC redpanda/$RPC OpenMeter(compose) + $WORK preserved"
   else
-    docker compose -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
-    echo "  OpenMeter stack down (project $OM_PROJECT)"
+    docker rm -f "$PGC" "$RPC" >/dev/null 2>&1 || true
+    docker compose -f "$ROOT/docker-compose.openmeter.yml" down -v >/dev/null 2>&1 || true
+    rm -rf "$WORK"; echo "  stack down, OpenMeter down, $WORK cleaned"
   fi
-  [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  ephemeral zeroship PG removed; $WORK cleaned (the billing :5440 PG was NEVER touched)"
 }
 trap cleanup EXIT
+for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-# ===========================================================================
-echo ""
-echo "=== Stage 1: bring up the REAL OpenMeter stack (kafka + clickhouse + redis + pg + api + sink) ==="
-# ===========================================================================
-docker compose -f "$COMPOSE_FILE" up -d > "$WORK/om-up.log" 2>&1 || { fail "OpenMeter compose up failed"; tail -30 "$WORK/om-up.log"; exit 1; }
+echo ""; echo "=== Stage 1: infra (PG + redpanda + REAL OpenMeter) + migrate + seed + stack ==="
+docker rm -f "$PGC" >/dev/null 2>&1 || true
+docker run --name "$PGC" -d -p "$PG_PORT:5432" -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship postgres:16 -c max_connections=300 >/dev/null || { fail "pg run"; exit 1; }
+for _ in $(seq 1 30); do docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+docker exec "$PGC" pg_isready -U postgres >/dev/null 2>&1 && pass "ephemeral PG on :$PG_PORT" || { fail "PG"; exit 1; }
 
-# Wait for the OpenMeter API to be reachable AND the meter provisioned.
+docker rm -f "$RPC" >/dev/null 2>&1 || true
+docker run --name "$RPC" -d -p "$RP_PORT:$RP_PORT" docker.redpanda.com/redpandadata/redpanda:latest \
+  redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false \
+  --kafka-addr "external://0.0.0.0:$RP_PORT" --advertise-kafka-addr "external://127.0.0.1:$RP_PORT" \
+  --set redpanda.auto_create_topics_enabled=true >/dev/null || { fail "redpanda run"; exit 1; }
+for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && break; sleep 1.5; done
+docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
+
+# Real OpenMeter (kafka + clickhouse + sink-worker). Slow to become ready.
+docker compose -f "$ROOT/docker-compose.openmeter.yml" up -d >/dev/null 2>&1 || { fail "openmeter compose up"; exit 1; }
 OM_READY=0
 for _ in $(seq 1 60); do
-  if curl -sf "$OM_URL/api/v1/meters" 2>/dev/null | grep -q '"slug":"compute_units"'; then OM_READY=1; break; fi
-  sleep 2
+  if curl -sf "$OM_URL/api/v1/meters" 2>/dev/null | grep -q '"slug":"requests"'; then OM_READY=1; break; fi
+  sleep 3
 done
-[ "$OM_READY" = "1" ] && pass "OpenMeter API live on $OM_URL with the compute_units meter provisioned" \
-  || { fail "OpenMeter API never became ready / meter missing"; docker compose -f "$COMPOSE_FILE" logs openmeter | tail -30; exit 1; }
-
-# ===========================================================================
-echo ""
-echo "=== Stage 2: dedicated ephemeral zeroship PG (:$PG_PORT, NOT :5440) + zeroship-migrate ==="
-# ===========================================================================
-lsof -ti :"$PG_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
-  -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-  postgres:16 -c max_connections=200 >/dev/null || { fail "docker run zeroship PG failed"; exit 1; }
-for _ in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
-  && pass "ephemeral zeroship PG ready on :$PG_PORT (dedicated; :5440 untouched)" \
-  || { fail "zeroship PG never became ready"; exit 1; }
-
-[ -f "$ROOT/ops/postgres-init.sql" ] && docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
-  && pass "applied ops/postgres-init.sql" || true
+[ "$OM_READY" = "1" ] && pass "OpenMeter healthy on $OM_URL (requests meter present)" || { fail "openmeter never ready"; docker compose -f "$ROOT/docker-compose.openmeter.yml" logs openmeter 2>&1 | tail -20; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate-recorder-child \
-  >"$WORK/migrate-recorder-build.log" 2>&1 || {
-    fail "zeroship-migrate recorder child build failed (see $WORK/migrate-recorder-build.log)"
-    tail -20 "$WORK/migrate-recorder-build.log"
-    exit 1
-  }
-if ZEROSHIP_RECORDER_CHILD="$ROOT/target/debug/zeroship-migrate-recorder-child" \
-    cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate -- migrate \
-    --dir "$ROOT/db/migrations-ts" \
-    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-    --profile platform --yes > "$MIG_LOG" 2>&1; then
-  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
-else
-  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
-fi
+ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" "$BIN/zeroship-migrate" migrate \
+  --dir "$ROOT/db/migrations-ts" --database-url "$DBURL" --profile platform --yes > "$MIG_LOG" 2>&1 \
+  && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }
 
-# ===========================================================================
-echo ""
-echo "=== Stage 3: drive the REAL export path (cargo test against live OpenMeter + PG) ==="
-# ===========================================================================
-# The #[ignore]'d live tests are gated on CONTROL_TEST_DB + OPENMETER_LIVE_URL.
-# They run the SAME hardened metering_export cron through the real cyper
-# OpenMeterClient over the wire, then poll the LIVE ClickHouse-backed aggregate.
-TEST_LOG="$WORK/cargo-test.log"
-if CONTROL_TEST_DB="$DBURL" OPENMETER_LIVE_URL="$OM_URL" \
-   cargo test -p zeroship-control --test metering_export_openmeter_live_test -- --ignored --nocapture --test-threads=1 \
-   > "$TEST_LOG" 2>&1; then
-  # Confirm tests actually RAN (not silently skipped) — the live tests print
-  # nothing on the skip path; on the real path they exercise ingest+query.
-  if grep -qE "test result: ok\. [1-9]" "$TEST_LOG"; then
-    pass "live export cargo tests PASSED against real OpenMeter (CloudEvents accepted + aggregate reconciled)"
-    grep -E "running [0-9]+ test|test result:" "$TEST_LOG" | sed 's/^/    /'
-  else
-    fail "cargo test reported ok but ran 0 live tests (gating env not honoured?)"; tail -30 "$TEST_LOG"
-  fi
-else
-  fail "live export cargo tests FAILED (see below)"; tail -40 "$TEST_LOG"
-fi
+PLAN_ID="pln_om_e2e"
+psql_exec >/dev/null 2>&1 <<SQL && pass "seeded plan + pricing_config + metric_weights (requests=1 CU/op × 1c/CU)" || { fail "plan seed"; exit 1; }
+INSERT INTO zeroship.plans (id,name,base_fee_cents,included_units,fx_pico_cents_per_unit,runtime_limits_json,spend_limit_default_cents)
+VALUES ('$PLAN_ID','om-e2e',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',1000000) ON CONFLICT (id) DO NOTHING;
+INSERT INTO zeroship.pricing_config (id,fx_pico_cents_per_unit) VALUES ('global',1000000000000) ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit=EXCLUDED.fx_pico_cents_per_unit;
+INSERT INTO zeroship.billing_metrics (metric,kind,unit) VALUES ('requests','platform','op') ON CONFLICT (metric) DO UPDATE SET kind='platform';
+INSERT INTO zeroship.metric_weights (metric,units_per_op,per_units) VALUES ('requests',1,1) ON CONFLICT (metric) DO UPDATE SET units_per_op=1,per_units=1;
+SQL
 
-# ===========================================================================
-echo ""
-echo "============================================"
+openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null; chmod 600 "$WORK/sk.pem"
+openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-broker-secret"
+CFG_TOML="$WORK/zeroship.toml"
+printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
+
+# control: OpenMeter meter (forwarder-fed) + lite invoicer (unused here, needs
+# --allow-unsupported-billing + a stripe base for lite's store) + the stream.
+OPENMETER_TOKEN=dev-insecure \
+"$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" --config "$CFG_TOML" \
+  --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
+  --stripe-base-url "http://127.0.0.1:1" --stripe-secret-key "sk_test_unused" \
+  --meter-provider openmeter --invoicer-provider lite --allow-unsupported-billing \
+  --provider-config "{\"openmeter\":{\"base_url\":\"$OM_URL\",\"token\":\"env:OPENMETER_TOKEN\"}}" \
+  --spend-recompute-interval 2 --dev-insecure > "$WORK/control.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && pass "control healthy (meter=openmeter, invoicer=lite, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
+
+USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads 2 \
+  --config "$CFG_TOML" --control "$CONTROL_URL" --db "$DBURL" --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && pass "worker healthy (outbox → redpanda)" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
+
+USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
+  --config "$CFG_TOML" --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
+  --db "$DBURL" --poll-interval 2 --signing-key-file "$WORK/sk.pem" --gateway-broker-secret-file "$WORK/gate-broker-secret" --dev-insecure > "$WORK/gate.log" 2>&1 &
+echo $! >> "$PIDFILE"
+for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
+
+echo ""; echo "=== Stage 2: PAT + creator + app + deploy ==="
+POLICY_JSON='{"name":"e2e-om","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
+POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
+CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"; TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"; EXP=$(( $(date +%s) + 86400 ))
+psql_exec >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','e2e-om-$CREATOR@zeroship.test'::citext,'E2E OM',NOW());
+INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
+INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$CREATOR','pat','e2e om','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
+SQL
+PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
+[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted PAT (creator=$CREATOR)" || { fail "PAT"; exit 1; }
+APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"name\":\"om-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
+[ -n "$APP" ] && pass "created app $APP" || { fail "create app"; exit 1; }
+psql_exec >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+SQL
+"$BIN/zeroship" deploy "$PROBE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1 | grep -q deploy_hash && pass "deployed probe" || { fail "deploy"; exit 1; }
+sleep 5
+
+echo ""; echo "=== Stage 3: gateway traffic ==="
+N_REQ=100; BODY='{"hello":"om","n":1}'
+READY=0; for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: om-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/ready")" = "200" ] && { READY=1; break; }; sleep 1; done
+[ "$READY" = "1" ] && pass "app reachable via gateway" || { fail "app never reachable"; tail -15 "$WORK/gate.log"; exit 1; }
+for _ in 1 2 3 4 5 6; do curl -s -o /dev/null -H 'Host: om-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/warm" || true; done
+GW_OK=0; for i in $(seq 1 $N_REQ); do for _ in 1 2 3; do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: om-probe.localhost' -H 'content-type: application/json' --data "$BODY" "http://localhost:$GATE_PORT/probe/$i")" = "200" ] && { GW_OK=$((GW_OK+1)); break; }; sleep 0.2; done; done
+[ "$GW_OK" = "$N_REQ" ] && pass "drove $GW_OK/$N_REQ requests (HTTP 200)" || { fail "traffic $GW_OK/$N_REQ"; tail -20 "$WORK/worker.log"; exit 1; }
+
+echo ""; echo "=== Stage 4: forwarder -> REAL OpenMeter (meter query) + enforcement ==="
+FROM="$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"; TO="$(date -u -d '1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+OM_UNITS=0
+for _ in $(seq 1 30); do
+  OM_UNITS=$(curl -s "$OM_URL/api/v1/meters/requests/query?subject=$CREATOR&from=$FROM&to=$TO" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const rows=j.data||j.rows||[];console.log(Math.round(rows.reduce((a,r)=>a+Number(r.value||0),0)))}catch(e){console.log(0)}})')
+  [ -n "$OM_UNITS" ] && [ "$OM_UNITS" -ge "$N_REQ" ] 2>/dev/null && break
+  sleep 2
+done
+echo "    OpenMeter meter[requests] SUM for subject $CREATOR = $OM_UNITS"
+[ -n "$OM_UNITS" ] && [ "$OM_UNITS" -ge "$N_REQ" ] 2>/dev/null \
+  && pass "REAL OpenMeter aggregated the forwarded usage ($OM_UNITS ≥ $N_REQ requests) for the resolved creator — forwarder→OpenMeter + app→creator work" \
+  || fail "OpenMeter did not aggregate the forwarded usage (got '$OM_UNITS', want ≥ $N_REQ)"
+
+DL=$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.provider_dead_letter" 2>/dev/null | tr -d '[:space:]')
+[ "$DL" = "0" ] && pass "0 provider dead-letters (every event attributed to a real creator)" || fail "provider_dead_letter has $DL rows"
+
+REQS=""; for _ in $(seq 1 20); do REQS="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $PAT" | jget '.requests')"; [ -n "$REQS" ] && [ "$REQS" != "0" ] && break; sleep 2; done
+[ -n "$REQS" ] && [ "$REQS" -ge "$N_REQ" ] 2>/dev/null && pass "enforcement recompute aggregated requests ($REQS ≥ $N_REQ)" || fail "usage_aggregates not populated (got '$REQS')"
+
+echo ""; echo "=== Stage 5: spend enforcement — low cap → 402 Block ==="
+curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"cents":1}'
+curl -s -o /dev/null -X POST "$CONTROL_URL/internal/spend/reconcile"
+STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
+[ "$STATE" = "block" ] && pass "control derived spend state = block" || fail "expected block, got '$STATE'"
+GW402=0; for _ in $(seq 1 15); do [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: om-probe.localhost' "http://localhost:$GATE_PORT/probe/blocked")" = "402" ] && { GW402=1; break; }; sleep 1; done
+[ "$GW402" = "1" ] && pass "gateway returns 402 for the over-limit app" || fail "gateway never returned 402"
+
+echo ""; echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
 echo "============================================"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
