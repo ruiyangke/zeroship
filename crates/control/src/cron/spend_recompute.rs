@@ -22,6 +22,11 @@ use crate::AppState;
 pub const DEFAULT_RECOMPUTE_INTERVAL_SECS: u64 = 60 * 60;
 pub const DEFAULT_BATCH_MAX: usize = 10_000;
 
+/// Consecutive empty polls that conclude the retained stream is fully drained
+/// for one recompute cycle. A Kafka-wire broker's fetch is async, so a single
+/// empty poll right after `rewind` does not mean the topic is empty.
+const RECOMPUTE_DRAIN_EMPTY_ROUNDS: u32 = 3;
+
 #[derive(Debug, Clone)]
 pub struct SpendRecomputeConfig {
     pub interval: Duration,
@@ -181,11 +186,23 @@ pub async fn recompute_usage_aggregates(
     let mut totals = HashMap::<(Uuid, String), i64>::new();
     let mut seen_event_ids = HashSet::<String>::new();
 
+    // A Kafka-wire broker's fetch is asynchronous: right after `rewind`'s
+    // seek-to-beginning, the first `poll` can return empty even though the topic
+    // is non-empty (the fetch has not landed yet). A single empty poll therefore
+    // does NOT mean "fully drained" — tolerate a few consecutive empties so each
+    // cycle reads the COMPLETE retained stream, rather than replacing the period
+    // snapshot with a partial (or empty) read.
+    let mut empty_rounds = 0u32;
     loop {
         let records = stream.poll(batch_max).await?;
         if records.is_empty() {
-            break;
+            empty_rounds += 1;
+            if empty_rounds >= RECOMPUTE_DRAIN_EMPTY_ROUNDS {
+                break;
+            }
+            continue;
         }
+        empty_rounds = 0;
         cycle.polled += records.len();
         for record in &records {
             match decode_record(record) {
@@ -216,6 +233,14 @@ pub async fn recompute_usage_aggregates(
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    // A cycle that read NOTHING must not overwrite the snapshot: replacing it
+    // with an empty set would transiently zero out enforcement (an app would
+    // briefly look like it has no usage and escape its spend limit). Leave the
+    // last good snapshot in place until a cycle actually reads the stream.
+    if cycle.polled == 0 {
+        return Ok(cycle);
     }
 
     let mut aggregates: Vec<_> = totals
@@ -475,6 +500,45 @@ mod tests {
         assert_state(&client, warn_app, SpendState::Warn).await;
         assert_state(&client, degrade_app, SpendState::Degrade).await;
         assert_state(&client, block_app, SpendState::Block).await;
+    }
+
+    #[compio::test]
+    async fn stream_recompute_empty_cycle_does_not_wipe_snapshot() {
+        // A recompute cycle that reads NOTHING (a transient empty poll — common
+        // right after a Kafka-wire rewind) must leave the last good snapshot in
+        // place, not overwrite it with zero. Otherwise enforcement flickers to
+        // "no usage" and an over-limit app briefly escapes its spend limit.
+        let url = db_url();
+        let client = pg(&url).await;
+        let registry = Registry::new(&url).await.expect("registry");
+        let period = current_period_start_unix();
+        let plan_id = seed_pricing(&client).await;
+        let app = seed_priced_app(&client, &plan_id, "recompute-nowipe").await;
+        let creator = Uuid::new_v4();
+        let cfg = SpendRecomputeConfig {
+            interval: Duration::from_secs(1),
+            settle_window: Duration::from_secs(
+                super::super::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS,
+            ),
+            batch_max: 8,
+        };
+
+        // Cycle 1: real usage lands.
+        let populated = FakeStream::new(vec![event("evt_real", app, creator, 100, period + 10)]);
+        let first = recompute_usage_aggregates(&registry, &populated, period, &cfg)
+            .await
+            .expect("populated recompute");
+        assert_eq!(first.written, 1);
+        assert_total(&client, app, period, 100).await;
+
+        // Cycle 2: an EMPTY stream must NOT wipe the snapshot.
+        let empty = FakeStream::new(vec![]);
+        let second = recompute_usage_aggregates(&registry, &empty, period, &cfg)
+            .await
+            .expect("empty recompute");
+        assert_eq!(second.polled, 0);
+        assert_eq!(second.written, 0, "an empty cycle writes nothing");
+        assert_total(&client, app, period, 100).await; // snapshot preserved
     }
 
     #[compio::test]
