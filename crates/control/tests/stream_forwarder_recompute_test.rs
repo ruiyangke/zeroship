@@ -20,6 +20,20 @@ use zeroship_control::metering::provider::{
 use zeroship_control::Registry;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
+/// These tests seed events that already carry a real creator, so the forwarder's
+/// creator-enrichment is a no-op here; a resolver that returns None is never
+/// consulted.
+struct NoopCreatorResolver;
+#[async_trait::async_trait(?Send)]
+impl event_forwarder::CreatorResolver for NoopCreatorResolver {
+    async fn creator_for_app(
+        &self,
+        _app: uuid::Uuid,
+    ) -> Result<Option<uuid::Uuid>, event_forwarder::EventForwarderError> {
+        Ok(None)
+    }
+}
+
 fn db_url(_test_name: &str) -> String {
     common::require_control_db()
 }
@@ -97,6 +111,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         forwarder_stream.as_ref(),
         &stack,
         &dead_letters,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -132,6 +147,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         fresh_forwarder_stream.as_ref(),
         &stack,
         &dead_letters,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -209,6 +225,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         initial_stream.as_ref(),
         &stack,
         &dead_letters,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -234,6 +251,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         restarted_stream.as_ref(),
         &stack,
         &dead_letters,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -259,6 +277,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         after_commit.as_ref(),
         &stack,
         &dead_letters,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -319,6 +338,7 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
         reject_stream.as_ref(),
         &reject_stack,
         &sink,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await
@@ -355,6 +375,7 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
         decode_stream.as_ref(),
         &decode_stack,
         &sink,
+        &NoopCreatorResolver,
         &forward_cfg,
     )
     .await

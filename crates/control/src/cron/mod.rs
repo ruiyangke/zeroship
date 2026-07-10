@@ -138,11 +138,15 @@ pub fn spawn_all(
             let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
                 &state.control_pg,
             )));
+            let creator_resolver = Arc::new(event_forwarder::PgCreatorResolver::new(Arc::clone(
+                &state.control_pg,
+            )));
             compio::runtime::spawn(async move {
                 event_forwarder::run(
                     forwarder_stream,
                     forwarder_stack,
                     forwarder_sink,
+                    creator_resolver,
                     event_forwarder::EventForwarderConfig::default(),
                 )
                 .await;
