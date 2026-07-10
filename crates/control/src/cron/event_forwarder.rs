@@ -11,6 +11,8 @@ use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use zeroship_stream::{StreamOffset, StreamRecord, StreamTransport};
 
+use uuid::Uuid;
+
 use crate::metering::provider::{BillingStack, ProviderError, UsageEvent};
 
 pub const DEFAULT_BATCH_MAX: usize = 500;
@@ -240,6 +242,50 @@ pub enum EventForwarderError {
     DeadLetter(String),
 }
 
+/// Resolves the OWNING creator for an app so the forwarder can attribute usage
+/// events to the right provider customer. The worker producer only has the
+/// server-injected `app_id` and stamps `subject.creator = nil`; the control
+/// plane owns the app→creator mapping (`app_members` role='owner'), so it must
+/// enrich the creator here before forwarding to a per-creator provider.
+#[async_trait::async_trait(?Send)]
+pub trait CreatorResolver: Send + Sync {
+    async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError>;
+}
+
+/// Postgres-backed [`CreatorResolver`] (`app_members` role='owner').
+pub struct PgCreatorResolver {
+    conn: Arc<compio_postgres::Client>,
+}
+
+impl std::fmt::Debug for PgCreatorResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgCreatorResolver").finish_non_exhaustive()
+    }
+}
+
+impl PgCreatorResolver {
+    #[must_use]
+    pub fn new(conn: Arc<compio_postgres::Client>) -> Self {
+        Self { conn }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl CreatorResolver for PgCreatorResolver {
+    async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT user_id FROM zeroship.app_members \
+                 WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+                &[&app_id],
+            )
+            .await
+            .map_err(|e| EventForwarderError::DeadLetter(format!("creator resolve: {e}")))?;
+        Ok(rows.first().map(|r| r.get::<_, Uuid>("user_id")))
+    }
+}
+
 /// Run forever. Transient provider/stream failures retry with bounded backoff;
 /// offsets are not committed for transient failures.
 #[allow(clippy::future_not_send)]
@@ -247,6 +293,7 @@ pub async fn run(
     stream: Arc<dyn StreamTransport>,
     stack: Arc<BillingStack>,
     dead_letters: Arc<dyn DeadLetterSink>,
+    creator_resolver: Arc<dyn CreatorResolver>,
     cfg: EventForwarderConfig,
 ) {
     tracing::info!(
@@ -258,7 +305,15 @@ pub async fn run(
 
     let mut backoff = cfg.retry_backoff;
     loop {
-        match run_cycle(stream.as_ref(), &stack, dead_letters.as_ref(), &cfg).await {
+        match run_cycle(
+            stream.as_ref(),
+            &stack,
+            dead_letters.as_ref(),
+            creator_resolver.as_ref(),
+            &cfg,
+        )
+        .await
+        {
             Ok(cycle) => {
                 if cycle.polled > 0 {
                     tracing::info!(
@@ -290,6 +345,7 @@ pub async fn run_cycle(
     stream: &dyn StreamTransport,
     stack: &BillingStack,
     dead_letters: &dyn DeadLetterSink,
+    creator_resolver: &dyn CreatorResolver,
     cfg: &EventForwarderConfig,
 ) -> Result<EventForwarderCycle, EventForwarderError> {
     let max = cfg.batch_max.max(1);
@@ -300,13 +356,57 @@ pub async fn run_cycle(
 
     let mut events = Vec::with_capacity(records.len());
     let mut event_records = Vec::with_capacity(records.len());
+    let mut creator_cache = std::collections::HashMap::<Uuid, Option<Uuid>>::new();
     let mut cycle = EventForwarderCycle {
         polled: records.len(),
         ..EventForwarderCycle::default()
     };
     for record in &records {
         match decode_record(record) {
-            Ok(event) => {
+            Ok(mut event) => {
+                // Attribute the event to its owning creator: the worker stamps
+                // `creator = nil` (it only has the app id), so a per-creator
+                // provider (openmeter/lago/stripe_meters) would otherwise bill
+                // EVERY app's usage to one nil customer. Resolve app→creator and
+                // dead-letter events we cannot attribute rather than mis-bill.
+                if event.subject.creator.is_nil() {
+                    let creator = match event.subject.app {
+                        Some(app_id) => {
+                            if let Some(cached) = creator_cache.get(&app_id) {
+                                *cached
+                            } else {
+                                let resolved = creator_resolver.creator_for_app(app_id).await?;
+                                creator_cache.insert(app_id, resolved);
+                                resolved
+                            }
+                        }
+                        None => None,
+                    };
+                    match creator {
+                        Some(creator_id) => event.subject.creator = creator_id,
+                        None => {
+                            dead_letters
+                                .record_provider_reject(ProviderDeadLetter {
+                                    provider_id: stack.meter.id().to_string(),
+                                    event: event.clone(),
+                                    reason: "no owning creator for app; cannot attribute usage"
+                                        .to_string(),
+                                    partition: record.partition,
+                                    offset: record.offset,
+                                })
+                                .await?;
+                            cycle.dead_lettered += 1;
+                            tracing::warn!(
+                                provider = stack.meter.id(),
+                                app_id = ?event.subject.app,
+                                partition = record.partition,
+                                offset = record.offset,
+                                "usage event has no owning creator; quarantined"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 events.push(event);
                 event_records.push(record);
             }
@@ -465,6 +565,7 @@ mod tests {
         seen: Mutex<HashSet<String>>,
         accepted_ids: Mutex<Vec<String>>,
         attempted_ids: Mutex<Vec<String>>,
+        ingested_events: Mutex<Vec<UsageEvent>>,
         permanent_reject: bool,
     }
 
@@ -477,10 +578,12 @@ mod tests {
             let mut seen = self.seen.lock().expect("seen poisoned");
             let mut accepted_ids = self.accepted_ids.lock().expect("accepted poisoned");
             let mut attempted_ids = self.attempted_ids.lock().expect("attempts poisoned");
+            let mut ingested_events = self.ingested_events.lock().expect("ingested poisoned");
             let mut accepted = 0;
             let mut deduped = 0;
             for event in batch {
                 attempted_ids.push(event.event_id.clone());
+                ingested_events.push(event.clone());
                 if seen.insert(event.event_id.clone()) {
                     accepted_ids.push(event.event_id.clone());
                     accepted += 1;
@@ -551,6 +654,18 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct MockCreatorResolver {
+        mapping: std::collections::HashMap<Uuid, Uuid>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl CreatorResolver for MockCreatorResolver {
+        async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError> {
+            Ok(self.mapping.get(&app_id).copied())
+        }
+    }
+
     #[compio::test]
     async fn run_cycle_ingests_batch_and_commits_redelivered_offsets_idempotently() {
         let ids = vec!["evt_1".to_string(), "evt_2".to_string(), "evt_3".to_string()];
@@ -561,10 +676,10 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let first = run_cycle(&stream, &stack, dead_letters.as_ref(), &cfg)
+        let first = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
             .await
             .expect("first cycle");
-        let second = run_cycle(&stream, &stack, dead_letters.as_ref(), &cfg)
+        let second = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
             .await
             .expect("redelivery cycle");
 
@@ -612,7 +727,7 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &cfg)
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
             .await
             .expect("permanent rejects are quarantined");
 
@@ -671,7 +786,7 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &cfg)
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
             .await
             .expect("decode poison is quarantined");
 
@@ -751,5 +866,76 @@ mod tests {
             event_time: 1_783_468_800,
             dims: BTreeMap::new(),
         }
+    }
+
+    fn nil_creator_event(event_id: &str, app: Uuid) -> UsageEvent {
+        UsageEvent {
+            event_id: event_id.to_string(),
+            source: "worker-a".to_string(),
+            subject: UsageSubject {
+                app: Some(app),
+                creator: Uuid::nil(), // the worker stamps nil; control must enrich
+            },
+            meter: "requests".to_string(),
+            value: 10,
+            event_time: 1_783_468_800,
+            dims: BTreeMap::new(),
+        }
+    }
+
+    fn fake_stream_of(events: Vec<UsageEvent>) -> FakeStream {
+        let records = events
+            .into_iter()
+            .enumerate()
+            .map(|(offset, event)| StreamRecord {
+                partition: 0,
+                offset: offset as i64,
+                key: event.event_id.clone().into_bytes(),
+                payload: serde_json::to_vec(&event).expect("event serializes"),
+            })
+            .collect();
+        FakeStream {
+            records: Mutex::new(records),
+            committed: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[compio::test]
+    async fn run_cycle_enriches_nil_creator_from_app_owner_and_deadletters_orphans() {
+        let app_owned = Uuid::parse_str("aaaaaaaa-aaaa-7aaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let app_orphan = Uuid::parse_str("cccccccc-cccc-7ccc-cccc-cccccccccccc").unwrap();
+        let owner = Uuid::parse_str("dddddddd-dddd-7ddd-dddd-dddddddddddd").unwrap();
+        let stream = fake_stream_of(vec![
+            nil_creator_event("evt_owned", app_owned),
+            nil_creator_event("evt_orphan", app_orphan),
+        ]);
+        let meter = Arc::new(RecordingMeter::default());
+        let meter_provider: Arc<dyn MeteringProvider> = meter.clone();
+        let stack = BillingStack::with_meter_for_tests(meter_provider);
+        let dead_letters = Arc::new(RecordingDeadLetters::default());
+        let mut mapping = std::collections::HashMap::new();
+        mapping.insert(app_owned, owner); // app_orphan has NO owner
+        let resolver = MockCreatorResolver { mapping };
+        let cfg = EventForwarderConfig::default();
+
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &resolver, &cfg)
+            .await
+            .expect("cycle");
+
+        // The owned app's event is forwarded WITH the resolved creator; the
+        // orphan (no owner) is quarantined, never forwarded with a nil customer.
+        assert_eq!(cycle.ingested, 1);
+        assert_eq!(cycle.dead_lettered, 1);
+        let ingested = meter.ingested_events.lock().expect("ingested poisoned");
+        assert_eq!(ingested.len(), 1);
+        assert_eq!(ingested[0].event_id, "evt_owned");
+        assert_eq!(
+            ingested[0].subject.creator, owner,
+            "nil creator must be enriched to the app's owning creator before forwarding"
+        );
+        let dl = dead_letters.entries.lock().expect("dl poisoned");
+        assert_eq!(dl.len(), 1);
+        assert_eq!(dl[0].event.event_id, "evt_orphan");
+        assert!(dl[0].reason.contains("no owning creator"));
     }
 }
