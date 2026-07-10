@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
@@ -13,6 +14,17 @@ use zeroship_core::auth::{
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
+use zeroship_plugin_workflow::advance::{
+    collect_post_apply_registrations, worker_json_to_step_result, WorkflowAdvanceNackKind,
+    WorkflowAdvanceResponse,
+};
+use zeroship_plugin_workflow::apply;
+use zeroship_plugin_workflow::engine::{
+    WorkflowEngineConfig, WorkflowJournalLimits, DEFAULT_MAX_CHILD_DEPTH,
+    DEFAULT_MAX_LIVE_DESCENDANTS, DEFAULT_MAX_START_MANY_BATCH,
+};
+use zeroship_plugin_workflow::errors::WorkflowError;
+use zeroship_plugin_workflow::store::pg::PgStore;
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -36,6 +48,7 @@ const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 
 const WORKFLOW_INLINE_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
+static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
 
 /// Cap on the decoded creator-app request body. Most apps don't need huge
 /// inbound bodies on this surface (file uploads typically go straight to object
@@ -360,6 +373,18 @@ struct WorkflowStepRequest {
     #[serde(default)]
     attempt: Option<u32>,
     nonce: String,
+    #[serde(default)]
+    owner_id: String,
+    #[serde(default)]
+    stuck_strike_limit: Option<i16>,
+    #[serde(default)]
+    max_child_depth: Option<i16>,
+    #[serde(default)]
+    max_live_descendants: Option<i64>,
+    #[serde(default)]
+    max_start_many_batch: Option<usize>,
+    #[serde(default)]
+    journal_limits: Option<WorkflowJournalLimits>,
 }
 
 /// Test-only durable-workflow replay ingress.
@@ -481,29 +506,30 @@ pub async fn workflow_advance_unsigned(
     match outcome {
         WorkflowOutcome::Response { json, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
-            let json = match rewrite_workflow_output_blobs(&config, &app_id, json).await {
-                Ok(json) => json,
+            let response = match apply_workflow_advance_result(&config, &app_id, &parsed, json).await {
+                Ok(response) => response,
                 Err(resp) => {
                     record(0);
                     return resp;
                 }
             };
-            record(json.len() as u64);
-            HttpResponse::Ok().content_type("application/json").body(json)
+            record(response.len() as u64);
+            HttpResponse::Ok().content_type("application/json").body(response)
         }
         WorkflowOutcome::Pending { rx, cancel } => {
             match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(SettledWorkflow { json, logs: request_logs })) => {
                     crate::logs::append(&logs, app_id, request_logs);
-                    let json = match rewrite_workflow_output_blobs(&config, &app_id, json).await {
-                        Ok(json) => json,
-                        Err(resp) => {
-                            record(0);
-                            return resp;
-                        }
-                    };
-                    record(json.len() as u64);
-                    HttpResponse::Ok().content_type("application/json").body(json)
+                    let response =
+                        match apply_workflow_advance_result(&config, &app_id, &parsed, json).await {
+                            Ok(response) => response,
+                            Err(resp) => {
+                                record(0);
+                                return resp;
+                            }
+                        };
+                    record(response.len() as u64);
+                    HttpResponse::Ok().content_type("application/json").body(response)
                 }
                 Some(Err(e)) => {
                     record(0);
@@ -516,6 +542,131 @@ pub async fn workflow_advance_unsigned(
             }
         }
     }
+}
+
+async fn apply_workflow_advance_result(
+    config: &WorkerConfig,
+    app_id: &Uuid,
+    request: &WorkflowStepRequest,
+    json: String,
+) -> Result<String, HttpResponse> {
+    let json = rewrite_workflow_output_blobs(config, app_id, json).await?;
+    let response = match apply_workflow_advance_json(app_id, request, &json).await {
+        Ok(response) | Err(response) => response,
+    };
+    serde_json::to_string(&response).map_err(|e| {
+        HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+            "error": format!("encode workflow advance ack: {e}")
+        }))
+    })
+}
+
+async fn apply_workflow_advance_json(
+    app_id: &Uuid,
+    request: &WorkflowStepRequest,
+    json: &str,
+) -> Result<WorkflowAdvanceResponse, WorkflowAdvanceResponse> {
+    let step_result = match worker_json_to_step_result(&request.run_id, &request.nonce, json) {
+        Ok(result) => result,
+        Err(e) => {
+            return Err(WorkflowAdvanceResponse::nack(
+                request.run_id.clone(),
+                WorkflowAdvanceNackKind::Invalid,
+                format!("invalid workflow replay result: {e}"),
+            ));
+        }
+    };
+
+    let Some(db_url) = cache::db_url() else {
+        return Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::Backpressure,
+            "worker DB_URL is not configured",
+        ));
+    };
+    if let Err(e) = ensure_workflow_journal_provisioned(&db_url, app_id).await {
+        return Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::Backpressure,
+            e,
+        ));
+    }
+
+    let store = PgStore::new(db_url.clone(), *app_id);
+    let apply_config = workflow_apply_config_from_request(request);
+    match apply::apply_step_result_on_store(&store, &apply_config, step_result).await {
+        Ok(_applied) => match collect_post_apply_registrations(&db_url, *app_id, &request.run_id, true).await {
+            Ok(registrations) => Ok(WorkflowAdvanceResponse::ack(
+                request.run_id.clone(),
+                registrations,
+            )),
+            Err(e) => Err(WorkflowAdvanceResponse::nack(
+                request.run_id.clone(),
+                WorkflowAdvanceNackKind::ApplyFailed,
+                format!("collect workflow advance registrations: {e}"),
+            )),
+        },
+        Err(WorkflowError::Deadlock(e)) => Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::Deadlock,
+            e,
+        )),
+        Err(WorkflowError::Invalid(e)) => Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::Invalid,
+            e,
+        )),
+        Err(WorkflowError::Db(e)) => Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::ApplyFailed,
+            e,
+        )),
+    }
+}
+
+fn workflow_apply_config_from_request(request: &WorkflowStepRequest) -> WorkflowEngineConfig {
+    let mut config = WorkflowEngineConfig::default();
+    config.owner_id = request.owner_id.clone();
+    config.stuck_strike_limit = request.stuck_strike_limit.unwrap_or(config.stuck_strike_limit);
+    config.max_child_depth = request.max_child_depth.unwrap_or(DEFAULT_MAX_CHILD_DEPTH);
+    config.max_live_descendants = request
+        .max_live_descendants
+        .unwrap_or(DEFAULT_MAX_LIVE_DESCENDANTS);
+    config.max_start_many_batch = request
+        .max_start_many_batch
+        .unwrap_or(DEFAULT_MAX_START_MANY_BATCH);
+    config.journal_limits = request.journal_limits.unwrap_or_default();
+    config
+}
+
+async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Result<(), String> {
+    let cache = PROVISIONED_WORKFLOW_JOURNALS.get_or_init(|| Mutex::new(HashSet::new()));
+    if cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(app_id)
+    {
+        return Ok(());
+    }
+
+    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .map_err(|e| format!("connect workflow journal db: {e}"))?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            tracing::error!(error = %e, "worker workflow provision pg connection error");
+        }
+    })
+    .detach();
+    PgStore::provision(&client, app_id)
+        .await
+        .map_err(|e| format!("provision workflow journal: {e}"))?;
+
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(*app_id);
+    Ok(())
 }
 
 async fn rewrite_workflow_output_blobs(
@@ -882,16 +1033,20 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Once, RwLock};
 
+    use compio_postgres::NoTls;
     use ntex::http::StatusCode;
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::types::AppRuntimeLimits;
     use zeroship_plugin_storage::StorageBackendConfig;
+    use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
     use zeroship_runtime::init::init_v8;
 
     use super::*;
 
     static V8_INIT: Once = Once::new();
+    const WORKFLOW_TEST_OWNER: &str = "worker-test-owner";
+    const WORKFLOW_TEST_NONCE: &str = "nonce_test";
 
     fn init_runtime() {
         V8_INIT.call_once(init_v8);
@@ -1004,20 +1159,47 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         workflow_name: &str,
         journal: Vec<serde_json::Value>,
     ) -> serde_json::Value {
+        workflow_request_named_for_run(
+            deploy_hash,
+            workflow_name,
+            "run_test",
+            WORKFLOW_TEST_NONCE,
+            journal,
+        )
+    }
+
+    fn workflow_request_named_for_run(
+        deploy_hash: &str,
+        workflow_name: &str,
+        run_id: &str,
+        nonce: &str,
+        journal: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
         serde_json::json!({
-            "runId": "run_test",
+            "runId": run_id,
             "workflowName": workflow_name,
             "trigger": {
                 "input": { "orderId": "ord_1" },
                 "startedAt": "2026-07-06T00:00:00Z",
-                "runId": "run_test",
+                "runId": run_id,
                 "workflowName": workflow_name,
             },
             "journal": journal,
             "deployHash": deploy_hash,
             "attempt": 0,
-            "nonce": "nonce_test",
+            "nonce": nonce,
+            "ownerId": WORKFLOW_TEST_OWNER,
+            "journalLimits": {
+                "runMaxBytes": 1073741824,
+                "appMaxBytes": 1073741824
+            }
         })
+    }
+
+    fn workflow_test_db_url() -> Option<String> {
+        std::env::var("CONTROL_TEST_DB")
+            .or_else(|_| std::env::var("PG_TEST_URL"))
+            .ok()
     }
 
     fn workflow_test_state(
@@ -1049,13 +1231,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         init_runtime();
         let app_id = Uuid::new_v4();
         let meter = Arc::new(zeroship_metering::Meter::new());
+        let db_url = workflow_test_db_url();
         crate::cache::init_cache(
             10,
             max_pinned_isolates_per_app,
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_url: None,
+                db_url: db_url.clone(),
                 kv_url: None,
                 storage_backend: None,
                 meter: meter.clone(),
@@ -1080,7 +1263,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         let config = Arc::new(crate::WorkerConfig {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
-            db_url: None,
+            db_url,
             kv_url: None,
             storage_backend: None,
             max_isolates: 10,
@@ -1096,6 +1279,121 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         (app_id, blob_store, envs, logs, config, meter, blob_root)
     }
 
+    async fn pg_client(db_url: &str) -> compio_postgres::Client {
+        let (client, connection) = compio_postgres::connect(db_url, NoTls)
+            .await
+            .expect("connect workflow test pg");
+        compio::runtime::spawn(async move {
+            if let Err(e) = connection.run().await {
+                tracing::error!(error = %e, "worker test pg connection error");
+            }
+        })
+        .detach();
+        client
+    }
+
+    async fn seed_claimed_workflow_run(
+        db_url: &str,
+        app_id: &Uuid,
+        run_id: &str,
+        workflow_name: &str,
+        nonce: &str,
+    ) {
+        let conn = pg_client(db_url).await;
+        PgStore::provision(&conn, app_id)
+            .await
+            .expect("provision worker workflow test journal");
+        let tables = WorkflowTables::for_app_id(app_id);
+        conn.execute(
+            &format!(
+                "INSERT INTO {} \
+                    (id, workflow_name, app_id, deploy_id, state, input, claimed_by, dispatch_nonce, started_at) \
+                 VALUES ($1, $2, $3, 'dep_test', 'running', $4, $5, $6, now())",
+                tables.runs
+            ),
+            &[
+                &run_id,
+                &workflow_name,
+                app_id,
+                &serde_json::json!({"orderId": "ord_1"}),
+                &WORKFLOW_TEST_OWNER,
+                &nonce,
+            ],
+        )
+        .await
+        .expect("seed claimed workflow run");
+    }
+
+    async fn reclaim_workflow_run(db_url: &str, app_id: &Uuid, run_id: &str, nonce: &str) {
+        let conn = pg_client(db_url).await;
+        let tables = WorkflowTables::for_app_id(app_id);
+        conn.execute(
+            &format!(
+                "UPDATE {} \
+                    SET state = 'running', claimed_by = $2, dispatch_nonce = $3, wake_at = NULL \
+                  WHERE id = $1",
+                tables.runs
+            ),
+            &[&run_id, &WORKFLOW_TEST_OWNER, &nonce],
+        )
+        .await
+        .expect("reclaim workflow run for replay");
+    }
+
+    async fn workflow_step_names(db_url: &str, app_id: &Uuid, run_id: &str) -> Vec<String> {
+        let conn = pg_client(db_url).await;
+        let tables = WorkflowTables::for_app_id(app_id);
+        conn.query(
+            &format!(
+                "SELECT name FROM {} WHERE run_id = $1 ORDER BY ordinal",
+                tables.steps
+            ),
+            &[&run_id],
+        )
+        .await
+        .expect("load workflow step names")
+        .into_iter()
+        .map(|row| row.get("name"))
+        .collect()
+    }
+
+    async fn workflow_step_output(
+        db_url: &str,
+        app_id: &Uuid,
+        run_id: &str,
+        name: &str,
+    ) -> serde_json::Value {
+        let conn = pg_client(db_url).await;
+        let tables = WorkflowTables::for_app_id(app_id);
+        conn.query_one(
+            &format!(
+                "SELECT output FROM {} WHERE run_id = $1 AND name = $2",
+                tables.steps
+            ),
+            &[&run_id, &name],
+        )
+        .await
+        .expect("load workflow step output")
+        .get::<_, Option<serde_json::Value>>("output")
+        .expect("inline workflow step output")
+    }
+
+    fn assert_workflow_ack(body: &[u8], run_id: &str) -> serde_json::Value {
+        let result: serde_json::Value =
+            serde_json::from_slice(body).expect("workflow advance ack JSON");
+        assert_eq!(result["ack"], true, "workflow advance should ack: {result:?}");
+        assert_eq!(result["runId"], run_id);
+        assert!(
+            result["registrations"]
+                .as_array()
+                .is_some_and(|registrations| registrations
+                    .iter()
+                    .any(|registration| registration["runId"] == run_id)),
+            "ack registrations should include dispatched run: {result:?}"
+        );
+        result
+    }
+
     #[test]
     fn workflow_advance_first_frontier_returns_step_completed() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
@@ -1104,8 +1402,20 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test",
+                "Checkout",
+                WORKFLOW_TEST_NONCE,
+            )
+            .await;
             let app = test::init_service(
                 web::App::new()
                     .state(config)
@@ -1125,13 +1435,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
             let body = test::read_body(resp).await;
-            let result: serde_json::Value =
-                serde_json::from_slice(&body).expect("workflow StepResult JSON");
-            assert_eq!(result["kind"], "StepCompleted");
-            assert_eq!(result["name"], "first");
-            assert_eq!(result["ordinal"], 0);
-            assert_eq!(result["output"]["mark"], "A");
-            assert_eq!(result["output"]["bodyRuns"], 1);
+            assert_workflow_ack(&body, "run_test");
+            assert_eq!(
+                workflow_step_names(&db_url, &app_id, "run_test").await,
+                vec!["first".to_string()]
+            );
+            let output = workflow_step_output(&db_url, &app_id, "run_test", "first").await;
+            assert_eq!(output["mark"], "A");
+            assert_eq!(output["bodyRuns"], 1);
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
@@ -1145,8 +1456,20 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "C").await;
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test",
+                "ConcurrentWorkflow",
+                WORKFLOW_TEST_NONCE,
+            )
+            .await;
             let app = test::init_service(
                 web::App::new()
                     .state(config)
@@ -1173,22 +1496,11 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
             let body = test::read_body(resp).await;
-            let result: serde_json::Value =
-                serde_json::from_slice(&body).expect("workflow StepResult JSON");
-            let outcomes = result["outcomes"].as_array().expect("outcomes array");
-            assert_eq!(outcomes.len(), 3);
+            assert_workflow_ack(&body, "run_test");
             assert_eq!(
-                outcomes
-                    .iter()
-                    .map(|outcome| (
-                        outcome["kind"].as_str().unwrap(),
-                        outcome["ordinal"].as_i64().unwrap(),
-                        outcome["name"].as_str().unwrap(),
-                    ))
-                    .collect::<Vec<_>>(),
-                vec![("StepCompleted", 0, "a"), ("StepCompleted", 1, "b"), ("StepCompleted", 2, "c")]
+                workflow_step_names(&db_url, &app_id, "run_test").await,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
             );
-            assert!(result.get("kind").is_none(), "wide batch has no single top-level kind");
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
@@ -1202,9 +1514,21 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, meter, blob_root) =
                 workflow_test_state_with_meter(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "M").await;
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test",
+                "Checkout",
+                WORKFLOW_TEST_NONCE,
+            )
+            .await;
             let app = test::init_service(
                 web::App::new()
                     .state(config)
@@ -1225,7 +1549,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
             let body = test::read_body(resp).await;
-            assert!(!body.is_empty(), "workflow advance returned a response body");
+            assert_workflow_ack(&body, "run_test");
 
             let snap = meter.drain();
             let usage = snap
@@ -1240,7 +1564,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             assert_eq!(
                 usage.egress_bytes,
                 body.len() as u64,
-                "workflow advance egress is the StepResult JSON body"
+                "workflow advance egress is the ack JSON body"
             );
             assert!(usage.wall_us > 0, "workflow advance records wall_us");
             assert!(usage.cpu_us > 0, "workflow advance records cpu_us");
@@ -1262,8 +1586,20 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test",
+                "Checkout",
+                WORKFLOW_TEST_NONCE,
+            )
+            .await;
             let app = test::init_service(
                 web::App::new()
                     .state(config)
@@ -1283,32 +1619,42 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let first_resp = test::call_service(&app, first_req).await;
             assert_eq!(first_resp.status(), StatusCode::OK);
             let first_body = test::read_body(first_resp).await;
-            let first_result: serde_json::Value =
-                serde_json::from_slice(&first_body).expect("first StepResult JSON");
-            assert_eq!(first_result["name"], "first");
+            assert_workflow_ack(&first_body, "run_test");
+            let first_output = workflow_step_output(&db_url, &app_id, "run_test", "first").await;
 
             let journal = vec![serde_json::json!({
-                "ordinal": first_result["ordinal"],
-                "name": first_result["name"],
-                "nameOccurrence": first_result["nameOccurrence"],
+                "ordinal": 0,
+                "name": "first",
+                "nameOccurrence": 0,
                 "kind": "run",
                 "state": "completed",
-                "output": first_result["output"],
+                "output": first_output,
             })];
+            reclaim_workflow_run(&db_url, &app_id, "run_test", "nonce_replay").await;
             let second_req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, journal)).unwrap())
+                .set_payload(
+                    serde_json::to_vec(&workflow_request_named_for_run(
+                        &deploy_hash,
+                        "Checkout",
+                        "run_test",
+                        "nonce_replay",
+                        journal,
+                    ))
+                    .unwrap(),
+                )
                 .to_request();
             let second_resp = test::call_service(&app, second_req).await;
             assert_eq!(second_resp.status(), StatusCode::OK);
             let second_body = test::read_body(second_resp).await;
-            let result: serde_json::Value =
-                serde_json::from_slice(&second_body).expect("second StepResult JSON");
-            assert_eq!(result["kind"], "StepCompleted");
-            assert_eq!(result["name"], "second");
-            assert_eq!(result["ordinal"], 1);
+            assert_workflow_ack(&second_body, "run_test");
             assert_eq!(
-                result["output"]["bodyRuns"], 2,
+                workflow_step_names(&db_url, &app_id, "run_test").await,
+                vec!["first".to_string(), "second".to_string()]
+            );
+            let second_output = workflow_step_output(&db_url, &app_id, "run_test", "second").await;
+            assert_eq!(
+                second_output["bodyRuns"], 2,
                 "the completed first step must be replayed from journal, not re-run"
             );
 
@@ -1324,6 +1670,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
@@ -1340,20 +1690,33 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
 
-            for (deploy_hash, expected_mark) in [(&deploy_a, "A"), (&deploy_b, "B"), (&deploy_a, "A")] {
+            for (idx, (deploy_hash, expected_mark)) in
+                [(&deploy_a, "A"), (&deploy_b, "B"), (&deploy_a, "A")]
+                    .into_iter()
+                    .enumerate()
+            {
+                let run_id = format!("run_test_pinned_{idx}");
+                let nonce = format!("nonce_test_pinned_{idx}");
+                seed_claimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", &nonce).await;
                 let req = test::TestRequest::post()
                     .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                     .set_payload(
-                        serde_json::to_vec(&workflow_request(deploy_hash, vec![])).unwrap(),
+                        serde_json::to_vec(&workflow_request_named_for_run(
+                            deploy_hash,
+                            "Checkout",
+                            &run_id,
+                            &nonce,
+                            vec![],
+                        ))
+                        .unwrap(),
                     )
                     .to_request();
                 let resp = test::call_service(&app, req).await;
                 assert_eq!(resp.status(), StatusCode::OK);
                 let body = test::read_body(resp).await;
-                let result: serde_json::Value =
-                    serde_json::from_slice(&body).expect("workflow StepResult JSON");
-                assert_eq!(result["kind"], "StepCompleted");
-                assert_eq!(result["output"]["mark"], expected_mark);
+                assert_workflow_ack(&body, &run_id);
+                let output = workflow_step_output(&db_url, &app_id, &run_id, "first").await;
+                assert_eq!(output["mark"], expected_mark);
             }
             assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
             assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_b));
@@ -1370,6 +1733,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         };
 
         runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(1);
             let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
@@ -1385,17 +1752,51 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
 
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test_lru_a",
+                "Checkout",
+                "nonce_test_lru_a",
+            )
+            .await;
             let req_a = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(serde_json::to_vec(&workflow_request(&deploy_a, vec![])).unwrap())
+                .set_payload(
+                    serde_json::to_vec(&workflow_request_named_for_run(
+                        &deploy_a,
+                        "Checkout",
+                        "run_test_lru_a",
+                        "nonce_test_lru_a",
+                        vec![],
+                    ))
+                    .unwrap(),
+                )
                 .to_request();
             let resp_a = test::call_service(&app, req_a).await;
             assert_eq!(resp_a.status(), StatusCode::OK);
             assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
 
+            seed_claimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_test_lru_b",
+                "Checkout",
+                "nonce_test_lru_b",
+            )
+            .await;
             let req_b = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(serde_json::to_vec(&workflow_request(&deploy_b, vec![])).unwrap())
+                .set_payload(
+                    serde_json::to_vec(&workflow_request_named_for_run(
+                        &deploy_b,
+                        "Checkout",
+                        "run_test_lru_b",
+                        "nonce_test_lru_b",
+                        vec![],
+                    ))
+                    .unwrap(),
+                )
                 .to_request();
             let resp_b = test::call_service(&app, req_b).await;
             assert_eq!(resp_b.status(), StatusCode::OK);

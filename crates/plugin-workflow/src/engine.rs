@@ -26,6 +26,22 @@ fn default_owner_id() -> String {
         .clone()
 }
 
+fn default_stuck_strike_limit() -> i16 {
+    WorkflowEngineConfig::default().stuck_strike_limit
+}
+
+fn default_max_child_depth() -> i16 {
+    DEFAULT_MAX_CHILD_DEPTH
+}
+
+fn default_max_live_descendants() -> i64 {
+    DEFAULT_MAX_LIVE_DESCENDANTS
+}
+
+fn default_max_start_many_batch() -> usize {
+    DEFAULT_MAX_START_MANY_BATCH
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowJournalLimits {
@@ -203,6 +219,16 @@ pub struct StepRequest {
     pub input: Option<Value>,
     pub started_at: DateTime<Utc>,
     pub journal: Vec<JournalStep>,
+    #[serde(default = "default_owner_id")]
+    pub owner_id: String,
+    #[serde(default = "default_stuck_strike_limit")]
+    pub stuck_strike_limit: i16,
+    #[serde(default = "default_max_child_depth")]
+    pub max_child_depth: i16,
+    #[serde(default = "default_max_live_descendants")]
+    pub max_live_descendants: i64,
+    #[serde(default = "default_max_start_many_batch")]
+    pub max_start_many_batch: usize,
     #[serde(default)]
     pub journal_limits: WorkflowJournalLimits,
 }

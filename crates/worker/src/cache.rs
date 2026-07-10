@@ -128,6 +128,10 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
 }
 
+pub fn db_url() -> Option<String> {
+    DB_URL.with(|u| u.borrow().clone())
+}
+
 /// Create plugins for a new Runtime — the kernel every deployed app boots
 /// against. This is the SINGLE source of truth for the multi-node `env.*`
 /// surface; the CLI `zeroship serve` vector (`crates/cli/src/main.rs`)

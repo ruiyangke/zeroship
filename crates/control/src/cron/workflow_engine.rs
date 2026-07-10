@@ -14,6 +14,9 @@ use compio_postgres::GenericClient;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
+use zeroship_plugin_workflow::advance::{
+    WorkflowAdvanceNackKind, WorkflowAdvanceRegistration, WorkflowAdvanceResponse,
+};
 use zeroship_plugin_workflow::apply;
 use zeroship_plugin_workflow::engine;
 use zeroship_plugin_workflow::errors::WorkflowError;
@@ -142,7 +145,7 @@ pub trait StepDispatcher: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub enum DispatchOutcome {
-    Completed(StepResult),
+    Completed(WorkflowAdvanceResponse),
     Backpressure {
         run_id: String,
         dispatch_nonce: String,
@@ -166,7 +169,13 @@ pub struct StubStepDispatcher;
 #[async_trait(?Send)]
 impl StepDispatcher for StubStepDispatcher {
     async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
-        DispatchOutcome::Completed(StepResult::requeue(request.run_id, request.dispatch_nonce))
+        DispatchOutcome::Completed(WorkflowAdvanceResponse::ack(
+            request.run_id.clone(),
+            vec![WorkflowAdvanceRegistration::preserve(
+                request.run_id,
+                request.app_id,
+            )],
+        ))
     }
 }
 
@@ -266,11 +275,17 @@ impl StepDispatcher for GatewayStepDispatcher {
             );
         }
 
-        match serde_json::from_slice::<StepResult>(&bytes) {
-            Ok(result) => DispatchOutcome::Completed(result),
+        match serde_json::from_slice::<WorkflowAdvanceResponse>(&bytes) {
+            Ok(response) if response.is_ack() || response.is_nack() => {
+                DispatchOutcome::Completed(response)
+            }
+            Ok(_) => DispatchOutcome::backpressure(
+                &request,
+                "parse gateway workflow advance ack: response is neither ack nor nack",
+            ),
             Err(e) => DispatchOutcome::backpressure(
                 &request,
-                format!("parse gateway StepResult: {e}"),
+                format!("parse gateway workflow advance ack: {e}"),
             ),
         }
     }
@@ -829,6 +844,11 @@ where
             input: candidate.input,
             started_at: candidate.started_at,
             journal,
+            owner_id: config.owner_id.clone(),
+            stuck_strike_limit: config.stuck_strike_limit,
+            max_child_depth: config.max_child_depth,
+            max_live_descendants: config.max_live_descendants,
+            max_start_many_batch: config.max_start_many_batch,
             journal_limits: config.journal_limits,
         },
     }))
@@ -1463,58 +1483,88 @@ fn spawn_dispatch<D>(
     );
     compio::runtime::spawn(async move {
         let mut inflight_guard = InflightDispatchGuard::new();
+        let dispatch_run_id = claim.request.run_id.clone();
+        let dispatch_nonce = claim.request.dispatch_nonce.clone();
         let outcome = dispatcher.dispatch(claim.request).await;
         heartbeat.store(false, Ordering::SeqCst);
         match outcome {
-            DispatchOutcome::Completed(result) => {
-                match apply_step_result_on_registry(&registry, &config, result.clone()).await {
-                    Err(WorkflowError::Deadlock(msg)) => {
-                        tracing::warn!(error = %msg, run_id = %result.run_id, "workflow_engine: apply deadlock, requeueing claim");
+            DispatchOutcome::Completed(response) if response.is_ack() => {
+                let run_id = response
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| dispatch_run_id.clone());
+                inflight_guard.release();
+                if let Err(e) = apply_workflow_advance_ack(&scheduler_store, &response).await {
+                    tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler worker ack registration failed");
+                }
+            }
+            DispatchOutcome::Completed(response) if response.is_nack() => {
+                let run_id = response
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| dispatch_run_id.clone());
+                let reason = response
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "worker workflow advance nack".to_string());
+                match response
+                    .nack_kind
+                    .unwrap_or(WorkflowAdvanceNackKind::ApplyFailed)
+                {
+                    WorkflowAdvanceNackKind::Deadlock => {
+                        tracing::warn!(error = %reason, run_id = %run_id, "workflow_engine: worker apply deadlock, requeueing claim");
                         if let Err(e) =
-                            requeue_claim(&registry, &config.owner_id, &result.run_id, &result.dispatch_nonce).await
+                            requeue_claim(&registry, &config.owner_id, &run_id, &dispatch_nonce).await
                         {
-                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: deadlock requeue failed");
+                            tracing::error!(error = %e, run_id = %run_id, "workflow_engine: deadlock requeue failed");
                         } else {
                             inflight_guard.release();
                             if let Err(e) =
-                                sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                                sync_scheduler_for_run(&scheduler_store, &registry, &run_id).await
                             {
-                                tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler requeue ack failed");
+                                tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler requeue ack failed");
                             }
                         }
                     }
-                    Err(WorkflowError::Invalid(msg)) => {
-                        tracing::error!(error = %msg, run_id = %result.run_id, "workflow_engine: invalid StepResult");
-                        inflight_guard.release();
+                    WorkflowAdvanceNackKind::Backpressure => {
+                        tracing::warn!(
+                            run_id = %run_id,
+                            reason = %reason,
+                            "workflow_engine: worker backpressure, parking claim"
+                        );
                         if let Err(e) =
-                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
+                            park_backpressure_claim(&registry, &config.owner_id, &run_id, &dispatch_nonce).await
                         {
-                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler invalid apply sync failed");
-                        }
-                    }
-                    Err(WorkflowError::Db(e)) => {
-                        tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: apply failed");
-                        inflight_guard.release();
-                        if let Err(e) =
-                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
-                        {
-                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler failed apply sync failed");
-                        }
-                    }
-                    Ok(applied) => {
-                        inflight_guard.release();
-                        if applied {
-                            if let Err(e) =
-                                sync_scheduler_after_apply(&scheduler_store, &registry, &result.run_id).await
-                            {
-                                tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler apply ack failed");
+                            tracing::error!(error = %e, run_id = %run_id, "workflow_engine: backpressure park failed");
+                        } else {
+                            inflight_guard.release();
+                            if let Err(e) = sync_scheduler_for_run(&scheduler_store, &registry, &run_id).await {
+                                tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler backpressure ack failed");
                             }
-                        } else if let Err(e) =
-                            sync_scheduler_for_run(&scheduler_store, &registry, &result.run_id).await
-                        {
-                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: scheduler noop apply sync failed");
                         }
                     }
+                    WorkflowAdvanceNackKind::Invalid | WorkflowAdvanceNackKind::ApplyFailed => {
+                        tracing::error!(reason = %reason, run_id = %run_id, "workflow_engine: worker workflow advance nack");
+                        inflight_guard.release();
+                        if let Err(e) =
+                            sync_scheduler_for_run(&scheduler_store, &registry, &run_id).await
+                        {
+                            tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler worker nack sync failed");
+                        }
+                    }
+                }
+            }
+            DispatchOutcome::Completed(response) => {
+                tracing::error!(
+                    ?response,
+                    run_id = %dispatch_run_id,
+                    "workflow_engine: invalid workflow advance response"
+                );
+                inflight_guard.release();
+                if let Err(e) =
+                    sync_scheduler_for_run(&scheduler_store, &registry, &dispatch_run_id).await
+                {
+                    tracing::error!(error = %e, run_id = %dispatch_run_id, "workflow_engine: scheduler invalid ack sync failed");
                 }
             }
             DispatchOutcome::Backpressure {
@@ -1541,6 +1591,40 @@ fn spawn_dispatch<D>(
         }
     })
     .detach();
+}
+
+async fn apply_workflow_advance_ack(
+    scheduler_store: &WorkflowSchedulerStore,
+    response: &WorkflowAdvanceResponse,
+) -> Result<(), RegistryError> {
+    if response.registrations.is_empty() {
+        return Err(RegistryError::InvalidInput(
+            "workflow advance ack missing registrations".to_string(),
+        ));
+    }
+
+    for registration in &response.registrations {
+        apply_workflow_advance_registration(scheduler_store, registration).await?;
+    }
+    Ok(())
+}
+
+async fn apply_workflow_advance_registration(
+    scheduler_store: &WorkflowSchedulerStore,
+    registration: &WorkflowAdvanceRegistration,
+) -> Result<(), RegistryError> {
+    if let Some(next_wake_at) = registration.next_wake_at.clone() {
+        scheduler_store
+            .ack_register_next(&registration.run_id, registration.app_id, next_wake_at)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+    } else if registration.terminal {
+        scheduler_store
+            .ack_terminal(&registration.run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+    }
+    Ok(())
 }
 
 struct InflightDispatchGuard {
@@ -1655,6 +1739,17 @@ pub async fn apply_step_result_without_scheduler_sync(
 ) -> Result<bool, RegistryError> {
     let mut config = WorkflowEngineConfig::default();
     config.owner_id = owner_id.to_string();
+    apply_step_result_without_scheduler_sync_with_config(state, config, result).await
+}
+
+/// Deterministic apply path with config overrides that intentionally stops
+/// before scheduler sync.
+#[allow(clippy::future_not_send)]
+pub async fn apply_step_result_without_scheduler_sync_with_config(
+    state: &AppState,
+    config: WorkflowEngineConfig,
+    result: StepResult,
+) -> Result<bool, RegistryError> {
     apply_step_result_on_registry(&state.registry, &config, result)
         .await
         .map_err(workflow_error_to_registry)
@@ -2892,6 +2987,11 @@ mod tests {
             phase: "running".to_string(),
             input: Some(serde_json::json!({"orderId": "ord_1"})),
             started_at: Utc::now(),
+            owner_id: "owner-test".to_string(),
+            stuck_strike_limit: 3,
+            max_child_depth: DEFAULT_MAX_CHILD_DEPTH,
+            max_live_descendants: DEFAULT_MAX_LIVE_DESCENDANTS,
+            max_start_many_batch: DEFAULT_MAX_START_MANY_BATCH,
             journal_limits: Default::default(),
             journal: Vec::new(),
         }
@@ -2904,30 +3004,18 @@ mod tests {
         let request: Value = serde_json::from_slice(body.as_ref()).expect("StepRequest json");
         seen.lock().expect("seen lock").push(request.clone());
         web::HttpResponse::Ok().json(&serde_json::json!({
+            "ack": true,
             "runId": request["runId"],
-            "dispatchNonce": request["dispatchNonce"],
-            "checkpoints": [{
-                "ordinal": 0,
-                "name": "done",
-                "nameOccurrence": 0,
-                "kind": "run",
-                "state": "completed",
-                "output": {"ok": true},
-                "error": null,
-                "wakeAt": null,
-                "signalType": null,
-                "maxSignalAgeMs": null,
-                "consumedSignalId": null
-            }],
-            "runUpdate": {
-                "state": "completed",
-                "output": {"ok": true}
-            }
+            "registrations": [{
+                "runId": request["runId"],
+                "appId": request["appId"],
+                "terminal": true
+            }]
         }))
     }
 
     #[ntex::test]
-    async fn gateway_step_dispatcher_posts_and_parses_step_result() {
+    async fn gateway_step_dispatcher_posts_and_parses_advance_ack() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let server_seen = Arc::clone(&seen);
         let gateway = test::server(move || {
@@ -2947,10 +3035,11 @@ mod tests {
         let DispatchOutcome::Completed(result) = outcome else {
             panic!("expected completed dispatch outcome");
         };
-        assert_eq!(result.run_id, request.run_id);
-        assert_eq!(result.dispatch_nonce, request.dispatch_nonce);
-        assert_eq!(result.checkpoints.len(), 1);
-        assert_eq!(result.checkpoints[0].name, "done");
+        assert!(result.is_ack());
+        assert_eq!(result.run_id.as_deref(), Some(request.run_id.as_str()));
+        assert_eq!(result.registrations.len(), 1);
+        assert_eq!(result.registrations[0].run_id, request.run_id);
+        assert!(result.registrations[0].terminal);
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);

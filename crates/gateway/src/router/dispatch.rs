@@ -102,6 +102,18 @@ struct WorkflowStepRequest {
     started_at: DateTime<Utc>,
     #[serde(default)]
     journal: Vec<Value>,
+    #[serde(default)]
+    owner_id: String,
+    #[serde(default)]
+    stuck_strike_limit: Option<i16>,
+    #[serde(default)]
+    max_child_depth: Option<i16>,
+    #[serde(default)]
+    max_live_descendants: Option<i64>,
+    #[serde(default)]
+    max_start_many_batch: Option<usize>,
+    #[serde(default)]
+    journal_limits: Value,
 }
 
 /// Internal durable-workflow advance edge.
@@ -165,6 +177,12 @@ pub async fn workflow_advance_internal(
         "deployHash": &request.deploy_hash,
         "attempt": 0,
         "nonce": &request.dispatch_nonce,
+        "ownerId": &request.owner_id,
+        "stuckStrikeLimit": request.stuck_strike_limit,
+        "maxChildDepth": request.max_child_depth,
+        "maxLiveDescendants": request.max_live_descendants,
+        "maxStartManyBatch": request.max_start_many_batch,
+        "journalLimits": request.journal_limits.clone(),
         "outputRead": {
             "controlUrl": &state.config.control_url,
             "token": zeroship_core::auth::derive_app_scoped_control_token(
@@ -208,13 +226,41 @@ pub async fn workflow_advance_internal(
     }
 
     let (_buffered, worker_bytes) = buffer_response_body(worker_response).await;
-    match workflow_worker_result_to_step_result(&request, &worker_bytes) {
-        Ok(result) => HttpResponse::Ok().json(&result),
+    match workflow_worker_advance_response(&worker_bytes) {
+        Ok(response) => HttpResponse::Ok().json(&response),
         Err(e) => HttpResponse::BadGateway()
-            .json(&serde_json::json!({"error": format!("invalid worker StepResult: {e}")})),
+            .json(&serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")})),
     }
 }
 
+fn workflow_worker_advance_response(worker_bytes: &[u8]) -> Result<Value, String> {
+    let response: Value = serde_json::from_slice(worker_bytes).map_err(|e| e.to_string())?;
+    let ack = response
+        .get("ack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let nack = response
+        .get("nack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if ack == nack {
+        return Err("response must set exactly one of ack or nack".to_string());
+    }
+    if response.get("runId").and_then(Value::as_str).is_none() {
+        return Err("response missing runId".to_string());
+    }
+    if ack
+        && response
+            .get("registrations")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        return Err("ack response missing registrations".to_string());
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
 fn workflow_worker_result_to_step_result(
     request: &WorkflowStepRequest,
     worker_bytes: &[u8],
@@ -263,6 +309,7 @@ fn workflow_worker_result_to_step_result(
     }))
 }
 
+#[cfg(test)]
 fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
     let kind = result
         .get("kind")
@@ -350,6 +397,7 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
     }
 }
 
+#[cfg(test)]
 fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
     let step_kind = value
         .get("stepKind")
@@ -362,6 +410,7 @@ fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
     }
 }
 
+#[cfg(test)]
 fn copy_workflow_output(source: &Value, target: &mut Value) {
     if let Some(output_ref) = source.get("outputRef").filter(|value| !value.is_null()) {
         target["outputRef"] = output_ref.clone();
@@ -370,6 +419,7 @@ fn copy_workflow_output(source: &Value, target: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn ensure_workflow_output(outcome: &mut Value) {
     let has_ref = outcome
         .get("outputRef")
@@ -380,6 +430,7 @@ fn ensure_workflow_output(outcome: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
     error
         .filter(|value| !value.is_null())
@@ -387,6 +438,7 @@ fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
         .unwrap_or_else(|| serde_json::json!({"type": "Error", "message": message}))
 }
 
+#[cfg(test)]
 fn normalize_workflow_outcomes(
     mut outcomes: Vec<Value>,
     fallback_error: Option<Value>,
@@ -493,6 +545,7 @@ fn normalize_workflow_outcomes(
     Ok(outcomes)
 }
 
+#[cfg(test)]
 fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> {
     let mut outcomes = Vec::new();
     let mut failed_checkpoint_encoded = false;
@@ -581,6 +634,7 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
     normalize_workflow_outcomes(outcomes, None)
 }
 
+#[cfg(test)]
 fn required_i64(value: &Value, key: &str) -> Result<i64, String> {
     value
         .get(key)
@@ -588,6 +642,7 @@ fn required_i64(value: &Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("missing {key}"))
 }
 
+#[cfg(test)]
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
     value
         .get(key)
@@ -595,6 +650,7 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing {key}"))
 }
 
+#[cfg(test)]
 fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
     let state = result
         .pointer("/runUpdate/state")
@@ -659,6 +715,7 @@ fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn normalize_workflow_wake_at(raw: Option<&Value>) -> Option<Value> {
     let value = raw?;
     if value.is_null() {
@@ -675,6 +732,7 @@ fn normalize_workflow_wake_at(raw: Option<&Value>) -> Option<Value> {
     Some(Value::String(wake_at.to_rfc3339()))
 }
 
+#[cfg(test)]
 fn normalize_workflow_duration_ms(raw: Option<&Value>) -> Option<Value> {
     let Some(value) = raw else {
         return Some(Value::Null);
@@ -690,6 +748,7 @@ fn normalize_workflow_duration_ms(raw: Option<&Value>) -> Option<Value> {
     Some(Value::Number(ms.into()))
 }
 
+#[cfg(test)]
 fn parse_iso8601_duration_ms(raw: &str) -> Option<i64> {
     let s = raw.strip_prefix('P')?;
     let (date_part, time_part) = match s.split_once('T') {
@@ -733,6 +792,7 @@ fn parse_iso8601_duration_ms(raw: &str) -> Option<i64> {
     Some(total_ms.max(0))
 }
 
+#[cfg(test)]
 fn parse_duration_number(raw: &str) -> Option<f64> {
     if raw.is_empty() {
         return None;
@@ -2763,22 +2823,13 @@ mod tests {
         let request: Value = serde_json::from_slice(body.as_ref()).expect("worker request json");
         seen.lock().expect("seen lock").push(request.clone());
         HttpResponse::Ok().json(&serde_json::json!({
+            "ack": true,
             "runId": request["runId"],
-            "dispatchNonce": request["nonce"],
-            "checkpoints": [{
-                "ordinal": 0,
-                "name": "first",
-                "nameOccurrence": 0,
-                "kind": "run",
-                "state": "completed",
-                "output": {"ok": true},
-                "error": null,
-                "wakeAt": null,
-                "signalType": null,
-                "maxSignalAgeMs": null,
-                "consumedSignalId": null
-            }],
-            "runUpdate": {"state": "queued"}
+            "registrations": [{
+                "runId": request["runId"],
+                "appId": request["outputRead"]["appId"],
+                "terminal": true
+            }]
         }))
     }
 
@@ -2798,7 +2849,7 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn internal_workflow_advance_routes_to_worker_and_returns_step_result() {
+    async fn internal_workflow_advance_routes_to_worker_and_returns_ack() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let server_seen = Arc::clone(&seen);
         let worker = ntex::web::test::server(move || {
@@ -2835,11 +2886,12 @@ mod tests {
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = ntex::web::test::read_body(resp).await;
-        let result: Value = serde_json::from_slice(&body).expect("StepResult JSON");
+        let result: Value = serde_json::from_slice(&body).expect("workflow advance ack JSON");
+        assert_eq!(result["ack"], true);
         assert_eq!(result["runId"], "run_test");
-        assert_eq!(result["dispatchNonce"], "wfd_test");
-        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
-        assert_eq!(result["outcomes"][0]["name"], "first");
+        assert_eq!(result["registrations"][0]["runId"], "run_test");
+        assert_eq!(result["registrations"][0]["appId"], app_id.to_string());
+        assert_eq!(result["registrations"][0]["terminal"], true);
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
