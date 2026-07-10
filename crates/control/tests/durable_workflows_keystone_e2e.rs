@@ -1179,6 +1179,24 @@ async fn scheduler_counts(fx: &Fixture, run_id: &str) -> (i64, i64) {
     (row.get("timers"), row.get("inflight"))
 }
 
+/// Poll the scheduler store until a run's (timers, inflight) counts converge to
+/// `expected`. The scheduler store is a derived, eventually-consistent copy: a
+/// terminal run's de-register (`ack_terminal`) runs in the detached dispatch
+/// task after the journal commit is visible, so tests must observe the settled
+/// state rather than assume synchronous de-registration.
+async fn wait_for_scheduler_counts(fx: &Fixture, run_id: &str, expected: (i64, i64)) {
+    for _ in 0..200 {
+        if scheduler_counts(fx, run_id).await == expected {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "scheduler counts for {run_id} did not converge to {expected:?}; last = {:?}",
+        scheduler_counts(fx, run_id).await
+    );
+}
+
 async fn scheduler_timer_wake_at(fx: &Fixture, run_id: &str) -> Option<DateTime<Utc>> {
     fx.pg
         .query(
@@ -4607,11 +4625,7 @@ async fn scheduler_misfire_lost_register_recovers() {
     let counts = side_counts(&fx, &run_id).await;
     assert_eq!(counts.get("a").copied(), Some(1));
     assert_eq!(counts.get("b").copied(), Some(1));
-    assert_eq!(
-        scheduler_counts(&fx, &run_id).await,
-        (0, 0),
-        "terminal ack should retire scheduler rows"
-    );
+    wait_for_scheduler_counts(&fx, &run_id, (0, 0)).await;
 }
 
 #[compio::test]
@@ -4730,11 +4744,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         Some(1),
         "idempotent side effect should commit once despite duplicate dispatch"
     );
-    assert_eq!(
-        scheduler_counts(&fx, &run_id).await,
-        (0, 0),
-        "terminal duplicate-dispatch run should retire scheduler rows"
-    );
+    wait_for_scheduler_counts(&fx, &run_id, (0, 0)).await;
 }
 
 #[compio::test]
