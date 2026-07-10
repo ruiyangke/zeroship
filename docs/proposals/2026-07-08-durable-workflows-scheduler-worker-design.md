@@ -176,6 +176,8 @@ kind ∈ { start, advance, fire-schedule, deliver-signal, install-schedule,
 ### 10.2 The `_sys` boundary (why a per-app system schema)
 The journal underpins exactly-once + billing, so app code must not forge/delete it. `env.db`'s role has RW to `app_<id>`; the journal therefore lives in a **platform-owned `app_<id>_sys` schema with no grants to the app role** — a write boundary encryption *cannot* provide (encryption gives confidentiality, not write-integrity). Per-app `_sys` gives clean isolation + portability (drop-schema = remove a tenant's workflows); a per-database `_wf`+RLS schema is the scalable alternative (fewer schemas, commingled + RLS) if per-app schema count ever bites. Either is platform-owned + app-unwritable. The signal **mailbox**, **subscriptions**, and **schedules** are `_sys` tables too (content, not fire-time) — worker-written, never in the scheduler store.
 
+> **DEFERRED — schema placement (operator, 2026-07-09):** the separate `app_<id>_sys` schema is **not settled**. Operator preference is to keep the journal in the app's **own `app_<id>` schema** (one schema per app, not two). Viable, but the resolution must preserve at the *table* level the two properties `_sys` gave for free at the schema level: **(1) tamper-proofness** — journal tables owned by a platform/system role with **no DML grants to the `env.db` app-runtime role** and no ability to `DROP`/`ALTER` them (the app role has RW on its own schema, so table-level `REVOKE` + non-app ownership must carry the write boundary); **(2) name-collision avoidance** — a **reserved table-name prefix** (e.g. a `zs_`-family) creator migrations are forbidden to use, so platform journal tables can't clash with creator tables in the shared schema. Trade: schema-count down, grant-management complexity up. **Decision recorded, not yet folded into the sections above** — P2 must resolve it before the journal moves off the control-plane DB. This adds a third, preferred option to the §16.2 "per-app `_sys` vs per-database `_wf`+RLS" question: **single `app_<id>` schema + table-level isolation.**
+
 ### 10.3 Security & blast radius
 - **Execution:** hardened V8 isolate per `(app, deploy)` (seccomp, side-channel mitigations, per-isolate limits) — no microVM; deploy-pinned replay from a bounded per-app pinned-isolate budget.
 - **Data (primary defense):** end-to-end-encrypted journal — the worker decrypts only inside the tenant's isolate (key from KMS, zeroized after); a DB breach yields ciphertext.
@@ -230,7 +232,7 @@ A scenario evaluation (10 clusters) found the spine sound but 11 critical + 8 ma
 
 ## 16. Open questions
 1. **Scheduler-store backend** — its own PG per shard vs. a shared store; DR-reconcile cadence for the rare scheduler-store-loss case (§6.3).
-2. **`_sys` granularity** — per-app schema (portability) vs. per-database `_wf`+RLS (schema count) (§10.2).
+2. **`_sys` granularity** — per-app schema (portability) vs. per-database `_wf`+RLS (schema count) (§10.2). **Operator lean (2026-07-09, deferred): a third option — single `app_<id>` schema + table-level isolation (no `_sys`); see the §10.2 deferred note.**
 3. **Affinity vs. any-worker** dispatch (cold-load cost vs. pure fungibility).
 4. **Journal encryption posture** — full zero-knowledge vs. audited break-glass.
 
