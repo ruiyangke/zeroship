@@ -1,45 +1,45 @@
 #!/usr/bin/env bash
 # ============================================================================
 # e2e_metering_billing.sh — full multi-node E2E for the billing & metering
-# pipeline (ISS-31, Stream-1). Proves the CROSS-SERVICE path the per-crate
-# integration tests cover only in isolation:
+# pipeline (ISS-31, Stream-1), STREAM-TO-PROVIDER architecture. Proves the
+# CROSS-SERVICE path the per-crate integration tests cover only in isolation:
 #
 #   real traffic ─► gateway ─► worker (platform counters + env.db metrics)
-#                                 │ flush (UsageReport, every ~10s)
+#                                 │ Meter.drain ─► UsageOutbox.publish (~10s)
 #                                 ▼
-#                  control /internal/usage ─► usage_aggregates (Postgres)
-#                                 │
-#         ┌───────────────────────┼────────────────────────┐
-#         ▼                        ▼                         ▼
-#   creator usage read     spend_reconcile (price+state)   billing_reconcile
-#   (GET /api/apps/:id/      ─► app_spend_state ─► gateway   (closed period) ─►
-#    usage)                     route-pull ─► 402 Block      mock-Stripe invoice
-#                                                            items + invoice
+#                            REAL REDPANDA (durable usage-event stream)
+#                                 │  (two independent consumer groups)
+#         ┌───────────────────────┴────────────────────────┐
+#         ▼ spend-recompute-witness                          ▼ (billing rail)
+#   spend_recompute: stream ─► usage_aggregates              provider forwarder
+#     ─► spend_reconcile (price+state) ─► app_spend_state       (lite is fed by
+#     ─► gateway route-pull ─► 402 Block                         the recompute
+#                                 │                              snapshot, not
+#                                 ▼                              the forwarder —
+#   billing_reconcile (closed month) ─► lite close_period ─►      so no forwarder
+#     mock-Stripe invoice items + invoice                          is spawned)
+#
+# PROVIDER: `lite` (the evaluation-grade, locally-runnable billing provider —
+# no external metering service). Its billing still bills the creator's infra
+# usage through control's REAL cyper StripeClient against the mock-Stripe.
 #
 # FAITHFUL by construction — NO stubbing of the components under test:
 #   * Real zeroship-control / zeroship-worker / zeroship-gate binaries.
-#   * Real ephemeral Postgres (docker) + the full zeroship-migrate platform set.
+#   * Real ephemeral Postgres + a real Redpanda broker (docker) + the full
+#     zeroship-migrate platform set.
 #   * A real deployed app (examples/metering-probe .zship) hit through the
-#     gateway with real HTTP traffic.
+#     gateway with real HTTP traffic; usage flows worker ─► redpanda ─►
+#     control recompute (NOT a POST — the old /internal/usage path is gone).
 #   * A real (local) Stripe endpoint: the STANDALONE `zeroship-mock-stripe`
-#     server, hit over the wire by control's REAL cyper-based StripeClient
-#     (control is booted with `--stripe-base-url http://127.0.0.1:<mock>`).
-#     The mock records every request and exposes them at GET /__mock/requests
-#     for assertion — so the Stripe wire path (form encoding, Idempotency-Key,
-#     Authorization: Bearer, HTTP round-trip, JSON parse) is exercised end to
-#     end, not stubbed.
+#     server, hit over the wire by control's REAL cyper-based StripeClient.
 #
-# On-demand reconcile: the billing reconciler bills the PREVIOUS calendar month
-# (an e2e can't wait a month). Control exposes an operator-gated internal
-# endpoint POST /internal/billing/reconcile?period=<unix> (gated by the SAME
-# control-key/dev-insecure check as every other /internal/* route — NOT a
-# bypass) that drives the real `reconcile_period` for a chosen period. A peer
-# POST /internal/spend/reconcile forces one spend sweep on demand so the spend
-# stage is deterministic instead of waiting on the 60s cron.
+# On-demand reconcile: POST /internal/billing/reconcile?period=<unix> and POST
+# /internal/spend/reconcile force one sweep each (same /internal/* gate) so the
+# billing + spend stages are deterministic instead of waiting on the cron. Usage
+# aggregation is driven by a SHORT --spend-recompute-interval so the recompute
+# consumes the stream into usage_aggregates within a couple seconds.
 #
-# DEDICATED port band + DB/dirs (does NOT reuse :5440 / zeroship_billing_test
-# used by the cargo integration tests). Cleans up procs + container on exit.
-#
+# DEDICATED port band + DB/dirs + redpanda container. Cleans up on exit.
 # Skips CLEANLY (exit 0) when docker is unavailable.
 #
 # Usage:
@@ -84,17 +84,22 @@ PROBE_ZSHIP="$ROOT/examples/metering-probe/dist/app.zship"
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 [ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }
 
-# --- DEDICATED ports + container (distinct from every other harness) -------
+# --- DEDICATED ports + containers (distinct from every other harness) ------
 CONTROL_PORT=9171
 WORKER_PORT=8071
 GATE_PORT=8061
 PG_PORT=5471
 MOCK_PORT=9571
+REDPANDA_PORT=19171
 PG_CONTAINER="zs-e2e-billing-pg"
+RP_CONTAINER="zs-e2e-billing-redpanda"
 WORKER_THREADS=2
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$CONTROL_PORT"
 MOCK_URL="http://127.0.0.1:$MOCK_PORT"
+# The worker producer and control's forwarder/recompute consumers share ONE topic.
+RP_BROKERS="127.0.0.1:$REDPANDA_PORT"
+USAGE_TOPIC="zeroship-usage-e2e"
 
 WORK="$(mktemp -d -t zs-e2e-billing-XXXXXX)"
 mkdir -p "$WORK/blobs" "$WORK/blob-cache"
@@ -119,9 +124,14 @@ cleanup() {
     while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   wait 2>/dev/null || true
-  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  stack down, ephemeral PG removed, $WORK cleaned"
+  if [ "${KEEP_WORK:-0}" = "1" ]; then
+    echo "  stack down (procs killed); KEEP_WORK=1 → PG $PG_CONTAINER + redpanda $RP_CONTAINER + logs in $WORK PRESERVED"
+  else
+    docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$RP_CONTAINER" >/dev/null 2>&1 || true
+    [ -n "${WORK:-}" ] && rm -rf "$WORK"
+    echo "  stack down, ephemeral PG + redpanda removed, $WORK cleaned"
+  fi
 }
 trap cleanup EXIT
 
@@ -145,6 +155,24 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
 
 [ -f "$ROOT/ops/postgres-init.sql" ] && psql_exec < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
   && pass "applied ops/postgres-init.sql" || true
+
+# Redpanda — the durable usage-event stream. Needs an explicit advertised
+# listener so the worker producer + control consumers reach it at $RP_BROKERS.
+docker rm -f "$RP_CONTAINER" >/dev/null 2>&1 || true
+docker run --name "$RP_CONTAINER" -d -p "$REDPANDA_PORT:$REDPANDA_PORT" \
+  docker.redpanda.com/redpandadata/redpanda:latest \
+  redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M \
+  --node-id 0 --check=false \
+  --kafka-addr "external://0.0.0.0:$REDPANDA_PORT" \
+  --advertise-kafka-addr "external://127.0.0.1:$REDPANDA_PORT" \
+  --set redpanda.auto_create_topics_enabled=true >/dev/null \
+  || { fail "docker run redpanda failed"; exit 1; }
+for _ in $(seq 1 40); do docker exec "$RP_CONTAINER" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && break; sleep 1.5; done
+if docker exec "$RP_CONTAINER" rpk cluster health --exit-when-healthy >/dev/null 2>&1; then
+  pass "redpanda broker healthy on $RP_BROKERS (usage-event stream)"
+else
+  fail "redpanda never became healthy"; docker logs "$RP_CONTAINER" 2>&1 | tail -20; exit 1
+fi
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
@@ -171,8 +199,25 @@ INSERT INTO zeroship.plans
 VALUES ('$PLAN_ID', 'metering-test', 0, 0, 1000000000000,
         '{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}', 1000000)
 ON CONFLICT (id) DO NOTHING;
+-- The global default FX (pricing_config.id='global') MUST exist or every spend +
+-- billing sweep fails closed ("global default FX row is MISSING"). Match the
+-- plan's 1 cent/CU so pricing is deterministic.
+INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit)
+VALUES ('global', 1000000000000)
+ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit;
+-- Register the platform metrics + WEIGHT 'requests' at 1 CU/op. Without a
+-- metric_weights row the compute-unit pricing weights the metric at 0, so priced
+-- spend is \$0 (no Block, no invoice). Only 'requests' is weighted so pricing is a
+-- deterministic 1 cent/request; the other counters stay unpriced.
+INSERT INTO zeroship.billing_metrics (metric, kind, unit) VALUES
+  ('requests','platform','op'), ('cpu_us','platform','us'), ('wall_us','platform','us'),
+  ('egress_bytes','platform','byte'), ('ingress_bytes','platform','byte')
+ON CONFLICT (metric) DO UPDATE SET kind='platform';
+INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units)
+VALUES ('requests', 1, 1)
+ON CONFLICT (metric) DO UPDATE SET units_per_op=1, per_units=1;
 SQL
-then pass "seeded metering-test plan ($PLAN_ID): 1 cent/CU, 0 included CU, default cap \$10000"; else fail "plan seed failed"; exit 1; fi
+then pass "seeded plan ($PLAN_ID) + pricing_config global FX + metric_weights (requests=1 CU/op)"; else fail "plan seed failed"; exit 1; fi
 
 # mock-Stripe (standalone, fixed port) — control's REAL cyper client targets it.
 "$BIN/zeroship-mock-stripe" --port "$MOCK_PORT" > "$WORK/mock-stripe.log" 2>&1 &
@@ -188,30 +233,66 @@ fi
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
-# control — booted with the mock-Stripe base URL + a test secret key.
+# Gateway broker secret (≥32 bytes) — required to start the gateway (it backs the
+# OIDC RP broker). A per-run random secret is fine for the e2e.
+openssl rand -base64 48 > "$WORK/gateway-broker-secret"
+chmod 600 "$WORK/gateway-broker-secret"
+
+# Shared config overlay (zeroship.toml). The [metering] section configures the
+# usage-event stream from the config FILE — for BOTH the producers (worker +
+# gateway) AND the control-plane consumers (forwarder + recompute) — instead of
+# env vars. Each binary loads it via --config. (Per-process outbox WAL paths are
+# passed separately since two producers on one host must not share one redb file.)
+CFG_TOML="$WORK/zeroship.toml"
+cat > "$CFG_TOML" <<TOML
+[metering]
+redpanda_brokers = "$RP_BROKERS"
+usage_events_topic = "$USAGE_TOPIC"
+TOML
+pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
+
+# control — mock-Stripe base URL + the `lite` billing provider + the redpanda
+# usage stream. `lite` is evaluation-grade (production_ready()=false) so it is
+# boot-gated behind --allow-unsupported-billing. The forwarder + recompute
+# consumers get distinct group ids from the base --stream-config (control injects
+# group.id per role). A SHORT --spend-recompute-interval makes usage aggregation
+# deterministic (the recompute drains the stream every 2s). lite is recompute-fed
+# so no forwarder is spawned for it (Meter::accepts_forwarded_events=false).
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DBURL" \
+  --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "$MOCK_URL" --stripe-secret-key "sk_test_e2e_billing" \
+  --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
+  --spend-recompute-interval 2 \
   --dev-insecure > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/health" >/dev/null 2>&1 \
-  && pass "control healthy (stripe-base-url → mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
+  && pass "control healthy (lite provider, stream=redpanda, stripe→mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
-# worker — flushes usage to control /internal/usage every ~10s.
+# worker — publishes drained usage events to redpanda. The [metering] stream
+# config comes from --config; only the per-process outbox WAL path is passed
+# separately (two producers on one host must not share one redb file).
+USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
 "$BIN/zeroship-worker" --port "$WORKER_PORT" --worker-threads "$WORKER_THREADS" \
+  --config "$CFG_TOML" \
   --control "$CONTROL_URL" --db "$DBURL" \
   --blob-store "$WORK/blobs" --poll-interval 2 --dev-insecure > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$WORKER_PORT/health" >/dev/null 2>&1 \
-  && pass "worker healthy (metering flush task running)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+  && pass "worker healthy (usage outbox → redpanda $USAGE_TOPIC)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
 
-# gateway — pulls routes (incl. spend_state) every 2s.
+# gateway — pulls routes (incl. spend_state) every 2s; ALSO a usage producer
+# (gateway_egress_bytes etc.), publishing to the same stream via --config.
+USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
 "$BIN/zeroship-gate" --port "$GATE_PORT" --control "$CONTROL_URL" \
+  --config "$CFG_TOML" \
   --workers "http://localhost:$WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --db "$DBURL" --poll-interval 2 \
-  --signing-key-file "$WORK/signing-key.pem" --dev-insecure > "$WORK/gate.log" 2>&1 &
+  --signing-key-file "$WORK/signing-key.pem" \
+  --gateway-broker-secret-file "$WORK/gateway-broker-secret" \
+  --dev-insecure > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$GATE_PORT/health" >/dev/null 2>&1 \
@@ -293,14 +374,36 @@ echo "=== Stage 3: real gateway traffic → worker (platform-measured metering) 
 # (95–99% of the cap) is reachable with an integer cap in Stage 5.
 N_REQ=100
 REQ_BODY='{"hello":"metering","n":1}'   # measurable ingress body
+# Readiness gate: the gateway must have synced the app's route from control AND
+# the worker must be able to load the app on-demand before the counted loop —
+# otherwise early requests miss (route not yet pulled / cold worker thread). Poll
+# until a probe request returns 200 (bounded), then warm both worker threads.
+READY=0
+for _ in $(seq 1 30); do
+  C="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: metering-probe.localhost' \
+        -H 'content-type: application/json' --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/ready")"
+  if [ "$C" = "200" ]; then READY=1; break; fi
+  sleep 1
+done
+[ "$READY" = "1" ] && pass "gateway route synced + app loadable (probe returns 200)" || { fail "app never became reachable via the gateway"; tail -15 "$WORK/gate.log"; exit 1; }
+# Warm both worker threads so the counted loop doesn't race a cold on-demand load.
+for _ in $(seq 1 $((WORKER_THREADS * 3))); do
+  curl -s -o /dev/null -H 'Host: metering-probe.localhost' -H 'content-type: application/json' \
+    --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/warmup" || true
+done
 GW_OK=0
 LAST_BODY=""
 for i in $(seq 1 $N_REQ); do
-  R="$(curl -s -w '\n%{http_code}' -H 'Host: metering-probe.localhost' \
-        -H 'content-type: application/json' \
-        --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/$i")"
-  CODE="$(echo "$R" | tail -1)"; BODY="$(echo "$R" | head -n -1)"
-  [ "$CODE" = "200" ] && GW_OK=$((GW_OK+1)) && LAST_BODY="$BODY"
+  # Retry a cold-start/transient miss so all N_REQ are counted (the Stage 4/5
+  # assertions depend on exactly N_REQ priced requests landing).
+  for _ in 1 2 3; do
+    R="$(curl -s -w '\n%{http_code}' -H 'Host: metering-probe.localhost' \
+          -H 'content-type: application/json' \
+          --data "$REQ_BODY" "http://localhost:$GATE_PORT/probe/$i")"
+    CODE="$(echo "$R" | tail -1)"; BODY="$(echo "$R" | head -n -1)"
+    [ "$CODE" = "200" ] && { GW_OK=$((GW_OK+1)); LAST_BODY="$BODY"; break; }
+    sleep 0.2
+  done
 done
 if [ "$GW_OK" = "$N_REQ" ] && echo "$LAST_BODY" | grep -q '"metric":"db_writes"'; then
   WROTE="$(echo "$LAST_BODY" | jget '.wrote')"
@@ -311,11 +414,13 @@ fi
 
 # ===========================================================================
 echo ""
-echo "=== Stage 4: metering → aggregation (worker flush → control → usage_aggregates) ==="
+echo "=== Stage 4: metering → aggregation (worker → redpanda → recompute → usage_aggregates) ==="
 # ===========================================================================
-# The flush task drains + POSTs a UsageReport every ~10s. Poll the creator
-# usage endpoint until the aggregates appear (bounded wait), then assert the
-# platform counters AND the custom metric.
+# The worker outbox drains the Meter + publishes UsageEvents to redpanda every
+# ~10s; control's spend_recompute consumer drains the stream into
+# usage_aggregates every ~2s (--spend-recompute-interval). Poll the creator usage
+# endpoint until the aggregates appear (bounded wait), then assert the platform
+# counters AND the custom metric — proving the whole stream path, not a POST.
 # The probe drives one env.db write + read per request, so the platform
 # emits `db_writes`/`db_reads` (≥ N_REQ) alongside the five platform counters.
 PRIMARY_METRIC="db_writes"
@@ -439,21 +544,27 @@ if(m===0){y-=1;m=11;}else{m-=1;}
 process.stdout.write(String(Math.floor(Date.UTC(y,m,1,0,0,0)/1000)));
 ' "$NOW_UNIX")"
 
-psql_exec >/dev/null 2>&1 <<SQL
+if psql_exec >/dev/null <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CLOSED_CREATOR', 'e2e-closed-$CLOSED_CREATOR@zeroship.test'::citext, 'Closed-Period Creator', NOW());
 INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash)
 VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '');
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CLOSED_CREATOR', 'owner');
--- The creator must have a saved Stripe Customer or the reconciler skips them.
-INSERT INTO zeroship.creator_billing (creator_id, stripe_customer_id)
-VALUES ('$CLOSED_CREATOR', 'cus_e2e_closed');
--- Seed 750 priced requests (= 750 cents) in the CLOSED period.
-INSERT INTO zeroship.usage_aggregates (app_id, period_start, metric, total, updated_at)
-VALUES ('$CLOSED_APP', to_timestamp($PERIOD_START), 'requests', 750, NOW())
-ON CONFLICT (app_id, period_start, metric) DO UPDATE SET total = 750;
+-- The creator must have a saved platform Stripe Customer or the reconciler skips
+-- them. The customer lives in billing_customer_refs (provider='stripe'); the
+-- creator_billing identity row backs the notify-cron FK.
+INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CLOSED_CREATOR')
+ON CONFLICT (creator_id) DO NOTHING;
+INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
+VALUES ('$CLOSED_CREATOR', 'stripe', 'cus_e2e_closed')
+ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
+-- Seed 750 priced requests (= 750 cents) in the CLOSED period. usage_aggregates
+-- is keyed by the period DATE (the month bucket), not a timestamp.
+INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total)
+VALUES ('$CLOSED_APP', to_timestamp($PERIOD_START)::date, 'requests', 750)
+ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
 SQL
-pass "seeded closed-period creator+app (period_start=$PERIOD_START, 750 priced requests, Customer cus_e2e_closed)"
+then pass "seeded closed-period creator+app (period=$(date -u -d @$PERIOD_START +%Y-%m-%d), 750 priced requests, Customer cus_e2e_closed)"; else fail "closed-period seed failed"; fi
 
 # Trigger the on-demand reconcile for this period (operator-gated internal).
 # We pass `now`=$NOW_UNIX; the endpoint bills previous_period_start_unix(now).
@@ -488,11 +599,13 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 });')"
 [ "$HAS_KEY" = "yes" ] && pass "recorded item carries deterministic Idempotency-Key (billitem:…) + Bearer auth (real cyper wire path)" || fail "invoice-item lacked the expected Idempotency-Key/auth (not the real wire path?)"
 
-# billing_runs records exactly one row for (creator, period) with the invoice id.
-RUN_N="$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.billing_runs WHERE creator_id='$CLOSED_CREATOR'" 2>/dev/null | tr -d '[:space:]')"
-RUN_INV="$(psql_exec -tA -c "SELECT stripe_invoice_id FROM zeroship.billing_runs WHERE creator_id='$CLOSED_CREATOR'" 2>/dev/null | tr -d '[:space:]')"
-[ "$RUN_N" = "1" ] && pass "billing_runs has exactly one row for the creator/period" || fail "expected 1 billing_runs row, got '$RUN_N'"
-[ -n "$RUN_INV" ] && pass "billing_runs row carries the finalized stripe_invoice_id ($RUN_INV)" || fail "billing_runs row has no stripe_invoice_id"
+# The billing rail records exactly one FINALIZED invoice for (creator, period),
+# priced at 750 cents (750 requests × 1 cent). (The legacy billing_runs table is
+# gone; the invoice is the system of record.)
+INV_N="$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.invoices WHERE creator_id='$CLOSED_CREATOR' AND status='finalized'" 2>/dev/null | tr -d '[:space:]')"
+INV_TOTAL="$(psql_exec -tA -c "SELECT COALESCE(total_cents,0) FROM zeroship.invoices WHERE creator_id='$CLOSED_CREATOR' AND status='finalized' LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+[ "$INV_N" = "1" ] && pass "invoices has exactly one finalized invoice for the creator/period" || fail "expected 1 finalized invoice, got '$INV_N'"
+[ "$INV_TOTAL" = "750" ] && pass "finalized invoice total = 750 cents (750 requests × 1¢)" || fail "expected invoice total 750, got '$INV_TOTAL'"
 
 # --- idempotency: a SECOND trigger creates NO new items ---------------------
 RECON2="$(curl -s -X POST "$CONTROL_URL/internal/billing/reconcile?period=$NOW_UNIX")"
