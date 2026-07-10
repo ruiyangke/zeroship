@@ -1863,21 +1863,25 @@ where
     let app_id: Uuid = row.get("app_id");
     let state: String = row.get("state");
     let mut wake_at: Option<DateTime<Utc>> = row.get("wake_at");
-    let claimed_by: Option<String> = row.get("claimed_by");
-    let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
     let waiting_step_key: Option<String> = row.get("waiting_step_key");
     if is_schedulable_state(&state) {
         if state == "waiting" && wake_at.is_none() {
             wake_at = rearm_waiting_run_if_pending_signal(conn, tables, &run_id, waiting_step_key.as_deref()).await?;
         }
-        if claimed_by.is_some() && dispatch_nonce.is_some() {
-            return Ok(());
-        }
         if let Some(wake_at) = wake_at {
+            // The journal claim gates execution; the scheduler store still
+            // needs a row for every durable wake so claimed parent joins cannot
+            // disappear between child-terminal applies and the parent's park.
             scheduler_store
                 .ack_register_next(&run_id, app_id, wake_at)
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
+        } else if state == "waiting"
+            && waiting_run_has_live_resume_source(conn, tables, &run_id, waiting_step_key.as_deref()).await?
+        {
+            // A no-wake parent join/subscription park can race a child/signal
+            // wake that already registered the timer store. Preserve any row
+            // that exists; the next terminal signal will register if none does.
         } else {
             scheduler_store
                 .ack_terminal(&run_id)
@@ -1898,6 +1902,123 @@ fn is_schedulable_state(state: &str) -> bool {
         state,
         "queued" | "running" | "sleeping" | "waiting" | "compensating"
     )
+}
+
+async fn waiting_run_has_live_resume_source<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+    waiting_step_key: Option<&str>,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    match waiting_step_key {
+        Some(key) => match parse_waiting_step_key(key)? {
+            WaitingStep::Sleep { .. } => Ok(false),
+            WaitingStep::Child { .. } => {
+                waiting_run_has_running_step(conn, tables, run_id, "child").await
+            }
+            WaitingStep::WaitSignal { ordinal, name, .. } => {
+                let sql = journal_sql(
+                    tables,
+                    "SELECT 1 \
+                       FROM zeroship.workflow_steps \
+                      WHERE run_id = $1 \
+                        AND ordinal = $2 \
+                        AND name = $3 \
+                        AND kind = 'wait_signal' \
+                        AND state = 'running' \
+                      LIMIT 1",
+                );
+                let rows = conn
+                    .query(&sql, &[&run_id, &ordinal, &name])
+                    .await
+                    .map_err(RegistryError::from)?;
+                if !rows.is_empty() {
+                    return Ok(true);
+                }
+                waiting_run_has_subscription(conn, tables, run_id, Some(ordinal)).await
+            }
+        },
+        None => waiting_run_has_running_resume_step_or_subscription(conn, tables, run_id).await,
+    }
+}
+
+async fn waiting_run_has_running_resume_step_or_subscription<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let sql = journal_sql(
+        tables,
+        "SELECT 1 \
+           FROM zeroship.workflow_steps \
+          WHERE run_id = $1 \
+            AND kind IN ('child', 'wait_signal') \
+            AND state = 'running' \
+          LIMIT 1",
+    );
+    let rows = conn
+        .query(&sql, &[&run_id])
+        .await
+        .map_err(RegistryError::from)?;
+    if !rows.is_empty() {
+        return Ok(true);
+    }
+    waiting_run_has_subscription(conn, tables, run_id, None).await
+}
+
+async fn waiting_run_has_running_step<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+    kind: &str,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let sql = journal_sql(
+        tables,
+        "SELECT 1 \
+           FROM zeroship.workflow_steps \
+          WHERE run_id = $1 \
+            AND kind = $2 \
+            AND state = 'running' \
+          LIMIT 1",
+    );
+    let rows = conn
+        .query(&sql, &[&run_id, &kind])
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(!rows.is_empty())
+}
+
+async fn waiting_run_has_subscription<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+    ordinal: Option<i32>,
+) -> Result<bool, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let sql = journal_sql(
+        tables,
+        "SELECT 1 \
+           FROM zeroship.workflow_subscriptions \
+          WHERE run_id = $1 \
+            AND ($2::integer IS NULL OR ordinal = $2) \
+          LIMIT 1",
+    );
+    let rows = conn
+        .query(&sql, &[&run_id, &ordinal])
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(!rows.is_empty())
 }
 
 async fn rearm_waiting_run_if_pending_signal<C>(

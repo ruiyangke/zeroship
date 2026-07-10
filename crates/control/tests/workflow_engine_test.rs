@@ -734,6 +734,44 @@ impl StepDispatcher for CompleteDispatcher {
     }
 }
 
+#[derive(Debug, Default)]
+struct JoinChildrenDispatcher;
+
+#[async_trait(?Send)]
+impl StepDispatcher for JoinChildrenDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        let next_child = request
+            .journal
+            .iter()
+            .filter(|step| step.kind == "child" && step.state == "running")
+            .min_by_key(|step| step.ordinal)
+            .cloned();
+
+        if let Some(child) = next_child {
+            let mut checkpoint =
+                running_child_checkpoint(child.ordinal, child.child_run_id.as_deref().unwrap_or(""));
+            checkpoint.name = child.name;
+            checkpoint.name_occurrence = child.name_occurrence;
+            return DispatchOutcome::Completed(StepResult::from_checkpoints(
+                request.run_id,
+                request.dispatch_nonce,
+                vec![checkpoint],
+                RunUpdate::Waiting { wake_at: None },
+            ));
+        }
+
+        DispatchOutcome::Completed(StepResult::from_checkpoints(
+            request.run_id,
+            request.dispatch_nonce,
+            Vec::new(),
+            RunUpdate::Completed {
+                output: Some(serde_json::json!({"joined": 3})),
+                output_ref: None,
+            },
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct GatedCheckpointDispatcher {
     requests: Arc<Mutex<Vec<StepRequest>>>,
@@ -1146,6 +1184,85 @@ fn child_outcome(name: &str, input: serde_json::Value, cascade: bool) -> serde_j
     })
 }
 
+fn running_child_checkpoint(ordinal: i32, child_run_id: &str) -> StepCheckpoint {
+    StepCheckpoint {
+        ordinal,
+        name: "ChildEchoWorkflow".to_string(),
+        name_occurrence: ordinal,
+        kind: "child".to_string(),
+        state: "running".to_string(),
+        output: None,
+        output_ref: None,
+        error: None,
+        wake_at: None,
+        signal_type: Some(workflow_engine::child_signal_type(ordinal)),
+        max_signal_age_ms: None,
+        consumed_signal_id: None,
+        topic: None,
+        child_run_id: Some(child_run_id.to_string()),
+        child_workflow_name: Some("ChildEchoWorkflow".to_string()),
+        child_input: None,
+        child_options: None,
+        compensation_state: None,
+        compensation_max_attempts: 1,
+    }
+}
+
+async fn assert_due_scheduler_presence(fx: &Fixture, run_id: &str) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT state, wake_at \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load due run");
+    let state: String = row.get("state");
+    let wake_at: DateTime<Utc> = row
+        .get::<_, Option<DateTime<Utc>>>("wake_at")
+        .unwrap_or_else(|| panic!("run {run_id} should have a due wake in state {state}"));
+    assert!(
+        wake_at <= Utc::now() + ChronoDuration::milliseconds(100),
+        "run {run_id} wake_at should be due, got {wake_at:?}"
+    );
+
+    let (timer, inflight) = scheduler_presence(fx, run_id).await;
+    assert!(
+        timer.is_some() || inflight.is_some(),
+        "run {run_id} has due journal wake_at {wake_at:?} in state {state} but is absent from scheduler timers and inflight"
+    );
+}
+
+async fn assert_scheduler_presence(fx: &Fixture, run_id: &str, context: &str) {
+    let (timer, inflight) = scheduler_presence(fx, run_id).await;
+    assert!(
+        timer.is_some() || inflight.is_some(),
+        "run {run_id} should remain in scheduler timers or inflight after {context}"
+    );
+}
+
+async fn scheduler_presence(
+    fx: &Fixture,
+    run_id: &str,
+) -> (
+    Option<zeroship_workflow_scheduler::store::TimerRow>,
+    Option<zeroship_workflow_scheduler::store::InflightTimer>,
+) {
+    let timer = fx
+        .scheduler_store
+        .timer(run_id)
+        .await
+        .expect("load scheduler timer");
+    let inflight = fx
+        .scheduler_store
+        .inflight(run_id)
+        .await
+        .expect("load scheduler inflight");
+    (timer, inflight)
+}
+
 #[test]
 fn child_dedup_key_is_parent_and_ordinal_deterministic() {
     assert_eq!(
@@ -1517,6 +1634,209 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     assert_eq!(
         parent_step.get::<_, Option<serde_json::Value>>("output"),
         Some(serde_json::json!({"child": "ok"}))
+    );
+}
+
+#[compio::test]
+async fn concurrent_child_terminals_keep_claimed_parent_registered() {
+    let Some(fx) = isolated_fixture("child-join-parent-strand").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-join-parent-strand").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "waiting",
+        -1_000,
+        Some("child:0:ChildEchoWorkflow"),
+        Some("owner-parent-park"),
+        Some(60_000),
+        Some("wfd_parent_park"),
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET wake_at = NULL \
+              WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("park parent without durable wake");
+    fx.scheduler_store
+        .ack_terminal(&parent)
+        .await
+        .expect("remove parent from scheduler store");
+
+    let mut child_ids = Vec::new();
+    for ordinal in 0..3 {
+        let ordinal = ordinal as i32;
+        let child_id = zeroship_core::typed_id::new_workflow_run_id();
+        let dedup_key = workflow_engine::child_dedup_key(&parent, ordinal);
+        let signal_type = workflow_engine::child_signal_type(ordinal);
+        let owner = format!("owner-child-{ordinal}");
+        let nonce = format!("wfd_child_{ordinal}");
+        let lease_expires = Utc::now() + ChronoDuration::seconds(60);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_runs \
+                    (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                     parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, started_at, \
+                     claimed_by, lease_expires, dispatch_nonce) \
+                 VALUES ($1, 'ChildEchoWorkflow', $2, $3, 'running', $4, $5, now(), \
+                         $6, $7, true, 1, now(), $8, $9, $10)",
+                &[
+                    &child_id,
+                    &app_id,
+                    &deploy_id,
+                    &serde_json::json!({"ordinal": ordinal}),
+                    &dedup_key,
+                    &parent,
+                    &signal_type,
+                    &owner,
+                    &lease_expires,
+                    &nonce,
+                ],
+            )
+            .await
+            .expect("insert child run");
+        let checkpoint = running_child_checkpoint(ordinal, &child_id);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_steps \
+                    (run_id, ordinal, name, name_occurrence, kind, state, signal_type, child_run_id, batch_id, batch_width) \
+                 VALUES ($1, $2, $3, $4, 'child', 'running', $5, $6, 'wfd_seed_children', 3)",
+                &[
+                    &parent,
+                    &checkpoint.ordinal,
+                    &checkpoint.name,
+                    &checkpoint.name_occurrence,
+                    &signal_type,
+                    &child_id,
+                ],
+            )
+            .await
+            .expect("insert parent child step");
+        child_ids.push((ordinal, child_id));
+    }
+
+    for (ordinal, child_id) in &child_ids {
+        let owner = format!("owner-child-{ordinal}");
+        let nonce = format!("wfd_child_{ordinal}");
+        let child_terminal = StepResult::from_checkpoints(
+            child_id.clone(),
+            nonce,
+            Vec::new(),
+            RunUpdate::Completed {
+                output: Some(serde_json::json!({"ordinal": ordinal})),
+                output_ref: None,
+            },
+        );
+        assert!(
+            workflow_engine::apply_step_result(&fx.state, &owner, child_terminal)
+                .await
+                .expect("child terminal apply"),
+            "child terminal apply should commit for ordinal {ordinal}"
+        );
+        assert_due_scheduler_presence(&fx, &parent).await;
+        if *ordinal == 0 {
+            fx.pg
+                .execute(
+                    "UPDATE zeroship.workflow_runs \
+                        SET wake_at = NULL, waiting_step_key = 'child:1:ChildEchoWorkflow' \
+                      WHERE id = $1",
+                    &[&parent],
+                )
+                .await
+                .expect("simulate parent parking on next child after first join");
+            workflow_engine::register_run_timer(&fx.state, &parent)
+                .await
+                .expect("sync no-wake waiting parent with live children");
+            assert_scheduler_presence(
+                &fx,
+                &parent,
+                "no-wake parent park with live child steps",
+            )
+            .await;
+        }
+    }
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET claimed_by = NULL, lease_expires = NULL, dispatch_nonce = NULL \
+              WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("release simulated parent park claim");
+
+    let dispatcher = Arc::new(JoinChildrenDispatcher);
+    for _ in 0..20 {
+        workflow_engine::fire_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(&dispatcher),
+            config("owner-child-join-drive"),
+        )
+        .await
+        .expect("drive parent join");
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT state \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1",
+                &[&parent],
+            )
+            .await
+            .expect("load parent state");
+        if row.get::<_, String>("state") == "completed" {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let parent_row = fx
+        .pg
+        .query_one(
+            "SELECT state, output, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("load completed parent");
+    assert_eq!(parent_row.get::<_, String>("state"), "completed");
+    assert_eq!(
+        parent_row.get::<_, Option<serde_json::Value>>("output"),
+        Some(serde_json::json!({"joined": 3}))
+    );
+    assert_eq!(parent_row.get::<_, Option<String>>("claimed_by"), None);
+    assert_eq!(parent_row.get::<_, Option<String>>("dispatch_nonce"), None);
+    assert_eq!(
+        workflow_step_summaries(&fx, &parent).await,
+        vec![
+            (
+                0,
+                "ChildEchoWorkflow".to_string(),
+                "child".to_string(),
+                "completed".to_string(),
+            ),
+            (
+                1,
+                "ChildEchoWorkflow".to_string(),
+                "child".to_string(),
+                "completed".to_string(),
+            ),
+            (
+                2,
+                "ChildEchoWorkflow".to_string(),
+                "child".to_string(),
+                "completed".to_string(),
+            ),
+        ]
     );
 }
 
