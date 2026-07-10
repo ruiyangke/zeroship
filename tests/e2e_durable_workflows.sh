@@ -273,6 +273,15 @@ export class ConcurrentCommitWorkflow {
   }
 }
 
+export class SingleCommitWorkflow {
+  async run(trigger, step) {
+    const once = await step.run("once", () =>
+      commit(trigger.runId, "once", \`\${trigger.runId}:once\`),
+    );
+    return { once };
+  }
+}
+
 export class SideEffectWorkflow {
   async run(trigger, step) {
     const v = await step.sideEffect("v", () => bump(trigger.runId, "v"));
@@ -482,6 +491,7 @@ export default {
     TopicSignalWorkflow,
     ConcurrentWorkflow,
     ConcurrentCommitWorkflow,
+    SingleCommitWorkflow,
     SideEffectWorkflow,
     BareAwaitWorkflow,
     NameDivergenceWorkflow,

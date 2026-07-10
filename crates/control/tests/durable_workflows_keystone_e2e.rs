@@ -45,6 +45,7 @@ const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 const TOPIC_SIGNAL_WORKFLOW_NAME: &str = "TopicSignalWorkflow";
 const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
 const CONCURRENT_COMMIT_WORKFLOW_NAME: &str = "ConcurrentCommitWorkflow";
+const SINGLE_COMMIT_WORKFLOW_NAME: &str = "SingleCommitWorkflow";
 const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
@@ -696,6 +697,21 @@ fn config(owner: &str) -> WorkflowEngineConfig {
     }
 }
 
+fn single_dispatch_config(owner: &str) -> WorkflowEngineConfig {
+    let mut cfg = config(owner);
+    cfg.batch_apps = 1;
+    cfg.per_app_fair_limit = 1;
+    cfg.max_inflight_per_app = 1;
+    cfg.max_inflight_dispatch = 1;
+    cfg
+}
+
+fn duplicate_dispatch_config(owner: &str) -> WorkflowEngineConfig {
+    let mut cfg = single_dispatch_config(owner);
+    cfg.max_inflight_dispatch = 2;
+    cfg
+}
+
 fn schedule_config(owner: &str) -> ScheduleSweepConfig {
     ScheduleSweepConfig {
         batch_size: 4,
@@ -1121,6 +1137,115 @@ async fn wait_for_state(
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("run {run_id} did not reach state {expected}");
+}
+
+async fn wait_for_step_count(fx: &Fixture, run_id: &str, expected: usize) {
+    for _ in 0..120 {
+        if step_rows(fx, run_id).await.len() == expected {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "run {run_id} did not reach {expected} step rows: {}",
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn wait_for_dispatch_count(dispatcher: &CountingDispatcher, expected: usize) {
+    for _ in 0..120 {
+        if dispatcher.count() == expected {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "dispatcher reached {} calls, expected {expected}",
+        dispatcher.count()
+    );
+}
+
+async fn scheduler_counts(fx: &Fixture, run_id: &str) -> (i64, i64) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT \
+                (SELECT COUNT(*)::bigint FROM workflow_scheduler.timers WHERE run_id = $1) AS timers, \
+                (SELECT COUNT(*)::bigint FROM workflow_scheduler.inflight WHERE run_id = $1) AS inflight",
+            &[&run_id],
+        )
+        .await
+        .expect("load scheduler counts");
+    (row.get("timers"), row.get("inflight"))
+}
+
+async fn scheduler_timer_wake_at(fx: &Fixture, run_id: &str) -> Option<DateTime<Utc>> {
+    fx.pg
+        .query(
+            "SELECT wake_at FROM workflow_scheduler.timers WHERE run_id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load scheduler timer")
+        .first()
+        .map(|row| row.get("wake_at"))
+}
+
+async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
+    for _ in 0..120 {
+        if let Some(wake_at) = scheduler_timer_wake_at(fx, run_id).await {
+            return wake_at;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "scheduler timer for {run_id} did not appear: {}",
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn force_inflight_deadline_elapsed(fx: &Fixture, run_id: &str) {
+    let deadline = Utc::now() - ChronoDuration::milliseconds(1);
+    let updated = fx
+        .pg
+        .execute(
+            "UPDATE workflow_scheduler.inflight SET deadline = $2 WHERE run_id = $1",
+            &[&run_id, &deadline],
+        )
+        .await
+        .expect("force inflight deadline elapsed");
+    assert_eq!(updated, 1, "expected one inflight row for {run_id}");
+}
+
+async fn force_run_due(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
+    let wake_at = Utc::now() - ChronoDuration::milliseconds(10);
+    let updated = fx
+        .pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = $2 WHERE id = $1",
+            &[&run_id, &wake_at],
+        )
+        .await
+        .expect("force workflow run due");
+    assert_eq!(updated, 1, "expected one workflow run for {run_id}");
+    fx.scheduler_store
+        .register_timer(run_id, fx.app_id, wake_at)
+        .await
+        .expect("register due workflow timer");
+    wake_at
+}
+
+async fn force_claim_lease_elapsed(fx: &Fixture, run_id: &str) {
+    let lease_expires = Utc::now() - ChronoDuration::milliseconds(1);
+    let updated = fx
+        .pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET lease_expires = $2 WHERE id = $1",
+            &[&run_id, &lease_expires],
+        )
+        .await
+        .expect("force workflow claim lease elapsed");
+    assert_eq!(updated, 1, "expected one workflow run for {run_id}");
 }
 
 async fn drive_until_completed<D>(
@@ -4358,6 +4483,257 @@ async fn bare_await_body_io_is_rejected() {
     assert!(
         bare_dispatcher.count() >= 1,
         "bare-await workflow should have dispatched at least once"
+    );
+}
+
+#[compio::test]
+#[serial]
+async fn scheduler_misfire_lost_register_recovers() {
+    if !enabled() {
+        eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
+        return;
+    }
+
+    let db_url = required_env("CONTROL_TEST_DB");
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        .parse()
+        .expect("app id uuid");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+        .parse()
+        .expect("side port");
+    let side_cfg = SideEffectConfig {
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+    };
+
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    prepare_side_effect_table(&fx.pg).await;
+    start_side_effect_server(side_cfg, side_port);
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    let run_id = seed_workflow_run(
+        &fx,
+        WORKFLOW_NAME,
+        serde_json::json!({"case": "scheduler-misfire"}),
+    )
+    .await;
+    let first_claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(GatewayStepDispatcher::new(gateway_url.clone())),
+        single_dispatch_config("scheduler-misfire-a"),
+    )
+    .await
+    .expect("misfire first normal tick");
+    assert_eq!(first_claimed, 1);
+    wait_for_step_count(&fx, &run_id, 1).await;
+    let (state, _, claimed_by, dispatch_nonce) = run_state(&fx.pg, &run_id).await;
+    assert_eq!(state, "queued");
+    assert_eq!(claimed_by, None);
+    assert_eq!(dispatch_nonce, None);
+    wait_for_scheduler_timer(&fx, &run_id).await;
+
+    let (held_dispatcher, held_rx, release_tx) = CrashOnceDispatcher::new(gateway_url.clone());
+    let held_dispatcher = Arc::new(held_dispatcher);
+    let first_owner = "scheduler-misfire-sleep";
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&held_dispatcher),
+        single_dispatch_config(first_owner),
+    )
+    .await
+    .expect("misfire sleep tick");
+    assert_eq!(claimed, 1);
+
+    let DispatchOutcome::Completed(first_result) =
+        held_rx.await.expect("misfire held dispatch result")
+    else {
+        panic!("misfire first dispatch did not produce a StepResult");
+    };
+    assert_eq!(first_result.run_id, run_id);
+    assert!(
+        workflow_engine::apply_step_result_without_scheduler_sync(
+            &fx.state,
+            first_owner,
+            first_result.clone(),
+        )
+            .await
+            .expect("misfire manual sleep apply"),
+        "first sleep checkpoint should apply before the scheduler ack is lost"
+    );
+
+    let (state, wake_at, claimed_by, dispatch_nonce) = run_state(&fx.pg, &run_id).await;
+    let _wake_at = wake_at.expect("sleeping run wake_at");
+    assert_eq!(state, "sleeping");
+    assert_eq!(claimed_by, None);
+    assert_eq!(dispatch_nonce, None);
+    assert_eq!(
+        scheduler_counts(&fx, &run_id).await,
+        (0, 1),
+        "lost register window should leave only the fire-time inflight row"
+    );
+
+    force_inflight_deadline_elapsed(&fx, &run_id).await;
+    let reaped = workflow_engine::reap_lapsed_inflight_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(GatewayStepDispatcher::new(gateway_url.clone())),
+        single_dispatch_config("scheduler-misfire-reaper"),
+        8,
+    )
+    .await
+    .expect("misfire reaper tick");
+    assert_eq!(reaped, 1, "lapsed inflight row should redispatch once");
+
+    let _timer_wake_at = wait_for_scheduler_timer(&fx, &run_id).await;
+    let _ = release_tx.send(());
+    assert_eq!(
+        scheduler_counts(&fx, &run_id).await,
+        (1, 0),
+        "reaper replay should replace inflight with the future timer"
+    );
+
+    drive_until_completed(
+        &fx,
+        Arc::new(GatewayStepDispatcher::new(gateway_url)),
+        single_dispatch_config("scheduler-misfire-complete"),
+        &run_id,
+    )
+    .await;
+    let counts = side_counts(&fx, &run_id).await;
+    assert_eq!(counts.get("a").copied(), Some(1));
+    assert_eq!(counts.get("b").copied(), Some(1));
+    assert_eq!(
+        scheduler_counts(&fx, &run_id).await,
+        (0, 0),
+        "terminal ack should retire scheduler rows"
+    );
+}
+
+#[compio::test]
+#[serial]
+async fn scheduler_overfire_duplicate_dispatch_noops() {
+    if !enabled() {
+        eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
+        return;
+    }
+
+    let db_url = required_env("CONTROL_TEST_DB");
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        .parse()
+        .expect("app id uuid");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+        .parse()
+        .expect("side port");
+    let side_cfg = SideEffectConfig {
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+    };
+
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    prepare_side_effect_table(&fx.pg).await;
+    start_side_effect_server(side_cfg, side_port);
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    let run_id = seed_workflow_run(
+        &fx,
+        SINGLE_COMMIT_WORKFLOW_NAME,
+        serde_json::json!({"case": "scheduler-overfire"}),
+    )
+    .await;
+    force_run_due(&fx, &run_id).await;
+    let (held_dispatcher, held_rx, release_tx) = CrashOnceDispatcher::new(gateway_url.clone());
+    let held_dispatcher = Arc::new(held_dispatcher);
+    let stale_owner = "scheduler-overfire-stale";
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&held_dispatcher),
+        single_dispatch_config(stale_owner),
+    )
+    .await
+    .expect("overfire first tick");
+    assert_eq!(claimed, 1);
+
+    let DispatchOutcome::Completed(stale_result) =
+        held_rx.await.expect("overfire held dispatch result")
+    else {
+        panic!("overfire first dispatch did not produce a StepResult");
+    };
+    assert_eq!(stale_result.run_id, run_id);
+
+    force_claim_lease_elapsed(&fx, &run_id).await;
+    force_run_due(&fx, &run_id).await;
+    assert_eq!(
+        scheduler_counts(&fx, &run_id).await,
+        (1, 0),
+        "duplicate registered timer should replace the stale inflight row"
+    );
+    let duplicate_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&duplicate_dispatcher),
+        duplicate_dispatch_config("scheduler-overfire-winner"),
+    )
+    .await
+    .expect("overfire duplicate tick");
+    assert_eq!(claimed, 1, "duplicate registered timer should dispatch once");
+    wait_for_dispatch_count(&duplicate_dispatcher, 1).await;
+    assert_eq!(
+        duplicate_dispatcher.count(),
+        1,
+        "duplicate path must use the real gateway dispatcher exactly once"
+    );
+
+    let duplicate_state = wait_for_state(&fx, &run_id, "queued").await;
+    assert!(
+        duplicate_state.is_some(),
+        "duplicate dispatch should requeue the run after applying the memoized action step"
+    );
+    assert!(
+        !workflow_engine::apply_step_result(&fx.state, stale_owner, stale_result.clone())
+            .await
+            .expect("overfire stale manual apply"),
+        "stale dispatch_nonce apply must be a zero-row no-op"
+    );
+    let _ = release_tx.send(());
+    compio::time::sleep(Duration::from_millis(150)).await;
+    let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+    drive_until_completed(
+        &fx,
+        redrive_dispatcher,
+        config("scheduler-overfire-redrive"),
+        &run_id,
+    )
+    .await;
+
+    assert_eq!(
+        step_rows(&fx, &run_id).await,
+        vec![(0, "once".to_string(), "run".to_string(), "completed".to_string())],
+        "duplicate dispatch must leave one memoized step row"
+    );
+    assert_eq!(
+        effect_attempt_counts(&fx, &run_id).await.get("once").copied(),
+        Some(2),
+        "both real dispatches should reach the idempotent action boundary"
+    );
+    assert_eq!(
+        effect_commit_counts(&fx, &run_id).await.get("once").copied(),
+        Some(1),
+        "idempotent side effect should commit once despite duplicate dispatch"
+    );
+    assert_eq!(
+        scheduler_counts(&fx, &run_id).await,
+        (0, 0),
+        "terminal duplicate-dispatch run should retire scheduler rows"
     );
 }
 

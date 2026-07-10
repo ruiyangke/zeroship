@@ -1398,6 +1398,23 @@ async fn apply_step_result_on_registry(
     apply::apply_step_result_on_store(&store, config, result).await
 }
 
+/// Deterministic apply path that intentionally stops before scheduler sync.
+///
+/// This is used to exercise the crash window where the journal commit
+/// succeeds but the scheduler ack is lost before the next timer is registered.
+#[allow(clippy::future_not_send)]
+pub async fn apply_step_result_without_scheduler_sync(
+    state: &AppState,
+    owner_id: &str,
+    result: StepResult,
+) -> Result<bool, RegistryError> {
+    let mut config = WorkflowEngineConfig::default();
+    config.owner_id = owner_id.to_string();
+    apply_step_result_on_registry(&state.registry, &config, result)
+        .await
+        .map_err(workflow_error_to_registry)
+}
+
 /// Public deterministic apply path for tests and future control handlers.
 #[allow(clippy::future_not_send)]
 pub async fn apply_step_result(
