@@ -28,8 +28,13 @@ use crate::apply::executor::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
+// `PolicyProfile` is consumed only by the zsv8-gated `build_policy_profile`.
+#[cfg(feature = "zsv8")]
 use crate::model::profile::PolicyProfile;
-use crate::plan::loader::{load_dir, LoaderError, PLATFORM_OWNER_APP};
+use crate::plan::loader::{load_dir, LoaderError};
+// `PLATFORM_OWNER_APP` feeds only the zsv8-gated platform-TS-apply path.
+#[cfg(feature = "zsv8")]
+use crate::plan::loader::PLATFORM_OWNER_APP;
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -222,6 +227,24 @@ pub enum RunError {
          (use `plan --sql --engine mysql` for offline SQL preview)"
     )]
     MysqlLiveExecUnimplemented,
+    /// MySQL execution requires the V8 runtime host, which is absent from a
+    /// V8-free (`--no-default-features`) build. Names a *build-time* absence,
+    /// distinct from the *CLI-path* policy of [`RunError::MysqlLiveExecUnimplemented`].
+    #[error(
+        "MySQL execution requires the `zsv8` runtime host. This binary was \
+         compiled V8-free (`--no-default-features`); rebuild with `--features zsv8` \
+         (the default build)."
+    )]
+    MysqlRequiresZsv8,
+    /// Authoring `.ts` migration records requires the V8 runtime host, absent
+    /// from a V8-free (`--no-default-features`) build.
+    #[error(
+        "Authoring `.ts` migration records requires the `zsv8` runtime host; this \
+         binary was compiled V8-free (`--no-default-features`). Rebuild with \
+         `--features zsv8` (the default build), or supply committed `.ir.json` / \
+         `.sql` corpus instead."
+    )]
+    TsRecordRequiresZsv8,
     /// An explicit `--engine` (or `ZEROSHIP_MIGRATE_ENGINE` / config `engine`)
     /// contradicts the engine the DSN's unambiguous scheme implies. We refuse
     /// rather than silently trusting one side.
@@ -286,6 +309,25 @@ pub enum RunError {
     /// Applying IR migrations failed.
     #[error("apply IR migrations: {0}")]
     IrApply(#[from] crate::command::ir_apply::PostgresIrApplyError),
+}
+
+/// The error the CLI's live-MySQL command arms return.
+///
+/// Under `zsv8` the V8 host is present but the CLI still refuses live MySQL DSNs
+/// as policy ([`RunError::MysqlLiveExecUnimplemented`]). Under a V8-free
+/// (`--no-default-features`) build the MySQL backend is not compiled at all, so
+/// the arm instead names the *build-time* absence
+/// ([`RunError::MysqlRequiresZsv8`]). The distinction is intentional.
+#[cfg(feature = "zsv8")]
+#[inline]
+fn mysql_live_unsupported() -> RunError {
+    RunError::MysqlLiveExecUnimplemented
+}
+
+#[cfg(not(feature = "zsv8"))]
+#[inline]
+fn mysql_live_unsupported() -> RunError {
+    RunError::MysqlRequiresZsv8
 }
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
@@ -729,6 +771,8 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 }
 
 /// The resolved migration policy profile paired with the executor/guard config.
+/// Only the zsv8-gated platform-TS-apply path consumes it, so it is gated too.
+#[cfg(feature = "zsv8")]
 fn build_policy_profile(cfg: &RunConfig) -> PolicyProfile {
     match cfg.profile {
         RunProfile::Platform => PolicyProfile::platform(),
@@ -770,7 +814,7 @@ pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
         Engine::Postgres => run_migrate_pg(cfg).await,
         Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -795,7 +839,10 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     if cfg.profile == RunProfile::Platform {
         match platform_corpus_format(&cfg.dir)? {
+            #[cfg(feature = "zsv8")]
             MigrationCorpusFormat::Ts => return run_migrate_pg_platform_ts(cfg).await,
+            #[cfg(not(feature = "zsv8"))]
+            MigrationCorpusFormat::Ts => return Err(RunError::TsRecordRequiresZsv8),
             MigrationCorpusFormat::Sql => {}
         }
     }
@@ -820,6 +867,11 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 }
 
 /// The Platform Postgres `.ts` leg of `migrate`.
+///
+/// Drives the V8 authoring front-end (records `.ts` → transient IR), so it is
+/// compiled only under `zsv8`; the V8-free build routes the `Ts` arm to
+/// [`RunError::TsRecordRequiresZsv8`] instead.
+#[cfg(feature = "zsv8")]
 async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -871,7 +923,7 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
             let exec_cfg = sqlite_exec_cfg(cfg);
             status_via_backend(&backend, &exec_cfg, &migrations).await?
         }
-        Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => return Err(mysql_live_unsupported()),
         Engine::Unsupported => return Err(RunError::UnsupportedEngine),
     };
     Ok(RunReport::Status(Box::new(st)))
@@ -949,7 +1001,7 @@ pub async fn run_resolve_pending(
                     .to_string(),
             ))
         }
-        Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => return Err(mysql_live_unsupported()),
         Engine::Unsupported => return Err(RunError::UnsupportedEngine),
     }
 
@@ -1180,7 +1232,7 @@ pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
         Engine::Postgres => run_validate_pg(cfg).await,
         Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -1521,7 +1573,7 @@ pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunE
                 })
                 .collect())
         }
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -1809,7 +1861,7 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     match cfg.resolve_engine()? {
         Engine::Postgres => run_load_pg(cfg, &ddl, &entries).await,
         Engine::Sqlite(app) => run_load_sqlite(cfg, &app, &ddl, &entries).await,
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -2053,7 +2105,7 @@ pub async fn run_rollback(
     match cfg.resolve_engine()? {
         Engine::Postgres => run_rollback_pg(cfg, target).await,
         Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
+        Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -2240,7 +2292,7 @@ async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
             // path hardens the connection but does not bootstrap the journal.
             open_sqlite_backend(app).map(|_| ()).map_err(|e| e.to_string())
         }
-        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented.to_string()),
+        Engine::Mysql => Err(mysql_live_unsupported().to_string()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine.to_string()),
     }
 }
@@ -2382,8 +2434,16 @@ mod tests {
             .expect("compio runtime")
             .block_on(run_migrate(&cfg))
             .expect_err("live MySQL migrate must be refused");
+        // Both feature states fail closed before touching the migration dir; only
+        // the variant differs (CLI-path policy vs. V8-free build-out refusal).
+        #[cfg(feature = "zsv8")]
         assert!(
             matches!(err, RunError::MysqlLiveExecUnimplemented),
+            "expected MySQL fail-closed error, got {err:?}"
+        );
+        #[cfg(not(feature = "zsv8"))]
+        assert!(
+            matches!(err, RunError::MysqlRequiresZsv8),
             "expected MySQL fail-closed error, got {err:?}"
         );
     }

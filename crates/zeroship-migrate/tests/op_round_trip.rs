@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! The PR1 single-source-of-truth anti-drift gate (design §2.5 / PR1 "skeletal JS
 //! builder + round-trip fixtures").
 //!

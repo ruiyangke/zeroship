@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 test #1 (PG leg) + #2 — the build/new path applied on REAL Postgres :5440,
 //! and the `generate` autogenerate flow (re-diff to zero + autogenerate parity +
 //! machine-readable TODO-backfill marker).

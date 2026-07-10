@@ -37,6 +37,7 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
+#[cfg(feature = "zsv8")]
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
@@ -46,8 +47,9 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
-#[cfg(test)]
+#[cfg(all(test, feature = "zsv8"))]
 pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
+#[cfg(feature = "zsv8")]
 pub use mysql::{
     deprovision_mysql_migrator_account, mysql_migration_lock_name,
     provision_mysql_migrator_account, provision_mysql_migrator_account_with_password,

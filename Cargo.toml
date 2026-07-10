@@ -194,7 +194,14 @@ compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
-zeroship-migrate = { path = "crates/zeroship-migrate" }
+# V8 decoupling: the shared inherited edge defaults to the V8-free core. Consumers
+# that need the in-Rust V8 host (JS authoring front-end + live-MySQL backend) opt
+# in with `features = ["zsv8"]` (or `js-cli`). Without this key on the workspace
+# entry, per-edge `default-features = false` is silently IGNORED under Cargo's
+# workspace-inheritance rules, so the V8-free consumers (plugin-db, migrated) would
+# still link the V8 host. The migrate CLI bins build via the package's own
+# `default = ["js-cli"]`, which is unaffected by this workspace-edge default.
+zeroship-migrate = { path = "crates/zeroship-migrate", default-features = false }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

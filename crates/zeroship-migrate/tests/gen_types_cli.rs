@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! **Migration-first P3 — the `gen-types` load/emit/check round-trip.**
 //!
 //! Pre-change, `load_dir_ops` required committed `<stem>.ir.json` siblings and a

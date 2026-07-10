@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! Faithful `generate` e2e against a REAL Postgres (no shims): eval a sample
 //! `schema.js` → IR → diff against an empty live schema → assert the produced
 //! versioned dbmate migration contains the expected DDL for the goodies

@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use zeroship_runtime::channel::{result_slot, ResultReceiver};
 use zeroship_runtime::{EnvSnapshot, HostPort, NetPolicy, Runtime};
 
-use crate::frontend::embedding::js_driver_module_graph;
+use crate::apply::backend::mysql::embedding::js_driver_module_graph;
 use crate::render::step::BindValue;
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
