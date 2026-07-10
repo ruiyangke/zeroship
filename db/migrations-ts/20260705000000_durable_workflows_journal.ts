@@ -1,5 +1,4 @@
-import { table, t } from "@zeroship/migrate";
-import { grant, pgTable, revoke } from "@zeroship/migrate/pg";
+import { table, t, now, grant, revoke } from "@zeroship/migrate";
 
 export const name = "durable_workflows_journal";
 
@@ -22,7 +21,7 @@ function zs(name) {
 }
 
 function pzs(name) {
-  return pgTable(name, { schema });
+  return table(name, { schema });
 }
 
 function journalTableTarget() {
@@ -36,7 +35,7 @@ export function up() {
       app_id: t.uuid().notNull(),
       deploy_hash: t.text().notNull(),
       manifest_json: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       activated_at: t.timestamp(),
     },
     primaryKey: ["id"],
@@ -91,7 +90,7 @@ export function up() {
       dedup_key: t.text(),
       started_at: t.timestamp().notNull(),
       terminal_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -105,7 +104,7 @@ export function up() {
       c("output_kind")
         .eq("inline")
         .and(c("output_hash").isNull())
-        .or(c("output_kind").eq("blob").and(c("output_hash").isNotNull(), c("output_size").isNotNull(), c("output").isNull(), c.pg.regex(c("output_hash"), "^[0-9a-f]{64}$"))),
+        .or(c("output_kind").eq("blob").and(c("output_hash").isNotNull(), c("output_size").isNotNull(), c("output").isNull(), c("output_hash").regex("^[0-9a-f]{64}$"))),
   });
   zs("workflow_runs").check("workflow_runs_check1").add({ expr: (c) => c("input").isNotNull().or(c("input_hash").isNotNull()) });
   zs("workflow_runs").check("workflow_runs_check2").add({ expr: (c) => c("parent_run_id").isNull().eq(c("parent_wait_step_key").isNull()) });
@@ -137,12 +136,12 @@ export function up() {
       size: t.bigInt().notNull(),
       content_type: t.text().notNull(),
       refcount: t.int().notNull().default(0),
-      first_seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      last_referenced_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      first_seen_at: t.timestamp().notNull().default(now()),
+      last_referenced_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["hash"],
   });
-  pzs("workflow_blobs").check("workflow_blobs_hash_check").add({ expr: (c) => c.pg.regex(c("hash"), "^[0-9a-f]{64}$") });
+  pzs("workflow_blobs").check("workflow_blobs_hash_check").add({ expr: (c) => c("hash").regex("^[0-9a-f]{64}$") });
   pzs("workflow_blobs").index("workflow_blobs_gc_idx").add({
     on: ["last_referenced_at"],
     where: (c) => c("refcount").eq(0),
@@ -157,7 +156,7 @@ export function up() {
       secret_ct: t.bytes().notNull(),
       secret_kek: t.text().notNull(),
       status: t.text().notNull().default("active"),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       rotated_at: t.timestamp(),
       retired_at: t.timestamp(),
     },
@@ -180,7 +179,7 @@ export function up() {
       idempotency_key: t.text().notNull(),
       deploy_id: t.text().notNull(),
       fanout_state: t.text().notNull().default("pending"),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
     },
     primaryKey: ["id"],
@@ -217,7 +216,7 @@ export function up() {
       child_run_id: t.text(),
       batch_id: t.text().notNull(),
       batch_width: t.smallInt().notNull().default(1),
-      started_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      started_at: t.timestamp().notNull().default(now()),
       finished_at: t.timestamp(),
       compensation_state: t.text(),
       compensation_attempt: t.int().notNull().default(0),
@@ -236,7 +235,7 @@ export function up() {
       c("output_kind")
         .eq("inline")
         .and(c("output_hash").isNull())
-        .or(c("output_kind").eq("blob").and(c("output_hash").isNotNull(), c("output_size").isNotNull(), c("output").isNull(), c.pg.regex(c("output_hash"), "^[0-9a-f]{64}$"))),
+        .or(c("output_kind").eq("blob").and(c("output_hash").isNotNull(), c("output_size").isNotNull(), c("output").isNull(), c("output_hash").regex("^[0-9a-f]{64}$"))),
   });
   zs("workflow_steps").check("workflow_steps_compensation_state_check").add({
     expr: (c) => c("compensation_state").isNull().or(c("compensation_state").in(["pending", "running", "completed", "failed"])),
@@ -262,7 +261,7 @@ export function up() {
       run_id: t.text().notNull(),
       type: t.text().notNull(),
       payload: t.json(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       consumed_by: t.text(),
       origin: t.text().notNull().default("app"),
       delivery: t.text().notNull().default("direct"),
@@ -301,7 +300,7 @@ export function up() {
       type_filter: t.text(),
       ordinal: t.int().notNull(),
       max_age_ms: t.bigInt(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp(),
     },
     primaryKey: ["id"],
@@ -333,8 +332,8 @@ export function up() {
       claimed_by: t.text(),
       claimed_at: t.timestamp(),
       lease_expires: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -362,7 +361,7 @@ export function up() {
       id: t.text().notNull().default("global"),
       dispatch_paused: t.boolean().notNull().default(false),
       ingress_disabled: t.boolean().notNull().default(false),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
       updated_by: t.text(),
     },
     primaryKey: ["id"],
