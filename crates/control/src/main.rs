@@ -652,6 +652,8 @@ fn main() -> std::io::Result<()> {
     // up front so individual `obtain_secret` calls can borrow the per-field refs
     // (CLI/env > [secrets] file ref > default) without re-borrowing `boot`.
     let file_secrets = boot.overlay.config.secrets.clone();
+    // `[metering]` file-overlay tier for the billing stream (CLI/env > file).
+    let file_metering = boot.overlay.config.metering.clone();
     let filter = &boot.log_filter;
 
     // CLI presence overrides env, so `--dev-insecure=false` disables a stray
@@ -1355,21 +1357,59 @@ fn main() -> std::io::Result<()> {
         "control: billing provider stack selected"
     );
 
-    let billing_stream = match cli
+    // Resolve the billing stream from CLI/env, falling back to the `[metering]`
+    // file overlay so the same section that configures the producers (worker +
+    // gateway) can configure the control-plane consumers — fully from
+    // zeroship.toml, not env-only. Explicit --stream-transport / --stream-config
+    // (or their env) still win.
+    let effective_transport = cli
         .stream_transport
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            file_metering
+                .redpanda_brokers
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|_| "redpanda".to_string())
+        });
+    let effective_stream_config = if cli.stream_config.trim() != "{}"
+        && !cli.stream_config.trim().is_empty()
+    {
+        cli.stream_config.clone()
+    } else if let Some(brokers) = file_metering
+        .redpanda_brokers
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        // Matches zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC (control does not
+        // link the metering crate).
+        let topic = file_metering
+            .usage_events_topic
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("usage-events");
+        serde_json::json!({ "brokers": brokers, "topic": topic }).to_string()
+    } else {
+        cli.stream_config.clone()
+    };
+
+    let billing_stream = match effective_transport
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
         Some(id) => {
-            let stream_config_json: serde_json::Value = match serde_json::from_str(&cli.stream_config)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "control: --stream-config must be valid JSON");
-                    std::process::exit(1);
-                }
-            };
+            let stream_config_json: serde_json::Value =
+                match serde_json::from_str(&effective_stream_config) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(error = %e, "control: --stream-config must be valid JSON");
+                        std::process::exit(1);
+                    }
+                };
             let mut registry = zeroship_stream::StreamRegistry::default();
             zeroship_stream::adapters::register_builtin(&mut registry);
             let stream_registry = Arc::new(registry);

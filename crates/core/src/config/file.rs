@@ -52,6 +52,29 @@ pub struct FileConfig {
     /// resolve); absent fields fall back to CLI/env/default.
     #[serde(default)]
     pub secrets: SecretSection,
+    /// Usage-metering stream (Redpanda) configuration shared by the usage
+    /// producers (worker + gateway) and the control-plane consumers. Absent
+    /// fields fall back to env/default.
+    #[serde(default)]
+    pub metering: MeteringSection,
+}
+
+/// Usage-metering stream configuration supplied by the shared file overlay.
+/// These back-fill the corresponding environment variables (env wins) so the
+/// billing stream can be configured entirely from `zeroship.toml`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MeteringSection {
+    /// Kafka-wire broker list for the usage-event stream, e.g.
+    /// `"redpanda:9092"` (env `REDPANDA_BROKERS`). Unset ⇒ the usage producer is
+    /// disabled (drain-and-drop).
+    pub redpanda_brokers: Option<String>,
+    /// Usage-event topic (env `USAGE_EVENTS_TOPIC`, default `"usage-events"`).
+    pub usage_events_topic: Option<String>,
+    /// Producer consumer-group id override (env `REDPANDA_PRODUCER_GROUP_ID`).
+    pub producer_group_id: Option<String>,
+    /// redb WAL path for the outbox (env `USAGE_OUTBOX_WAL_PATH`).
+    pub outbox_wal_path: Option<String>,
 }
 
 /// Auth-domain values that can be supplied by the shared file overlay.

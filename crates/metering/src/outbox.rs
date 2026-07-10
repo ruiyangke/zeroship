@@ -11,12 +11,117 @@ use std::time::Duration;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError};
 use zeroship_core::usage_event::UsageEvent;
-use zeroship_stream::StreamTransport;
+use zeroship_stream::{StreamConfig, StreamRegistry, StreamTransport};
 
 use crate::Meter;
 
 pub const DEFAULT_OUTBOX_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_USAGE_EVENTS_TOPIC: &str = "usage-events";
+
+/// Resolved usage-stream producer settings. The source of these values is the
+/// caller's concern (config-file overlay, env, CLI) — this crate only consumes
+/// the resolved struct, so the billing stream is configurable from
+/// `zeroship.toml` (via the `[metering]` overlay) as well as the environment.
+#[derive(Debug, Clone, Default)]
+pub struct UsageStreamSettings {
+    /// Kafka-wire brokers. `None`/empty ⇒ the producer is disabled.
+    pub brokers: Option<String>,
+    /// Usage-event topic (default [`DEFAULT_USAGE_EVENTS_TOPIC`]).
+    pub topic: Option<String>,
+    /// Producer consumer-group id override.
+    pub group_id: Option<String>,
+    /// redb WAL path override.
+    pub wal_path: Option<String>,
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+}
+
+impl UsageStreamSettings {
+    /// Read the settings from the environment (`REDPANDA_BROKERS`,
+    /// `USAGE_EVENTS_TOPIC`, `REDPANDA_PRODUCER_GROUP_ID`, `USAGE_OUTBOX_WAL_PATH`).
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            brokers: env_nonempty("REDPANDA_BROKERS"),
+            topic: env_nonempty("USAGE_EVENTS_TOPIC"),
+            group_id: env_nonempty("REDPANDA_PRODUCER_GROUP_ID"),
+            wal_path: env_nonempty("USAGE_OUTBOX_WAL_PATH"),
+        }
+    }
+
+    /// Back-fill any field left `None` on `self` from `fallback` (so `self`, the
+    /// higher-precedence source such as env, wins over the file overlay).
+    #[must_use]
+    pub fn or(mut self, fallback: Self) -> Self {
+        self.brokers = self.brokers.or(fallback.brokers);
+        self.topic = self.topic.or(fallback.topic);
+        self.group_id = self.group_id.or(fallback.group_id);
+        self.wal_path = self.wal_path.or(fallback.wal_path);
+        self
+    }
+}
+
+/// Build a usage-event outbox (redpanda transport + redb WAL) from resolved
+/// [`UsageStreamSettings`], or `None` when no brokers are configured (producer
+/// disabled). Shared by the worker and gateway producers. The WAL path defaults
+/// per-`producer_source` so a worker and a gateway on the same host never
+/// contend for one single-writer redb file.
+pub fn build_usage_outbox(
+    producer_source: &str,
+    settings: &UsageStreamSettings,
+) -> Result<Option<(UsageOutbox, OutboxConfig)>, String> {
+    let Some(brokers) = settings
+        .brokers
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let topic = settings
+        .topic
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_USAGE_EVENTS_TOPIC)
+        .to_string();
+    let group_id = settings
+        .group_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("zeroship-producer-{producer_source}"));
+    let raw_config = serde_json::json!({
+        "brokers": brokers,
+        "topic": topic,
+        "group_id": group_id,
+        "client_id": format!("zeroship-{producer_source}"),
+    });
+
+    let mut registry = StreamRegistry::default();
+    zeroship_stream::adapters::register_builtin(&mut registry);
+    let stream = registry
+        .build("redpanda", &StreamConfig::new(raw_config))
+        .map_err(|e| e.to_string())?;
+    let config = OutboxConfig {
+        topic: topic.clone(),
+        interval: DEFAULT_OUTBOX_INTERVAL,
+    };
+    let wal_path = settings
+        .wal_path
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let safe: String = producer_source
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            PathBuf::from(format!(".zeroship/usage-outbox-{safe}.redb"))
+        });
+    let outbox = UsageOutbox::new(stream, topic, wal_path).map_err(|e| e.to_string())?;
+    Ok(Some((outbox, config)))
+}
 
 #[derive(Debug, Clone)]
 pub struct OutboxConfig {
