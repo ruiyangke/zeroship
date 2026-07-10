@@ -5,8 +5,8 @@
 //!   `build_migrations` to produce transient canonical IR, then APPLY that IR
 //!   through `IrAuthor::load_and_lower` + `engine.apply` on a real SQLite temp-file
 //!   backend (LOCAL record path).
-//! - The scaffold is deterministic by construction: it contains `c.fn.now()` /
-//!   `(c) => c.fn.now()` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
+//! - The scaffold is deterministic by construction: it contains `now()` /
+//!   `(col) => now()` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
 //!   `crypto.randomUUID()`, and recording it has ZERO determinism findings.
 //!
 //! Faithful: the REAL sandboxed recorder child + the REAL engine apply on SQLite.
@@ -32,7 +32,7 @@ const APP: &str = "app_pr4";
 // a LITERAL default (synth defaults in createTable are a deferred render wave on the
 // engine — the determinism scaffold demonstrates the synth pattern in comments).
 const EDITED_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
 export function up() {
   table("notes").create({
     columns: {
@@ -83,8 +83,8 @@ fn scaffold_is_deterministic_by_construction_and_records_zero_warnings() {
     // `new` scaffolds the `.ts` (NO `.ir.json` at new time).
     let ts = scaffold_new_ts("seed_table").expect("scaffold a valid name");
     // Determinism-correct synth defaults documented.
-    assert!(ts.contains("c.fn.genRandomUuid()"));
-    assert!(ts.contains("c.fn.now()"));
+    assert!(ts.contains("genRandomUuid()"));
+    assert!(ts.contains("now()"));
     // Scan ONLY the executable body (comments stripped) for host clock / RNG — so
     // the guarantee is about the EMITTED ops, not comment text (LOW-fix).
     let code: String = ts

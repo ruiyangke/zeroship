@@ -25,7 +25,6 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-import { pgTable as pubPgTable } from "../src/pg.js";
 // The COMPILED engine-embedded recorder artifact (the file the Rust runtime
 // include_str!s into V8). Importing it directly makes this an oracle against the
 // real shipped engine recording, not a self-referential restatement of the source.
@@ -34,7 +33,6 @@ import {
   __drain as engDrain,
   maxValue as engMaxValue,
   minValue as engMinValue,
-  pgTable as engPgTable,
   t as engT,
   table as engTable,
 } from "../dist/embedded-recorder.js";
@@ -42,9 +40,8 @@ import {
 type Rec = {
   begin: () => void;
   drain: () => any[];
-  pgTable: any;
-  t: any;
   table: any;
+  t: any;
   minValue: any;
   maxValue: any;
 };
@@ -52,7 +49,6 @@ type Rec = {
 const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
-  pgTable: pubPgTable,
   t: pubT,
   table: pubTable,
   minValue: pubMinValue,
@@ -61,7 +57,6 @@ const PUBLIC: Rec = {
 const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
-  pgTable: engPgTable,
   t: engT,
   table: engTable,
   minValue: engMinValue,
@@ -87,8 +82,8 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       unit_cents: t.int(),
       ratio: t.real(),
       source_ip: t.inet(),
-      total_cents: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
-      virtual_total: t.int().generated((c: any) => c("qty").mul(c("unit_cents")), { virtual: true }),
+      total_cents: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
+      virtual_total: t.int().generated((col: any) => col("qty").mul(col("unit_cents")), { virtual: true }),
       embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
@@ -101,7 +96,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
-    type: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
+    type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
   });
   table("documents").column("added_seq").add({ type: t.bigInt().identity() });
   return drain();
@@ -117,7 +112,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   const ops = authorWith(PUBLIC);
   const create = ops[0];
   assert.equal(create.op, "createTable");
-  const byName = (n: string) => create.columns.find((c: any) => c.name === n);
+  const byName = (n: string) => create.columns.find((column: any) => column.name === n);
 
   // t.id({ prefix }) → idPrefix
   assert.equal(byName("id").idPrefix, "doc");
@@ -164,9 +159,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 function authorPartitionWith({
   begin,
   drain,
-  pgTable,
-  t,
   table,
+  t,
   minValue,
   maxValue,
 }: Rec): any[] {
@@ -183,7 +177,7 @@ function authorPartitionWith({
     to: ["2026-06-01T00:00:00Z", maxValue],
   }, { ifNotExists: true });
   table("events").partition("events_default").create({ default: true });
-  pgTable("events")
+  table("events")
     .index("events_ts_brin_idx")
     .add({
       on: ["ts"],
@@ -192,7 +186,7 @@ function authorPartitionWith({
       with: { pagesPerRange: 32 },
       only: true,
     });
-  pgTable("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
+  table("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
   table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }

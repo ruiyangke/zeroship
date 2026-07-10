@@ -6,14 +6,14 @@
 // constraint, but this fixture's golden has an EMPTY constraints list (it is the
 // no-constraint createTable carrier). `note` is nullable-by-default (the fluent
 // chain OMITS the nullable key for a nullable column).
-import { table, t } from "@zeroship/migrate";
+import { table, t, genRandomUuid } from "@zeroship/migrate";
 
 export const name = "ddl_create";
 
 export function up() {
   table("orders").create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       total: t.int().notNull().default(0),
       note: t.text(),
     },

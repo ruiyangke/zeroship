@@ -13,7 +13,7 @@ const shared = {
 export default defineConfig([
   {
     ...shared,
-    entry: ["src/index.ts", "src/pg.ts"],
+    entry: ["src/index.ts"],
     clean: true,
   },
   // The engine-embedded recorder artifact (DSL redesign S0.5): ONE

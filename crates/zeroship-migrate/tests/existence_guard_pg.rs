@@ -944,6 +944,8 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
                 }],
                 joins: vec![],
                 r#where: None,
+                group_by: Vec::new(),
+                having: None,
                 order_by: None,
                 limit: None,
             },

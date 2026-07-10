@@ -252,6 +252,8 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
                 projection: vec![],
                 joins: vec![],
                 r#where: None,
+                group_by: Vec::new(),
+                having: None,
                 order_by: None,
                 limit: None,
             },
@@ -402,7 +404,6 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             table: "t".into(),
             set: std::iter::once(("a".to_string(), IrValue::Expr(col_ref()))).collect(),
             r#where: None,
-            batch: None,
             schema: None,
         },
     ));
@@ -427,6 +428,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             filter: None,
             name: "bf".into(),
             schema: None,
+        },
+    ));
+    c.push((
+        "dialectal",
+        "base",
+        Op::Dialectal {
+            default: Some(Vec::new()),
+            pg: None,
+            sqlite: None,
+            mysql: None,
         },
     ));
     c.push((
@@ -1097,13 +1108,13 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     let corpus = corpus();
 
     // 1. Exhaustiveness over op-KINDS: the corpus covers exactly the schema's Op
-    //    discriminants (the 53-op wire contract). No op silently uncovered.
+    //    discriminants (the 54-op wire contract). No op silently uncovered.
     let corpus_kinds: BTreeSet<String> = corpus.iter().map(|(k, _, _)| (*k).to_string()).collect();
     let schema_kinds = schema_op_tags();
     assert_eq!(
         schema_kinds.len(),
-        53,
-        "the wire contract must still carry the closed 53-op discriminant set"
+        54,
+        "the wire contract must still carry the closed 54-op discriminant set"
     );
     assert_eq!(
         corpus_kinds, schema_kinds,

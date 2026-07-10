@@ -2,7 +2,6 @@
 // createTable.partitionBy, createPartition range/default bounds, detach/drop
 // partition lifecycle ops, and PG partition-index facets (BRIN/INCLUDE/WITH/ONLY).
 import { table, t } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "partition";
 
@@ -21,10 +20,10 @@ export function up() {
   });
   table("events").partition("events_default").create({ default: true });
 
-  pgTable("events").partition("events_2026_05").detach({ concurrently: true });
+  table("events").partition("events_2026_05").detach({ concurrently: true });
   table("events").partition("events_2026_05").drop({ cascade: true });
 
-  pgTable("events")
+  table("events")
     .index("events_ts_brin_idx")
     .add({
       on: ["ts"],

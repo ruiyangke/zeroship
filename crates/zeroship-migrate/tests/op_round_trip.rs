@@ -179,10 +179,10 @@ fn corpus_is_byte_stable_and_value_equal() {
 }
 
 /// The sandboxed child and the in-process oracle must share the same module graph.
-/// This pins the vendor subpath too: `pg_vendor.mig.js` imports
-/// `@zeroship/migrate/pg`, which pre-change resolved in-process but not in the child.
+/// This pins the rooted vendor exports too: `pg_vendor.mig.js` imports privileged
+/// Postgres helpers from `@zeroship/migrate`.
 #[test]
-fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_subpath() {
+fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_exports() {
     for stem in fixture_stems() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
@@ -232,8 +232,8 @@ fn every_op_variant_has_a_fixture() {
         .collect();
     assert_eq!(
         expected.len(),
-        53,
-        "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition"
+        54,
+        "the closed Op set has 54 variants after adding op-level dialectal"
     );
 
     // The union of op discriminants across all recorded fixtures.

@@ -429,7 +429,7 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
     author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
 
     let symbol_src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "seed_symbols", up() {
             table("events").insert({ rows: [{
                 id: crypto.randomUUID,
@@ -441,12 +441,12 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
         }};
     "#;
     let explicit_src = r#"
-        import { table, cFn } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "seed_symbols", up() {
             table("events").insert({ rows: [{
-                id: cFn.genRandomUuid(),
-                created_at: cFn.now(),
-                updated_at: cFn.now(),
+                id: genRandomUuid(),
+                created_at: now(),
+                updated_at: now(),
                 version: 1,
                 kind: "symbol"
             }] });
@@ -456,10 +456,10 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
     let symbol_ir = record_migration_to_ir_unsandboxed(symbol_src, APP, "pg_fnsynth_symbol")
         .expect("record symbol-form fnSynth insert");
     let explicit_ir = record_migration_to_ir_unsandboxed(explicit_src, APP, "pg_fnsynth_explicit")
-        .expect("record explicit cFn insert");
+        .expect("record explicit top-level constructor insert");
     assert_eq!(
         symbol_ir.ops, explicit_ir.ops,
-        "native symbol form and cFn form must record byte-identical ops"
+        "native symbol form and top-level constructor form must record byte-identical ops"
     );
 
     compio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -594,7 +594,7 @@ async fn ir_batched_backfill_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// **PR6a `c.fn.concatWs` NULL-skip apply on real PG (§9) — the byte-identity peer
+/// **PR6a `concatWs` NULL-skip apply on real PG (§9) — the byte-identity peer
 /// of the SQLite `concat_ws_null_skip_applies_byte_identical_on_sqlite`.** PG's
 /// native `concat_ws` SKIPS NULL arguments, so `concat_ws('-', '1', NULL)` = `'1'`
 /// (no trailing delimiter). This pins the PG render to the EXACT same expected value
