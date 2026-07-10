@@ -36,11 +36,16 @@ use std::error::Error;
 use std::fmt;
 use std::time::Instant;
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
-use crate::apply::backend::{MigrationBackend, PgSessionSnapshot, PostgresBackend};
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::postgres::PgSession;
+use crate::apply::backend::MigrationBackend;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::{PgSessionSnapshot, PostgresBackend};
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
@@ -54,6 +59,7 @@ use crate::model::migration::{Migration, MigrationId};
 /// loose free functions. They stay defined inline in this module (so their rich
 /// doc-comments and the surrounding apply/rollback context are unchanged); this
 /// `pub(crate) mod pg` is a thin façade, not a relocation.
+#[cfg(feature = "native-pg")]
 pub(crate) mod pg {
     pub(crate) use super::{
         acquire_project_lock, apply_non_transactional, apply_transactional,
@@ -154,6 +160,7 @@ impl Error for BackendError {
     }
 }
 
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for BackendError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::new(error)
@@ -435,6 +442,7 @@ pub enum ApplyError {
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for ApplyError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::Db(error.into())
@@ -457,7 +465,11 @@ impl From<compio_postgres::Error> for ApplyError {
 /// since each apply still operates strictly within its own meta + project
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
-pub(crate) async fn acquire_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
+#[cfg(feature = "native-pg")]
+pub(crate) async fn acquire_project_lock<D: PgSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
         &[&project_id],
@@ -466,7 +478,11 @@ pub(crate) async fn acquire_project_lock(conn: &Client, project_id: &str) -> Res
     Ok(())
 }
 
-pub(crate) async fn release_project_lock(conn: &Client, project_id: &str) -> Result<(), ApplyError> {
+#[cfg(feature = "native-pg")]
+pub(crate) async fn release_project_lock<D: PgSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
         &[&project_id],
@@ -478,7 +494,10 @@ pub(crate) async fn release_project_lock(conn: &Client, project_id: &str) -> Res
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
-pub(crate) async fn snapshot_session(conn: &Client) -> Result<PgSessionSnapshot, ApplyError> {
+#[cfg(feature = "native-pg")]
+pub(crate) async fn snapshot_session<D: PgSession>(
+    conn: &D,
+) -> Result<PgSessionSnapshot, ApplyError> {
     let row = conn
         .query_one(
             "SELECT current_setting('statement_timeout') AS st, \
@@ -498,8 +517,9 @@ pub(crate) async fn snapshot_session(conn: &Client) -> Result<PgSessionSnapshot,
 /// value, false)` so the *value* is a bound literal, not interpolated SQL
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
-pub(crate) async fn restore_session(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn restore_session<D: PgSession>(
+    conn: &D,
     snap: &PgSessionSnapshot,
 ) -> Result<(), ApplyError> {
     // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
@@ -598,8 +618,9 @@ fn set_local_role_sql(
 /// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
-pub(crate) async fn configure_session_non_txn(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn configure_session_non_txn<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
@@ -759,6 +780,7 @@ fn non_transactional_down_reason(down: &str) -> Option<String> {
 /// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
+#[cfg(feature = "native-pg")]
 pub async fn apply(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -785,6 +807,7 @@ pub async fn apply(
 ///
 /// # Errors
 /// Same as [`apply`].
+#[cfg(feature = "native-pg")]
 pub async fn apply_with_lock(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -919,6 +942,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
 ///
 /// # Errors
 /// [`ApplyError::Db`] if the `SELECT pg_advisory_lock(...)` fails.
+#[cfg(feature = "native-pg")]
 pub async fn acquire_project_lock_outer(
     conn: &Client,
     project_id: &str,
@@ -934,6 +958,7 @@ pub async fn acquire_project_lock_outer(
 ///
 /// # Errors
 /// [`ApplyError::Db`] if the `SELECT pg_advisory_unlock(...)` fails.
+#[cfg(feature = "native-pg")]
 pub async fn release_project_lock_outer(
     conn: &Client,
     project_id: &str,
@@ -2007,8 +2032,9 @@ fn order_rollback<'a>(
 /// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
-pub(crate) async fn apply_transactional(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn apply_transactional<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
@@ -2210,9 +2236,10 @@ pub(crate) async fn apply_transactional(
 /// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
 /// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
 /// failure.
+#[cfg(feature = "native-pg")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_dml_transactional(
-    conn: &Client,
+pub(crate) async fn apply_dml_transactional<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -2348,8 +2375,9 @@ pub(crate) async fn apply_dml_transactional(
 /// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
 /// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
-async fn insert_supersedes_edges(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn insert_supersedes_edges<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     squash_version: &str,
     supersedes: &[&str],
@@ -2374,8 +2402,9 @@ async fn insert_supersedes_edges(
 /// marker, plus the idempotent recovery path.
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
-pub(crate) async fn apply_non_transactional(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn apply_non_transactional<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
@@ -2602,8 +2631,9 @@ pub(crate) async fn apply_non_transactional(
 /// migrator has no grant for. The admin owns the meta schema and is privileged
 /// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
 /// without needing the migrator role.
-async fn recover_non_transactional(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn recover_non_transactional<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
@@ -2953,6 +2983,7 @@ pub enum RollbackError {
     },
 }
 
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for RollbackError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::Db(error.into())
@@ -3009,6 +3040,7 @@ impl From<compio_postgres::Error> for RollbackError {
 /// See [`RollbackError`]. All pre-flight checks (approval, unknown target,
 /// missing-from-set, guard denial, irreversible-without-force, checksum drift)
 /// abort before any `down` executes.
+#[cfg(feature = "native-pg")]
 pub async fn rollback(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -3394,8 +3426,9 @@ async fn rollback_locked<B: MigrationBackend>(
 /// crash leaves either both (rolled back + recorded) or neither. The `down` runs
 /// under the migrator role; the journal append runs as admin (the migrator has no
 /// meta grant — C1), exactly mirroring [`apply_transactional`].
-pub(crate) async fn rollback_one_transactional(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn rollback_one_transactional<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
     applied_by: &str,
@@ -3857,7 +3890,7 @@ mod order_tests {
 // prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op
 // still carries the approval flag (so the CLI `--yes` gate holds).
 // ===========================================================================
-#[cfg(test)]
+#[cfg(all(test, feature = "native-pg"))]
 #[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
 mod trusted_apply_pg {
     use super::*;

@@ -39,6 +39,7 @@
 pub mod capability;
 #[cfg(feature = "zsv8")]
 pub mod mysql;
+#[cfg(feature = "native-pg")]
 pub mod postgres;
 pub mod sqlite;
 
@@ -46,6 +47,7 @@ pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
+#[cfg(feature = "native-pg")]
 pub use postgres::PostgresBackend;
 #[cfg(all(test, feature = "zsv8"))]
 pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};

@@ -1,3 +1,7 @@
+// Drives the built `zeroship-migrate` (standalone-cli) + `recorder-child` (zsv8)
+// binaries as subprocesses via `CARGO_BIN_EXE_*`, so it requires the CLI build
+// (`standalone-cli` → `zsv8` → `native-pg`), not a bare `native-pg` library build.
+#![cfg(feature = "standalone-cli")]
 //! Phase-6 BINARY-level e2e (design §9/§12): the COMPOSE `migrate` flow, proven
 //! end-to-end through the ACTUAL `zeroship-migrate` binary as a SUBPROCESS — not
 //! the library `run_*` functions, not a shim.

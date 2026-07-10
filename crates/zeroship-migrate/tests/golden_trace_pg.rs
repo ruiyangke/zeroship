@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! HIGH #1 (spec §6.0 / §10 PR0 test 8) — the GOLDEN-TRACE ORACLE for the
 //! re-pointed declarative path, on REAL Postgres (`:5440`).
 //!

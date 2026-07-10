@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR0 — faithful e2e for the single shared `apply_plan` orchestrator on REAL
 //! Postgres (`:5440`), the `op.*` DSL §2.0/§6/§6.0 convergence.
 //!

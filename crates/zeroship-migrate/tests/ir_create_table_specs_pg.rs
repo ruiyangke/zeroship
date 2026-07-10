@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! **PR15 (HIGH fix) — FAITHFUL apply-level e2e for `createTable` TABLE-LEVEL
 //! constraints + indexes on real Postgres (`:5440`).**
 //!

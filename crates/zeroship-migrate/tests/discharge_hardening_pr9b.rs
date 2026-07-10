@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR9b L1 — DISCHARGE HARDENING (re-author-compare), faithful e2e on REAL Postgres
 //! (`:5440`). No shims, no PG-gated skips.
 //!

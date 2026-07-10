@@ -55,7 +55,7 @@
 //! batch is safe: a concurrent migration that commits between two batches is
 //! simply observed by the next batch's window.
 
-use compio_postgres::Client;
+use crate::apply::backend::postgres::PgSession;
 use serde_json::Value;
 
 use crate::approval::Approval;
@@ -197,8 +197,8 @@ fn build_batch_sql(
 ///
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
-pub async fn ensure_backfill_progress(
-    conn: &Client,
+pub async fn ensure_backfill_progress<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
     // JournalError-returning seam: route directly through the shared engine helper
@@ -264,8 +264,8 @@ pub struct BackfillProgress {
 ///
 /// # Errors
 /// [`JournalError::Db`] on a read/bootstrap failure.
-pub async fn backfill_progress(
-    conn: &Client,
+pub async fn backfill_progress<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     backfill_id: &str,
 ) -> Result<Option<BackfillProgress>, JournalError> {
@@ -308,8 +308,8 @@ pub async fn backfill_progress(
 ///
 /// # Errors
 /// [`JournalError::Db`] on a read/bootstrap failure.
-pub async fn list_backfills(
-    conn: &Client,
+pub async fn list_backfills<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<BackfillProgress>, JournalError> {
     ensure_backfill_progress(conn, cfg).await?;
@@ -346,8 +346,8 @@ pub async fn list_backfills(
 /// the table + column exist in the project schema. Returns the
 /// `format_type`-rendered type (e.g. `integer`, `text`, `timestamp with time
 /// zone`) which is a TRUSTED, catalog-derived string (never the author's input).
-async fn resolve_cursor_type(
-    conn: &Client,
+async fn resolve_cursor_type<D: PgSession>(
+    conn: &D,
     // #149: introspection now targets `spec.schema` (the effective schema), so the
     // executor config is no longer read here. Kept for call-site uniformity.
     _cfg: &ExecutorConfig,
@@ -395,8 +395,8 @@ async fn resolve_cursor_type(
 /// Both are closed by requiring a UNIQUE NOT NULL key (a `PRIMARY KEY` is the
 /// canonical choice). Introspection binds schema/table/column as parameters
 /// (injection-safe, like [`resolve_cursor_type`]).
-async fn validate_cursor_column(
-    conn: &Client,
+async fn validate_cursor_column<D: PgSession>(
+    conn: &D,
     // #149: introspection now targets `spec.schema`; the config is unused here.
     _cfg: &ExecutorConfig,
     spec: &BackfillSpec,
@@ -553,8 +553,8 @@ fn walk_update_set_targets(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bo
 /// - [`BackfillError::BatchFailed`] — a batch's `UPDATE` failed; the batch rolled
 ///   back, progress is at the last committed cursor, safely resumable.
 /// - [`BackfillError::Db`] / [`BackfillError::Journal`] — infrastructure failures.
-pub async fn run_backfill(
-    conn: &Client,
+pub async fn run_backfill<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     spec: &BackfillSpec,
     approval: Approval,
@@ -576,8 +576,8 @@ pub async fn run_backfill(
 ///
 /// # Errors
 /// Same as [`run_backfill`].
-pub async fn run_backfill_bounded(
-    conn: &Client,
+pub async fn run_backfill_bounded<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     spec: &BackfillSpec,
     approval: Approval,
@@ -709,8 +709,8 @@ pub async fn run_backfill_bounded(
 
 /// Insert the progress row for a fresh backfill (idempotent — `ON CONFLICT DO
 /// NOTHING`, so a resumed run keeps its committed cursor). Runs as admin.
-async fn upsert_progress_row(
-    conn: &Client,
+async fn upsert_progress_row<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     backfill_id: &str,
     spec: &BackfillSpec,
@@ -738,8 +738,8 @@ async fn upsert_progress_row(
 }
 
 /// Mark a backfill's progress row complete (runs as admin, its own statement).
-async fn mark_complete(
-    conn: &Client,
+async fn mark_complete<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     backfill_id: &str,
 ) -> Result<(), BackfillError> {
@@ -764,8 +764,8 @@ async fn mark_complete(
 /// advisory lock is taken with `pg_advisory_xact_lock` so it auto-releases at
 /// COMMIT (per-batch serialization without holding the lock across the whole
 /// long-running backfill).
-async fn run_one_batch(
-    conn: &Client,
+async fn run_one_batch<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     spec: &BackfillSpec,
     cursor_type: &str,
@@ -907,6 +907,7 @@ async fn run_one_batch(
 #[allow(clippy::future_not_send)] // compio single-thread runtime; the stack is !Send by design.
 mod cross_schema_backfill_pg {
     use super::*;
+    use compio_postgres::Client;
     use crate::model::capability::OperatorCapability;
 
     const DEFAULT_DSN: &str =
@@ -944,7 +945,7 @@ mod cross_schema_backfill_pg {
         c
     }
 
-    async fn count_where(conn: &Client, schema: &str, table: &str, pred: &str) -> i64 {
+    async fn count_where<D: PgSession>(conn: &D, schema: &str, table: &str, pred: &str) -> i64 {
         conn.query_one(
             &format!("SELECT count(*)::bigint FROM \"{schema}\".\"{table}\" WHERE {pred}"),
             &[],

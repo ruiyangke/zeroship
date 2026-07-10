@@ -1556,6 +1556,7 @@ mod tests {
         let canonical = quote_ident_checked(schema).unwrap();
         // author (infallible-on-valid wrapper) — maps to its own error on failure.
         assert_eq!(crate::plan::author::quote_ident_for_test(schema).unwrap(), canonical);
+        #[cfg(feature = "native-pg")]
         assert_eq!(
             crate::apply::backend::postgres::backfill::quote_ident_for_test(schema).unwrap(),
             canonical
@@ -1564,6 +1565,7 @@ mod tests {
         assert_eq!(crate::apply::journal::quote_ident_for_test(schema).unwrap(), canonical);
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
+        #[cfg(feature = "native-pg")]
         assert!(crate::apply::backend::postgres::backfill::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());

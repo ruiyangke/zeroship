@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! MED #3 (spec §10 PR0 test 7, "mandatory") — the Platform Flyway-mode
 //! DIFFERENTIAL APPLY test on REAL Postgres (`:5440`).
 //!

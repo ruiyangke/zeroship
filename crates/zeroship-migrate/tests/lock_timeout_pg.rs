@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Apply-time **lock-safety envelope** — faithful e2e on REAL Postgres (`:5440`).
 //!
 //! The migration engine pins a SHORT, SEPARATE `lock_timeout` (default 3s) on

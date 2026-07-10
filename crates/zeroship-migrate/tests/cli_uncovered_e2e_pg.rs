@@ -1,3 +1,4 @@
+#![cfg(feature = "standalone-cli")]
 //! BINARY-level e2e for the `zeroship-migrate` subcommands that were previously
 //! ONLY unit/library-tested — driven through the REAL binary as a subprocess on a
 //! fresh throwaway Postgres DB, asserting real DB state (table existence) + `status`

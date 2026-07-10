@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::Client;
 
 use crate::conn::ExecutorConfig;
@@ -130,6 +131,7 @@ pub enum StatusError {
 /// - [`StatusError::Journal`] on a journal read/bootstrap failure.
 /// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
 ///   unsatisfiable or cyclic (the same fault apply would surface).
+#[cfg(feature = "native-pg")]
 pub async fn status(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -222,6 +224,7 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
 
 /// The body of [`status`]'s consistent-snapshot read: both journal reads + the
 /// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
+#[cfg(feature = "native-pg")]
 async fn read_status_snapshot(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -360,6 +363,7 @@ fn derive_pending_contract_status(
 ///
 /// # Errors
 /// [`StatusError::Journal`] on a journal read/bootstrap failure.
+#[cfg(feature = "native-pg")]
 pub async fn history(
     conn: &Client,
     cfg: &ExecutorConfig,

@@ -32,6 +32,7 @@ pub struct BackfillOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum BackfillError {
     /// A database error outside a guarded/progress step.
+    #[cfg(feature = "native-pg")]
     #[error("db error: {0}")]
     Db(#[from] compio_postgres::Error),
     /// A progress / journal-schema operation failed.
@@ -81,6 +82,7 @@ pub enum BackfillError {
         cursor_column: String,
     },
     /// A batch's `UPDATE` failed at execution.
+    #[cfg(feature = "native-pg")]
     #[error("backfill batch failed at cursor {at_cursor:?}: {source}")]
     BatchFailed {
         /// The last committed cursor when the failing batch started.
@@ -165,6 +167,7 @@ pub struct DryRunReport {
 #[derive(Debug, thiserror::Error)]
 pub enum DryRunError {
     /// `CREATE DATABASE` / `DROP DATABASE` or another admin-connection op failed.
+    #[cfg(feature = "native-pg")]
     #[error("shadow admin db error: {0}")]
     Admin(#[source] compio_postgres::Error),
     /// Opening the second shadow session failed.

@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful status + history read-API tests against a REAL Postgres (no shims).
 //!
 //! Requires `zeroship_migrate_test` on :5440 (see the test runbook). Each test

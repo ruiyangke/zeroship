@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! **#173 + #174 — live-PG round-trip for carried column facets.**
 //!
 //! Two facet-completeness lifts, proven against REAL Postgres (not a stub):

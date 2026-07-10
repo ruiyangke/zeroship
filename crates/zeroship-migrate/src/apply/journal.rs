@@ -30,7 +30,8 @@
 //! schema, so a creator migration confined to its own schema cannot touch its
 //! own history. Bootstrap ([`ensure_journal`]) is idempotent.
 
-use compio_postgres::Client;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::postgres::PgSession;
 
 use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
@@ -359,6 +360,7 @@ pub enum JournalError {
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for JournalError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::Db(error.into())
@@ -389,7 +391,8 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 ///
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
-pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), JournalError> {
+#[cfg(feature = "native-pg")]
+pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema))?;
     let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
@@ -722,8 +725,9 @@ pub async fn ensure_journal(conn: &Client, cfg: &ExecutorConfig) -> Result<(), J
 /// # Errors
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
 /// phase value is unrecognized.
-pub async fn applied(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn applied<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -853,8 +857,9 @@ pub struct HistoryEvent {
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn net_rolled_back(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn net_rolled_back<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -901,8 +906,9 @@ pub async fn net_rolled_back(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn history(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn history<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -955,8 +961,9 @@ pub async fn history(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn record_rolled_back(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn record_rolled_back<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -986,8 +993,9 @@ pub async fn record_rolled_back(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn record_started(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn record_started<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -1034,8 +1042,9 @@ pub struct CompletedRecord<'a> {
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
-pub async fn record_completed(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn record_completed<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
@@ -1085,8 +1094,9 @@ pub async fn record_completed(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn outstanding_pending_contracts(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn outstanding_pending_contracts<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<PendingContract>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -1168,8 +1178,9 @@ pub async fn outstanding_pending_contracts(
 /// [`JournalError::Db`] on insert/commit failure. When a scope is present and any
 /// statement fails, the whole transaction is rolled back so there is never an
 /// obligation without its marker (nor a marker without its obligation).
-pub async fn record_pending_contract_with_recovery(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn record_pending_contract_with_recovery<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     rec: PendingContractRecord<'_>,
     scope: Option<DeployRecoveryScope<'_>>,
@@ -1252,8 +1263,9 @@ pub async fn record_pending_contract_with_recovery(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn resolve_pending_contract(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn resolve_pending_contract<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     pc: &PendingContract,
     resolution: Resolution,
@@ -1325,8 +1337,9 @@ pub struct DeployRecovery {
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn mark_deploy_recovery_committed(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn mark_deploy_recovery_committed<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
     pending_version: &str,
@@ -1371,8 +1384,9 @@ pub async fn mark_deploy_recovery_committed(
 /// # Errors
 /// [`JournalError::Db`] on any insert/commit failure (the partial batch is rolled
 /// back so no marker is left half-promoted).
-pub async fn mark_deploy_recovery_committed_batch(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
     pending_versions: &[String],
@@ -1410,8 +1424,9 @@ pub async fn mark_deploy_recovery_committed_batch(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-pub async fn mark_deploy_recovery_reconciled(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
     pending_version: &str,
@@ -1462,8 +1477,9 @@ pub async fn mark_deploy_recovery_reconciled(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn outstanding_deploy_recoveries(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn outstanding_deploy_recoveries<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<DeployRecovery>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -1512,7 +1528,8 @@ pub async fn outstanding_deploy_recoveries(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
+#[cfg(feature = "native-pg")]
+pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let row = conn
         .query_one(
@@ -1551,8 +1568,9 @@ pub async fn applied_count(conn: &Client, cfg: &ExecutorConfig) -> Result<i64, J
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn superseded_versions(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn superseded_versions<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -1620,8 +1638,9 @@ pub async fn superseded_versions(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-pub async fn latest_completed_checksums(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn latest_completed_checksums<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
@@ -1682,8 +1701,9 @@ pub struct BaselineRecord<'a> {
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure (the partial work is rolled back).
-pub async fn record_baseline(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn record_baseline<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
@@ -1703,8 +1723,9 @@ pub async fn record_baseline(
 /// The row + edge INSERTs of [`record_baseline`], run INSIDE its `BEGIN … COMMIT`
 /// (#3). Split out so the caller can ROLLBACK on the first failure, making the
 /// completed row and its full edge set atomic.
-async fn record_baseline_inner(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn record_baseline_inner<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
@@ -1740,8 +1761,9 @@ async fn record_baseline_inner(
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
-pub async fn clear_inflight(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn clear_inflight<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {

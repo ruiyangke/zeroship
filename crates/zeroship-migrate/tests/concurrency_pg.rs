@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! H10 — whole-deploy serialization of a declarative deploy against a REAL
 //! Postgres (no shims).
 //!

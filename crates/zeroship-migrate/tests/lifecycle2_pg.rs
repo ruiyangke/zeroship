@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! P1/P2 cross-feature END-TO-END lifecycle tests against a REAL Postgres (no
 //! shims) — the sequel to `lifecycle_pg` (P0).
 //!

@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! VENDOR (`@zeroship/migrate`) V1 — render + capability-gate + closed-enum +
 //! ir_version + checksum-neutrality faithful tests (vendor spec §6.1 PR-V1).
 //!

@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! **PR10 Part B** — faithful e2e for the executor-side existence-guard catalog
 //! probe on REAL Postgres (`:5440`). Each test builds a guarded `op.*` IR, lowers
 //! it through the REAL `IrAuthor` (which stamps the `GuardProbe` onto the lowered

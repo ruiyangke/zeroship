@@ -8,12 +8,18 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::{Client, NoTls};
 
 /// Error opening a migrator connection.
+///
+/// The single variant names the compio-postgres driver, so it is `native-pg`-
+/// gated; a `native-pg`-off build compiles this as an (uninhabited) enum — no
+/// connect path exists to construct it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     /// The underlying compio-postgres driver failed to connect.
+    #[cfg(feature = "native-pg")]
     #[error("connect: {0}")]
     Connect(#[from] compio_postgres::Error),
 }
@@ -400,6 +406,7 @@ impl ExecutorConfig {
 ///
 /// # Errors
 /// [`ConnectError::Connect`] if the driver cannot establish the session.
+#[cfg(feature = "native-pg")]
 pub async fn connect(dsn: &str) -> Result<Client, ConnectError> {
     let (client, handle) = connect_with_handle(dsn).await?;
     // Run-loop ownership not needed by this caller: detach it (background).
@@ -423,6 +430,7 @@ pub async fn connect(dsn: &str) -> Result<Client, ConnectError> {
 ///
 /// # Errors
 /// [`ConnectError::Connect`] if the driver cannot establish the session.
+#[cfg(feature = "native-pg")]
 pub async fn connect_with_handle(
     dsn: &str,
 ) -> Result<(Client, compio::runtime::JoinHandle<()>), ConnectError> {

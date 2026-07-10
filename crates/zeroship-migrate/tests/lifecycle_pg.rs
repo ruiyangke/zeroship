@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! P0 cross-feature END-TO-END lifecycle tests against a REAL Postgres (no shims).
 //!
 //! Every per-feature suite (`executor_pg`, `declarative_pg`, `expand_contract_pg`,

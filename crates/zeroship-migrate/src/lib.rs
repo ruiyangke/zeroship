@@ -64,6 +64,14 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
+// When the `native-pg` driver seam is omitted (`--no-default-features`), the whole
+// PG apply path (journal/drift/baseline/precondition free fns, the connect path,
+// role provisioning, the PG CLI/IR legs) is gated out. The dialect-neutral helpers
+// and imports those gated leaves are the sole consumers of then read as dead —
+// expected for the PG-omitted core. Scope the allowance to that config ONLY so the
+// default (`native-pg`-on) build stays strict and warning-clean.
+#![cfg_attr(not(feature = "native-pg"), allow(dead_code, unused_imports))]
+
 pub mod analysis;
 pub mod apply;
 pub mod approval;
@@ -81,6 +89,9 @@ pub mod model;
 pub mod ops;
 pub mod plan;
 pub mod render;
+// PG integration-test helpers (all consumers are `*_pg.rs` suites that connect to
+// a live PG at :5440). PG-only, so gated with `native-pg`.
+#[cfg(feature = "native-pg")]
 #[doc(hidden)]
 pub mod test_support;
 
@@ -113,12 +124,16 @@ pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
 #[cfg(all(test, feature = "zsv8"))]
 pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
-// V8-free re-exports (consumed by plugin-db / migrated per the decoupling design §7).
+// V8-free, driver-neutral re-exports (consumed by plugin-db / migrated per the
+// decoupling design §7). Name no compio type and back the SQLite path too — ungated.
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    MigrationBackend, MigrationResult, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend,
-    SeedError, ShadowConfig, ShadowDryRun,
+    MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
+// PG-only re-exports (consumer-based gate: `PgSessionSnapshot` is a pure-`String`
+// struct, but its only consumers are the PG session leaves). Behind `native-pg`.
+#[cfg(feature = "native-pg")]
+pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
 // MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
 #[cfg(feature = "zsv8")]
 pub use apply::backend::{
@@ -128,9 +143,12 @@ pub use apply::backend::{
     MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
 };
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
+#[cfg(feature = "native-pg")]
 pub use apply::backend::postgres::online::PgOnline;
+#[cfg(feature = "native-pg")]
 pub use apply::backend::postgres::shadow::PgShadow;
 pub use apply::baseline::{BaselineError, BaselineOutcome};
+#[cfg(feature = "native-pg")]
 pub use apply::backend::postgres::backfill::{
     backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
     run_backfill_bounded, BackfillProgress,
@@ -155,15 +173,23 @@ pub use engine::{
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
-pub use conn::{connect, ConnectError, ExecutorConfig, PgConfinement};
+pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
+#[cfg(feature = "native-pg")]
+pub use conn::connect;
 pub use apply::drift::{
-    check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
+    diff_snapshots, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
+// `check_checksum_drift` reads the journal over a `&D: PgSession`; `snapshot_schema`
+// introspects `pg_catalog` — both PG-only (SQLite has its own peers). Gated.
+#[cfg(feature = "native-pg")]
+pub use apply::drift::{check_checksum_drift, snapshot_schema};
 pub use apply::executor::{
-    apply, rollback, ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
+    ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
+#[cfg(feature = "native-pg")]
+pub use apply::executor::{apply, rollback};
 // **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
@@ -189,13 +215,19 @@ pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
 pub use zeroship_schema::query::SqlDialect;
+// Dialect-neutral journal types (the SQLite path constructs/imports these too).
+pub use apply::journal::{
+    AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
+    PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
+};
+// The PG journal free functions (each takes a `&D: PgSession` connection). The
+// SQLite backend has its own `sqlite/journal_sql.rs` peers. Gated behind `native-pg`.
+#[cfg(feature = "native-pg")]
 pub use apply::journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
     record_baseline, record_completed, record_rolled_back, record_started,
-    resolve_pending_contract, superseded_versions, AppliedEntry, HistoryEvent,
-    HistoryKind, JournalError, JournaledKind, PendingContract, PendingContractRecord,
-    PendingState, Phase, Resolution, RolledBackEntry,
+    resolve_pending_contract, superseded_versions,
 };
 // The §8.8 structured pending-contract interlock payloads (§2.0.3 / §2.0.4).
 pub use plan::pending::{
@@ -209,11 +241,14 @@ pub use plan::loader::{
 };
 pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
-    history, status, BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
+    BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-pub use ops::submit::{
-    submit_migration, Submission, SubmissionOutcome, SubmitError,
-};
+// `history` / `status` take a concrete `&Client` PG connection — PG-only.
+#[cfg(feature = "native-pg")]
+pub use ops::status::{history, status};
+// The confined submit path is PG-only (§4.5); gated with `mod ops::submit`.
+#[cfg(feature = "native-pg")]
+pub use ops::submit::{submit_migration, Submission, SubmissionOutcome, SubmitError};
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
@@ -254,10 +289,14 @@ pub use model::load::{
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
 pub use command::ir_apply::{
-    apply_bundle_ir_postgres, apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog,
-    apply_one_ir_file_postgres, apply_sealed, discover_ir_files, postgres_ir_apply_state,
+    apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, discover_ir_files,
     IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
     SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
+};
+// The PG `.ir.json` apply entry points take `&PostgresBackend<'_>` — PG-only.
+#[cfg(feature = "native-pg")]
+pub use command::ir_apply::{
+    apply_bundle_ir_postgres, apply_one_ir_file_postgres, apply_sealed, postgres_ir_apply_state,
 };
 #[cfg(feature = "standalone-cli")]
 pub use command::ir_apply::apply_standalone;
@@ -301,11 +340,19 @@ pub use render::sql_preview::{
     render_ir_json_sql, render_ir_json_sql_statements, render_plan_sql, render_set_sql,
     PreviewOpts, RUNTIME_RESOLVED,
 };
-pub use apply::precondition::{evaluate as evaluate_precondition, PreconditionError};
+pub use apply::precondition::PreconditionError;
+#[cfg(feature = "native-pg")]
+pub use apply::precondition::evaluate as evaluate_precondition;
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
-pub use apply::role::{deprovision_migrator, migrator_role_name, provision_migrator, RoleError};
+// `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
+// error enum); the provisioning fns run over a PG `admin: &Client` — PG-only.
+pub use apply::role::{migrator_role_name, RoleError};
+#[cfg(feature = "native-pg")]
+pub use apply::role::{deprovision_migrator, provision_migrator};
+#[cfg(feature = "native-pg")]
 pub use apply::backend::postgres::shadow::{
     dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows,
 };
+#[cfg(feature = "native-pg")]
 #[doc(hidden)]
 pub use apply::backend::postgres::shadow::arm_panic_after_provision;

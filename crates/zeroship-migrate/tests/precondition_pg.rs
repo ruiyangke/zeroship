@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Preconditions — state/data-conditional apply (v3 Plan D). Faithful tests
 //! against a REAL Postgres (no shims).
 //!

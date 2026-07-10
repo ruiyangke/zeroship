@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful shadow-DATABASE dry-run tests (v3 Plan C) against a REAL Postgres.
 //!
 //! The dry-run runs the UNMODIFIED [`zeroship_migrate::apply`] path against a

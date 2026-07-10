@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful rollback (Plan 5 §5) tests against a REAL Postgres (no shims).
 //!
 //! Rollback is data-integrity-critical, so these run the real path: `apply` to

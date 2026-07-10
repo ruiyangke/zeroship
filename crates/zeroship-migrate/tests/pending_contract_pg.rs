@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR9a — §2.0.3/§2.0.4 cross-deploy pending-contract INTERLOCK, faithful e2e on
 //! REAL Postgres (`:5440`). No shims, no PG-gated skips.
 //!

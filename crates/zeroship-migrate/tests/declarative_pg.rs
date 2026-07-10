@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful declarative type-fidelity tests against a REAL Postgres (no shims).
 //!
 //! **P0** — type fidelity: for each DSL type, build the equivalent CREATE TABLE,

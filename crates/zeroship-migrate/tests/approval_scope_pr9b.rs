@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR9b — PER-VERSION APPROVAL SCOPING (anti-bypass), faithful e2e on REAL Postgres
 //! (`:5440`). No shims, no PG-gated skips.
 //!

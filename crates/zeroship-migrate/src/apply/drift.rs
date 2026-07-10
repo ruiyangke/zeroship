@@ -33,7 +33,8 @@
 
 use std::collections::BTreeMap;
 
-use compio_postgres::Client;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::postgres::PgSession;
 
 use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
@@ -98,6 +99,7 @@ pub enum DriftError {
     Backend(String),
 }
 
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for DriftError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::Db(error.into())
@@ -146,8 +148,9 @@ impl ChecksumDriftReport {
 ///
 /// # Errors
 /// [`DriftError::Journal`] if the journal read fails.
-pub async fn check_checksum_drift(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn check_checksum_drift<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<ChecksumDriftReport, DriftError> {
@@ -598,8 +601,9 @@ fn parse_index_storage_params_pg(
     Ok((!params.is_empty()).then_some(params))
 }
 
-pub async fn snapshot_schema(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn snapshot_schema<D: PgSession>(
+    conn: &D,
     project_schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();

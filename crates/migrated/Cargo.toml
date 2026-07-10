@@ -26,8 +26,12 @@ zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
 # Consumes only the V8-free apply/IR surface (apply_sealed / discover_ir_files /
 # postgres_ir_apply_state / PostgresBackend), so it opts out of zeroship-migrate's
-# default `zsv8` V8 host — keeping `v8` + `zeroship-runtime` out of this tree.
-zeroship-migrate = { workspace = true, default-features = false }
+# default `zsv8` V8 host — keeping `v8` + `zeroship-runtime` out of this tree — but
+# explicitly re-enables `native-pg` (the compio-postgres `PgSession` driver), since
+# it constructs `zeroship_migrate::PostgresBackend::new(&conn)` on its own compio
+# `Client`. This is the "V8-free PG apply core" config (`--no-default-features
+# --features native-pg`).
+zeroship-migrate = { workspace = true, default-features = false, features = ["native-pg"] }
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }

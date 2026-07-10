@@ -1,3 +1,4 @@
+#![cfg(feature = "standalone-cli")]
 //! Track A, Phase A3 — BINARY-level dbmate e2e: drive the ACTUAL
 //! `zeroship-migrate` binary as a SUBPROCESS through the full public dbmate
 //! workflow under the DEFAULT Trusted profile, on a fresh throwaway DB.
