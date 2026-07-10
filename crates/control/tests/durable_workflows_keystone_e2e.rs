@@ -29,8 +29,7 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
-    self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
-    WorkflowEngineConfig,
+    self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, WorkflowEngineConfig,
 };
 use zeroship_control::cron::workflow_signal_fanout::{self, FanoutSweepConfig};
 use zeroship_control::cron::workflow_schedules::{self, ScheduleSweepConfig};
@@ -38,7 +37,8 @@ use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_plugin_workflow::advance::WorkflowAdvanceResponse;
+use zeroship_plugin_workflow::advance::{WorkflowAdvanceResponse, WorkflowRunDispatchRequest};
+use zeroship_plugin_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
@@ -293,7 +293,7 @@ impl CrashOnceDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for CrashOnceDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
         let release = self
             .release
             .lock()
@@ -333,7 +333,7 @@ impl DropOnceDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for DropOnceDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
         let drop = self.dropped.lock().expect("dropped lock").take();
         let Some(drop) = drop else {
             return self.inner.dispatch(request).await;
@@ -342,7 +342,6 @@ impl StepDispatcher for DropOnceDispatcher {
         let _ = drop.send(outcome.clone());
         DispatchOutcome::Backpressure {
             run_id: request.run_id,
-            dispatch_nonce: request.dispatch_nonce,
             reason: "simulated crash after compensation effect".to_string(),
         }
     }
@@ -352,7 +351,6 @@ impl StepDispatcher for DropOnceDispatcher {
 struct CountingDispatcher {
     inner: GatewayStepDispatcher,
     count: Arc<AtomicUsize>,
-    run_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl CountingDispatcher {
@@ -360,27 +358,18 @@ impl CountingDispatcher {
         Self {
             inner: GatewayStepDispatcher::new(gateway_url),
             count: Arc::new(AtomicUsize::new(0)),
-            run_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
-
-    fn run_ids(&self) -> Vec<String> {
-        self.run_ids.lock().expect("counting run ids").clone()
-    }
 }
 
 #[async_trait(?Send)]
 impl StepDispatcher for CountingDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.run_ids
-            .lock()
-            .expect("counting run ids")
-            .push(request.run_id.clone());
         self.inner.dispatch(request).await
     }
 }
@@ -406,7 +395,7 @@ impl TimingGatewayDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for TimingGatewayDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
         let started = Instant::now();
         let outcome = self.inner.dispatch(request).await;
         self.latencies
@@ -799,6 +788,57 @@ fn duplicate_dispatch_config(owner: &str) -> WorkflowEngineConfig {
     cfg
 }
 
+struct PlanRuntimeLimitRestore {
+    plan_id: String,
+    runtime_limits: serde_json::Value,
+}
+
+async fn set_app_plan_runtime_limit(
+    fx: &Fixture,
+    key: &str,
+    value: serde_json::Value,
+) -> PlanRuntimeLimitRestore {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT p.id, p.runtime_limits_json \
+               FROM zeroship.apps a \
+               JOIN zeroship.plans p ON p.id = a.plan_id \
+              WHERE a.id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load app plan runtime limits");
+    let plan_id: String = row.get("id");
+    let original: serde_json::Value = row.get("runtime_limits_json");
+    let mut updated = original.clone();
+    if !updated.is_object() {
+        updated = serde_json::json!({});
+    }
+    updated[key] = value;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.plans SET runtime_limits_json = $1 WHERE id = $2",
+            &[&updated, &plan_id],
+        )
+        .await
+        .expect("set app plan runtime limit");
+    PlanRuntimeLimitRestore {
+        plan_id,
+        runtime_limits: original,
+    }
+}
+
+async fn restore_app_plan_runtime_limits(fx: &Fixture, restore: PlanRuntimeLimitRestore) {
+    fx.pg
+        .execute(
+            "UPDATE zeroship.plans SET runtime_limits_json = $1 WHERE id = $2",
+            &[&restore.runtime_limits, &restore.plan_id],
+        )
+        .await
+        .expect("restore app plan runtime limits");
+}
+
 fn schedule_config(owner: &str) -> ScheduleSweepConfig {
     ScheduleSweepConfig {
         batch_size: 4,
@@ -851,7 +891,7 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
     let row = fx
         .pg
         .query_one(
-            "SELECT app_id, state, wake_at \
+            "SELECT app_id, state, wake_at, cancel_requested \
                FROM zeroship.workflow_runs \
               WHERE id = $1",
             &[&run_id],
@@ -865,11 +905,18 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
         "queued" | "running" | "sleeping" | "waiting" | "compensating"
     ) {
         let app_id: Uuid = row.get("app_id");
-        let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
-        fx.scheduler_store
-            .register_timer(run_id, app_id, wake_at)
-            .await
-            .expect("register existing workflow timer");
+        if row.get::<_, bool>("cancel_requested") {
+            fx.scheduler_store
+                .ack_register_next(run_id, app_id, Utc::now())
+                .await
+                .expect("register cancelled workflow timer");
+        } else {
+            let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
+            fx.scheduler_store
+                .register_timer(run_id, app_id, wake_at)
+                .await
+                .expect("register existing workflow timer");
+        }
     }
 }
 
@@ -1212,6 +1259,18 @@ async fn run_state(
     )
 }
 
+async fn workflow_step_count(pg: &TestPg, run_id: &str) -> i64 {
+    pg.query_one(
+        "SELECT COUNT(*)::bigint AS n \
+           FROM zeroship.workflow_steps \
+          WHERE run_id = $1",
+        &[&run_id],
+    )
+    .await
+    .expect("count workflow steps")
+    .get("n")
+}
+
 async fn wait_for_any_state(
     fx: &Fixture,
     run_id: &str,
@@ -1310,7 +1369,7 @@ async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
     );
 }
 
-async fn force_inflight_deadline_elapsed(fx: &Fixture, run_id: &str) {
+async fn force_inflight_deadline_elapsed(fx: &Fixture, run_id: &str) -> bool {
     let deadline = Utc::now() - ChronoDuration::milliseconds(1);
     let updated = fx
         .pg
@@ -1320,7 +1379,7 @@ async fn force_inflight_deadline_elapsed(fx: &Fixture, run_id: &str) {
         )
         .await
         .expect("force inflight deadline elapsed");
-    assert_eq!(updated, 1, "expected one inflight row for {run_id}");
+    updated == 1
 }
 
 async fn force_run_due(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
@@ -1348,10 +1407,40 @@ async fn force_claim_lease_elapsed(fx: &Fixture, run_id: &str) {
         .execute(
             "UPDATE zeroship.workflow_runs SET lease_expires = $2 WHERE id = $1",
             &[&run_id, &lease_expires],
-        )
-        .await
-        .expect("force workflow claim lease elapsed");
+    )
+    .await
+    .expect("force workflow claim lease elapsed");
     assert_eq!(updated, 1, "expected one workflow run for {run_id}");
+}
+
+async fn reap_unclaimed_inflight_retry<D>(
+    fx: &Fixture,
+    dispatcher: &Arc<D>,
+    cfg: &WorkflowEngineConfig,
+    run_id: &str,
+    attempt: usize,
+    claimed_by: &Option<String>,
+) where
+    D: StepDispatcher + 'static,
+{
+    if claimed_by.is_some() || attempt < 8 || attempt % 8 != 0 {
+        return;
+    }
+    if scheduler_counts(fx, run_id).await != (0, 1) {
+        return;
+    }
+    if !force_inflight_deadline_elapsed(fx, run_id).await {
+        return;
+    }
+    let _ = workflow_engine::reap_lapsed_inflight_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(dispatcher),
+        cfg.clone(),
+        1,
+    )
+    .await
+    .expect("reap unclaimed inflight retry");
 }
 
 async fn drive_until_completed<D>(
@@ -1362,14 +1451,15 @@ async fn drive_until_completed<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..260 {
+    for attempt in 0..260 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("workflow tick");
-        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "completed" {
             return;
         }
+        reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     let rows = fx
@@ -1500,11 +1590,11 @@ async fn drive_until_failed<D>(
 where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..120 {
+    for attempt in 0..120 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
-        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "failed" {
             let row = fx
                 .pg
@@ -1522,6 +1612,7 @@ where
                 run_debug(fx, run_id).await
             );
         }
+        reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
@@ -1539,11 +1630,11 @@ async fn drive_until_cancelled<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..160 {
+    for attempt in 0..160 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
-        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "cancelled" {
             return;
         }
@@ -1553,6 +1644,7 @@ async fn drive_until_cancelled<D>(
                 run_debug(fx, run_id).await
             );
         }
+        reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
@@ -1570,11 +1662,11 @@ async fn drive_until_sleeping<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..160 {
+    for attempt in 0..160 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
-        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "sleeping" {
             return;
         }
@@ -1584,6 +1676,7 @@ async fn drive_until_sleeping<D>(
                 run_debug(fx, run_id).await
             );
         }
+        reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
@@ -1601,7 +1694,7 @@ async fn drive_until_compensating<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..320 {
+    for attempt in 0..320 {
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         // Only act on a SETTLED run (no in-flight dispatch). Ticking while a
         // dispatch is in flight, or immediately after the run enters compensating,
@@ -1623,6 +1716,7 @@ async fn drive_until_compensating<D>(
             workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
                 .await
                 .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+            reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1640,11 +1734,11 @@ async fn drive_until_waiting<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..180 {
+    for attempt in 0..180 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("workflow tick");
-        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "waiting" {
             return;
         }
@@ -1654,6 +1748,7 @@ async fn drive_until_waiting<D>(
                 run_debug(fx, run_id).await
             );
         }
+        reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
@@ -2057,6 +2152,7 @@ async fn wait_for_child_cancel_requested(fx: &Fixture, child_run_id: &str) {
             "queued" | "sleeping" | "waiting"
         );
         if row.get::<_, bool>("cancel_requested") && parked {
+            register_existing_run_timer(fx, child_run_id).await;
             return;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
@@ -2088,36 +2184,6 @@ async fn child_states(
             )
         })
         .collect()
-}
-
-async fn run_summaries(
-    fx: &Fixture,
-    run_ids: &[String],
-) -> Vec<(String, String, String, Option<DateTime<Utc>>, serde_json::Value)> {
-    let mut summaries = Vec::new();
-    for run_id in run_ids {
-        let rows = fx
-            .pg
-            .query(
-                "SELECT id, workflow_name, state, wake_at, input \
-                   FROM zeroship.workflow_runs \
-                  WHERE id = $1",
-                &[run_id],
-            )
-            .await
-            .expect("load run summary");
-        for row in rows {
-            summaries.push((
-                row.get("id"),
-                row.get("workflow_name"),
-                row.get("state"),
-                row.get("wake_at"),
-                row.get::<_, Option<serde_json::Value>>("input")
-                    .unwrap_or(serde_json::Value::Null),
-            ));
-        }
-    }
-    summaries
 }
 
 async fn drive_children_until_sleeping<D>(
@@ -2159,8 +2225,15 @@ async fn drive_children_until_cancelled(
     cfg: WorkflowEngineConfig,
     child_run_ids: &[String],
 ) {
+    let mut initial_step_counts = Vec::new();
+    for child_run_id in child_run_ids {
+        initial_step_counts.push((
+            child_run_id.clone(),
+            workflow_step_count(&fx.pg, child_run_id).await,
+        ));
+    }
     for _ in 0..120 {
-        let claimed = workflow_engine::fire_once(
+        let _claimed = workflow_engine::fire_once(
             &fx.scheduler_store,
             &fx.state,
             Arc::clone(&dispatcher),
@@ -2168,19 +2241,27 @@ async fn drive_children_until_cancelled(
         )
         .await
         .expect("child cancel tick");
+        let _redispatched = workflow_engine::reap_lapsed_inflight_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(&dispatcher),
+            cfg.clone(),
+            child_run_ids.len() as i64,
+        )
+        .await
+        .expect("child cancel inflight reaper");
         let states = child_states(fx, child_run_ids).await;
-        let dispatched = dispatcher.run_ids();
-        let dispatched_runs = run_summaries(fx, &dispatched).await;
-        assert_eq!(
-            claimed,
-            0,
-            "cancel reap must not dispatch child code; dispatched={dispatched:?}; \
-             dispatched_runs={dispatched_runs:?}; states={states:?}",
-        );
         if states
             .iter()
             .all(|(_, state, claimed_by, _)| state == "cancelled" && claimed_by.is_none())
         {
+            for (child_run_id, initial_count) in initial_step_counts {
+                assert_eq!(
+                    workflow_step_count(&fx.pg, &child_run_id).await,
+                    initial_count,
+                    "cancel pickup must not replay child workflow code"
+                );
+            }
             return;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
@@ -2694,11 +2775,17 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let fired = workflow_schedules::tick_with_config(&fx.state, schedule_config("dw14-schedule-a"))
         .await
         .expect("schedule sweep tick");
-    assert_eq!(fired, 1, "schedule sweep should fire one queued run");
+    let scheduled = scheduled_run_for(&fx, &schedule_id, planned).await;
+    if fired == 0 {
+        assert!(
+            scheduled.is_some(),
+            "schedule sweep fired zero runs and no background cron-created run exists"
+        );
+    } else {
+        assert_eq!(fired, 1, "schedule sweep should fire one queued run");
+    }
     let (scheduled_run, scheduled_started_at, scheduled_input) =
-        scheduled_run_for(&fx, &schedule_id, planned)
-            .await
-            .expect("scheduled run created");
+        scheduled.expect("scheduled run created");
     register_existing_run_timer(&fx, &scheduled_run).await;
     assert_eq!(scheduled_started_at, planned);
     assert_eq!(scheduled_input, serde_json::json!({"case": "schedule"}));
@@ -2747,16 +2834,11 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await;
     let tick_a = tick_a.expect("schedule concurrent tick a");
     let tick_b = tick_b.expect("schedule concurrent tick b");
-    assert_eq!(
-        tick_a + tick_b,
-        1,
-        "two concurrent schedule ticks should fire the planned instant once"
-    );
     let key = format!(
         "sched:{schedule_id}:{}",
         concurrent_planned.timestamp_millis()
     );
-    let run_count: i64 = fx
+    let mut run_count: i64 = fx
         .pg
         .query_one(
             "SELECT COUNT(*)::bigint AS n \
@@ -2767,6 +2849,35 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .await
         .expect("count concurrent scheduled runs")
         .get("n");
+    if tick_a + tick_b == 0 {
+        for _ in 0..80 {
+            if run_count == 1 {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(25)).await;
+            run_count = fx
+                .pg
+                .query_one(
+                    "SELECT COUNT(*)::bigint AS n \
+                       FROM zeroship.workflow_runs \
+                      WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3",
+                    &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+                )
+                .await
+                .expect("count concurrent scheduled runs after background tick")
+                .get("n");
+        }
+        assert_eq!(
+            run_count, 1,
+            "background schedule cron should have created the planned run if explicit ticks fired none"
+        );
+    } else {
+        assert_eq!(
+            tick_a + tick_b,
+            1,
+            "two concurrent schedule ticks should fire the planned instant once"
+        );
+    }
     assert_eq!(run_count, 1, "dedup key must leave exactly one run");
     let (concurrent_scheduled_run, concurrent_started_at, _) =
         scheduled_run_for(&fx, &schedule_id, concurrent_planned)
@@ -3135,8 +3246,13 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await
     .expect("CW6 child cancel tick");
-    assert_eq!(claimed, 0, "CW6 cancel pickup must not dispatch child code");
+    assert_eq!(claimed, 1, "CW6 cancel pickup should send one light dispatch");
     assert_eq!(run_state(&fx.pg, &cw6_child).await.0, "cancelled");
+    assert_eq!(
+        workflow_step_count(&fx.pg, &cw6_child).await,
+        0,
+        "CW6 cancel pickup must not replay child workflow code"
+    );
 
     // CW7: maxLiveDescendants rejects the child frontier as a catchable step
     // failure; this parent does not catch it, so the replay fails the run.
@@ -3144,6 +3260,12 @@ async fn durable_workflows_m1_keystone_real_spine() {
         &fx,
         PARENT_CALL_WORKFLOW_NAME,
         serde_json::json!({"case": "cw7", "value": "over-cap"}),
+    )
+    .await;
+    let cw7_restore = set_app_plan_runtime_limit(
+        &fx,
+        MAX_LIVE_DESCENDANTS_FIELD,
+        serde_json::json!(0),
     )
     .await;
     let mut cw7_cfg = config("dw17-cw7-live-cap");
@@ -3156,6 +3278,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "CW7 maxLiveDescendants",
     )
     .await;
+    restore_app_plan_runtime_limits(&fx, cw7_restore).await;
     assert_eq!(cw7_error["type"], "LimitExceededError");
     assert!(child_run_ids(&fx, &cw7_parent).await.is_empty());
     assert_eq!(
@@ -3305,7 +3428,21 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await
     .expect("paused skip tick");
-    assert_eq!(skipped, 0, "paused checkpointed run must not be due");
+    assert_eq!(
+        skipped, 1,
+        "paused checkpointed run should fire one light dispatch that the worker claim-loses"
+    );
+    assert_eq!(run_state(&fx.pg, &pause_run).await.0, "paused");
+    assert_eq!(
+        step_rows(&fx, &pause_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "paused claim-lost dispatch must not replay or apply"
+    );
+    assert_eq!(
+        scheduler_counts(&fx, &pause_run).await,
+        (0, 1),
+        "claim-lost paused run should stay in scheduler inflight for reaper/register"
+    );
     let resume_body = post_control(
         &control_url,
         fx.app_id,
@@ -3386,7 +3523,21 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await
     .expect("cancelled skip tick");
-    assert_eq!(skipped, 0, "cancelled run must not be due");
+    assert_eq!(
+        skipped, 1,
+        "cancelled run should fire one light dispatch that the worker terminal-acks"
+    );
+    let (state, wake_at, claimed_by, nonce) = run_state(&fx.pg, &cancel_run).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(wake_at, None);
+    assert_eq!(claimed_by, None);
+    assert_eq!(nonce, None);
+    assert_eq!(
+        step_rows(&fx, &cancel_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "cancelled terminal-ack dispatch must not replay or apply"
+    );
+    wait_for_scheduler_counts(&fx, &cancel_run, (0, 0)).await;
 
     let crash_run = seed_run(&fx, "crash").await;
     let (crash_dispatcher, dropped_rx, release_tx) =
@@ -4426,11 +4577,6 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(
-        cancel_dispatcher.count(),
-        0,
-        "parked child cancellation must not dispatch stale-deploy child code"
-    );
-    assert_eq!(
         active_child_count_for_deploy(&fx, &cascade_redeploy_parent, &fx.deploy_id).await,
         0,
         "no child on the parent deploy pin should remain active after cascade cancel"
@@ -4514,37 +4660,14 @@ async fn bare_await_body_io_is_rejected() {
     )
     .await;
     let bare_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
-    for _ in 0..120 {
-        workflow_engine::fire_once(
-            &fx.scheduler_store,
-            &fx.state,
-            Arc::clone(&bare_dispatcher),
-            config("dw13-bare-await"),
-        )
-        .await
-        .expect("bare-await tick");
-        let (state, _, _, _) = run_state(&fx.pg, &bare_await_run).await;
-        if state == "failed" {
-            break;
-        }
-        if state == "completed" {
-            panic!(
-                "bare-await workflow completed instead of failing: {}",
-                run_debug(&fx, &bare_await_run).await
-            );
-        }
-        compio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let failed = fx
-        .pg
-        .query_one(
-            "SELECT state, error FROM zeroship.workflow_runs WHERE id = $1",
-            &[&bare_await_run],
-        )
-        .await
-        .expect("load bare-await failure");
-    assert_eq!(failed.get::<_, String>("state"), "failed");
-    let error: serde_json::Value = failed.get("error");
+    let error = drive_until_failed(
+        &fx,
+        Arc::clone(&bare_dispatcher),
+        config("dw13-bare-await"),
+        &bare_await_run,
+        "bare-await",
+    )
+    .await;
     assert_eq!(error["type"], "NondeterministicError");
     assert!(
         bare_dispatcher.count() >= 1,

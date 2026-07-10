@@ -1266,6 +1266,7 @@ async fn create_run_inner(
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)
         .await
         .map_err(WorkflowApiError::from)?;
+    let mut cascade_run_ids = Vec::new();
 
     let run_id = if let Some(key) = dedup_key.as_ref() {
         match policy {
@@ -1342,7 +1343,14 @@ async fn create_run_inner(
                 .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
                 for row in cancelled {
                     let cancelled_run_id: String = row.get("id");
-                    workflow_engine::cascade_cancel_children_for_app(&tx, &tables, &cancelled_run_id).await?;
+                    cascade_run_ids.extend(
+                        workflow_engine::cascade_cancel_children_for_app(
+                            &tx,
+                            &tables,
+                            &cancelled_run_id,
+                        )
+                        .await?,
+                    );
                 }
 
                 let candidate = typed_id::new_workflow_run_id();
@@ -1397,6 +1405,11 @@ async fn create_run_inner(
     workflow_engine::register_run_timer(state, &run_id)
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    for run_id in cascade_run_ids {
+        workflow_engine::register_run_timer(state, &run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
     Ok((StatusCode::CREATED, json!({ "id": run_id, "state": "queued" })))
 }
 
@@ -1433,6 +1446,7 @@ async fn start_many_inner(
 
     let mut results = Vec::with_capacity(body.items.len());
     let mut run_ids = Vec::with_capacity(body.items.len());
+    let mut cascade_run_ids = Vec::new();
     let mut seen_keys = BTreeSet::new();
     for item in body.items {
         let input_journal_bytes = pg::json_column_size(&tx, &item.input)
@@ -1526,7 +1540,14 @@ async fn start_many_inner(
                     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
                     for row in cancelled {
                         let cancelled_run_id: String = row.get("id");
-                        workflow_engine::cascade_cancel_children_for_app(&tx, &tables, &cancelled_run_id).await?;
+                        cascade_run_ids.extend(
+                            workflow_engine::cascade_cancel_children_for_app(
+                                &tx,
+                                &tables,
+                                &cancelled_run_id,
+                            )
+                            .await?,
+                        );
                     }
                     check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
                     let run_id = typed_id::new_workflow_run_id();
@@ -1583,6 +1604,11 @@ async fn start_many_inner(
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     for run_id in run_ids {
+        workflow_engine::register_run_timer(state, &run_id)
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    }
+    for run_id in cascade_run_ids {
         workflow_engine::register_run_timer(state, &run_id)
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -3035,14 +3061,23 @@ async fn control_transition(
         .first()
         .map(|row| row.get("state"))
         .unwrap_or_else(|| current.clone());
+    let mut cascade_run_ids = Vec::new();
     if op == "cancel" && state_value != "compensating" {
-        if let Err(e) = workflow_engine::cascade_cancel_children(&tx, &run_id).await {
-            let _ = tx.commit().await;
-            return WorkflowApiError::from(e).response();
+        match workflow_engine::cascade_cancel_children(&tx, &run_id).await {
+            Ok(ids) => cascade_run_ids = ids,
+            Err(e) => {
+                let _ = tx.commit().await;
+                return WorkflowApiError::from(e).response();
+            }
         }
     }
     if let Err(e) = tx.commit().await {
         return WorkflowApiError::Database(e.to_string()).response();
+    }
+    for run_id in cascade_run_ids {
+        if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
+            return WorkflowApiError::Database(e.to_string()).response();
+        }
     }
     web::HttpResponse::Ok().json(&json!({ "state": state_value }))
 }

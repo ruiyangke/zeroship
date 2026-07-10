@@ -441,7 +441,7 @@ impl WorkflowTx for PgTx {
         &mut self,
         run_id: &str,
     ) -> Result<CompensationProgress, WorkflowError> {
-        compensation_progress(&self.conn, &self.tables, run_id).await
+        compensation_progress_on_conn(&self.conn, &self.tables, run_id).await
     }
 
     async fn next_compensation_wake_at(
@@ -552,7 +552,7 @@ impl WorkflowTx for PgTx {
         batch_id: &str,
         batch_width: i16,
     ) -> Result<StepWriteOutcome, WorkflowError> {
-        insert_resolved_step(
+        insert_resolved_step_on_conn(
             &self.conn,
             &self.tables,
             config,
@@ -767,14 +767,14 @@ impl WorkflowTx for PgTx {
         child_run_id: &str,
         terminal: ChildTerminalPayload<'_>,
     ) -> Result<(), WorkflowError> {
-        emit_child_terminal_hook(&self.conn, &self.tables, child_run_id, terminal).await
+        emit_child_terminal_hook_on_conn(&self.conn, &self.tables, child_run_id, terminal).await
     }
 
     async fn cascade_cancel_children(
         &mut self,
         parent_run_id: &str,
     ) -> Result<u64, WorkflowError> {
-        cascade_cancel_children(&self.conn, &self.tables, parent_run_id).await
+        cascade_cancel_children_on_conn(&self.conn, &self.tables, parent_run_id).await
     }
 }
 
@@ -946,7 +946,7 @@ fn child_cancelled_error() -> Value {
     })
 }
 
-async fn emit_child_terminal_hook<C>(
+pub async fn emit_child_terminal_hook_on_conn<C>(
     conn: &C,
     tables: &WorkflowTables,
     child_run_id: &str,
@@ -1029,7 +1029,7 @@ where
     Ok(())
 }
 
-async fn cascade_cancel_children<C>(
+pub async fn cascade_cancel_children_on_conn<C>(
     conn: &C,
     tables: &WorkflowTables,
     parent_run_id: &str,
@@ -1053,7 +1053,7 @@ where
     .map_err(WorkflowError::from)
 }
 
-async fn insert_resolved_step<C>(
+pub async fn insert_resolved_step_on_conn<C>(
     conn: &C,
     tables: &WorkflowTables,
     config: &WorkflowEngineConfig,
@@ -1390,7 +1390,7 @@ where
     Ok(rows[0].get("bytes"))
 }
 
-async fn compensation_progress<C>(
+pub async fn compensation_progress_on_conn<C>(
     conn: &C,
     tables: &WorkflowTables,
     run_id: &str,

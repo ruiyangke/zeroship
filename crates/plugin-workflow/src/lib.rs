@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod advance;
 pub mod apply;
+pub mod claim;
 pub mod client;
 pub mod dev;
 pub mod engine;

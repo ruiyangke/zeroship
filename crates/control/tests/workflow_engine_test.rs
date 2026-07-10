@@ -34,8 +34,11 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_plugin_workflow::advance::{
-    collect_post_apply_registrations_on_conn, WorkflowAdvanceResponse,
+    collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind, WorkflowAdvanceResponse,
+    WorkflowRunDispatchRequest,
 };
+use zeroship_plugin_workflow::claim::{claim_workflow_run_on_conn, WorkflowClaimOutcome};
+use zeroship_plugin_workflow::engine::STUCK_STRIKE_LIMIT_FIELD;
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as scheduler_store_engine, SchedulerConfig as StoreSchedulerConfig, TimerWheel,
@@ -44,6 +47,7 @@ use zeroship_workflow_scheduler::{
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+const TEST_WORKER_OWNER: &str = "test-worker-owner";
 
 static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -653,6 +657,44 @@ fn timing_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+async fn claim_for_test_dispatch(
+    state: &Arc<AppState>,
+    request: WorkflowRunDispatchRequest,
+) -> Result<StepRequest, DispatchOutcome> {
+    let claim_config = config(TEST_WORKER_OWNER);
+    match claim_workflow_run_on_conn(
+        state.control_pg.as_ref(),
+        &request,
+        &claim_config,
+    )
+    .await
+    {
+        Ok(WorkflowClaimOutcome::Claimed(request)) => Ok(request),
+        Ok(WorkflowClaimOutcome::Terminal(registrations)) => Err(DispatchOutcome::Completed(
+            WorkflowAdvanceResponse::ack(request.run_id, registrations),
+        )),
+        Ok(WorkflowClaimOutcome::ClaimLost) => Err(DispatchOutcome::Completed(
+            WorkflowAdvanceResponse::nack(
+                request.run_id,
+                WorkflowAdvanceNackKind::ClaimLost,
+                "workflow claim lost",
+            ),
+        )),
+        Ok(WorkflowClaimOutcome::Backpressure(reason)) => Err(DispatchOutcome::Completed(
+            WorkflowAdvanceResponse::nack(
+                request.run_id,
+                WorkflowAdvanceNackKind::Backpressure,
+                reason,
+            ),
+        )),
+        Err(e) => Err(DispatchOutcome::Completed(WorkflowAdvanceResponse::nack(
+            request.run_id,
+            WorkflowAdvanceNackKind::ApplyFailed,
+            format!("claim workflow run: {e}"),
+        ))),
+    }
+}
+
 async fn apply_like_worker(
     state: &Arc<AppState>,
     request: &StepRequest,
@@ -726,7 +768,11 @@ impl BlockingDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for BlockingDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         self.requests
             .lock()
             .expect("requests lock")
@@ -766,7 +812,11 @@ impl CompleteDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         let result = StepResult::from_checkpoints(
             request.run_id.clone(),
             request.dispatch_nonce.clone(),
@@ -799,7 +849,11 @@ impl JoinChildrenDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for JoinChildrenDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         let next_child = request
             .journal
             .iter()
@@ -869,7 +923,11 @@ impl GatedCheckpointDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for GatedCheckpointDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         self.requests
             .lock()
             .expect("requests lock")
@@ -906,7 +964,11 @@ impl CompleteAfterA {
 
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteAfterA {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         assert!(
             request
                 .journal
@@ -953,7 +1015,11 @@ impl CaughtStepFailureDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for CaughtStepFailureDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         self.requests
             .lock()
             .expect("requests lock")
@@ -1018,7 +1084,11 @@ impl UncaughtStepFailureDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for UncaughtStepFailureDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         self.requests
             .lock()
             .expect("requests lock")
@@ -1083,7 +1153,11 @@ impl ZeroProgressDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for ZeroProgressDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let request = match claim_for_test_dispatch(&self.state, request).await {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
         self.requests
             .lock()
             .expect("requests lock")
@@ -1725,7 +1799,10 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     )
     .await
     .expect("parent rearm sync tick");
-    assert_eq!(rearmed, 0, "first tick should re-register the lost parent wake");
+    assert_eq!(
+        rearmed, 1,
+        "worker-side claim should consume the repaired parent wake"
+    );
 
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -1735,7 +1812,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     )
     .await
     .expect("parent rearm tick");
-    assert_eq!(claimed, 1, "safety-net rearm should wake the parent");
+    assert_eq!(claimed, 0, "parent wake should already be retired");
     let parent_step = fx
         .pg
         .query_one(
@@ -2015,7 +2092,10 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
     )
     .await
     .expect("cooperative child cancel tick");
-    assert_eq!(claimed, 0, "cancel pickup should not dispatch child code");
+    assert!(
+        claimed >= 1,
+        "cancel pickup should dispatch at least the child run reference without replaying child code"
+    );
     let child_terminal = fx
         .pg
         .query_one(
@@ -2131,7 +2211,10 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
     )
     .await
     .expect("cooperative sleeping child cancel tick");
-    assert_eq!(claimed, 0, "cancel reap must not dispatch child code");
+    assert_eq!(
+        claimed, 1,
+        "cancel pickup should dispatch one light child run reference without replaying child code"
+    );
     let child_terminal = fx
         .pg
         .query_one(
@@ -3260,6 +3343,18 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
         return;
     };
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stuck-strikes").await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.plans \
+                SET runtime_limits_json = runtime_limits_json || $2::jsonb \
+              WHERE id = (SELECT plan_id FROM zeroship.apps WHERE id = $1)",
+            &[
+                &app_id,
+                &serde_json::json!({ STUCK_STRIKE_LIMIT_FIELD: 2 }),
+            ],
+        )
+        .await
+        .expect("set worker-visible stuck strike limit");
     let run_id = seed_run(
         &fx,
         app_id,
@@ -3273,8 +3368,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
     )
     .await;
     let dispatcher = Arc::new(ZeroProgressDispatcher::new(&fx.state));
-    let mut cfg = config("owner-stuck-strikes");
-    cfg.stuck_strike_limit = 2;
+    let cfg = config("owner-stuck-strikes");
 
     let first = workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
         .await
@@ -3352,7 +3446,7 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
     let claimed_by: Option<String> = rows[0].get("claimed_by");
     let nonce: Option<String> = rows[0].get("dispatch_nonce");
     let state: String = rows[0].get("state");
-    assert_eq!(claimed_by.as_deref(), Some("owner-claim"));
+    assert_eq!(claimed_by.as_deref(), Some(TEST_WORKER_OWNER));
     assert!(nonce.as_deref().is_some_and(|n| n.starts_with("wfd_")));
     assert_eq!(state, "running");
 
@@ -3451,7 +3545,7 @@ async fn stale_lease_is_taken_over_after_ttl() {
         .expect("select run");
     let claimed_by: Option<String> = row[0].get("claimed_by");
     let nonce: Option<String> = row[0].get("dispatch_nonce");
-    assert_eq!(claimed_by.as_deref(), Some("owner-stale"));
+    assert_eq!(claimed_by.as_deref(), Some(TEST_WORKER_OWNER));
     assert_ne!(nonce.as_deref(), Some("wfd_dead"));
 
     for release in releases {
@@ -3860,7 +3954,10 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     )
     .await
     .expect("tick");
-    assert_eq!(claimed, 0, "due paused rows must be skipped by the claim query");
+    assert_eq!(
+        claimed, 2,
+        "due paused rows should fire light dispatches that the worker claim-loses"
+    );
 
     for (run_id, original_state, original_wake) in &runs {
         let resp = test::call_service(
@@ -3979,7 +4076,10 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         row.get::<_, Option<String>>("paused_from_status").as_deref(),
         Some("running")
     );
-    assert_eq!(row.get::<_, Option<String>>("claimed_by").as_deref(), Some("owner-pause-mid"));
+    assert_eq!(
+        row.get::<_, Option<String>>("claimed_by").as_deref(),
+        Some(TEST_WORKER_OWNER)
+    );
     assert!(row.get::<_, Option<String>>("dispatch_nonce").is_some());
 
     let _ = release.send(());
@@ -4031,7 +4131,10 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     )
     .await
     .expect("paused tick");
-    assert_eq!(skipped, 0, "paused run must not be re-claimed after checkpoint");
+    assert_eq!(
+        skipped, 0,
+        "paused run should already be retired from the scheduler store after checkpoint"
+    );
 
     let resp = test::call_service(
         &app,
@@ -4131,7 +4234,10 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     )
     .await
     .expect("cancelled tick");
-    assert_eq!(claimed, 0);
+    assert_eq!(
+        claimed, 0,
+        "cancelled run should already be retired from the scheduler store"
+    );
 }
 
 #[compio::test]
@@ -4335,6 +4441,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
 #[compio::test]
 async fn per_app_cap_does_not_livelock_queued_runs() {
     let _timing_guard = timing_test_guard();
+    workflow_engine::reset_inflight_dispatches_for_test();
     let Some(fx) = isolated_fixture("cap").await else {
         return;
     };
@@ -4358,6 +4465,25 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("tick");
+        let elapsed_deadline = Utc::now() - ChronoDuration::milliseconds(1);
+        fx.pg
+            .execute(
+                "UPDATE workflow_scheduler.inflight \
+                    SET deadline = $2 \
+                  WHERE run_id = ANY($1)",
+                &[&run_ids, &elapsed_deadline],
+            )
+            .await
+            .expect("age cap test inflight deadlines");
+        workflow_engine::reap_lapsed_inflight_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(&dispatcher),
+            cfg.clone(),
+            16,
+        )
+        .await
+        .expect("reap cap test lapsed inflight");
         let rows = fx
             .pg
             .query(

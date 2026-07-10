@@ -17,6 +17,10 @@ pub const FREE_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 100 * 1024 * 1024;
 pub const PAID_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 pub const RUN_JOURNAL_LIMIT_FIELD: &str = "workflow_journal_max_bytes";
 pub const APP_JOURNAL_LIMIT_FIELD: &str = "workflow_app_journal_max_bytes";
+pub const MAX_CHILD_DEPTH_FIELD: &str = "workflow_max_child_depth";
+pub const MAX_LIVE_DESCENDANTS_FIELD: &str = "workflow_max_live_descendants";
+pub const MAX_START_MANY_BATCH_FIELD: &str = "workflow_max_start_many_batch";
+pub const STUCK_STRIKE_LIMIT_FIELD: &str = "workflow_stuck_strike_limit";
 
 static OWNER_ID: OnceLock<String> = OnceLock::new();
 
@@ -77,6 +81,40 @@ pub fn workflow_journal_limits_from_plan(
     }
 }
 
+pub fn workflow_engine_limits_from_plan(
+    defaults: &WorkflowEngineConfig,
+    plan_id: &str,
+    plan_name: Option<&str>,
+    runtime_limits: Option<&Value>,
+) -> WorkflowEngineConfig {
+    let mut config = defaults.clone();
+    config.journal_limits = workflow_journal_limits_from_plan(plan_id, plan_name, runtime_limits);
+    if let Some(limit) = runtime_limits
+        .and_then(|json| nonnegative_i64_field(json, MAX_CHILD_DEPTH_FIELD))
+        .and_then(|limit| i16::try_from(limit).ok())
+    {
+        config.max_child_depth = limit;
+    }
+    if let Some(limit) =
+        runtime_limits.and_then(|json| nonnegative_i64_field(json, MAX_LIVE_DESCENDANTS_FIELD))
+    {
+        config.max_live_descendants = limit;
+    }
+    if let Some(limit) = runtime_limits
+        .and_then(|json| nonnegative_i64_field(json, MAX_START_MANY_BATCH_FIELD))
+        .and_then(|limit| usize::try_from(limit).ok())
+    {
+        config.max_start_many_batch = limit;
+    }
+    if let Some(limit) = runtime_limits
+        .and_then(|json| positive_i64_field(json, STUCK_STRIKE_LIMIT_FIELD))
+        .and_then(|limit| i16::try_from(limit).ok())
+    {
+        config.stuck_strike_limit = limit;
+    }
+    config
+}
+
 fn default_journal_cap(plan_id: &str, plan_name: Option<&str>) -> i64 {
     if plan_name == Some("free") || plan_id == free_plan_id() {
         FREE_WORKFLOW_JOURNAL_MAX_BYTES
@@ -90,6 +128,15 @@ fn positive_i64_field(json: &Value, field: &str) -> Option<i64> {
     match value {
         Value::Number(n) => n.as_i64().filter(|v| *v > 0),
         Value::String(s) => s.parse::<i64>().ok().filter(|v| *v > 0),
+        _ => None,
+    }
+}
+
+fn nonnegative_i64_field(json: &Value, field: &str) -> Option<i64> {
+    let value = json.get(field)?;
+    match value {
+        Value::Number(n) => n.as_i64().filter(|v| *v >= 0),
+        Value::String(s) => s.parse::<i64>().ok().filter(|v| *v >= 0),
         _ => None,
     }
 }

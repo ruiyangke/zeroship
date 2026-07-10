@@ -1,28 +1,30 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
-use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::auth::{
-    extract_bearer, validate_control_key, verify_zeroship_user_header_for_request,
+    derive_app_scoped_control_token, extract_bearer, validate_control_key,
+    verify_zeroship_user_header_for_request,
 };
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
 use zeroship_plugin_workflow::advance::{
     collect_post_apply_registrations, worker_json_to_step_result, WorkflowAdvanceNackKind,
-    WorkflowAdvanceResponse,
+    WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
 use zeroship_plugin_workflow::apply;
-use zeroship_plugin_workflow::engine::{
-    WorkflowEngineConfig, WorkflowJournalLimits, DEFAULT_MAX_CHILD_DEPTH,
-    DEFAULT_MAX_LIVE_DESCENDANTS, DEFAULT_MAX_START_MANY_BATCH,
+use zeroship_plugin_workflow::claim::{
+    claim_workflow_run, renew_workflow_claim, WorkflowClaimOutcome,
 };
+use zeroship_plugin_workflow::engine::{StepRequest, WorkflowEngineConfig};
 use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::PgStore;
 use zeroship_runtime::runtime::DispatchError;
@@ -361,38 +363,61 @@ pub async fn dispatch(
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkflowStepRequest {
-    run_id: String,
-    workflow_name: String,
-    trigger: serde_json::Value,
-    #[serde(default)]
-    journal: Vec<serde_json::Value>,
-    deploy_hash: String,
-    #[serde(default)]
-    attempt: Option<u32>,
-    nonce: String,
-    #[serde(default)]
-    owner_id: String,
-    #[serde(default)]
-    stuck_strike_limit: Option<i16>,
-    #[serde(default)]
-    max_child_depth: Option<i16>,
-    #[serde(default)]
-    max_live_descendants: Option<i64>,
-    #[serde(default)]
-    max_start_many_batch: Option<usize>,
-    #[serde(default)]
-    journal_limits: Option<WorkflowJournalLimits>,
+static WORKFLOW_WORKER_OWNER_ID: OnceLock<String> = OnceLock::new();
+
+fn workflow_worker_owner_id() -> String {
+    WORKFLOW_WORKER_OWNER_ID
+        .get_or_init(|| format!("worker-wf-{}", std::process::id()))
+        .clone()
+}
+
+fn workflow_worker_config() -> WorkflowEngineConfig {
+    let mut config = WorkflowEngineConfig::default();
+    config.owner_id = workflow_worker_owner_id();
+    config
+}
+
+fn workflow_runtime_envelope(
+    config: &WorkerConfig,
+    request: &StepRequest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "runId": &request.run_id,
+        "workflowName": &request.workflow_name,
+        "trigger": {
+            "input": request.input.clone().unwrap_or(Value::Null),
+            "startedAt": request.started_at.to_rfc3339(),
+            "runId": &request.run_id,
+            "workflowName": &request.workflow_name,
+        },
+        "journal": request.journal.clone(),
+        "phase": &request.phase,
+        "deployHash": &request.deploy_hash,
+        "attempt": 0,
+        "nonce": &request.dispatch_nonce,
+        "ownerId": &request.owner_id,
+        "stuckStrikeLimit": request.stuck_strike_limit,
+        "maxChildDepth": request.max_child_depth,
+        "maxLiveDescendants": request.max_live_descendants,
+        "maxStartManyBatch": request.max_start_many_batch,
+        "journalLimits": request.journal_limits,
+        "outputRead": {
+            "controlUrl": &config.control_url,
+            "token": derive_app_scoped_control_token(
+                &config.control_key,
+                &request.app_id.to_string(),
+            ),
+            "appId": request.app_id.to_string(),
+        },
+    })
 }
 
 /// Test-only durable-workflow replay ingress.
 ///
 /// DW-05 deliberately leaves signature/nonce verification to a later task.
 /// Production config never enables this handler; tests can flip
-/// `workflow_advance_unsigned` and feed a hand-built StepRequest through the
-/// same worker/pinned-isolate path.
+/// `workflow_advance_unsigned` and feed a run reference through the same
+/// worker-owned claim/replay/apply path.
 pub async fn workflow_advance_unsigned(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
@@ -429,7 +454,7 @@ pub async fn workflow_advance_unsigned(
                 .json(&serde_json::json!({"error": format!("invalid utf-8 envelope: {e}")}));
         }
     };
-    let parsed: WorkflowStepRequest = match serde_json::from_str(envelope_json) {
+    let parsed: WorkflowRunDispatchRequest = match serde_json::from_str(envelope_json) {
         Ok(v) => v,
         Err(e) => {
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
@@ -437,24 +462,64 @@ pub async fn workflow_advance_unsigned(
                 .json(&serde_json::json!({"error": format!("invalid workflow envelope: {e}")}));
         }
     };
-    if parsed.run_id.is_empty()
-        || parsed.workflow_name.is_empty()
-        || parsed.deploy_hash.is_empty()
-        || parsed.nonce.is_empty()
-        || !parsed.trigger.is_object()
-    {
+    if parsed.run_id.is_empty() || parsed.app_id != app_id {
         metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
         return HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "workflow envelope requires runId, workflowName, trigger object, deployHash, and nonce"
+            "error": "workflow envelope requires matching appId and non-empty runId"
         }));
     }
-    let _journal_len = parsed.journal.len();
-    let _attempt = parsed.attempt.unwrap_or(0);
 
-    if cache::get_workflow_runtime(&app_id, &parsed.deploy_hash).is_none() {
+    let Some(db_url) = cache::db_url() else {
+        return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+            parsed.run_id.clone(),
+            WorkflowAdvanceNackKind::Backpressure,
+            "worker DB_URL is not configured",
+        ));
+    };
+    if let Err(e) = ensure_workflow_journal_provisioned(&db_url, &app_id).await {
+        return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+            parsed.run_id.clone(),
+            WorkflowAdvanceNackKind::Backpressure,
+            e,
+        ));
+    }
+
+    let claim_config = workflow_worker_config();
+    let claim = match claim_workflow_run(&db_url, &parsed, &claim_config).await {
+        Ok(WorkflowClaimOutcome::Claimed(request)) => request,
+        Ok(WorkflowClaimOutcome::Terminal(registrations)) => {
+            return HttpResponse::Ok().json(&WorkflowAdvanceResponse::ack(
+                parsed.run_id,
+                registrations,
+            ));
+        }
+        Ok(WorkflowClaimOutcome::ClaimLost) => {
+            return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+                parsed.run_id,
+                WorkflowAdvanceNackKind::ClaimLost,
+                "workflow claim lost",
+            ));
+        }
+        Ok(WorkflowClaimOutcome::Backpressure(reason)) => {
+            return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+                parsed.run_id,
+                WorkflowAdvanceNackKind::Backpressure,
+                reason,
+            ));
+        }
+        Err(e) => {
+            return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+                parsed.run_id,
+                WorkflowAdvanceNackKind::ApplyFailed,
+                format!("claim workflow run: {e}"),
+            ));
+        }
+    };
+
+    if cache::get_workflow_runtime(&app_id, &claim.deploy_hash).is_none() {
         metrics::inc(&metrics::ON_DEMAND_LOADS_TOTAL);
         if let Err(e) =
-            load_pinned_workflow_on_demand(&config, &envs, &app_id, &parsed.deploy_hash).await
+            load_pinned_workflow_on_demand(&config, &envs, &app_id, &claim.deploy_hash).await
         {
             metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
             return HttpResponse::ServiceUnavailable().json(&serde_json::json!({
@@ -463,11 +528,11 @@ pub async fn workflow_advance_unsigned(
         }
     }
 
-    let runtime = match cache::get_workflow_runtime(&app_id, &parsed.deploy_hash) {
+    let runtime = match cache::get_workflow_runtime(&app_id, &claim.deploy_hash) {
         Some(r) => r,
         None => {
             return HttpResponse::NotFound().json(&serde_json::json!({
-                "error": format!("app {app_id} deploy {} not loaded", parsed.deploy_hash)
+                "error": format!("app {app_id} deploy {} not loaded", claim.deploy_hash)
             }));
         }
     };
@@ -481,6 +546,27 @@ pub async fn workflow_advance_unsigned(
         }
     };
 
+    let runtime_envelope = workflow_runtime_envelope(&config, &claim);
+    let runtime_envelope_json = match serde_json::to_string(&runtime_envelope) {
+        Ok(json) => json,
+        Err(e) => {
+            return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
+                claim.run_id.clone(),
+                WorkflowAdvanceNackKind::Invalid,
+                format!("encode workflow runtime envelope: {e}"),
+            ));
+        }
+    };
+    let heartbeat = spawn_workflow_heartbeat(
+        db_url.clone(),
+        claim.app_id,
+        claim.run_id.clone(),
+        claim.owner_id.clone(),
+        claim.dispatch_nonce.clone(),
+        claim_config.claim_ttl_ms,
+        claim_config.heartbeat_ms,
+    );
+
     metrics::inc(&metrics::DISPATCH_TOTAL);
     let ingress_bytes = body.len() as u64;
     let wall_start = std::time::Instant::now();
@@ -489,7 +575,7 @@ pub async fn workflow_advance_unsigned(
     let cpu_start = zeroship_runtime::init::thread_cpu_time();
     let outcome = {
         runtime.enter_isolate();
-        let o = runtime.call_workflow_dispatch(envelope_json, &env, ctx);
+        let o = runtime.call_workflow_dispatch(&runtime_envelope_json, &env, ctx);
         runtime.exit_isolate();
         o
     };
@@ -506,7 +592,15 @@ pub async fn workflow_advance_unsigned(
     match outcome {
         WorkflowOutcome::Response { json, logs: request_logs } => {
             crate::logs::append(&logs, app_id, request_logs);
-            let response = match apply_workflow_advance_result(&config, &app_id, &parsed, json).await {
+            let response = match apply_workflow_advance_result(
+                &config,
+                &db_url,
+                &claim,
+                &heartbeat,
+                json,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(resp) => {
                     record(0);
@@ -520,14 +614,21 @@ pub async fn workflow_advance_unsigned(
             match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(SettledWorkflow { json, logs: request_logs })) => {
                     crate::logs::append(&logs, app_id, request_logs);
-                    let response =
-                        match apply_workflow_advance_result(&config, &app_id, &parsed, json).await {
-                            Ok(response) => response,
-                            Err(resp) => {
-                                record(0);
-                                return resp;
-                            }
-                        };
+                    let response = match apply_workflow_advance_result(
+                        &config,
+                        &db_url,
+                        &claim,
+                        &heartbeat,
+                        json,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(resp) => {
+                            record(0);
+                            return resp;
+                        }
+                    };
                     record(response.len() as u64);
                     HttpResponse::Ok().content_type("application/json").body(response)
                 }
@@ -544,14 +645,129 @@ pub async fn workflow_advance_unsigned(
     }
 }
 
+struct WorkflowHeartbeat {
+    active: Arc<AtomicBool>,
+    lease_lost: Arc<AtomicBool>,
+}
+
+impl WorkflowHeartbeat {
+    fn lease_lost(&self) -> bool {
+        self.lease_lost.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for WorkflowHeartbeat {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+fn spawn_workflow_heartbeat(
+    db_url: String,
+    app_id: Uuid,
+    run_id: String,
+    owner_id: String,
+    dispatch_nonce: String,
+    claim_ttl_ms: i64,
+    heartbeat_ms: u64,
+) -> WorkflowHeartbeat {
+    let active = Arc::new(AtomicBool::new(true));
+    let lease_lost = Arc::new(AtomicBool::new(false));
+    let heartbeat_active = Arc::clone(&active);
+    let heartbeat_lost = Arc::clone(&lease_lost);
+    let interval = Duration::from_millis(heartbeat_ms);
+    compio::runtime::spawn(async move {
+        while heartbeat_active.load(Ordering::SeqCst) {
+            compio::time::sleep(interval).await;
+            if !heartbeat_active.load(Ordering::SeqCst) {
+                break;
+            }
+            match renew_workflow_claim(
+                &db_url,
+                app_id,
+                &run_id,
+                &owner_id,
+                &dispatch_nonce,
+                claim_ttl_ms,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    heartbeat_lost.store(true, Ordering::SeqCst);
+                    heartbeat_active.store(false, Ordering::SeqCst);
+                    tracing::warn!(run_id = %run_id, "worker workflow heartbeat lost claim");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, run_id = %run_id, "worker workflow heartbeat failed");
+                }
+            }
+        }
+    })
+    .detach();
+
+    WorkflowHeartbeat { active, lease_lost }
+}
+
 async fn apply_workflow_advance_result(
     config: &WorkerConfig,
-    app_id: &Uuid,
-    request: &WorkflowStepRequest,
+    db_url: &str,
+    request: &StepRequest,
+    heartbeat: &WorkflowHeartbeat,
     json: String,
 ) -> Result<String, HttpResponse> {
-    let json = rewrite_workflow_output_blobs(config, app_id, json).await?;
-    let response = match apply_workflow_advance_json(app_id, request, &json).await {
+    if heartbeat.lease_lost() {
+        let response = WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::ApplyFailed,
+            "workflow lease lost before apply",
+        );
+        return serde_json::to_string(&response).map_err(|e| {
+            HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": format!("encode workflow advance ack: {e}")
+            }))
+        });
+    }
+    match renew_workflow_claim(
+        db_url,
+        request.app_id,
+        &request.run_id,
+        &request.owner_id,
+        &request.dispatch_nonce,
+        WorkflowEngineConfig::default().claim_ttl_ms,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            let response = WorkflowAdvanceResponse::nack(
+                request.run_id.clone(),
+                WorkflowAdvanceNackKind::ApplyFailed,
+                "workflow lease lost before apply",
+            );
+            return serde_json::to_string(&response).map_err(|e| {
+                HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                    "error": format!("encode workflow advance ack: {e}")
+                }))
+            });
+        }
+        Err(e) => {
+            let response = WorkflowAdvanceResponse::nack(
+                request.run_id.clone(),
+                WorkflowAdvanceNackKind::Backpressure,
+                format!("renew workflow claim before apply: {e}"),
+            );
+            return serde_json::to_string(&response).map_err(|e| {
+                HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                    "error": format!("encode workflow advance ack: {e}")
+                }))
+            });
+        }
+    }
+
+    let json = rewrite_workflow_output_blobs(config, &request.app_id, json).await?;
+    let response = match apply_workflow_advance_json(db_url, request, &json).await {
         Ok(response) | Err(response) => response,
     };
     serde_json::to_string(&response).map_err(|e| {
@@ -562,11 +778,11 @@ async fn apply_workflow_advance_result(
 }
 
 async fn apply_workflow_advance_json(
-    app_id: &Uuid,
-    request: &WorkflowStepRequest,
+    db_url: &str,
+    request: &StepRequest,
     json: &str,
 ) -> Result<WorkflowAdvanceResponse, WorkflowAdvanceResponse> {
-    let step_result = match worker_json_to_step_result(&request.run_id, &request.nonce, json) {
+    let step_result = match worker_json_to_step_result(&request.run_id, &request.dispatch_nonce, json) {
         Ok(result) => result,
         Err(e) => {
             return Err(WorkflowAdvanceResponse::nack(
@@ -577,14 +793,7 @@ async fn apply_workflow_advance_json(
         }
     };
 
-    let Some(db_url) = cache::db_url() else {
-        return Err(WorkflowAdvanceResponse::nack(
-            request.run_id.clone(),
-            WorkflowAdvanceNackKind::Backpressure,
-            "worker DB_URL is not configured",
-        ));
-    };
-    if let Err(e) = ensure_workflow_journal_provisioned(&db_url, app_id).await {
+    if let Err(e) = ensure_workflow_journal_provisioned(db_url, &request.app_id).await {
         return Err(WorkflowAdvanceResponse::nack(
             request.run_id.clone(),
             WorkflowAdvanceNackKind::Backpressure,
@@ -592,10 +801,10 @@ async fn apply_workflow_advance_json(
         ));
     }
 
-    let store = PgStore::new(db_url.clone(), *app_id);
+    let store = PgStore::new(db_url.to_string(), request.app_id);
     let apply_config = workflow_apply_config_from_request(request);
     match apply::apply_step_result_on_store(&store, &apply_config, step_result).await {
-        Ok(_applied) => match collect_post_apply_registrations(&db_url, *app_id, &request.run_id, true).await {
+        Ok(_applied) => match collect_post_apply_registrations(db_url, request.app_id, &request.run_id, true).await {
             Ok(registrations) => Ok(WorkflowAdvanceResponse::ack(
                 request.run_id.clone(),
                 registrations,
@@ -624,18 +833,14 @@ async fn apply_workflow_advance_json(
     }
 }
 
-fn workflow_apply_config_from_request(request: &WorkflowStepRequest) -> WorkflowEngineConfig {
+fn workflow_apply_config_from_request(request: &StepRequest) -> WorkflowEngineConfig {
     let mut config = WorkflowEngineConfig::default();
     config.owner_id = request.owner_id.clone();
-    config.stuck_strike_limit = request.stuck_strike_limit.unwrap_or(config.stuck_strike_limit);
-    config.max_child_depth = request.max_child_depth.unwrap_or(DEFAULT_MAX_CHILD_DEPTH);
-    config.max_live_descendants = request
-        .max_live_descendants
-        .unwrap_or(DEFAULT_MAX_LIVE_DESCENDANTS);
-    config.max_start_many_batch = request
-        .max_start_many_batch
-        .unwrap_or(DEFAULT_MAX_START_MANY_BATCH);
-    config.journal_limits = request.journal_limits.unwrap_or_default();
+    config.stuck_strike_limit = request.stuck_strike_limit;
+    config.max_child_depth = request.max_child_depth;
+    config.max_live_descendants = request.max_live_descendants;
+    config.max_start_many_batch = request.max_start_many_batch;
+    config.journal_limits = request.journal_limits;
     config
 }
 
@@ -1045,8 +1250,7 @@ mod tests {
     use super::*;
 
     static V8_INIT: Once = Once::new();
-    const WORKFLOW_TEST_OWNER: &str = "worker-test-owner";
-    const WORKFLOW_TEST_NONCE: &str = "nonce_test";
+    const WORKFLOW_TEST_PLAN: &str = "pln_worker_workflow_test";
 
     fn init_runtime() {
         V8_INIT.call_once(init_v8);
@@ -1150,49 +1354,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .deploy_hash
     }
 
-    fn workflow_request(deploy_hash: &str, journal: Vec<serde_json::Value>) -> serde_json::Value {
-        workflow_request_named(deploy_hash, "Checkout", journal)
+    fn workflow_request(app_id: &Uuid) -> serde_json::Value {
+        workflow_request_for_run(app_id, "run_test")
     }
 
-    fn workflow_request_named(
-        deploy_hash: &str,
-        workflow_name: &str,
-        journal: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
-        workflow_request_named_for_run(
-            deploy_hash,
-            workflow_name,
-            "run_test",
-            WORKFLOW_TEST_NONCE,
-            journal,
-        )
-    }
-
-    fn workflow_request_named_for_run(
-        deploy_hash: &str,
-        workflow_name: &str,
-        run_id: &str,
-        nonce: &str,
-        journal: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
+    fn workflow_request_for_run(app_id: &Uuid, run_id: &str) -> serde_json::Value {
         serde_json::json!({
             "runId": run_id,
-            "workflowName": workflow_name,
-            "trigger": {
-                "input": { "orderId": "ord_1" },
-                "startedAt": "2026-07-06T00:00:00Z",
-                "runId": run_id,
-                "workflowName": workflow_name,
-            },
-            "journal": journal,
-            "deployHash": deploy_hash,
-            "attempt": 0,
-            "nonce": nonce,
-            "ownerId": WORKFLOW_TEST_OWNER,
-            "journalLimits": {
-                "runMaxBytes": 1073741824,
-                "appMaxBytes": 1073741824
-            }
+            "appId": app_id,
         })
     }
 
@@ -1292,52 +1461,98 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         client
     }
 
-    async fn seed_claimed_workflow_run(
+    async fn seed_unclaimed_workflow_run(
         db_url: &str,
         app_id: &Uuid,
         run_id: &str,
         workflow_name: &str,
-        nonce: &str,
+        deploy_hash: &str,
     ) {
         let conn = pg_client(db_url).await;
         PgStore::provision(&conn, app_id)
             .await
             .expect("provision worker workflow test journal");
+        conn.execute(
+            "INSERT INTO zeroship.plans \
+                (id, name, base_fee_cents, included_units, spend_limit_default_cents, workflows_allowed, runtime_limits_json) \
+             VALUES ($1, 'worker-workflow-test', 0, 1000000, 0, true, '{}'::json) \
+             ON CONFLICT (id) DO UPDATE SET workflows_allowed = true, archived = false",
+            &[&WORKFLOW_TEST_PLAN],
+        )
+        .await
+        .expect("upsert worker workflow test plan");
+        conn.execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
+             VALUES ($1, 'worker-workflow-test-app', $2, 'worker-test-key', '', true) \
+             ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
+            &[app_id, &WORKFLOW_TEST_PLAN],
+        )
+        .await
+        .expect("upsert worker workflow test app");
+        let deploy_id = format!("dep_{run_id}");
+        conn.execute(
+            "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
+             VALUES ($1, $2, $3, '{}', now()) \
+             ON CONFLICT (id) DO UPDATE SET deploy_hash = EXCLUDED.deploy_hash, activated_at = now()",
+            &[&deploy_id, app_id, &deploy_hash],
+        )
+        .await
+        .expect("upsert worker workflow test deploy");
         let tables = WorkflowTables::for_app_id(app_id);
         conn.execute(
             &format!(
                 "INSERT INTO {} \
-                    (id, workflow_name, app_id, deploy_id, state, input, claimed_by, dispatch_nonce, started_at) \
-                 VALUES ($1, $2, $3, 'dep_test', 'running', $4, $5, $6, now())",
+                    (id, workflow_name, app_id, deploy_id, state, input, started_at, wake_at) \
+                 VALUES ($1, $2, $3, $4, 'queued', $5, now(), now())",
                 tables.runs
             ),
             &[
                 &run_id,
                 &workflow_name,
                 app_id,
+                &deploy_id,
                 &serde_json::json!({"orderId": "ord_1"}),
-                &WORKFLOW_TEST_OWNER,
-                &nonce,
             ],
         )
         .await
-        .expect("seed claimed workflow run");
+        .expect("seed unclaimed workflow run");
     }
 
-    async fn reclaim_workflow_run(db_url: &str, app_id: &Uuid, run_id: &str, nonce: &str) {
+    async fn reclaim_workflow_run(db_url: &str, app_id: &Uuid, run_id: &str) {
         let conn = pg_client(db_url).await;
         let tables = WorkflowTables::for_app_id(app_id);
         conn.execute(
             &format!(
                 "UPDATE {} \
-                    SET state = 'running', claimed_by = $2, dispatch_nonce = $3, wake_at = NULL \
+                    SET state = 'running', claimed_by = NULL, dispatch_nonce = NULL, lease_expires = NULL, wake_at = now() \
                   WHERE id = $1",
                 tables.runs
             ),
-            &[&run_id, &WORKFLOW_TEST_OWNER, &nonce],
+            &[&run_id],
         )
         .await
         .expect("reclaim workflow run for replay");
+    }
+
+    async fn steal_workflow_claim(db_url: &str, app_id: &Uuid, run_id: &str) {
+        let conn = pg_client(db_url).await;
+        let tables = WorkflowTables::for_app_id(app_id);
+        let lease_expires_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_millis() as i64
+            + 60_000;
+        conn.execute(
+            &format!(
+                "UPDATE {} \
+                    SET state = 'running', claimed_by = 'other-worker', dispatch_nonce = 'wfd_other', lease_expires = to_timestamp($2::double precision / 1000.0) \
+                  WHERE id = $1",
+                tables.runs
+            ),
+            &[&run_id, &lease_expires_ms],
+        )
+        .await
+        .expect("steal workflow claim");
     }
 
     async fn workflow_step_names(db_url: &str, app_id: &Uuid, run_id: &str) -> Vec<String> {
@@ -1394,6 +1609,19 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         result
     }
 
+    fn assert_workflow_nack(
+        body: &[u8],
+        run_id: &str,
+        kind: &str,
+    ) -> serde_json::Value {
+        let result: serde_json::Value =
+            serde_json::from_slice(body).expect("workflow advance nack JSON");
+        assert_eq!(result["nack"], true, "workflow advance should nack: {result:?}");
+        assert_eq!(result["runId"], run_id);
+        assert_eq!(result["nackKind"], kind);
+        result
+    }
+
     #[test]
     fn workflow_advance_first_frontier_returns_step_completed() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
@@ -1408,12 +1636,12 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test",
                 "Checkout",
-                WORKFLOW_TEST_NONCE,
+                &deploy_hash,
             )
             .await;
             let app = test::init_service(
@@ -1430,7 +1658,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
@@ -1443,6 +1671,63 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let output = workflow_step_output(&db_url, &app_id, "run_test", "first").await;
             assert_eq!(output["mark"], "A");
             assert_eq!(output["bodyRuns"], 1);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_advance_claim_lost_nacks_without_replay() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let Some(db_url) = workflow_test_db_url() else {
+                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                return;
+            };
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
+            let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "CL").await;
+            seed_unclaimed_workflow_run(
+                &db_url,
+                &app_id,
+                "run_claim_lost",
+                "Checkout",
+                &deploy_hash,
+            )
+            .await;
+            steal_workflow_claim(&db_url, &app_id, "run_claim_lost").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-advance-unsigned/{app_id}")
+                            .route(web::post().to(workflow_advance_unsigned)),
+                    ),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .set_payload(
+                    serde_json::to_vec(&workflow_request_for_run(&app_id, "run_claim_lost"))
+                        .unwrap(),
+                )
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert_workflow_nack(&body, "run_claim_lost", "claimLost");
+            assert!(
+                workflow_step_names(&db_url, &app_id, "run_claim_lost")
+                    .await
+                    .is_empty(),
+                "claim-lost dispatch must not replay or apply"
+            );
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
@@ -1462,12 +1747,12 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "C").await;
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test",
                 "ConcurrentWorkflow",
-                WORKFLOW_TEST_NONCE,
+                &deploy_hash,
             )
             .await;
             let app = test::init_service(
@@ -1485,11 +1770,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(
-                    serde_json::to_vec(&workflow_request_named(
-                        &deploy_hash,
-                        "ConcurrentWorkflow",
-                        vec![],
-                    ))
+                    serde_json::to_vec(&workflow_request(&app_id))
                     .unwrap(),
                 )
                 .to_request();
@@ -1521,12 +1802,12 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let (app_id, blob_store, envs, logs, config, meter, blob_root) =
                 workflow_test_state_with_meter(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "M").await;
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test",
                 "Checkout",
-                WORKFLOW_TEST_NONCE,
+                &deploy_hash,
             )
             .await;
             let app = test::init_service(
@@ -1541,7 +1822,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
 
-            let payload = serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap();
+            let payload = serde_json::to_vec(&workflow_request(&app_id)).unwrap();
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(payload.clone())
@@ -1592,12 +1873,12 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test",
                 "Checkout",
-                WORKFLOW_TEST_NONCE,
+                &deploy_hash,
             )
             .await;
             let app = test::init_service(
@@ -1614,35 +1895,16 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let first_req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let first_resp = test::call_service(&app, first_req).await;
             assert_eq!(first_resp.status(), StatusCode::OK);
             let first_body = test::read_body(first_resp).await;
             assert_workflow_ack(&first_body, "run_test");
-            let first_output = workflow_step_output(&db_url, &app_id, "run_test", "first").await;
-
-            let journal = vec![serde_json::json!({
-                "ordinal": 0,
-                "name": "first",
-                "nameOccurrence": 0,
-                "kind": "run",
-                "state": "completed",
-                "output": first_output,
-            })];
-            reclaim_workflow_run(&db_url, &app_id, "run_test", "nonce_replay").await;
+            reclaim_workflow_run(&db_url, &app_id, "run_test").await;
             let second_req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                .set_payload(
-                    serde_json::to_vec(&workflow_request_named_for_run(
-                        &deploy_hash,
-                        "Checkout",
-                        "run_test",
-                        "nonce_replay",
-                        journal,
-                    ))
-                    .unwrap(),
-                )
+                .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let second_resp = test::call_service(&app, second_req).await;
             assert_eq!(second_resp.status(), StatusCode::OK);
@@ -1696,20 +1958,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                     .enumerate()
             {
                 let run_id = format!("run_test_pinned_{idx}");
-                let nonce = format!("nonce_test_pinned_{idx}");
-                seed_claimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", &nonce).await;
+                seed_unclaimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", deploy_hash).await;
                 let req = test::TestRequest::post()
                     .uri(&format!("/workflow-advance-unsigned/{app_id}"))
-                    .set_payload(
-                        serde_json::to_vec(&workflow_request_named_for_run(
-                            deploy_hash,
-                            "Checkout",
-                            &run_id,
-                            &nonce,
-                            vec![],
-                        ))
-                        .unwrap(),
-                    )
+                    .set_payload(serde_json::to_vec(&workflow_request_for_run(&app_id, &run_id)).unwrap())
                     .to_request();
                 let resp = test::call_service(&app, req).await;
                 assert_eq!(resp.status(), StatusCode::OK);
@@ -1752,24 +2004,18 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
 
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test_lru_a",
                 "Checkout",
-                "nonce_test_lru_a",
+                &deploy_a,
             )
             .await;
             let req_a = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(
-                    serde_json::to_vec(&workflow_request_named_for_run(
-                        &deploy_a,
-                        "Checkout",
-                        "run_test_lru_a",
-                        "nonce_test_lru_a",
-                        vec![],
-                    ))
+                    serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_a"))
                     .unwrap(),
                 )
                 .to_request();
@@ -1777,24 +2023,18 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             assert_eq!(resp_a.status(), StatusCode::OK);
             assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
 
-            seed_claimed_workflow_run(
+            seed_unclaimed_workflow_run(
                 &db_url,
                 &app_id,
                 "run_test_lru_b",
                 "Checkout",
-                "nonce_test_lru_b",
+                &deploy_b,
             )
             .await;
             let req_b = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{app_id}"))
                 .set_payload(
-                    serde_json::to_vec(&workflow_request_named_for_run(
-                        &deploy_b,
-                        "Checkout",
-                        "run_test_lru_b",
-                        "nonce_test_lru_b",
-                        vec![],
-                    ))
+                    serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_b"))
                     .unwrap(),
                 )
                 .to_request();
