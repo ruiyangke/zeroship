@@ -526,9 +526,18 @@ done
 case "$DU" in du_*) pass "REAL dispute object appeared: $DU";; *) diverge "no dispute object materialized for $DISP_CH within poll window (Stripe creates disputes asynchronously); dispute leg cannot be completed this run"; DU="";; esac
 
 if [ -n "$DU" ]; then
+  # A freshly-created dispute object populates `charge` immediately but
+  # `payment_intent` a beat later (Stripe eventual consistency). Re-fetch until
+  # BOTH are present so the "both candidates" assertion is deterministic — our
+  # handle_dispute_created resolves via EITHER, so this is only about the raw
+  # object's shape, not correctness. Falls through to whatever Stripe returns.
+  for _ in $(seq 1 10); do
+    DU_PI="$(sget "disputes/$DU" | jget payment_intent)"
+    DU_CH="$(sget "disputes/$DU" | jget charge)"
+    [ -n "$DU_PI" ] && [ -n "$DU_CH" ] && break
+    sleep 2
+  done
   DU_AMOUNT="$(sget "disputes/$DU" | jget amount)"
-  DU_PI="$(sget "disputes/$DU" | jget payment_intent)"
-  DU_CH="$(sget "disputes/$DU" | jget charge)"
   DU_REASON="$(sget "disputes/$DU" | jget reason)"
   echo "    REAL dispute: amount=${DU_AMOUNT}c pi=$DU_PI ch=$DU_CH reason=$DU_REASON"
   [ -n "$DU_PI" ] && [ -n "$DU_CH" ] && pass "REAL dispute object carries BOTH payment_intent ($DU_PI) and charge ($DU_CH) at top level — matches handle_dispute_created's candidates" \
