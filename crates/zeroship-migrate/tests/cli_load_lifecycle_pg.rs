@@ -1,3 +1,4 @@
+#![cfg(feature = "standalone-cli")]
 //! Schema-lifecycle dbmate parity (PG leg) — BINARY-level e2e driving the ACTUAL
 //! `zeroship-migrate` binary as a subprocess against a fresh throwaway DB on the
 //! `zeroship_migrate_test` cluster.

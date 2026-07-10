@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful pre-apply **integrity-manifest gate** tests (v3 Plan F) against a
 //! REAL Postgres (no shims).
 //!

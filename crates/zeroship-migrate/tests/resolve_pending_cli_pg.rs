@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR9a — the `resolve-pending --apply|--abort` CLI runner, faithful e2e on REAL
 //! Postgres (`:5440`). Drives the REAL `command::runner::run_resolve_pending`
 //! (not a spawned process, not a shim) against a real obligation the engine wrote.

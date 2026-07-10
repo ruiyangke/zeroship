@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR2 — faithful e2e + byte-equality for the IR `renameColumn` lowering on the
 //! **Postgres** leg (§2.6 / §2.6.1 / §2.6.2) against REAL Postgres (`:5440`).
 //!

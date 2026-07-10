@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! PR6b — FAITHFUL cross-backend e2e proving the §1.1 headline ("one script, both
 //! backends, DDL+DML") for the bi-dialect DDL+backfill hero (§3.1) and the pinned
 //! `.splitPart` envelope (§9). ONE `.ir.json` source is applied to BOTH a real

@@ -18,10 +18,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::analysis::analyze::Advisory;
-use crate::apply::backend::{MigrationBackend, PostgresBackend};
+use crate::apply::backend::MigrationBackend;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::PostgresBackend;
 use crate::apply::backend::sqlite::SqliteBackend;
-use crate::conn::{connect, ConnectError, ExecutorConfig};
-use crate::apply::drift::{check_checksum_drift, ChecksumDriftReport, DriftError};
+#[cfg(feature = "native-pg")]
+use crate::conn::connect;
+use crate::conn::{ConnectError, ExecutorConfig};
+use crate::apply::drift::{ChecksumDriftReport, DriftError};
+#[cfg(feature = "native-pg")]
+use crate::apply::drift::check_checksum_drift;
 use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineError};
 use crate::apply::executor::{
     ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest, RollbackTarget,
@@ -35,7 +41,9 @@ use crate::plan::loader::{load_dir, LoaderError};
 // `PLATFORM_OWNER_APP` feeds only the zsv8-gated platform-TS-apply path.
 #[cfg(feature = "zsv8")]
 use crate::plan::loader::PLATFORM_OWNER_APP;
-use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
+#[cfg(feature = "native-pg")]
+use crate::ops::status::status;
+use crate::ops::status::{status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
 /// The trust profile the runner builds its configs under (design §9 `--profile`).
@@ -245,6 +253,15 @@ pub enum RunError {
          `.sql` corpus instead."
     )]
     TsRecordRequiresZsv8,
+    /// A Postgres engine was selected, but this binary was compiled without the
+    /// `native-pg` driver (`--no-default-features`, no `PgSession` impl). Rebuild
+    /// with `--features native-pg` (the default build), or target a SQLite DSN.
+    #[error(
+        "Postgres apply requires the `native-pg` compio-postgres driver; this binary \
+         was compiled without it (`--no-default-features`). Rebuild with \
+         `--features native-pg` (the default build), or use a SQLite DSN."
+    )]
+    PgRequiresNativePg,
     /// An explicit `--engine` (or `ZEROSHIP_MIGRATE_ENGINE` / config `engine`)
     /// contradicts the engine the DSN's unambiguous scheme implies. We refuse
     /// rather than silently trusting one side.
@@ -812,7 +829,10 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 /// destructive-without-`--yes` refusal / apply.
 pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => run_migrate_pg(cfg).await,
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -836,6 +856,7 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
 }
 
 /// The Postgres leg of `migrate`.
+#[cfg(feature = "native-pg")]
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     if cfg.profile == RunProfile::Platform {
         match platform_corpus_format(&cfg.dir)? {
@@ -913,11 +934,14 @@ async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunErr
 pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir_flat(&cfg.dir)?;
     let st = match cfg.resolve_engine()? {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => {
             let conn = connect(&cfg.database_url).await?;
             let exec_cfg = build_exec_cfg(cfg);
             status(&conn, &exec_cfg, &migrations).await?
         }
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => return Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => {
             let backend = open_sqlite_backend(&app)?;
             let exec_cfg = sqlite_exec_cfg(cfg);
@@ -951,6 +975,7 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// [`RunError::ResolvePending`] on a bad/absent version, missing `--yes`,
 /// both/neither flag, a non-PG engine, or a re-author/apply failure;
 /// [`RunError`] sub-arms on connect/apply/journal failure.
+#[cfg(feature = "native-pg")]
 pub async fn run_resolve_pending(
     cfg: &RunConfig,
     version: &str,
@@ -1230,7 +1255,10 @@ fn plain_ddl(name: &str, up: String, destructive: bool) -> crate::model::migrati
 /// drift read failure.
 pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => run_validate_pg(cfg).await,
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -1258,6 +1286,7 @@ fn validate_plan_signals(
 }
 
 /// The Postgres leg of `validate` — the existing path, byte-identical.
+#[cfg(feature = "native-pg")]
 async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
@@ -1548,6 +1577,9 @@ pub async fn dump_schema_sqlite(app: &Path) -> Result<String, RunError> {
 /// [`RunError`] on an unsupported engine / connect / a journal read failure.
 pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunError> {
     match cfg.resolve_engine()? {
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg),
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => {
             let conn = connect(&cfg.database_url).await?;
             let exec_cfg = build_exec_cfg(cfg);
@@ -1582,6 +1614,7 @@ pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunE
 /// LATEST event must be `applied`; its name/checksum are read from that completed
 /// event. Mirrors [`crate::apply::journal::applied`]'s DISTINCT-ON-latest logic, additionally
 /// carrying `name` (which `AppliedEntry` does not). Ordered by version.
+#[cfg(feature = "native-pg")]
 async fn pg_net_applied_trailer(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
@@ -1859,7 +1892,10 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     let (ddl, entries) = parse_schema_dump(content)?;
 
     match cfg.resolve_engine()? {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => run_load_pg(cfg, &ddl, &entries).await,
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_load_sqlite(cfg, &app, &ddl, &entries).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -1869,6 +1905,7 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
 /// The Postgres leg of `load`: restore the DDL via the admin connection, then
 /// record each trailer version as a baseline `completed` event under the project
 /// advisory lock (the SAME serialization + immutable journal path `migrate` uses).
+#[cfg(feature = "native-pg")]
 async fn run_load_pg(
     cfg: &RunConfig,
     ddl: &str,
@@ -1899,6 +1936,7 @@ async fn run_load_pg(
 
 /// The PG `load` body, run while holding the project advisory lock: first-entry
 /// guard → restore DDL → journal the trailer versions.
+#[cfg(feature = "native-pg")]
 async fn run_load_pg_locked(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
@@ -1984,6 +2022,7 @@ async fn run_load_pg_locked(
 /// `schema_migrations*` tables live there too but a fresh load target has none yet
 /// (the journal-presence check `load_pg_net_applied` already covers the managed
 /// case, so any table here on a journal-less DB is genuine user data).
+#[cfg(feature = "native-pg")]
 async fn load_pg_user_tables(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
@@ -2007,6 +2046,7 @@ async fn load_pg_user_tables(
 /// `CREATE TABLE … schema_migrations` on restore. So we check the meta table's
 /// existence first (via `to_regclass`, NULL when absent) and only read net state if
 /// it exists.
+#[cfg(feature = "native-pg")]
 async fn load_pg_net_applied(
     conn: &compio_postgres::Client,
     exec_cfg: &ExecutorConfig,
@@ -2103,7 +2143,10 @@ pub async fn run_rollback(
     };
 
     match cfg.resolve_engine()? {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => run_rollback_pg(cfg, target).await,
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
@@ -2111,6 +2154,7 @@ pub async fn run_rollback(
 }
 
 /// The Postgres leg of `rollback` — the existing path, byte-identical.
+#[cfg(feature = "native-pg")]
 async fn run_rollback_pg(cfg: &RunConfig, target: RollbackTarget) -> Result<RunReport, RunError> {
     let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
@@ -2277,8 +2321,11 @@ pub async fn run_wait(
 /// backend (the dev-file analog of "the DB accepts a connection" — `:memory:` is
 /// always ready). An unsupported URL fails the probe with a clear message (so
 /// `wait` times out honestly rather than panicking).
+// `database_url` is consumed only by the `native-pg` Postgres arm below.
+#[cfg_attr(not(feature = "native-pg"), allow(unused_variables))]
 async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
     match engine {
+        #[cfg(feature = "native-pg")]
         Engine::Postgres => {
             let conn = connect(database_url).await.map_err(|e| e.to_string())?;
             conn.query("SELECT 1", &[])
@@ -2286,6 +2333,8 @@ async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
+        #[cfg(not(feature = "native-pg"))]
+        Engine::Postgres => Err(RunError::PgRequiresNativePg.to_string()),
         Engine::Sqlite(app) => {
             // The SQLite "is it ready?" probe: can we open the hardened backend on
             // the file? (`:memory:` always opens.) No journal mutation — the open

@@ -55,7 +55,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::apply::backend::{MigrationBackend, PostgresBackend};
+use crate::apply::backend::MigrationBackend;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::PostgresBackend;
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, LockMode};
 use crate::apply::journal::{DeployRecoveryScope, PendingContract};
@@ -248,6 +250,7 @@ impl From<IrDiscoveryError> for SqliteIrApplyError {
 ///
 /// # Errors
 /// [`DriftError`] if live schema introspection fails.
+#[cfg(feature = "native-pg")]
 pub async fn postgres_ir_apply_state(
     backend: &PostgresBackend<'_>,
     exec_cfg: &ExecutorConfig,
@@ -298,6 +301,7 @@ pub async fn postgres_ir_apply_state(
 /// # Errors
 /// [`PostgresIrApplyError`] on discovery, live introspection, guarded lower, or
 /// apply failure.
+#[cfg(feature = "native-pg")]
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_bundle_ir_postgres(
     backend: &PostgresBackend<'_>,
@@ -378,6 +382,7 @@ pub async fn apply_bundle_ir_postgres(
 /// # Errors
 /// [`SealedApplyError::Seal`] when the seal is invalid or stale, otherwise the
 /// underlying [`PostgresIrApplyError`] from [`apply_bundle_ir_postgres`].
+#[cfg(feature = "native-pg")]
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_sealed(
     backend: &PostgresBackend<'_>,
@@ -448,6 +453,7 @@ pub async fn apply_standalone(
 /// and recovery bracket; the Platform runner calls it through
 /// [`apply_bundle_ir_postgres`]. This is the shared load + guarded-lower +
 /// `apply_plan` core for PG IR artifacts.
+#[cfg(feature = "native-pg")]
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_one_ir_file_postgres(
     backend: &PostgresBackend<'_>,
@@ -499,6 +505,7 @@ struct PlatformTsVersionSeed<'a> {
     version: &'a str,
 }
 
+#[cfg(feature = "native-pg")]
 #[allow(clippy::too_many_arguments)]
 async fn apply_one_ir_document_postgres(
     backend: &PostgresBackend<'_>,

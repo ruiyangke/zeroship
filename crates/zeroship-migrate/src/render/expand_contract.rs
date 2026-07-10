@@ -693,6 +693,7 @@ fn build_dual_write_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native-pg")]
     use crate::apply::backend::postgres::online::run_expand_pg;
 
     fn author() -> ExpandContractAuthor {
@@ -1058,6 +1059,7 @@ mod tests {
     //
     // The refusal fires BEFORE any DDL/backfill, so the connection is never used on this
     // path — but `run_expand_pg` needs a `&Client`, so we open one (skip if :5440 is down).
+    #[cfg(feature = "native-pg")]
     #[compio::test]
     async fn empty_expand_under_scoped_versions_is_refused_not_fail_open() {
         const DSN: &str =

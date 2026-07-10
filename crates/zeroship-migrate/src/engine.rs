@@ -23,6 +23,7 @@
 //! if a caller hand-built a plan, the executor still independently denies the
 //! dangerous surface and confines execution. The engine never disables those.
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::Client;
 
 pub use crate::approval::Approval;
@@ -896,6 +897,11 @@ impl MigrationEngine {
     /// # Errors
     /// [`DeclarativeApplyError`] from the abort apply (a DB error, or a re-author
     /// failure surfaced as [`EngineError`]).
+    ///
+    /// Online-rename obligations exist only on the PG online path (SQLite has no
+    /// online path — `online() == None`), and this re-authors the abort DDL via
+    /// the PG-only `build_abort_steps`, so it rides `native-pg`.
+    #[cfg(feature = "native-pg")]
     pub async fn abort_same_deploy_expands<B: MigrationBackend>(
         &self,
         obligations: &[crate::apply::journal::PendingContract],
@@ -1986,6 +1992,7 @@ impl MigrationEngine {
     /// - [`RollbackEngineError::Rollback`] — the executor's rollback failed
     ///   (guard denial on a `down`, irreversible without force, checksum drift,
     ///   missing-from-set, unknown target, or a mid-rollback DB error).
+    #[cfg(feature = "native-pg")]
     pub async fn rollback(
         &self,
         migrations: &[Migration],
@@ -2039,6 +2046,7 @@ impl MigrationEngine {
     /// - [`OnlineError::Backfill`] — the backfill failed (E3 is NOT journaled, so
     ///   the gate keeps the expand incomplete and the contract stays blocked; the
     ///   backfill is resumable on a re-run).
+    #[cfg(feature = "native-pg")]
     pub async fn run_expand(
         &self,
         plan: &crate::render::expand_contract::ExpandContractPlan,
@@ -2067,6 +2075,7 @@ impl MigrationEngine {
     /// auto-releases at each batch COMMIT), while a SECOND connection still blocks
     /// on the held session lock. So the whole-deploy serialization is preserved
     /// through the backfill too, without ever freeing the project lock.
+    #[cfg(feature = "native-pg")]
     async fn run_expand_with_lock(
         &self,
         plan: &crate::render::expand_contract::ExpandContractPlan,

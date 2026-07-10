@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful migration-submission-adapter tests against a REAL Postgres (no shims).
 //!
 //! Exercises [`zeroship_migrate::submit_migration`] end-to-end: a client hands in a
