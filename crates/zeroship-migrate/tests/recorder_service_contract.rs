@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4a §8.9.2 recorder-SERVICE contract tests: PAT auth + server-side `app_id`
 //! ownership cross-check (§8.6), per-token + global concurrency limits, and the
 //! end-to-end `record` happy path through the real sandboxed child.

@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 test #1 (SQLite leg) + #6 — the end-to-end `new → edit → build → apply` flow
 //! on a REAL temp-file SQLite backend, and the deterministic-by-construction scaffold.
 //!

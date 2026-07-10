@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4a §8.9 FAITHFUL kernel-level e2e for the build-time recorder sandbox.
 //!
 //! These tests exercise the REAL path — the actual `zeroship-migrate-recorder-child`

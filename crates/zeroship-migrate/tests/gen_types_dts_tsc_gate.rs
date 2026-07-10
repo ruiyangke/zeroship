@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! **Migration-first P2b — the REAL `tsc` gate over the emitted `env.db` module
 //! (CRITICAL-1).**
 //!

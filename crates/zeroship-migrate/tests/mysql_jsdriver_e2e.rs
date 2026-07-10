@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 #![allow(unsafe_code)]
 
 #[path = "../../runtime/tests/support/node_realworld.rs"]

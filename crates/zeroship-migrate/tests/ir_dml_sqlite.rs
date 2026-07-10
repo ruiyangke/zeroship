@@ -26,10 +26,15 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    apply::executor::LockMode, frontend::record_migration_to_ir_unsandboxed, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
+    apply::executor::LockMode, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
     MigrationEngine, MigrationIr, PolicyProfile, SqlDialect, SqliteBackend,
     resolve_create_table_policy,
 };
+// The single V8-recorder-backed test below is compiled only under `zsv8`; the
+// rest of this suite is pure-core DML render/apply and survives the V8-free
+// (`--no-default-features`) build.
+#[cfg(feature = "zsv8")]
+use zeroship_migrate::frontend::record_migration_to_ir_unsandboxed;
 
 const PROJECT: &str = "prj_dml";
 const APP: &str = "app_dml";
@@ -68,6 +73,7 @@ fn resolved_ir_json(raw: &str) -> String {
     serde_json::to_string(&resolve_ir(&ir)).expect("resolved test IR serializes")
 }
 
+#[cfg(feature = "zsv8")]
 fn unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -75,6 +81,7 @@ fn unix_secs() -> i64 {
         .as_secs() as i64
 }
 
+#[cfg(feature = "zsv8")]
 fn parse_sqlite_current_timestamp(value: &str) -> i64 {
     assert_eq!(value.len(), 19, "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
     assert_eq!(&value[4..5], "-", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
@@ -171,6 +178,7 @@ async fn lower_plan_and_apply(
         .expect("apply the DML plan on SQLite")
 }
 
+#[cfg(feature = "zsv8")]
 async fn load_recorded_ir_and_apply(
     be: &SqliteBackend,
     ir: &zeroship_migrate::MigrationIr,
@@ -313,6 +321,7 @@ async fn update_set_scalar_and_expr_apply_on_sqlite() {
     );
 }
 
+#[cfg(feature = "zsv8")]
 #[compio::test]
 async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() {
     let p = paths("fnsynth_symbol");

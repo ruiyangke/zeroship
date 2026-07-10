@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4a §8.9.2 HTTP-contract tests for `POST /v1/recorder/record` — the DTO shapes,
 //! the §8.8 structured-error mapping, and the 200 body (ir_json + ts_provenance_blob
 //! + checksum) driven through the real `RecorderService` + sandboxed child.
