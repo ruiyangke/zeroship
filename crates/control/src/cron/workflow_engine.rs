@@ -3,8 +3,9 @@
 //! This cron owns only the control-plane scheduling core: due-run claiming,
 //! lease heartbeats, the dispatch seam, and the idempotent outcome apply txn.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,7 +17,7 @@ use zeroship_core::typed_id;
 use zeroship_plugin_workflow::apply;
 use zeroship_plugin_workflow::engine;
 use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{self, PgStore};
+use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_plugin_workflow::store::{CompensationProgress, StepWriteOutcome};
 use zeroship_workflow_scheduler::{
     self as workflow_scheduler, FiredTimer, LapsedInflightTimer, SchedulerConfig, TimerWheel,
@@ -25,6 +26,7 @@ use zeroship_workflow_scheduler::{
 };
 
 use crate::registry::RegistryError;
+use crate::workflow_limits;
 use crate::workflow_rollout;
 use crate::{AppState, Registry};
 
@@ -41,6 +43,97 @@ const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKPRESSURE_PARK_MS: i64 = 1_000;
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+
+pub(crate) fn journal_sql(tables: &WorkflowTables, sql: &str) -> String {
+    sql.replace("zeroship.workflow_runs", &tables.runs)
+        .replace("zeroship.workflow_steps", &tables.steps)
+        .replace("zeroship.workflow_signals", &tables.signals)
+        .replace("zeroship.workflow_subscriptions", &tables.subscriptions)
+        .replace("zeroship.workflow_blobs", &tables.blobs)
+}
+
+pub(crate) async fn provision_tables<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<WorkflowTables, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let tables = WorkflowTables::for_app_id(app_id);
+    let cache = PROVISIONED_WORKFLOW_JOURNALS.get_or_init(|| Mutex::new(HashSet::new()));
+    if cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(app_id)
+    {
+        return Ok(tables);
+    }
+
+    PgStore::provision(conn, app_id)
+        .await
+        .map_err(workflow_error_to_registry)?;
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(*app_id);
+    Ok(tables)
+}
+
+pub(crate) async fn existing_tables<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<Option<WorkflowTables>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let tables = WorkflowTables::for_app_id(app_id);
+    let rows = conn
+        .query("SELECT to_regclass($1) IS NOT NULL AS exists", &[&tables.runs])
+        .await
+        .map_err(RegistryError::from)?;
+    if rows.first().is_some_and(|row| row.get("exists")) {
+        Ok(Some(tables))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) async fn workflow_app_ids<C>(conn: &C) -> Result<Vec<Uuid>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT id \
+               FROM zeroship.apps \
+              ORDER BY id",
+            &[],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+async fn find_run_tables<C>(conn: &C, run_id: &str) -> Result<Option<WorkflowTables>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    for app_id in workflow_app_ids(conn).await? {
+        let Some(tables) = existing_tables(conn, &app_id).await? else {
+            continue;
+        };
+        let sql = format!("SELECT 1 FROM {} WHERE id = $1 LIMIT 1", tables.runs);
+        let rows = conn
+            .query(&sql, &[&run_id])
+            .await
+            .map_err(RegistryError::from)?;
+        if !rows.is_empty() {
+            return Ok(Some(tables));
+        }
+    }
+    Ok(None)
+}
 
 #[async_trait(?Send)]
 pub trait StepDispatcher: Send + Sync {
@@ -206,7 +299,19 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         tracing::error!(error = %e, "workflow inflight reaper provision failed");
         return;
     }
+    match reconcile_scheduler_from_journal_with_store(&store, &state.registry, false).await {
+        Ok(n) if n > 0 => tracing::info!(registered = n, "workflow scheduler DR reconcile seeded timers"),
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "workflow scheduler DR reconcile failed"),
+    }
     loop {
+        match reconcile_scheduler_from_journal_with_store(&store, &state.registry, true).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(registered = n, "workflow scheduler DR reconcile seeded due timers")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "workflow scheduler DR reconcile tick failed"),
+        }
         match reap_lapsed_inflight_once(
             &store,
             &state,
@@ -222,6 +327,58 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         }
         compio::time::sleep(Duration::from_secs(tick_secs)).await;
     }
+}
+
+/// One-shot control-mediated scheduler seed from per-app workflow journals.
+///
+/// The scheduler store never reads the journal directly. Control owns the
+/// platform connection, provisions every app-local journal, and uses the
+/// scheduler's normal ack API to register current wake rows.
+#[allow(clippy::future_not_send)]
+pub async fn reconcile_scheduler_from_journal(state: &AppState) -> Result<usize, RegistryError> {
+    let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
+    store
+        .provision()
+        .await
+        .map_err(scheduler_store_error_to_registry)?;
+    reconcile_scheduler_from_journal_with_store(&store, &state.registry, false).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn reconcile_scheduler_from_journal_with_store(
+    scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
+    due_only: bool,
+) -> Result<usize, RegistryError> {
+    let conn = registry.conn().await?;
+    let mut registered = 0usize;
+    for app_id in workflow_app_ids(&conn).await? {
+        let Some(tables) = existing_tables(&conn, &app_id).await? else {
+            continue;
+        };
+        let sql = format!(
+            "SELECT id, app_id, wake_at \
+               FROM {} \
+              WHERE state IN ('queued','running','sleeping','waiting','compensating') \
+                AND wake_at IS NOT NULL \
+                AND ($1::bool = false OR wake_at <= now()) \
+                AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
+              ORDER BY wake_at, id",
+            tables.runs
+        );
+        let rows = conn.query(&sql, &[&due_only]).await.map_err(RegistryError::from)?;
+        for row in rows {
+            let run_id: String = row.get("id");
+            let app_id: Uuid = row.get("app_id");
+            let wake_at: DateTime<Utc> = row.get("wake_at");
+            scheduler_store
+                .ack_register_next(&run_id, app_id, wake_at)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
+            registered = registered.saturating_add(1);
+        }
+    }
+    Ok(registered)
 }
 
 /// Retired control-side scan tick. The scheduler store is the timer authority.
@@ -393,9 +550,13 @@ async fn claim_fired_timer(
 ) -> Result<Option<ClaimedRun>, RegistryError> {
     let mut conn = registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
-    let rows = tx
-        .query(
-            "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
+    let Some(tables) = existing_tables(&tx, &timer.app_id).await? else {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(None);
+    };
+    let sql = journal_sql(
+        &tables,
+        "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
                     r.state, r.input, r.started_at, r.waiting_step_key, r.cancel_requested \
                FROM zeroship.workflow_runs r \
                JOIN zeroship.apps app ON app.id = r.app_id \
@@ -410,8 +571,9 @@ async fn claim_fired_timer(
                 AND plan.workflows_allowed \
                 AND NOT plan.archived \
               FOR UPDATE SKIP LOCKED",
-            &[&timer.run_id, &timer.app_id, &require_due],
-        )
+    );
+    let rows = tx
+        .query(&sql, &[&timer.run_id, &timer.app_id, &require_due])
         .await
         .map_err(RegistryError::from)?;
 
@@ -436,7 +598,10 @@ async fn claim_fired_timer(
     tx.batch_execute("SAVEPOINT workflow_claim_row")
         .await
         .map_err(RegistryError::from)?;
-    let claimed = match claim_one_locked(&tx, config, candidate).await {
+    let mut run_config = config.clone();
+    run_config.journal_limits =
+        workflow_limits::workflow_journal_limits_for_app(&tx, &candidate.app_id).await?;
+    let claimed = match claim_one_locked(&tx, &tables, &run_config, candidate).await {
         Ok(run) => {
             tx.batch_execute("RELEASE SAVEPOINT workflow_claim_row")
                 .await
@@ -498,46 +663,85 @@ async fn reap_parked_cancel_requested_runs<C>(
 where
     C: GenericClient + Sync,
 {
-    let rows = tx
-        .query(
+    let mut reaped = Vec::new();
+    for app_id in workflow_app_ids(tx).await? {
+        if i64::try_from(reaped.len()).unwrap_or(i64::MAX) >= limit {
+            break;
+        }
+        let Some(tables) = existing_tables(tx, &app_id).await? else {
+            continue;
+        };
+        let remaining = limit - i64::try_from(reaped.len()).unwrap_or(i64::MAX);
+        let sql = format!(
             "SELECT r.id \
-               FROM zeroship.workflow_runs r \
-               JOIN zeroship.apps app ON app.id = r.app_id \
-               JOIN zeroship.plans plan ON plan.id = app.plan_id \
+               FROM {runs} r \
               WHERE r.cancel_requested \
                 AND r.state IN ('queued','sleeping','waiting') \
-                AND app.workflows_enabled \
-                AND plan.workflows_allowed \
-                AND NOT plan.archived \
               ORDER BY r.wake_at NULLS FIRST, r.id \
               LIMIT $1 \
               FOR UPDATE SKIP LOCKED",
-            &[&limit],
-        )
-        .await
-        .map_err(RegistryError::from)?;
-
-    let mut reaped = Vec::new();
-    for row in rows {
-        let run_id: String = row.get("id");
-        if cancel_requested_run(tx, &run_id).await? {
-            reaped.push(run_id);
+            runs = tables.runs
+        );
+        let rows = tx
+            .query(&sql, &[&remaining])
+            .await
+            .map_err(RegistryError::from)?;
+        for row in rows {
+            let run_id: String = row.get("id");
+            if cancel_requested_run_for_app(tx, &tables, &run_id).await? {
+                reaped.push(run_id);
+            }
         }
     }
     Ok(reaped)
 }
 
+pub(crate) async fn cascade_cancel_children_for_app<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    parent_run_id: &str,
+) -> Result<u64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let sql = journal_sql(
+        tables,
+        "UPDATE zeroship.workflow_runs \
+            SET cancel_requested = true, wake_at = now() \
+          WHERE parent_run_id = $1 \
+            AND parent_cascade \
+            AND state NOT IN ('completed','failed','cancelled','stalled')",
+    );
+    conn.execute(&sql, &[&parent_run_id])
+        .await
+        .map_err(RegistryError::from)
+}
+
+pub(crate) async fn cascade_cancel_children<C>(
+    conn: &C,
+    parent_run_id: &str,
+) -> Result<u64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let Some(tables) = find_run_tables(conn, parent_run_id).await? else {
+        return Ok(0);
+    };
+    cascade_cancel_children_for_app(conn, &tables, parent_run_id).await
+}
+
 async fn claim_one_locked<C>(
     tx: &C,
+    tables: &WorkflowTables,
     config: &WorkflowEngineConfig,
     candidate: CandidateRun,
 ) -> Result<Option<ClaimedRun>, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let inflight = tx
-        .query(
-            "SELECT COUNT(*)::bigint AS n \
+    let inflight_sql = journal_sql(
+        tables,
+        "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_runs \
               WHERE app_id = $1 \
                 AND id <> $2 \
@@ -545,8 +749,9 @@ where
                 AND claimed_by IS NOT NULL \
                 AND lease_expires IS NOT NULL \
                 AND lease_expires > now()",
-            &[&candidate.app_id, &candidate.run_id],
-        )
+    );
+    let inflight = tx
+        .query(&inflight_sql, &[&candidate.app_id, &candidate.run_id])
         .await
         .map_err(RegistryError::from)?;
     let inflight: i64 = inflight[0].get("n");
@@ -555,28 +760,28 @@ where
     }
 
     if candidate.cancel_requested && candidate.state != "compensating" {
-        cancel_requested_run(tx, &candidate.run_id).await?;
+        cancel_requested_run_for_app(tx, tables, &candidate.run_id).await?;
         return Ok(None);
     }
 
     if candidate.state == "compensating"
-        && !has_due_compensation(tx, &candidate.run_id).await?
+        && !has_due_compensation(tx, tables, &candidate.run_id).await?
     {
-        finalize_compensation_if_drained(tx, &candidate.run_id).await?;
+        finalize_compensation_if_drained(tx, tables, &candidate.run_id).await?;
         return Ok(None);
     }
 
     let dispatch_nonce = typed_id::new_workflow_dispatch_id();
     let lease_expires = Utc::now() + chrono::Duration::milliseconds(config.claim_ttl_ms);
     if let Some(key) = candidate.waiting_step_key.as_deref() {
-        if !resolve_due_waiting_step(tx, &candidate.run_id, key, &dispatch_nonce).await? {
+        if !resolve_due_waiting_step(tx, tables, config, &candidate.run_id, key, &dispatch_nonce).await? {
             return Ok(None);
         }
     }
 
-    let rows = tx
-        .query(
-            "UPDATE zeroship.workflow_runs \
+    let update_sql = journal_sql(
+        tables,
+        "UPDATE zeroship.workflow_runs \
                 SET claimed_by = $1, \
                     lease_expires = $2, \
                     dispatch_nonce = $3, \
@@ -589,6 +794,10 @@ where
                 AND state IN ('queued','running','sleeping','waiting','compensating') \
                 AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
               RETURNING id",
+    );
+    let rows = tx
+        .query(
+            &update_sql,
             &[
                 &config.owner_id,
                 &lease_expires,
@@ -603,7 +812,7 @@ where
         return Ok(None);
     }
 
-    let journal = load_journal(tx, &candidate.run_id).await?;
+    let journal = load_journal(tx, tables, &candidate.run_id).await?;
     Ok(Some(ClaimedRun {
         request: StepRequest {
             run_id: candidate.run_id,
@@ -620,24 +829,30 @@ where
             input: candidate.input,
             started_at: candidate.started_at,
             journal,
+            journal_limits: config.journal_limits,
         },
     }))
 }
 
-async fn load_journal<C>(conn: &C, run_id: &str) -> Result<Vec<JournalStep>, RegistryError>
+async fn load_journal<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+) -> Result<Vec<JournalStep>, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "SELECT ordinal, name, name_occurrence, kind, state, output, error, child_run_id, \
+    let sql = journal_sql(
+        tables,
+        "SELECT ordinal, name, name_occurrence, kind, state, output, error, child_run_id, \
                     output_kind, output_hash, output_size, output_content_type, \
                     compensation_state \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 \
               ORDER BY ordinal",
-            &[&run_id],
-        )
+    );
+    let rows = conn
+        .query(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     Ok(rows
@@ -765,6 +980,8 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, RegistryError> {
 
 async fn resolve_due_waiting_step<C>(
     tx: &C,
+    tables: &WorkflowTables,
+    config: &WorkflowEngineConfig,
     run_id: &str,
     key: &str,
     dispatch_nonce: &str,
@@ -776,6 +993,8 @@ where
         WaitingStep::Sleep { ordinal, name } => {
             if insert_resolved_step(
                 tx,
+                tables,
+                config,
                 &StepCheckpoint {
                     ordinal,
                     name,
@@ -806,9 +1025,9 @@ where
                 return Ok(false);
             }
             tx.execute(
-                "UPDATE zeroship.workflow_runs \
+                &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                     SET waiting_step_key = NULL, wake_at = now() \
-                  WHERE id = $1",
+                  WHERE id = $1"),
                 &[&run_id],
             )
             .await
@@ -823,14 +1042,14 @@ where
         } => {
             let step_rows = tx
                 .query(
-                    "SELECT wake_at \
+                    &journal_sql(tables, "SELECT wake_at \
                        FROM zeroship.workflow_steps \
                       WHERE run_id = $1 \
                         AND ordinal = $2 \
                         AND name = $3 \
                         AND kind = 'wait_signal' \
                         AND state = 'running' \
-                      FOR UPDATE",
+                      FOR UPDATE"),
                     &[&run_id, &ordinal, &name],
                 )
                 .await
@@ -846,12 +1065,12 @@ where
                 max_signal_age_ms.map(|age| now - chrono::Duration::milliseconds(age));
             if let Some(stale_cutoff) = min_created_at.as_ref() {
                 tx.execute(
-                    "UPDATE zeroship.workflow_signals \
+                    &journal_sql(tables, "UPDATE zeroship.workflow_signals \
                         SET consumed_by = $1 \
                       WHERE run_id = $1 \
                         AND type = $2 \
                         AND consumed_by IS NULL \
-                        AND created_at < $3",
+                        AND created_at < $3"),
                     &[&run_id, &signal_type, stale_cutoff],
                 )
                 .await
@@ -859,7 +1078,7 @@ where
             }
             let signal = tx
                 .query(
-                    "SELECT id, payload, created_at, origin, delivery, topic \
+                    &journal_sql(tables, "SELECT id, payload, created_at, origin, delivery, topic \
                        FROM zeroship.workflow_signals \
                       WHERE run_id = $1 \
                         AND type = $2 \
@@ -867,7 +1086,7 @@ where
                         AND ($3::timestamptz IS NULL OR created_at >= $3) \
                       ORDER BY created_at, id \
                       LIMIT 1 \
-                      FOR UPDATE SKIP LOCKED",
+                      FOR UPDATE SKIP LOCKED"),
                     &[&run_id, &signal_type, &min_created_at],
                 )
                 .await
@@ -877,6 +1096,8 @@ where
                 if deadline.is_some_and(|deadline| deadline <= now) {
                     if insert_resolved_step(
                         tx,
+                        tables,
+                        config,
                         &StepCheckpoint {
                             ordinal,
                             name,
@@ -911,21 +1132,21 @@ where
                         return Ok(false);
                     }
                     tx.execute(
-                        "UPDATE zeroship.workflow_runs \
+                        &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                             SET waiting_step_key = NULL, wake_at = now() \
-                          WHERE id = $1",
+                          WHERE id = $1"),
                         &[&run_id],
                     )
                     .await
                     .map_err(RegistryError::from)?;
-                    delete_workflow_subscription(tx, run_id, ordinal).await?;
+                    delete_workflow_subscription(tx, tables, run_id, ordinal).await?;
                     return Ok(true);
                 }
 
                 tx.execute(
-                    "UPDATE zeroship.workflow_runs \
+                    &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                         SET state = 'waiting', wake_at = $2 \
-                      WHERE id = $1",
+                      WHERE id = $1"),
                     &[&run_id, &deadline],
                 )
                 .await
@@ -941,6 +1162,8 @@ where
             let topic: Option<String> = row.get("topic");
             if insert_resolved_step(
                 tx,
+                tables,
+                config,
                 &StepCheckpoint {
                     ordinal,
                     name,
@@ -980,35 +1203,35 @@ where
                 return Ok(false);
             }
             tx.execute(
-                "UPDATE zeroship.workflow_signals \
+                &journal_sql(tables, "UPDATE zeroship.workflow_signals \
                     SET consumed_by = $1 \
-                  WHERE id = $2 AND consumed_by IS NULL",
+                  WHERE id = $2 AND consumed_by IS NULL"),
                 &[&run_id, &signal_id],
             )
             .await
             .map_err(RegistryError::from)?;
             tx.execute(
-                "UPDATE zeroship.workflow_runs \
+                &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                     SET waiting_step_key = NULL, wake_at = now() \
-                  WHERE id = $1",
+                  WHERE id = $1"),
                 &[&run_id],
             )
             .await
             .map_err(RegistryError::from)?;
-            delete_workflow_subscription(tx, run_id, ordinal).await?;
+            delete_workflow_subscription(tx, tables, run_id, ordinal).await?;
             Ok(true)
         }
         WaitingStep::Child { ordinal, name } => {
             let step_rows = tx
                 .query(
-                    "SELECT wake_at, child_run_id, name_occurrence \
+                    &journal_sql(tables, "SELECT wake_at, child_run_id, name_occurrence \
                        FROM zeroship.workflow_steps \
                       WHERE run_id = $1 \
                         AND ordinal = $2 \
                         AND name = $3 \
                         AND kind = 'child' \
                         AND state = 'running' \
-                      FOR UPDATE",
+                      FOR UPDATE"),
                     &[&run_id, &ordinal, &name],
                 )
                 .await
@@ -1025,14 +1248,14 @@ where
             let now = Utc::now();
             let signal = tx
                 .query(
-                    "SELECT id, payload \
+                    &journal_sql(tables, "SELECT id, payload \
                        FROM zeroship.workflow_signals \
                       WHERE run_id = $1 \
                         AND type = $2 \
                         AND consumed_by IS NULL \
                       ORDER BY created_at, id \
                       LIMIT 1 \
-                      FOR UPDATE SKIP LOCKED",
+                      FOR UPDATE SKIP LOCKED"),
                     &[&run_id, &signal_type],
                 )
                 .await
@@ -1050,7 +1273,7 @@ where
             } else {
                 let any_signal = tx
                     .query(
-                        "SELECT sig.id, sig.payload, s.ordinal, s.name, s.name_occurrence, s.child_run_id \
+                        &journal_sql(tables, "SELECT sig.id, sig.payload, s.ordinal, s.name, s.name_occurrence, s.child_run_id \
                            FROM zeroship.workflow_steps s \
                            JOIN zeroship.workflow_signals sig \
                              ON sig.run_id = s.run_id \
@@ -1061,7 +1284,7 @@ where
                             AND s.state = 'running' \
                           ORDER BY sig.created_at, sig.id \
                           LIMIT 1 \
-                          FOR UPDATE OF sig SKIP LOCKED",
+                          FOR UPDATE OF sig SKIP LOCKED"),
                         &[&run_id],
                     )
                     .await
@@ -1080,11 +1303,11 @@ where
                 if deadline.is_some_and(|deadline| deadline <= now) {
                     if let Some(child_run_id) = resolved_child_run_id.as_ref() {
                         tx.execute(
-                            "UPDATE zeroship.workflow_runs \
+                            &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                                 SET cancel_requested = true, wake_at = now() \
                               WHERE id = $1 \
                                 AND parent_cascade \
-                                AND state NOT IN ('completed','failed','cancelled','stalled')",
+                                AND state NOT IN ('completed','failed','cancelled','stalled')"),
                             &[child_run_id],
                         )
                         .await
@@ -1092,6 +1315,8 @@ where
                     }
                     if insert_resolved_step(
                         tx,
+                        tables,
+                        config,
                             &StepCheckpoint {
                                 ordinal: resolved_ordinal,
                                 name: resolved_name,
@@ -1126,9 +1351,9 @@ where
                         return Ok(false);
                     }
                     tx.execute(
-                        "UPDATE zeroship.workflow_runs \
+                        &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                             SET waiting_step_key = NULL, wake_at = now() \
-                          WHERE id = $1",
+                          WHERE id = $1"),
                         &[&run_id],
                     )
                     .await
@@ -1137,9 +1362,9 @@ where
                 }
 
                 tx.execute(
-                    "UPDATE zeroship.workflow_runs \
+                    &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                         SET state = 'waiting', wake_at = $2 \
-                      WHERE id = $1",
+                      WHERE id = $1"),
                     &[&run_id, &deadline],
                 )
                 .await
@@ -1191,23 +1416,23 @@ where
                 compensation_state: None,
                 compensation_max_attempts: 1,
             };
-            if insert_resolved_step(tx, &checkpoint, run_id, dispatch_nonce, 1).await?
+            if insert_resolved_step(tx, tables, config, &checkpoint, run_id, dispatch_nonce, 1).await?
                 == StepWriteOutcome::CapExceeded
             {
                 return Ok(false);
             }
             tx.execute(
-                "UPDATE zeroship.workflow_signals \
+                &journal_sql(tables, "UPDATE zeroship.workflow_signals \
                     SET consumed_by = $1 \
-                  WHERE id = $2 AND consumed_by IS NULL",
+                  WHERE id = $2 AND consumed_by IS NULL"),
                 &[&run_id, &signal_id],
             )
             .await
             .map_err(RegistryError::from)?;
             tx.execute(
-                "UPDATE zeroship.workflow_runs \
+                &journal_sql(tables, "UPDATE zeroship.workflow_runs \
                     SET waiting_step_key = NULL, wake_at = now() \
-                  WHERE id = $1",
+                  WHERE id = $1"),
                 &[&run_id],
             )
             .await
@@ -1230,6 +1455,7 @@ fn spawn_dispatch<D>(
     let heartbeat = spawn_heartbeat(
         registry.clone(),
         config.owner_id.clone(),
+        claim.request.app_id,
         claim.request.run_id.clone(),
         claim.request.dispatch_nonce.clone(),
         config.claim_ttl_ms,
@@ -1343,6 +1569,7 @@ impl Drop for InflightDispatchGuard {
 fn spawn_heartbeat(
     registry: Registry,
     owner_id: String,
+    app_id: Uuid,
     run_id: String,
     dispatch_nonce: String,
     claim_ttl_ms: i64,
@@ -1358,13 +1585,18 @@ fn spawn_heartbeat(
             }
             let beat = async {
                 let conn = registry.conn().await?;
+                let tables = WorkflowTables::for_app_id(&app_id);
                 let lease_expires = Utc::now() + chrono::Duration::milliseconds(claim_ttl_ms);
-                conn.execute(
+                let sql = journal_sql(
+                    &tables,
                     "UPDATE zeroship.workflow_runs \
                         SET lease_expires = $1 \
                       WHERE id = $2 \
                         AND claimed_by = $3 \
                         AND dispatch_nonce = $4",
+                );
+                conn.execute(
+                    &sql,
                     &[&lease_expires, &run_id, &owner_id, &dispatch_nonce],
                 )
                 .await
@@ -1394,8 +1626,21 @@ async fn apply_step_result_on_registry(
     config: &WorkflowEngineConfig,
     result: StepResult,
 ) -> Result<bool, WorkflowError> {
-    let store = PgStore::new(registry.workflow_store_db_url().to_string());
-    apply::apply_step_result_on_store(&store, config, result).await
+    let conn = registry
+        .conn()
+        .await
+        .map_err(|e| WorkflowError::Db(e.to_string()))?;
+    let tables = find_run_tables(&conn, &result.run_id)
+        .await
+        .map_err(|e| WorkflowError::Db(e.to_string()))?
+        .ok_or_else(|| WorkflowError::Db(format!("workflow run {} not found", result.run_id)))?;
+    let mut apply_config = config.clone();
+    apply_config.journal_limits =
+        workflow_limits::workflow_journal_limits_for_app(&conn, &tables.app_id)
+            .await
+            .map_err(|e| WorkflowError::Db(e.to_string()))?;
+    let store = PgStore::new(registry.workflow_store_db_url().to_string(), tables.app_id);
+    apply::apply_step_result_on_store(&store, &apply_config, result).await
 }
 
 /// Deterministic apply path that intentionally stops before scheduler sync.
@@ -1475,9 +1720,16 @@ async fn sync_scheduler_after_apply(
     run_id: &str,
 ) -> Result<(), RegistryError> {
     let conn = registry.conn().await?;
-    let rows = conn
-        .query(
-            "WITH RECURSIVE ancestors AS ( \
+    let Some(tables) = find_run_tables(&conn, run_id).await? else {
+        scheduler_store
+            .ack_terminal(run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+        return Ok(());
+    };
+    let sql = journal_sql(
+        &tables,
+        "WITH RECURSIVE ancestors AS ( \
                  SELECT id, parent_run_id \
                    FROM zeroship.workflow_runs \
                   WHERE id = $1 \
@@ -1502,8 +1754,9 @@ async fn sync_scheduler_after_apply(
              SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
                FROM family \
               ORDER BY tree_depth, id",
-            &[&run_id],
-        )
+    );
+    let rows = conn
+        .query(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     if rows.is_empty() {
@@ -1514,9 +1767,51 @@ async fn sync_scheduler_after_apply(
         return Ok(());
     }
     for row in rows {
-        sync_scheduler_row(scheduler_store, &conn, &row).await?;
+        sync_scheduler_row(scheduler_store, &conn, &tables, &row).await?;
     }
+    sync_parent_after_child_apply(scheduler_store, &conn, &tables, run_id).await?;
 
+    Ok(())
+}
+
+#[allow(clippy::future_not_send)]
+async fn sync_parent_after_child_apply<C>(
+    scheduler_store: &WorkflowSchedulerStore,
+    conn: &C,
+    tables: &WorkflowTables,
+    child_run_id: &str,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let parent_sql = journal_sql(
+        tables,
+        "SELECT parent_run_id \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 \
+                AND parent_run_id IS NOT NULL",
+    );
+    let rows = conn
+        .query(&parent_sql, &[&child_run_id])
+        .await
+        .map_err(RegistryError::from)?;
+    let Some(row) = rows.first() else {
+        return Ok(());
+    };
+    let parent_run_id: String = row.get("parent_run_id");
+    let parent_sql = journal_sql(
+        tables,
+        "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+    );
+    let parent_rows = conn
+        .query(&parent_sql, &[&parent_run_id])
+        .await
+        .map_err(RegistryError::from)?;
+    if let Some(row) = parent_rows.first() {
+        sync_scheduler_row(scheduler_store, conn, tables, row).await?;
+    }
     Ok(())
 }
 
@@ -1527,13 +1822,21 @@ async fn sync_scheduler_for_run(
     run_id: &str,
 ) -> Result<(), RegistryError> {
     let conn = registry.conn().await?;
-    let rows = conn
-        .query(
-            "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
+    let Some(tables) = find_run_tables(&conn, run_id).await? else {
+        scheduler_store
+            .ack_terminal(run_id)
+            .await
+            .map_err(scheduler_store_error_to_registry)?;
+        return Ok(());
+    };
+    let sql = journal_sql(
+        &tables,
+        "SELECT id, app_id, state, wake_at, claimed_by, dispatch_nonce, waiting_step_key \
                FROM zeroship.workflow_runs \
               WHERE id = $1",
-            &[&run_id],
-        )
+    );
+    let rows = conn
+        .query(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     let Some(row) = rows.first() else {
@@ -1543,13 +1846,14 @@ async fn sync_scheduler_for_run(
             .map_err(scheduler_store_error_to_registry)?;
         return Ok(());
     };
-    sync_scheduler_row(scheduler_store, &conn, row).await
+    sync_scheduler_row(scheduler_store, &conn, &tables, row).await
 }
 
 #[allow(clippy::future_not_send)]
 async fn sync_scheduler_row<C>(
     scheduler_store: &WorkflowSchedulerStore,
     conn: &C,
+    tables: &WorkflowTables,
     row: &compio_postgres::Row,
 ) -> Result<(), RegistryError>
 where
@@ -1564,7 +1868,7 @@ where
     let waiting_step_key: Option<String> = row.get("waiting_step_key");
     if is_schedulable_state(&state) {
         if state == "waiting" && wake_at.is_none() {
-            wake_at = rearm_waiting_run_if_pending_signal(conn, &run_id, waiting_step_key.as_deref()).await?;
+            wake_at = rearm_waiting_run_if_pending_signal(conn, tables, &run_id, waiting_step_key.as_deref()).await?;
         }
         if claimed_by.is_some() && dispatch_nonce.is_some() {
             return Ok(());
@@ -1598,6 +1902,7 @@ fn is_schedulable_state(state: &str) -> bool {
 
 async fn rearm_waiting_run_if_pending_signal<C>(
     conn: &C,
+    tables: &WorkflowTables,
     run_id: &str,
     waiting_step_key: Option<&str>,
 ) -> Result<Option<DateTime<Utc>>, RegistryError>
@@ -1610,24 +1915,25 @@ where
     let pending = match parse_waiting_step_key(key)? {
         WaitingStep::Sleep { .. } => false,
         WaitingStep::WaitSignal { signal_type, .. } => {
-            let rows = conn
-                .query(
-                    "SELECT id \
+            let sql = journal_sql(
+                tables,
+                "SELECT id \
                        FROM zeroship.workflow_signals \
                       WHERE run_id = $1 \
                         AND type = $2 \
                         AND consumed_by IS NULL \
                       LIMIT 1",
-                    &[&run_id, &signal_type],
-                )
+            );
+            let rows = conn
+                .query(&sql, &[&run_id, &signal_type])
                 .await
                 .map_err(RegistryError::from)?;
             !rows.is_empty()
         }
         WaitingStep::Child { .. } => {
-            let rows = conn
-                .query(
-                    "SELECT sig.id \
+            let sql = journal_sql(
+                tables,
+                "SELECT sig.id \
                        FROM zeroship.workflow_steps s \
                        JOIN zeroship.workflow_signals sig \
                          ON sig.run_id = s.run_id \
@@ -1637,8 +1943,9 @@ where
                         AND s.kind = 'child' \
                         AND s.state = 'running' \
                       LIMIT 1",
-                    &[&run_id],
-                )
+            );
+            let rows = conn
+                .query(&sql, &[&run_id])
                 .await
                 .map_err(RegistryError::from)?;
             !rows.is_empty()
@@ -1649,15 +1956,16 @@ where
     }
 
     let wake_at = Utc::now();
-    let changed = conn
-        .execute(
-            "UPDATE zeroship.workflow_runs \
+    let sql = journal_sql(
+        tables,
+        "UPDATE zeroship.workflow_runs \
                 SET wake_at = $2 \
               WHERE id = $1 \
                 AND state = 'waiting' \
                 AND wake_at IS NULL",
-            &[&run_id, &wake_at],
-        )
+    );
+    let changed = conn
+        .execute(&sql, &[&run_id, &wake_at])
         .await
         .map_err(RegistryError::from)?;
     if changed > 0 {
@@ -1667,13 +1975,17 @@ where
     }
 }
 
-async fn has_due_compensation<C>(conn: &C, run_id: &str) -> Result<bool, RegistryError>
+async fn has_due_compensation<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "SELECT 1 \
+    let sql = journal_sql(
+        tables,
+        "SELECT 1 \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 \
                 AND ( \
@@ -1683,8 +1995,9 @@ where
                 ) \
               ORDER BY ordinal DESC \
               LIMIT 1",
-            &[&run_id],
-        )
+    );
+    let rows = conn
+        .query(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     Ok(!rows.is_empty())
@@ -1693,23 +2006,25 @@ where
 
 async fn finalize_compensation_if_drained<C>(
     conn: &C,
+    tables: &WorkflowTables,
     run_id: &str,
 ) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let progress = compensation_progress(conn, run_id).await?;
+    let progress = compensation_progress(conn, tables, run_id).await?;
     if progress.remaining() > 0 {
         return Ok(false);
     }
-    let rows = conn
-        .query(
-            "SELECT compensation_target, error \
+    let select_sql = journal_sql(
+        tables,
+        "SELECT compensation_target, error \
                FROM zeroship.workflow_runs \
               WHERE id = $1 AND state = 'compensating' \
               FOR UPDATE",
-            &[&run_id],
-        )
+    );
+    let rows = conn
+        .query(&select_sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     let Some(row) = rows.first() else {
@@ -1721,9 +2036,9 @@ where
     let current_error: Option<Value> = row.get("error");
     let outcome = progress.terminal_outcome().to_string();
     let error = compensation_progress_error(current_error, progress, Some(outcome.as_str()));
-    let changed = conn
-        .execute(
-            "UPDATE zeroship.workflow_runs \
+    let update_sql = journal_sql(
+        tables,
+        "UPDATE zeroship.workflow_runs \
                 SET state = $2, \
                     error = $3, \
                     wake_at = NULL, \
@@ -1734,13 +2049,15 @@ where
                     lease_expires = NULL, \
                     dispatch_nonce = NULL \
               WHERE id = $1 AND state = 'compensating'",
-            &[&run_id, &target, &error, &outcome],
-        )
+    );
+    let changed = conn
+        .execute(&update_sql, &[&run_id, &target, &error, &outcome])
         .await
         .map_err(RegistryError::from)?;
     if changed > 0 && matches!(target.as_str(), "failed" | "cancelled") {
-        emit_child_terminal_hook(
+        emit_child_terminal_hook_for_app(
             conn,
+            tables,
             run_id,
             ChildTerminalPayload {
                 state: &target,
@@ -1750,21 +2067,22 @@ where
             },
         )
         .await?;
-        cascade_cancel_children(conn, run_id).await?;
+        cascade_cancel_children_for_app(conn, tables, run_id).await?;
     }
     Ok(changed > 0)
 }
 
 async fn compensation_progress<C>(
     conn: &C,
+    tables: &WorkflowTables,
     run_id: &str,
 ) -> Result<CompensationProgress, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let row = conn
-        .query_one(
-            "SELECT \
+    let sql = journal_sql(
+        tables,
+        "SELECT \
                 COUNT(*) FILTER (WHERE compensation_state IS NOT NULL)::bigint AS total, \
                 COUNT(*) FILTER (WHERE compensation_state = 'completed')::bigint AS completed, \
                 COUNT(*) FILTER (WHERE compensation_state = 'failed')::bigint AS failed, \
@@ -1772,8 +2090,9 @@ where
                 COUNT(*) FILTER (WHERE compensation_state = 'running')::bigint AS running \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1",
-            &[&run_id],
-        )
+    );
+    let row = conn
+        .query_one(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     Ok(CompensationProgress {
@@ -1826,13 +2145,17 @@ fn child_cancelled_error() -> Value {
     })
 }
 
-async fn cancel_requested_run<C>(conn: &C, run_id: &str) -> Result<bool, RegistryError>
+async fn cancel_requested_run_for_app<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let changed = conn
-        .execute(
-            "UPDATE zeroship.workflow_runs \
+    let sql = journal_sql(
+        tables,
+        "UPDATE zeroship.workflow_runs \
                 SET state = 'cancelled', \
                     cancel_requested = false, \
                     wake_at = NULL, \
@@ -1845,16 +2168,18 @@ where
               WHERE id = $1 \
                 AND cancel_requested \
                 AND state NOT IN ('completed','failed','cancelled','stalled')",
-            &[&run_id],
-        )
+    );
+    let changed = conn
+        .execute(&sql, &[&run_id])
         .await
         .map_err(RegistryError::from)?;
     if changed == 0 {
         return Ok(false);
     }
 
-    emit_child_terminal_hook(
+    emit_child_terminal_hook_for_app(
         conn,
+        tables,
         run_id,
         ChildTerminalPayload {
             state: "cancelled",
@@ -1864,7 +2189,7 @@ where
         },
     )
     .await?;
-    cascade_cancel_children(conn, run_id).await?;
+    cascade_cancel_children_for_app(conn, tables, run_id).await?;
     Ok(true)
 }
 
@@ -1877,23 +2202,25 @@ struct ChildTerminalPayload<'a> {
     error: Option<Value>,
 }
 
-async fn emit_child_terminal_hook<C>(
+async fn emit_child_terminal_hook_for_app<C>(
     conn: &C,
+    tables: &WorkflowTables,
     child_run_id: &str,
     terminal: ChildTerminalPayload<'_>,
 ) -> Result<(), RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "SELECT parent_run_id, parent_wait_step_key \
+    let parent_sql = journal_sql(
+        tables,
+        "SELECT parent_run_id, parent_wait_step_key \
                FROM zeroship.workflow_runs \
               WHERE id = $1 \
                 AND parent_run_id IS NOT NULL \
                 AND parent_wait_step_key IS NOT NULL",
-            &[&child_run_id],
-        )
+    );
+    let rows = conn
+        .query(&parent_sql, &[&child_run_id])
         .await
         .map_err(RegistryError::from)?;
     let Some(row) = rows.first() else {
@@ -1925,13 +2252,17 @@ where
         "childRunId": child_run_id,
     });
     let signal_id = typed_id::new_workflow_signal_id();
-    conn.execute(
+    let insert_sql = journal_sql(
+        tables,
         "INSERT INTO zeroship.workflow_signals \
             (id, run_id, type, payload, origin, delivery, idempotency_key, created_at) \
          VALUES ($1, $2, $3, $4, 'system', 'direct', $3, now()) \
          ON CONFLICT (run_id, type, idempotency_key) \
          WHERE idempotency_key IS NOT NULL AND delivery <> 'topic' \
          DO NOTHING",
+    );
+    conn.execute(
+        &insert_sql,
         &[
             &signal_id,
             &parent_run_id,
@@ -1941,11 +2272,15 @@ where
     )
     .await
     .map_err(RegistryError::from)?;
-    conn.execute(
+    let wake_sql = journal_sql(
+        tables,
         "UPDATE zeroship.workflow_runs \
             SET wake_at = now() \
           WHERE id = $1 \
             AND state IN ('running','sleeping','waiting')",
+    );
+    conn.execute(
+        &wake_sql,
         &[&parent_run_id],
     )
     .await
@@ -1953,36 +2288,22 @@ where
     Ok(())
 }
 
-pub(crate) async fn cascade_cancel_children<C>(
-    conn: &C,
-    parent_run_id: &str,
-) -> Result<u64, RegistryError>
-where
-    C: GenericClient + Sync,
-{
-    conn.execute(
-        "UPDATE zeroship.workflow_runs \
-            SET cancel_requested = true, wake_at = now() \
-          WHERE parent_run_id = $1 \
-            AND parent_cascade \
-            AND state NOT IN ('completed','failed','cancelled','stalled')",
-        &[&parent_run_id],
-    )
-    .await
-    .map_err(RegistryError::from)
-}
-
 async fn delete_workflow_subscription<C>(
     conn: &C,
+    tables: &WorkflowTables,
     run_id: &str,
     ordinal: i32,
 ) -> Result<(), RegistryError>
 where
     C: GenericClient + Sync,
 {
-    conn.execute(
+    let sql = journal_sql(
+        tables,
         "DELETE FROM zeroship.workflow_subscriptions \
           WHERE run_id = $1 AND ordinal = $2",
+    );
+    conn.execute(
+        &sql,
         &[&run_id, &ordinal],
     )
     .await
@@ -1992,6 +2313,8 @@ where
 
 async fn insert_resolved_step<C>(
     conn: &C,
+    tables: &WorkflowTables,
+    config: &WorkflowEngineConfig,
     checkpoint: &StepCheckpoint,
     run_id: &str,
     batch_id: &str,
@@ -2000,14 +2323,15 @@ async fn insert_resolved_step<C>(
 where
     C: GenericClient + Sync,
 {
-    let existing = conn
-        .query(
-            "SELECT state, name, kind \
+    let existing_sql = journal_sql(
+        tables,
+        "SELECT state, name, kind \
                FROM zeroship.workflow_steps \
               WHERE run_id = $1 AND ordinal = $2 \
               FOR UPDATE",
-            &[&run_id, &checkpoint.ordinal],
-        )
+    );
+    let existing = conn
+        .query(&existing_sql, &[&run_id, &checkpoint.ordinal])
         .await
         .map_err(RegistryError::from)?;
     let resolves_running = if let Some(row) = existing.first() {
@@ -2048,14 +2372,15 @@ where
 
     let delta = checkpoint_journal_bytes(conn, checkpoint).await?;
     if delta > 0 {
-        let rows = conn
-            .query(
-                "SELECT app_id, journal_bytes \
+        let accounting_sql = journal_sql(
+            tables,
+            "SELECT app_id, journal_bytes \
                    FROM zeroship.workflow_runs \
                   WHERE id = $1 \
                   FOR UPDATE",
-                &[&run_id],
-            )
+        );
+        let rows = conn
+            .query(&accounting_sql, &[&run_id])
             .await
             .map_err(RegistryError::from)?;
         let Some(row) = rows.first() else {
@@ -2063,20 +2388,18 @@ where
                 "workflow run {run_id} not found for journal accounting"
             )));
         };
-        let app_id: Uuid = row.get("app_id");
         let current: i64 = row.get("journal_bytes");
-        let limits = pg::limits_for_app(conn, &app_id)
-            .await
-            .map_err(workflow_error_to_registry)?;
+        let limits = config.journal_limits;
         if engine::cap_exceeded(current, delta, limits.run_max_bytes) {
-            mark_run_state_cap_exceeded(conn, run_id, current, delta, limits.run_max_bytes)
+            mark_run_state_cap_exceeded(conn, tables, run_id, current, delta, limits.run_max_bytes)
                 .await?;
             return Ok(StepWriteOutcome::CapExceeded);
         }
     }
 
     let changed = if resolves_running {
-        conn.execute(
+        let update_sql = journal_sql(
+            tables,
             "UPDATE zeroship.workflow_steps \
                 SET state = $4, \
                     output = $5, \
@@ -2098,6 +2421,9 @@ where
                 AND name = $3 \
                 AND kind = $11 \
                 AND state = 'running'",
+        );
+        conn.execute(
+            &update_sql,
             &[
                 &run_id,
                 &checkpoint.ordinal,
@@ -2122,7 +2448,8 @@ where
         .await
         .map_err(RegistryError::from)?
     } else {
-        conn.execute(
+        let insert_sql = journal_sql(
+            tables,
             "INSERT INTO zeroship.workflow_steps \
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
              output_kind, output_hash, output_size, output_content_type, \
@@ -2131,6 +2458,9 @@ where
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
                  $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now()) \
          ON CONFLICT (run_id, ordinal) DO NOTHING",
+        );
+        conn.execute(
+            &insert_sql,
             &[
                 &run_id,
                 &checkpoint.ordinal,
@@ -2160,15 +2490,19 @@ where
     };
     if changed > 0 {
         if let Some(output_ref) = output_ref {
-            upsert_workflow_blob_ref(conn, output_ref).await?;
+            upsert_workflow_blob_ref(conn, tables, output_ref).await?;
         }
     }
     if changed > 0 && (delta > 0 || blob_bytes_delta > 0) {
-        conn.execute(
+        let update_run_sql = journal_sql(
+            tables,
             "UPDATE zeroship.workflow_runs \
                 SET journal_bytes = journal_bytes + $2, \
                     blob_bytes = blob_bytes + $3 \
               WHERE id = $1",
+        );
+        conn.execute(
+            &update_run_sql,
             &[&run_id, &delta, &blob_bytes_delta],
         )
         .await
@@ -2214,6 +2548,7 @@ where
 
 async fn upsert_workflow_blob_ref<C>(
     conn: &C,
+    tables: &WorkflowTables,
     output_ref: &WorkflowOutputRef,
 ) -> Result<(), RegistryError>
 where
@@ -2223,7 +2558,8 @@ where
         .content_type
         .as_deref()
         .unwrap_or("application/json");
-    conn.execute(
+    let sql = journal_sql(
+        tables,
         "INSERT INTO zeroship.workflow_blobs \
             (hash, size, content_type, refcount, last_referenced_at) \
          VALUES ($1, $2, $3, 1, now()) \
@@ -2232,6 +2568,9 @@ where
             content_type = EXCLUDED.content_type, \
             refcount = zeroship.workflow_blobs.refcount + 1, \
             last_referenced_at = now()",
+    );
+    conn.execute(
+        &sql,
         &[&output_ref.hash, &output_ref.size, &content_type],
     )
     .await
@@ -2241,6 +2580,7 @@ where
 
 async fn mark_run_state_cap_exceeded<C>(
     conn: &C,
+    tables: &WorkflowTables,
     run_id: &str,
     current: i64,
     delta: i64,
@@ -2250,7 +2590,8 @@ where
     C: GenericClient + Sync,
 {
     let error = engine::state_cap_error(current, delta, cap);
-    conn.execute(
+    let sql = journal_sql(
+        tables,
         "UPDATE zeroship.workflow_runs \
             SET state = 'failed', \
                 output = NULL, \
@@ -2267,6 +2608,9 @@ where
                 lease_expires = NULL, \
                 dispatch_nonce = NULL \
           WHERE id = $1",
+    );
+    conn.execute(
+        &sql,
         &[&run_id, &error],
     )
     .await
@@ -2281,7 +2625,11 @@ async fn requeue_claim(
     dispatch_nonce: &str,
 ) -> Result<(), RegistryError> {
     let conn = registry.conn().await?;
-    conn.execute(
+    let Some(tables) = find_run_tables(&conn, run_id).await? else {
+        return Ok(());
+    };
+    let sql = journal_sql(
+        &tables,
         "UPDATE zeroship.workflow_runs \
             SET state = CASE \
                     WHEN state = 'paused' THEN 'paused' \
@@ -2297,6 +2645,9 @@ async fn requeue_claim(
             AND claimed_by = $2 \
             AND dispatch_nonce = $3 \
             AND state IN ('running','paused','compensating')",
+    );
+    conn.execute(
+        &sql,
         &[&run_id, &owner_id, &dispatch_nonce],
     )
     .await
@@ -2312,7 +2663,11 @@ async fn park_backpressure_claim(
 ) -> Result<(), RegistryError> {
     let wake_at = Utc::now() + chrono::Duration::milliseconds(BACKPRESSURE_PARK_MS);
     let conn = registry.conn().await?;
-    conn.execute(
+    let Some(tables) = find_run_tables(&conn, run_id).await? else {
+        return Ok(());
+    };
+    let sql = journal_sql(
+        &tables,
         "UPDATE zeroship.workflow_runs \
             SET state = CASE \
                     WHEN state = 'paused' THEN 'paused' \
@@ -2328,6 +2683,9 @@ async fn park_backpressure_claim(
             AND claimed_by = $3 \
             AND dispatch_nonce = $4 \
             AND state IN ('running','paused','compensating')",
+    );
+    conn.execute(
+        &sql,
         &[&wake_at, &run_id, &owner_id, &dispatch_nonce],
     )
     .await
@@ -2413,6 +2771,7 @@ mod tests {
             phase: "running".to_string(),
             input: Some(serde_json::json!({"orderId": "ord_1"})),
             started_at: Utc::now(),
+            journal_limits: Default::default(),
             journal: Vec::new(),
         }
     }

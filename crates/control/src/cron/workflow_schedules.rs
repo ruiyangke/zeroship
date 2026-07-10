@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 use crate::workflow_instance_api;
@@ -401,6 +402,7 @@ async fn fire_claimed_schedule(
         tx.commit().await.map_err(RegistryError::from)?;
         return Ok(0);
     };
+    let tables = super::workflow_engine::provision_tables(&tx, &row.app_id).await?;
     let now = db_now(&tx).await?;
     let (instants, next_fire_at) = due_instants(
         &row.descriptor,
@@ -417,7 +419,7 @@ async fn fire_claimed_schedule(
     for planned in instants {
         last_processed = planned;
         if row.overlap == "skipIfRunning"
-            && active_schedule_run_exists(&tx, &row.app_id, &row.workflow_name, &row.id).await?
+            && active_schedule_run_exists(&tx, &tables, &row.workflow_name, &row.id).await?
         {
             continue;
         }
@@ -516,7 +518,7 @@ where
 
 async fn active_schedule_run_exists<C>(
     conn: &C,
-    app_id: &Uuid,
+    tables: &WorkflowTables,
     workflow_name: &str,
     schedule_id: &str,
 ) -> Result<bool, RegistryError>
@@ -524,17 +526,17 @@ where
     C: GenericClient + Sync,
 {
     let prefix = format!("sched:{schedule_id}:%");
+    let sql = format!(
+        "SELECT 1 \
+           FROM {} \
+          WHERE workflow_name = $1 \
+            AND dedup_key LIKE $2 \
+            AND state NOT IN ('completed','failed','cancelled','stalled') \
+          LIMIT 1",
+        tables.runs
+    );
     let rows = conn
-        .query(
-            "SELECT 1 \
-               FROM zeroship.workflow_runs \
-              WHERE app_id = $1 \
-                AND workflow_name = $2 \
-                AND dedup_key LIKE $3 \
-                AND state NOT IN ('completed','failed','cancelled','stalled') \
-              LIMIT 1",
-            &[app_id, &workflow_name, &prefix],
-        )
+        .query(&sql, &[&workflow_name, &prefix])
         .await
         .map_err(RegistryError::from)?;
     Ok(!rows.is_empty())

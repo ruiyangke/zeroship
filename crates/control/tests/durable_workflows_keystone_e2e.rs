@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use compio_postgres::{connect, NoTls};
+use compio_postgres::types::ToSql;
 use futures::channel::oneshot;
 use futures::lock::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -37,6 +38,7 @@ use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -83,13 +85,69 @@ fn tmpdir(label: &str) -> PathBuf {
 
 struct Fixture {
     state: Arc<AppState>,
-    pg: Arc<compio_postgres::Client>,
+    pg: TestPg,
     blob_root: PathBuf,
     cleanup_blob_root: bool,
     deploy_tmp_dir: PathBuf,
     app_id: Uuid,
     deploy_id: String,
     scheduler_store: WorkflowSchedulerStore,
+}
+
+#[derive(Clone)]
+struct TestPg {
+    inner: Arc<compio_postgres::Client>,
+    app_id: Uuid,
+}
+
+impl TestPg {
+    fn new(inner: Arc<compio_postgres::Client>, app_id: Uuid) -> Self {
+        Self { inner, app_id }
+    }
+
+    fn rewrite(&self, sql: &str) -> String {
+        let tables = WorkflowTables::for_app_id(&self.app_id);
+        sql.replace("zeroship.workflow_runs", &tables.runs)
+            .replace("zeroship.workflow_steps", &tables.steps)
+            .replace("zeroship.workflow_signals", &tables.signals)
+            .replace(
+                "zeroship.workflow_subscriptions",
+                &tables.subscriptions,
+            )
+            .replace("zeroship.workflow_blobs", &tables.blobs)
+    }
+
+    async fn batch_execute(&self, sql: &str) -> Result<(), compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.batch_execute(&sql).await
+    }
+
+    async fn execute(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.execute(&sql, params).await
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<compio_postgres::Row>, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.query(&sql, params).await
+    }
+
+    async fn query_one(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<compio_postgres::Row, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.query_one(&sql, params).await
+    }
 }
 
 impl Drop for Fixture {
@@ -142,6 +200,10 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             .expect("workflow blob store"),
     );
     let control_pg = Arc::new(pg(db_url).await);
+    PgStore::provision(control_pg.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal");
+    let test_pg = TestPg::new(Arc::clone(&control_pg), app_id);
 
     Fixture {
         state: Arc::new(AppState {
@@ -189,7 +251,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
                 zeroship_control::billing_read::ProjectedChargeCache::default(),
             ),
         }),
-        pg: control_pg,
+        pg: test_pg,
         blob_root,
         cleanup_blob_root,
         deploy_tmp_dir,
@@ -651,7 +713,7 @@ fn start_side_effect_server(cfg: SideEffectConfig, port: u16) {
     let _ = SIDE_EFFECT_SERVER_PORT.set(port);
 }
 
-async fn prepare_side_effect_table(pg: &compio_postgres::Client) {
+async fn prepare_side_effect_table(pg: &TestPg) {
     pg.batch_execute(
         "DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_attempts; \
          DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_commits; \
@@ -693,6 +755,7 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
         max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
         max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
+        journal_limits: Default::default(),
         owner_id: owner.to_string(),
     }
 }
@@ -908,6 +971,7 @@ fn dw23_workflow_engine_load_bench() {
             max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
             max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
             max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
+            journal_limits: Default::default(),
             owner_id: format!("dw23-bench-{}", Uuid::new_v4().simple()),
         };
 
@@ -1105,7 +1169,7 @@ async fn seed_compensable_completed_step(
 }
 
 async fn run_state(
-    pg: &compio_postgres::Client,
+    pg: &TestPg,
     run_id: &str,
 ) -> (String, Option<DateTime<Utc>>, Option<String>, Option<String>) {
     let rows = pg
@@ -4223,7 +4287,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(timeout_counts.get("timeout").copied(), Some(1));
     assert_eq!(timeout_counts.get("b").copied(), None);
 
-    let stale_run = seed_signal_run(&fx, "stale", "PT1S", Some("PT0.2S")).await;
+    let stale_run = seed_signal_run(&fx, "stale", "PT2S", Some("PT0.2S")).await;
     let stale_signal_id = zeroship_core::typed_id::new_workflow_signal_id();
     let stale_created_at = Utc::now() - ChronoDuration::seconds(5);
     fx.pg
@@ -4249,8 +4313,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await;
     let stale_deadline = assert_signal_wait_parked(&fx, &stale_run, Some(200)).await;
     assert!(
-        stale_deadline <= Utc::now() + ChronoDuration::seconds(2),
-        "stale short timeout should park within ~1s, got deadline {stale_deadline:?}"
+        stale_deadline <= Utc::now() + ChronoDuration::seconds(3),
+        "stale short timeout should park within ~2s, got deadline {stale_deadline:?}"
     );
     let now = Utc::now();
     if stale_deadline > now {

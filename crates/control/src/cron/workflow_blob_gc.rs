@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
+use compio_postgres::GenericClient;
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -68,8 +70,19 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     }
 
     let cutoff = Utc::now() - chrono::Duration::seconds(REF_SWEEP_GRACE_SECS);
-    let rows = tx
-        .query(
+    let mut deleted = 0usize;
+    let mut remaining = MAX_REF_DELETES_PER_TICK;
+    for app_id in super::workflow_engine::workflow_app_ids(&tx).await? {
+        if remaining <= 0 {
+            break;
+        }
+        let Some(tables) = super::workflow_engine::existing_tables(&tx, &app_id).await? else {
+            continue;
+        };
+        let rows = tx
+            .query(
+                &super::workflow_engine::journal_sql(
+                    &tables,
             "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.refcount = 0 \
@@ -85,15 +98,20 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
               ORDER BY b.last_referenced_at, b.hash \
               LIMIT $2 \
               FOR UPDATE SKIP LOCKED",
-            &[&cutoff, &MAX_REF_DELETES_PER_TICK],
-        )
-        .await?;
+                ),
+                &[&cutoff, &remaining],
+            )
+            .await?;
 
-    let mut deleted = 0usize;
-    for row in rows {
-        let hash: String = row.get("hash");
-        if delete_zero_ref_blob_locked(state, &tx, &hash).await? {
-            deleted += 1;
+        for row in rows {
+            let hash: String = row.get("hash");
+            if delete_zero_ref_blob_locked_for_app(state, &tx, &tables, &hash).await? {
+                deleted += 1;
+                remaining -= 1;
+                if remaining <= 0 {
+                    break;
+                }
+            }
         }
     }
 
@@ -101,8 +119,9 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     Ok(deleted)
 }
 
-pub(crate) async fn delete_zero_ref_hashes(
+pub(crate) async fn delete_zero_ref_hashes_for_app(
     state: &AppState,
+    tables: &WorkflowTables,
     hashes: impl IntoIterator<Item = String>,
 ) -> Result<usize, RegistryError> {
     let hashes: BTreeSet<String> = hashes.into_iter().collect();
@@ -114,7 +133,7 @@ pub(crate) async fn delete_zero_ref_hashes(
     let tx = conn.transaction().await?;
     let mut deleted = 0usize;
     for hash in hashes {
-        if delete_zero_ref_blob_locked(state, &tx, &hash).await? {
+        if delete_zero_ref_blob_locked_for_app(state, &tx, tables, &hash).await? {
             deleted += 1;
         }
     }
@@ -180,32 +199,46 @@ where
 
 async fn workflow_blob_is_referenced<C>(conn: &C, hash: &str) -> Result<bool, RegistryError>
 where
-    C: compio_postgres::GenericClient + Sync,
+    C: GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "SELECT \
-                EXISTS (SELECT 1 FROM zeroship.workflow_blobs WHERE hash = $1) \
-             OR EXISTS (SELECT 1 FROM zeroship.workflow_steps \
-                         WHERE output_kind = 'blob' AND output_hash = $1) \
-             OR EXISTS (SELECT 1 FROM zeroship.workflow_runs \
-                         WHERE output_kind = 'blob' AND output_hash = $1) AS referenced",
-            &[&hash],
-        )
-        .await?;
-    Ok(rows.first().is_some_and(|row| row.get("referenced")))
+    for app_id in super::workflow_engine::workflow_app_ids(conn).await? {
+        let Some(tables) = super::workflow_engine::existing_tables(conn, &app_id).await? else {
+            continue;
+        };
+        let rows = conn
+            .query(
+                &super::workflow_engine::journal_sql(
+                    &tables,
+                    "SELECT \
+                        EXISTS (SELECT 1 FROM zeroship.workflow_blobs WHERE hash = $1) \
+                     OR EXISTS (SELECT 1 FROM zeroship.workflow_steps \
+                                 WHERE output_kind = 'blob' AND output_hash = $1) \
+                     OR EXISTS (SELECT 1 FROM zeroship.workflow_runs \
+                                 WHERE output_kind = 'blob' AND output_hash = $1) AS referenced",
+                ),
+                &[&hash],
+            )
+            .await?;
+        if rows.first().is_some_and(|row| row.get("referenced")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
-async fn delete_zero_ref_blob_locked<C>(
+async fn delete_zero_ref_blob_locked_for_app<C>(
     state: &AppState,
     conn: &C,
+    tables: &WorkflowTables,
     hash: &str,
 ) -> Result<bool, RegistryError>
 where
-    C: compio_postgres::GenericClient + Sync,
+    C: GenericClient + Sync,
 {
     let rows = conn
         .query(
+            &super::workflow_engine::journal_sql(
+                tables,
             "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.hash = $1 \
@@ -219,6 +252,7 @@ where
                      WHERE r.output_kind = 'blob' AND r.output_hash = b.hash \
                 ) \
               FOR UPDATE SKIP LOCKED",
+            ),
             &[&hash],
         )
         .await?;
@@ -226,17 +260,17 @@ where
         return Ok(false);
     }
 
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE hash = $1 AND refcount = 0",
+        tables.blobs
+    );
+    let changed = conn.execute(&delete_sql, &[&hash]).await?;
+    if changed == 0 || workflow_blob_is_referenced(conn, hash).await? {
+        return Ok(false);
+    }
+
     match state.workflow_blob_store.delete_blob(hash).await {
-        Ok(()) => {
-            let changed = conn
-                .execute(
-                    "DELETE FROM zeroship.workflow_blobs \
-                      WHERE hash = $1 AND refcount = 0",
-                    &[&hash],
-                )
-                .await?;
-            Ok(changed > 0)
-        }
+        Ok(()) => Ok(true),
         Err(e) => {
             tracing::warn!(hash = %hash, error = %e, "workflow blob GC delete failed");
             Ok(false)
