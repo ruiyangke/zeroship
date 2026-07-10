@@ -213,8 +213,17 @@ INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLIC
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
 VALUES ('$CREATOR', 'stripe', '$CUS')
 ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
--- usage_aggregates.period is a billing_period DATE (first-of-month), and metric
--- must reference billing_metrics ('requests' is seeded by changeset 0037).
+-- The platform migration set does NOT seed the pricing config: billing_metrics
+-- ('requests'), metric_weights (the CU weight), and pricing_config ('global' FX)
+-- must all be present or (a) the usage_aggregates FK to billing_metrics fails and
+-- (b) priced spend is \$0 (no invoice). Seed 'requests' at 1 CU/op × 1 cent/CU.
+INSERT INTO zeroship.billing_metrics (metric, kind, unit) VALUES ('requests','platform','op')
+ON CONFLICT (metric) DO UPDATE SET kind='platform';
+INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) VALUES ('requests', 1, 1)
+ON CONFLICT (metric) DO UPDATE SET units_per_op=1, per_units=1;
+INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) VALUES ('global', 1000000000000)
+ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit;
+-- usage_aggregates.period is a billing_period DATE (first-of-month).
 INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total, updated_at)
 VALUES ('$CLOSED_APP', to_timestamp($PERIOD_START)::date, 'requests', 750, NOW())
 ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
