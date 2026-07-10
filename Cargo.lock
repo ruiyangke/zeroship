@@ -7185,6 +7185,7 @@ dependencies = [
  "base64",
  "clap",
  "compio",
+ "compio-postgres",
  "cyper",
  "futures",
  "hex",

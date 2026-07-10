@@ -33,6 +33,9 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_plugin_workflow::advance::{
+    collect_post_apply_registrations_on_conn, WorkflowAdvanceResponse,
+};
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as scheduler_store_engine, SchedulerConfig as StoreSchedulerConfig, TimerWheel,
@@ -650,6 +653,39 @@ fn timing_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+async fn apply_like_worker(
+    state: &Arc<AppState>,
+    request: &StepRequest,
+    result: StepResult,
+) -> DispatchOutcome {
+    let run_id = result.run_id.clone();
+    let apply_config = WorkflowEngineConfig {
+        owner_id: request.owner_id.clone(),
+        stuck_strike_limit: request.stuck_strike_limit,
+        max_child_depth: request.max_child_depth,
+        max_live_descendants: request.max_live_descendants,
+        max_start_many_batch: request.max_start_many_batch,
+        journal_limits: request.journal_limits,
+        ..WorkflowEngineConfig::default()
+    };
+    workflow_engine::apply_step_result_without_scheduler_sync_with_config(
+        state,
+        apply_config,
+        result,
+    )
+        .await
+        .expect("test dispatcher worker-style apply");
+    let registrations = collect_post_apply_registrations_on_conn(
+        state.control_pg.as_ref(),
+        request.app_id,
+        &run_id,
+        true,
+    )
+    .await
+    .expect("test dispatcher worker-style registrations");
+    DispatchOutcome::Completed(WorkflowAdvanceResponse::ack(run_id, registrations))
+}
+
 fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
     let token =
         zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, &app_id.to_string());
@@ -657,14 +693,15 @@ fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
         .header(workflow_instance_api::APP_ID_HEADER, app_id.to_string())
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct BlockingDispatcher {
+    state: Arc<AppState>,
     requests: Arc<Mutex<Vec<StepRequest>>>,
     releases: Arc<Mutex<VecDeque<oneshot::Receiver<()>>>>,
 }
 
 impl BlockingDispatcher {
-    fn with_capacity(n: usize) -> (Self, Vec<oneshot::Sender<()>>) {
+    fn with_capacity(state: Arc<AppState>, n: usize) -> (Self, Vec<oneshot::Sender<()>>) {
         let mut receivers = VecDeque::new();
         let mut senders = Vec::new();
         for _ in 0..n {
@@ -674,6 +711,7 @@ impl BlockingDispatcher {
         }
         (
             Self {
+                state,
                 requests: Arc::new(Mutex::new(Vec::new())),
                 releases: Arc::new(Mutex::new(receivers)),
             },
@@ -700,27 +738,38 @@ impl StepDispatcher for BlockingDispatcher {
             .pop_front()
             .expect("release receiver available");
         let _ = release.await;
-        DispatchOutcome::Completed(StepResult::from_checkpoints(
-            request.run_id,
-            request.dispatch_nonce,
+        let result = StepResult::from_checkpoints(
+            request.run_id.clone(),
+            request.dispatch_nonce.clone(),
             Vec::new(),
             RunUpdate::Completed {
                 output: Some(serde_json::json!({"released": true})),
                 output_ref: None,
             },
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Debug, Default)]
-struct CompleteDispatcher;
+#[derive(Clone)]
+struct CompleteDispatcher {
+    state: Arc<AppState>,
+}
+
+impl CompleteDispatcher {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+        }
+    }
+}
 
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteDispatcher {
     async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
-        DispatchOutcome::Completed(StepResult::from_checkpoints(
-            request.run_id,
-            request.dispatch_nonce,
+        let result = StepResult::from_checkpoints(
+            request.run_id.clone(),
+            request.dispatch_nonce.clone(),
             vec![StepCheckpoint::completed_run(
                 0,
                 "done",
@@ -730,12 +779,23 @@ impl StepDispatcher for CompleteDispatcher {
                 output: Some(serde_json::json!({"ok": true})),
                 output_ref: None,
             },
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Debug, Default)]
-struct JoinChildrenDispatcher;
+#[derive(Clone)]
+struct JoinChildrenDispatcher {
+    state: Arc<AppState>,
+}
+
+impl JoinChildrenDispatcher {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+        }
+    }
+}
 
 #[async_trait(?Send)]
 impl StepDispatcher for JoinChildrenDispatcher {
@@ -752,28 +812,31 @@ impl StepDispatcher for JoinChildrenDispatcher {
                 running_child_checkpoint(child.ordinal, child.child_run_id.as_deref().unwrap_or(""));
             checkpoint.name = child.name;
             checkpoint.name_occurrence = child.name_occurrence;
-            return DispatchOutcome::Completed(StepResult::from_checkpoints(
-                request.run_id,
-                request.dispatch_nonce,
+            let result = StepResult::from_checkpoints(
+                request.run_id.clone(),
+                request.dispatch_nonce.clone(),
                 vec![checkpoint],
                 RunUpdate::Waiting { wake_at: None },
-            ));
+            );
+            return apply_like_worker(&self.state, &request, result).await;
         }
 
-        DispatchOutcome::Completed(StepResult::from_checkpoints(
-            request.run_id,
-            request.dispatch_nonce,
+        let result = StepResult::from_checkpoints(
+            request.run_id.clone(),
+            request.dispatch_nonce.clone(),
             Vec::new(),
             RunUpdate::Completed {
                 output: Some(serde_json::json!({"joined": 3})),
                 output_ref: None,
             },
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
 #[derive(Clone)]
 struct GatedCheckpointDispatcher {
+    state: Arc<AppState>,
     requests: Arc<Mutex<Vec<StepRequest>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     checkpoint: StepCheckpoint,
@@ -782,12 +845,14 @@ struct GatedCheckpointDispatcher {
 
 impl GatedCheckpointDispatcher {
     fn new(
+        state: Arc<AppState>,
         checkpoint: StepCheckpoint,
         run_update: RunUpdate,
     ) -> (Self, oneshot::Sender<()>) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
+                state,
                 requests: Arc::new(Mutex::new(Vec::new())),
                 release: Arc::new(Mutex::new(Some(rx))),
                 checkpoint,
@@ -816,17 +881,28 @@ impl StepDispatcher for GatedCheckpointDispatcher {
             .take()
             .expect("release receiver available");
         let _ = release.await;
-        DispatchOutcome::Completed(StepResult::from_checkpoints(
-            request.run_id,
-            request.dispatch_nonce,
+        let result = StepResult::from_checkpoints(
+            request.run_id.clone(),
+            request.dispatch_nonce.clone(),
             vec![self.checkpoint.clone()],
             self.run_update.clone(),
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Debug, Default)]
-struct CompleteAfterA;
+#[derive(Clone)]
+struct CompleteAfterA {
+    state: Arc<AppState>,
+}
+
+impl CompleteAfterA {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+        }
+    }
+}
 
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteAfterA {
@@ -839,9 +915,9 @@ impl StepDispatcher for CompleteAfterA {
             "resume dispatch should replay the landed a checkpoint: {:?}",
             request.journal
         );
-        DispatchOutcome::Completed(StepResult::from_checkpoints(
-            request.run_id,
-            request.dispatch_nonce,
+        let result = StepResult::from_checkpoints(
+            request.run_id.clone(),
+            request.dispatch_nonce.clone(),
             vec![StepCheckpoint::completed_run(
                 1,
                 "b",
@@ -851,16 +927,25 @@ impl StepDispatcher for CompleteAfterA {
                 output: Some(serde_json::json!({"ok": true})),
                 output_ref: None,
             },
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CaughtStepFailureDispatcher {
+    state: Arc<AppState>,
     requests: Arc<Mutex<Vec<StepRequest>>>,
 }
 
 impl CaughtStepFailureDispatcher {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     fn requests(&self) -> Vec<StepRequest> {
         self.requests.lock().expect("requests lock").clone()
     }
@@ -903,20 +988,29 @@ impl StepDispatcher for CaughtStepFailureDispatcher {
                 }
             ])
         };
-        DispatchOutcome::Completed(batch_step_result(
+        let result = batch_step_result(
             &request.run_id,
             &request.dispatch_nonce,
             outcomes,
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct UncaughtStepFailureDispatcher {
+    state: Arc<AppState>,
     requests: Arc<Mutex<Vec<StepRequest>>>,
 }
 
 impl UncaughtStepFailureDispatcher {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     fn requests(&self) -> Vec<StepRequest> {
         self.requests.lock().expect("requests lock").clone()
     }
@@ -959,20 +1053,29 @@ impl StepDispatcher for UncaughtStepFailureDispatcher {
                 }
             ])
         };
-        DispatchOutcome::Completed(batch_step_result(
+        let result = batch_step_result(
             &request.run_id,
             &request.dispatch_nonce,
             outcomes,
-        ))
+        );
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ZeroProgressDispatcher {
+    state: Arc<AppState>,
     requests: Arc<Mutex<Vec<StepRequest>>>,
 }
 
 impl ZeroProgressDispatcher {
+    fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::clone(state),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     fn requests(&self) -> Vec<StepRequest> {
         self.requests.lock().expect("requests lock").clone()
     }
@@ -985,10 +1088,8 @@ impl StepDispatcher for ZeroProgressDispatcher {
             .lock()
             .expect("requests lock")
             .push(request.clone());
-        DispatchOutcome::Completed(StepResult::requeue(
-            request.run_id,
-            request.dispatch_nonce,
-        ))
+        let result = StepResult::requeue(request.run_id.clone(), request.dispatch_nonce.clone());
+        apply_like_worker(&self.state, &request, result).await
     }
 }
 
@@ -1031,7 +1132,22 @@ async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
             .await
             .expect("count completed runs");
         if rows[0].get::<_, i64>("n") == i64::try_from(run_ids.len()).unwrap() {
-            return;
+            let mut all_acked = true;
+            for run_id in run_ids {
+                if fx
+                    .scheduler_store
+                    .inflight(run_id)
+                    .await
+                    .expect("load scheduler inflight")
+                    .is_some()
+                {
+                    all_acked = false;
+                    break;
+                }
+            }
+            if all_acked {
+                return;
+            }
         }
         compio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1377,7 +1493,7 @@ async fn claim_journal_preserves_same_name_child_occurrences() {
             .expect("insert same-name child journal row");
     }
 
-    let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
+    let (dispatcher, releases) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 1);
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
@@ -1604,7 +1720,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     let rearmed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-child-rearm-sync"),
     )
     .await
@@ -1614,7 +1730,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-child-rearm"),
     )
     .await
@@ -1772,7 +1888,7 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
         .await
         .expect("release simulated parent park claim");
 
-    let dispatcher = Arc::new(JoinChildrenDispatcher);
+    let dispatcher = Arc::new(JoinChildrenDispatcher::new(&fx.state));
     for _ in 0..20 {
         workflow_engine::fire_once(
             &fx.scheduler_store,
@@ -1894,7 +2010,7 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-child-cascade"),
     )
     .await
@@ -2010,7 +2126,7 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-child-cascade-sleep"),
     )
     .await
@@ -3018,7 +3134,7 @@ async fn caught_step_failure_continues_run_to_completion() {
         None,
     )
     .await;
-    let dispatcher = Arc::new(CaughtStepFailureDispatcher::default());
+    let dispatcher = Arc::new(CaughtStepFailureDispatcher::new(&fx.state));
 
     let first = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3077,7 +3193,7 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
         None,
     )
     .await;
-    let dispatcher = Arc::new(UncaughtStepFailureDispatcher::default());
+    let dispatcher = Arc::new(UncaughtStepFailureDispatcher::new(&fx.state));
 
     let first = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3156,7 +3272,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
         None,
     )
     .await;
-    let dispatcher = Arc::new(ZeroProgressDispatcher::default());
+    let dispatcher = Arc::new(ZeroProgressDispatcher::new(&fx.state));
     let mut cfg = config("owner-stuck-strikes");
     cfg.stuck_strike_limit = 2;
 
@@ -3212,7 +3328,7 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
         &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
-    let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
+    let (dispatcher, releases) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 1);
 
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3259,8 +3375,8 @@ async fn concurrent_ticks_claim_disjoint_rows() {
         )
         .await;
     }
-    let (d1, r1) = BlockingDispatcher::with_capacity(4);
-    let (d2, r2) = BlockingDispatcher::with_capacity(4);
+    let (d1, r1) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 4);
+    let (d2, r2) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 4);
     let mut c1 = config("owner-concurrent-a");
     c1.per_app_fair_limit = 4;
     c1.max_inflight_per_app = 8;
@@ -3312,7 +3428,7 @@ async fn stale_lease_is_taken_over_after_ttl() {
         Some("wfd_dead"),
     )
     .await;
-    let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
+    let (dispatcher, releases) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 1);
 
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3367,7 +3483,7 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-lease-b"),
     )
     .await
@@ -3450,7 +3566,7 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
         None,
     )
     .await;
-    let (dispatcher, releases) = BlockingDispatcher::with_capacity(1);
+    let (dispatcher, releases) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 1);
 
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3739,7 +3855,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-paused-skip"),
     )
     .await
@@ -3790,7 +3906,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-resumed-complete"),
     )
     .await
@@ -3816,7 +3932,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         None,
     )
     .await;
-    let (dispatcher, release) = GatedCheckpointDispatcher::new(
+    let (dispatcher, release) = GatedCheckpointDispatcher::new(Arc::clone(&fx.state),
         StepCheckpoint::completed_run(0, "a", serde_json::json!({"ok": true})),
         RunUpdate::Queued,
     );
@@ -3910,7 +4026,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     let skipped = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteAfterA),
+        Arc::new(CompleteAfterA::new(&fx.state)),
         config("owner-paused-after-apply"),
     )
     .await
@@ -3931,7 +4047,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteAfterA),
+        Arc::new(CompleteAfterA::new(&fx.state)),
         config("owner-paused-resume"),
     )
     .await
@@ -3972,7 +4088,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
         None,
     )
     .await;
-    let (dispatcher, release) = GatedCheckpointDispatcher::new(
+    let (dispatcher, release) = GatedCheckpointDispatcher::new(Arc::clone(&fx.state),
         StepCheckpoint::completed_run(0, "a", serde_json::json!({"ok": true})),
         RunUpdate::Queued,
     );
@@ -4010,7 +4126,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteDispatcher),
+        Arc::new(CompleteDispatcher::new(&fx.state)),
         config("owner-cancelled-skip"),
     )
     .await
@@ -4194,7 +4310,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(CompleteAfterA),
+        Arc::new(CompleteAfterA::new(&fx.state)),
         config("owner-restart-complete"),
     )
     .await
@@ -4236,7 +4352,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
     cfg.per_app_fair_limit = 6;
     cfg.max_inflight_per_app = 2;
     cfg.max_inflight_dispatch = 2;
-    let dispatcher = Arc::new(CompleteDispatcher);
+    let dispatcher = Arc::new(CompleteDispatcher::new(&fx.state));
 
     for _ in 0..200 {
         workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())

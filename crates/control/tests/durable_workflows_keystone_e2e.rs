@@ -38,6 +38,7 @@ use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_plugin_workflow::advance::WorkflowAdvanceResponse;
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
@@ -414,6 +415,29 @@ impl StepDispatcher for TimingGatewayDispatcher {
             .push(started.elapsed());
         outcome
     }
+}
+
+fn expect_completed_ack(outcome: DispatchOutcome, label: &str) -> WorkflowAdvanceResponse {
+    let DispatchOutcome::Completed(response) = outcome else {
+        panic!("{label} did not produce a workflow advance ack");
+    };
+    assert!(response.is_ack(), "{label} returned nack: {response:?}");
+    response
+}
+
+fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str) {
+    assert_eq!(
+        response.run_id.as_deref(),
+        Some(run_id),
+        "{label} ack run_id"
+    );
+    assert!(
+        response
+            .registrations
+            .iter()
+            .any(|registration| registration.run_id == run_id),
+        "{label} ack registrations did not include dispatched run"
+    );
 }
 
 #[derive(Clone)]
@@ -1188,19 +1212,19 @@ async fn run_state(
     )
 }
 
-async fn wait_for_state(
+async fn wait_for_any_state(
     fx: &Fixture,
     run_id: &str,
-    expected: &str,
-) -> Option<DateTime<Utc>> {
+    expected: &[&str],
+) -> (String, Option<DateTime<Utc>>) {
     for _ in 0..200 {
         let (state, wake_at, _, _) = run_state(&fx.pg, run_id).await;
-        if state == expected {
-            return wake_at;
+        if expected.iter().any(|candidate| state == *candidate) {
+            return (state, wake_at);
         }
         compio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("run {run_id} did not reach state {expected}");
+    panic!("run {run_id} did not reach any of {expected:?}");
 }
 
 async fn wait_for_step_count(fx: &Fixture, run_id: &str, expected: usize) {
@@ -2888,22 +2912,13 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("DW19 frontier first tick");
     assert_eq!(claimed, 1);
-    let DispatchOutcome::Completed(frontier_result) = frontier_dropped_rx
+    let frontier_ack = expect_completed_ack(
+        frontier_dropped_rx
         .await
-        .expect("DW19 frontier held result")
-    else {
-        panic!("DW19 frontier dispatch did not complete");
-    };
-    assert_eq!(frontier_result.run_id, frontier_run);
-    assert_eq!(
-        frontier_result
-            .checkpoints
-            .iter()
-            .map(|checkpoint| checkpoint.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b", "c"],
-        "first dispatch must be the 3-wide frontier"
+            .expect("DW19 frontier held ack"),
+        "DW19 frontier held dispatch",
     );
+    assert_ack_run(&frontier_ack, &frontier_run, "DW19 frontier held dispatch");
     assert_eq!(
         effect_commit_counts(&fx, &frontier_run).await,
         BTreeMap::from([
@@ -2911,42 +2926,16 @@ async fn durable_workflows_m1_keystone_real_spine() {
             ("frontier:b".to_string(), 1),
             ("frontier:c".to_string(), 1),
         ]),
-        "frontier side effects commit once before the simulated partial crash"
-    );
-
-    let partial_frontier = workflow_engine::StepResult::from_checkpoints(
-        frontier_run.clone(),
-        frontier_result.dispatch_nonce.clone(),
-        frontier_result.checkpoints[..2].to_vec(),
-        workflow_engine::RunUpdate::Queued,
-    );
-    assert!(
-        workflow_engine::apply_step_result(&fx.state, frontier_owner, partial_frontier)
-            .await
-            .expect("DW19 partial frontier apply"),
-        "partial frontier checkpoint should land under the live claim"
+        "frontier side effects commit in the worker before the held ack is released"
     );
     assert_eq!(
         step_rows(&fx, &frontier_run).await,
         vec![
             (0, "a".to_string(), "run".to_string(), "completed".to_string()),
             (1, "b".to_string(), "run".to_string(), "completed".to_string()),
+            (2, "c".to_string(), "run".to_string(), "completed".to_string()),
         ],
-        "crash point lands only part of the concurrent frontier"
-    );
-    assert!(
-        !workflow_engine::apply_step_result(&fx.state, frontier_owner, frontier_result.clone())
-            .await
-            .expect("DW19 stale full frontier apply"),
-        "stale full frontier result must be rejected after the partial crash state settles"
-    );
-    assert_eq!(
-        step_rows(&fx, &frontier_run).await,
-        vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
-        ],
-        "stale full frontier result must not overwrite the partial crash state"
+        "worker apply lands the full concurrent frontier before the ack"
     );
     let _ = frontier_release_tx.send(());
     drive_until_completed(
@@ -2965,19 +2954,11 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let frontier_attempts = effect_attempt_counts(&fx, &frontier_run).await;
     assert_eq!(frontier_attempts.get("frontier:a").copied(), Some(1));
     assert_eq!(frontier_attempts.get("frontier:b").copied(), Some(1));
-    assert!(
-        frontier_attempts
-            .get("frontier:c")
-            .copied()
-            .unwrap_or_default()
-            >= 2,
-        "uncheckpointed frontier member should be retried after replay"
-    );
+    assert_eq!(frontier_attempts.get("frontier:c").copied(), Some(1));
 
     // CW1/CW2/CW3: step.call parks the parent, spawns one deterministic child,
-    // and resumes with the child's output. The first dispatch result is applied
-    // manually before releasing the held dispatcher to simulate a duplicate
-    // post-crash apply racing the already-parked parent.
+    // and resumes with the child's output. Holding the ack now simulates the
+    // worker-applied/control-ack-lost window.
     let cw1_parent = seed_workflow_run(
         &fx,
         PARENT_CALL_WORKFLOW_NAME,
@@ -2997,15 +2978,11 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("CW1 first tick");
     assert_eq!(claimed, 1);
-    let dropped = cw1_dropped_rx.await.expect("CW1 dropped parent StepResult");
-    let DispatchOutcome::Completed(cw1_result) = dropped else {
-        panic!("CW1 parent did not produce a StepResult");
-    };
-    assert!(
-        workflow_engine::apply_step_result(&fx.state, cw1_owner, cw1_result)
-            .await
-            .expect("CW1 manual parent spawn apply")
+    let cw1_ack = expect_completed_ack(
+        cw1_dropped_rx.await.expect("CW1 dropped parent ack"),
+        "CW1 parent",
     );
+    assert_ack_run(&cw1_ack, &cw1_parent, "CW1 parent");
     let cw1_children = wait_for_child_count(&fx, &cw1_parent, 1).await;
     assert_child_dedup_keys(&fx, &cw1_parent, 1).await;
     let cw1_parent_row = fx
@@ -3277,18 +3254,19 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("pause first tick");
     assert_eq!(claimed, 1);
-    let paused_outcome = pause_outcome_rx.await.expect("pause real StepResult");
-    match &paused_outcome {
-        DispatchOutcome::Completed(result) => {
-            assert_eq!(result.run_id, pause_run);
-            assert_eq!(result.checkpoints.len(), 1);
-            assert_eq!(result.checkpoints[0].name, "a");
-        }
-        other => panic!("pause first real dispatch did not produce StepResult: {other:?}"),
-    }
+    let pause_ack = expect_completed_ack(
+        pause_outcome_rx.await.expect("pause real ack"),
+        "pause first dispatch",
+    );
+    assert_ack_run(&pause_ack, &pause_run, "pause first dispatch");
     let before_pause = run_state(&fx.pg, &pause_run).await;
-    assert_eq!(before_pause.0, "running");
-    assert!(before_pause.2.is_some(), "pause target should be claimed");
+    assert_eq!(before_pause.0, "queued");
+    assert_eq!(before_pause.2, None, "worker apply clears the claim before ack");
+    assert_eq!(
+        step_rows(&fx, &pause_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "worker apply lands the checkpoint before the held ack"
+    );
     let pause_body = post_control(
         &control_url,
         fx.app_id,
@@ -3299,9 +3277,10 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await;
     assert_eq!(pause_body["state"], "paused");
     assert_eq!(side_counts(&fx, &pause_run).await.get("a").copied(), Some(1));
-    assert!(
-        step_rows(&fx, &pause_run).await.is_empty(),
-        "pause happens before the control checkpoint apply"
+    assert_eq!(
+        step_rows(&fx, &pause_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "pause sees the worker-applied checkpoint"
     );
     let _ = pause_release_tx.send(());
     for _ in 0..100 {
@@ -3362,15 +3341,11 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("cancel first tick");
     assert_eq!(claimed, 1);
-    let cancelled_outcome = cancel_outcome_rx.await.expect("cancel real StepResult");
-    match &cancelled_outcome {
-        DispatchOutcome::Completed(result) => {
-            assert_eq!(result.run_id, cancel_run);
-            assert_eq!(result.checkpoints.len(), 1);
-            assert_eq!(result.checkpoints[0].name, "a");
-        }
-        other => panic!("cancel first real dispatch did not produce StepResult: {other:?}"),
-    }
+    let cancel_ack = expect_completed_ack(
+        cancel_outcome_rx.await.expect("cancel real ack"),
+        "cancel first dispatch",
+    );
+    assert_ack_run(&cancel_ack, &cancel_run, "cancel first dispatch");
     let cancel_body = post_control(
         &control_url,
         fx.app_id,
@@ -3391,9 +3366,10 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(wake_at, None);
     assert_eq!(claimed_by, None);
     assert_eq!(nonce, None);
-    assert!(
-        step_rows(&fx, &cancel_run).await.is_empty(),
-        "cancel must discard the late in-flight checkpoint"
+    assert_eq!(
+        step_rows(&fx, &cancel_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "cancel happens after the worker-applied checkpoint in the held-ack window"
     );
     let cancel_counts = side_counts(&fx, &cancel_run).await;
     assert_eq!(
@@ -3427,19 +3403,15 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .expect("crash first tick");
     assert_eq!(claimed, 1);
 
-    let dropped = dropped_rx.await.expect("dropped real StepResult");
-    match &dropped {
-        DispatchOutcome::Completed(result) => {
-            assert_eq!(result.run_id, crash_run);
-            assert_eq!(result.checkpoints.len(), 1);
-            assert_eq!(result.checkpoints[0].name, "a");
-        }
-        other => panic!("first real dispatch did not produce StepResult: {other:?}"),
-    }
+    let dropped_ack = expect_completed_ack(
+        dropped_rx.await.expect("dropped real ack"),
+        "crash first dispatch",
+    );
+    assert_ack_run(&dropped_ack, &crash_run, "crash first dispatch");
     assert_eq!(
-        step_rows(&fx, &crash_run).await.len(),
-        0,
-        "crash barrier is before control checkpoints step a"
+        step_rows(&fx, &crash_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "worker applies step a before the held ack is released"
     );
     assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
 
@@ -3457,8 +3429,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     );
     assert_eq!(
         step_rows(&fx, &crash_run).await.len(),
-        0,
-        "live-lease tick must not checkpoint"
+        1,
+        "live-lease tick must not add another checkpoint"
     );
 
     compio::time::sleep(Duration::from_millis(1_650)).await;
@@ -3472,30 +3444,51 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("takeover tick");
     assert_eq!(takeover, 1, "expired lease should be reclaimed");
-    wait_for_state(&fx, &crash_run, "queued").await;
-    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(2));
+    let (takeover_state, takeover_wake_at) =
+        wait_for_any_state(&fx, &crash_run, &["queued", "sleeping"]).await;
+    if takeover_state == "sleeping" {
+        assert!(
+            takeover_wake_at.is_some(),
+            "redrive sleep parking must carry wake_at"
+        );
+    }
+    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
+    let redrive_rows = step_rows(&fx, &crash_run).await;
     assert_eq!(
-        step_rows(&fx, &crash_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
-        "takeover should checkpoint exactly one a row"
+        redrive_rows
+            .iter()
+            .filter(|(_, name, _, _)| name == "a")
+            .count(),
+        1,
+        "redrive should keep exactly one a row: {redrive_rows:?}"
+    );
+    assert!(
+        redrive_rows.len() <= 2
+            && redrive_rows.first()
+                == Some(&(0, "a".to_string(), "run".to_string(), "completed".to_string()))
+            && redrive_rows
+                .get(1)
+                .is_none_or(|row| row.1 == "sleep" && row.2 == "sleep"),
+        "redrive should only replay into the next sleep checkpoint: {redrive_rows:?}"
     );
 
     let _ = release_tx.send(());
     compio::time::sleep(Duration::from_millis(100)).await;
+    let late_rows = step_rows(&fx, &crash_run).await;
     assert_eq!(
-        step_rows(&fx, &crash_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
-        "late stale StepResult must not double-checkpoint a"
+        late_rows
+            .iter()
+            .filter(|(_, name, _, _)| name == "a")
+            .count(),
+        1,
+        "late held ack must not double-checkpoint a: {late_rows:?}"
     );
 
     drive_until_completed(&fx, Arc::clone(&real_dispatcher), config("dw07-crash-drive"), &crash_run)
         .await;
     assert_expected_steps(&fx, &crash_run).await;
     let crash_counts = side_counts(&fx, &crash_run).await;
-    assert!(
-        crash_counts.get("a").copied().unwrap_or_default() >= 2,
-        "step a body is at-least-once across the dropped-checkpoint crash"
-    );
+    assert_eq!(crash_counts.get("a").copied(), Some(1));
     assert_eq!(crash_counts.get("b").copied(), Some(1));
 
     let blob_size = 1024 * 1024 + 17;
@@ -3517,40 +3510,31 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("blob crash first tick");
     assert_eq!(claimed, 1);
-    let dropped = blob_dropped_rx.await.expect("dropped blob StepResult");
-    let dropped_hash = match &dropped {
-        DispatchOutcome::Completed(result) => {
-            assert_eq!(result.run_id, blob_run);
-            assert_eq!(result.checkpoints.len(), 1);
-            assert_eq!(result.checkpoints[0].name, "big");
-            assert!(
-                result.checkpoints[0].output.is_none(),
-                "blob-backed checkpoint must not inline the large output"
-            );
-            result.checkpoints[0]
-                .output_ref
-                .as_ref()
-                .expect("dropped checkpoint blob ref")
-                .hash
-                .clone()
-        }
-        other => panic!("blob dispatch did not produce StepResult: {other:?}"),
-    };
-    assert!(
-        step_rows(&fx, &blob_run).await.is_empty(),
-        "dropped blob result must not commit a journal row"
+    let blob_ack = expect_completed_ack(
+        blob_dropped_rx.await.expect("dropped blob ack"),
+        "blob first dispatch",
     );
-    compio::time::sleep(Duration::from_millis(1_650)).await;
-    register_existing_run_timer(&fx, &blob_run).await;
-    let takeover = workflow_engine::fire_once(
-        &fx.scheduler_store,
-        &fx.state,
-        Arc::clone(&real_dispatcher),
-        config("dw15-blob-takeover"),
-    )
-    .await
-    .expect("blob takeover tick");
-    assert_eq!(takeover, 1, "expired blob lease should be reclaimed");
+    assert_ack_run(&blob_ack, &blob_run, "blob first dispatch");
+    let dropped_blob = fx
+        .pg
+        .query_one(
+            "SELECT output_kind, output_hash, output \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND name = 'big'",
+            &[&blob_run],
+        )
+        .await
+        .expect("load held-ack blob step row");
+    assert_eq!(dropped_blob.get::<_, String>("output_kind"), "blob");
+    assert!(
+        dropped_blob
+            .get::<_, Option<serde_json::Value>>("output")
+            .is_none(),
+        "blob-backed checkpoint must not inline the large output"
+    );
+    let dropped_hash: String = dropped_blob
+        .get::<_, Option<String>>("output_hash")
+        .expect("held-ack checkpoint blob hash");
     let _ = blob_release_tx.send(());
     drive_until_completed(
         &fx,
@@ -4631,22 +4615,11 @@ async fn scheduler_misfire_lost_register_recovers() {
     .expect("misfire sleep tick");
     assert_eq!(claimed, 1);
 
-    let DispatchOutcome::Completed(first_result) =
-        held_rx.await.expect("misfire held dispatch result")
-    else {
-        panic!("misfire first dispatch did not produce a StepResult");
-    };
-    assert_eq!(first_result.run_id, run_id);
-    assert!(
-        workflow_engine::apply_step_result_without_scheduler_sync(
-            &fx.state,
-            first_owner,
-            first_result.clone(),
-        )
-            .await
-            .expect("misfire manual sleep apply"),
-        "first sleep checkpoint should apply before the scheduler ack is lost"
+    let first_ack = expect_completed_ack(
+        held_rx.await.expect("misfire held dispatch ack"),
+        "misfire first dispatch",
     );
+    assert_ack_run(&first_ack, &run_id, "misfire first dispatch");
 
     let (state, wake_at, claimed_by, dispatch_nonce) = run_state(&fx.pg, &run_id).await;
     let _wake_at = wake_at.expect("sleeping run wake_at");
@@ -4740,12 +4713,11 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
     .expect("overfire first tick");
     assert_eq!(claimed, 1);
 
-    let DispatchOutcome::Completed(stale_result) =
-        held_rx.await.expect("overfire held dispatch result")
-    else {
-        panic!("overfire first dispatch did not produce a StepResult");
-    };
-    assert_eq!(stale_result.run_id, run_id);
+    let stale_ack = expect_completed_ack(
+        held_rx.await.expect("overfire held dispatch ack"),
+        "overfire first dispatch",
+    );
+    assert_ack_run(&stale_ack, &run_id, "overfire first dispatch");
 
     force_claim_lease_elapsed(&fx, &run_id).await;
     force_run_due(&fx, &run_id).await;
@@ -4771,17 +4743,14 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         "duplicate path must use the real gateway dispatcher exactly once"
     );
 
-    let duplicate_state = wait_for_state(&fx, &run_id, "queued").await;
-    assert!(
-        duplicate_state.is_some(),
-        "duplicate dispatch should requeue the run after applying the memoized action step"
-    );
-    assert!(
-        !workflow_engine::apply_step_result(&fx.state, stale_owner, stale_result.clone())
-            .await
-            .expect("overfire stale manual apply"),
-        "stale dispatch_nonce apply must be a zero-row no-op"
-    );
+    let (duplicate_state, duplicate_wake_at) =
+        wait_for_any_state(&fx, &run_id, &["queued", "completed"]).await;
+    if duplicate_state == "queued" {
+        assert!(
+            duplicate_wake_at.is_some(),
+            "queued duplicate dispatch must carry a follow-up wake"
+        );
+    }
     let _ = release_tx.send(());
     compio::time::sleep(Duration::from_millis(150)).await;
     let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
@@ -4800,8 +4769,8 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
     );
     assert_eq!(
         effect_attempt_counts(&fx, &run_id).await.get("once").copied(),
-        Some(2),
-        "both real dispatches should reach the idempotent action boundary"
+        Some(1),
+        "duplicate dispatch should replay the worker-applied journal hit without re-entering the action boundary"
     );
     assert_eq!(
         effect_commit_counts(&fx, &run_id).await.get("once").copied(),
@@ -4916,18 +4885,11 @@ async fn compensation_saga_rollback_real_spine() {
     .await
     .expect("DW18 crash-drop tick");
     assert_eq!(claimed, 1);
-    let dropped = dropped_rx.await.expect("DW18 dropped compensation outcome");
-    let DispatchOutcome::Completed(dropped_result) = dropped else {
-        panic!("DW18 dropped dispatch did not produce a StepResult");
-    };
-    assert_eq!(dropped_result.run_id, crash_run);
-    assert!(
-        dropped_result
-            .outcomes
-            .iter()
-            .any(|outcome| matches!(outcome, workflow_engine::StepOutcome::CompensationCompleted { ordinal: 1, .. })),
-        "first compensation dispatch should complete b's compensator"
+    let dropped_ack = expect_completed_ack(
+        dropped_rx.await.expect("DW18 dropped compensation ack"),
+        "DW18 dropped compensation",
     );
+    assert_ack_run(&dropped_ack, &crash_run, "DW18 dropped compensation");
     compio::time::sleep(Duration::from_millis(150)).await;
     let attempts_after_drop = effect_attempt_counts(&fx, &crash_run).await;
     let commits_after_drop = effect_commit_counts(&fx, &crash_run).await;
@@ -4946,8 +4908,8 @@ async fn compensation_saga_rollback_real_spine() {
     let commits = effect_commit_counts(&fx, &crash_run).await;
     assert_eq!(
         attempts.get("undo:b").copied(),
-        Some(2),
-        "crash after compensator effect should redrive the pending marker"
+        Some(1),
+        "worker-applied lost ack should not redrive a committed compensator effect"
     );
     assert_eq!(
         commits.get("undo:b").copied(),
