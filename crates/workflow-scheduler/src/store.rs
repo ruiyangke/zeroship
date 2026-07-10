@@ -1,6 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
@@ -11,23 +8,6 @@ use crate::wheel::TimerEntry;
 pub struct WorkflowSchedulerStore {
     db_url: String,
     schema: String,
-    metrics: Option<Arc<WorkflowSchedulerStoreMetrics>>,
-}
-
-#[derive(Debug, Default)]
-pub struct WorkflowSchedulerStoreMetrics {
-    workflow_runs_reads: AtomicUsize,
-}
-
-impl WorkflowSchedulerStoreMetrics {
-    #[must_use]
-    pub fn workflow_runs_reads(&self) -> usize {
-        self.workflow_runs_reads.load(Ordering::SeqCst)
-    }
-
-    fn record_workflow_runs_read(&self) {
-        self.workflow_runs_reads.fetch_add(1, Ordering::SeqCst);
-    }
 }
 
 impl WorkflowSchedulerStore {
@@ -43,14 +23,7 @@ impl WorkflowSchedulerStore {
         Self {
             db_url: db_url.into(),
             schema,
-            metrics: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_metrics(mut self, metrics: Arc<WorkflowSchedulerStoreMetrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
     }
 
     #[allow(clippy::future_not_send)]
@@ -364,54 +337,6 @@ impl WorkflowSchedulerStore {
             )
             .await?;
         Ok(rows.first().map(InflightTimer::from_row))
-    }
-
-    /// One-shot cutover/disaster-recovery seed from the workflow journal.
-    ///
-    /// This is intentionally called once during scheduler startup, immediately
-    /// after `provision()` and before the wheel can fire. It is not a standing
-    /// due-run scan; steady-state scheduling is driven by register/ack writes
-    /// and the inflight reaper reads only this crate's private store.
-    #[allow(clippy::future_not_send)]
-    pub async fn boot_reconcile_from_workflow_runs(
-        &self,
-    ) -> Result<usize, WorkflowSchedulerStoreError> {
-        if let Some(metrics) = &self.metrics {
-            metrics.record_workflow_runs_read();
-        }
-        let mut conn = self.open_conn().await?;
-        let tx = conn.transaction().await?;
-        let rows = tx
-            .query(
-                "SELECT id, app_id, wake_at \
-                   FROM zeroship.workflow_runs \
-                  WHERE state IN ('queued','running','sleeping','waiting','compensating') \
-                    AND wake_at IS NOT NULL",
-                &[],
-            )
-            .await?;
-        for row in &rows {
-            let run_id: String = row.get("id");
-            let app_id: Uuid = row.get("app_id");
-            let wake_at: DateTime<Utc> = row.get("wake_at");
-            tx.execute(
-                &format!("INSERT INTO {}.timers \
-                    (run_id, app_id, wake_at, generation, registered_at) \
-                 VALUES ($1, $2, $3, 0, now()) \
-                 ON CONFLICT (run_id) DO UPDATE \
-                    SET app_id = EXCLUDED.app_id, \
-                        wake_at = EXCLUDED.wake_at, \
-                        generation = GREATEST({schema}.timers.generation, EXCLUDED.generation), \
-                        registered_at = now()",
-                    self.quoted_schema(),
-                    schema = self.quoted_schema()
-                ),
-                &[&run_id, &app_id, &wake_at],
-            )
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(rows.len())
     }
 
     #[allow(clippy::future_not_send)]

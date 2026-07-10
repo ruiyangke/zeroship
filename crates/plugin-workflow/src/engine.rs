@@ -5,12 +5,18 @@ use std::sync::OnceLock;
 use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::typed_id;
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
 pub const DEFAULT_MAX_CHILD_DEPTH: i16 = 16;
 pub const DEFAULT_MAX_LIVE_DESCENDANTS: i64 = 1_024;
 pub const DEFAULT_MAX_START_MANY_BATCH: usize = 1_000;
+pub const FREE_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 100 * 1024 * 1024;
+pub const PAID_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 1024 * 1024 * 1024;
+pub const RUN_JOURNAL_LIMIT_FIELD: &str = "workflow_journal_max_bytes";
+pub const APP_JOURNAL_LIMIT_FIELD: &str = "workflow_app_journal_max_bytes";
 
 static OWNER_ID: OnceLock<String> = OnceLock::new();
 
@@ -18,6 +24,78 @@ fn default_owner_id() -> String {
     OWNER_ID
         .get_or_init(|| format!("control-wf-{}", std::process::id()))
         .clone()
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowJournalLimits {
+    pub run_max_bytes: i64,
+    pub app_max_bytes: i64,
+}
+
+impl Default for WorkflowJournalLimits {
+    fn default() -> Self {
+        Self {
+            run_max_bytes: PAID_WORKFLOW_JOURNAL_MAX_BYTES,
+            app_max_bytes: PAID_WORKFLOW_JOURNAL_MAX_BYTES,
+        }
+    }
+}
+
+pub fn workflow_journal_limits_from_plan(
+    plan_id: &str,
+    plan_name: Option<&str>,
+    runtime_limits: Option<&Value>,
+) -> WorkflowJournalLimits {
+    let default = default_journal_cap(plan_id, plan_name);
+    let run_max_bytes = runtime_limits
+        .and_then(|json| positive_i64_field(json, RUN_JOURNAL_LIMIT_FIELD))
+        .unwrap_or(default);
+    let app_max_bytes = runtime_limits
+        .and_then(|json| positive_i64_field(json, APP_JOURNAL_LIMIT_FIELD))
+        .unwrap_or(default);
+
+    WorkflowJournalLimits {
+        run_max_bytes,
+        app_max_bytes,
+    }
+}
+
+fn default_journal_cap(plan_id: &str, plan_name: Option<&str>) -> i64 {
+    if plan_name == Some("free") || plan_id == free_plan_id() {
+        FREE_WORKFLOW_JOURNAL_MAX_BYTES
+    } else {
+        PAID_WORKFLOW_JOURNAL_MAX_BYTES
+    }
+}
+
+fn positive_i64_field(json: &Value, field: &str) -> Option<i64> {
+    let value = json.get(field)?;
+    match value {
+        Value::Number(n) => n.as_i64().filter(|v| *v > 0),
+        Value::String(s) => s.parse::<i64>().ok().filter(|v| *v > 0),
+        _ => None,
+    }
+}
+
+fn free_plan_id() -> String {
+    let uuid = derive_uuid("zeroship:plan:free:v1", "builtin");
+    typed_id::from_uuid_string(typed_id::PLAN_PREFIX, &uuid.to_string())
+        .expect("derived uuid is a valid uuid string")
+}
+
+fn derive_uuid(label: &str, host: &str) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(host.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +124,8 @@ pub struct WorkflowEngineConfig {
     pub max_live_descendants: i64,
     /// Maximum child starts committed by one frontier batch.
     pub max_start_many_batch: usize,
+    /// Journal size caps resolved by the control plane for this dispatch.
+    pub journal_limits: WorkflowJournalLimits,
     /// Stable owner id written into `claimed_by`.
     pub owner_id: String,
 }
@@ -63,6 +143,7 @@ impl Default for WorkflowEngineConfig {
             max_child_depth: DEFAULT_MAX_CHILD_DEPTH,
             max_live_descendants: DEFAULT_MAX_LIVE_DESCENDANTS,
             max_start_many_batch: DEFAULT_MAX_START_MANY_BATCH,
+            journal_limits: WorkflowJournalLimits::default(),
             owner_id: default_owner_id(),
         }
     }
@@ -122,6 +203,8 @@ pub struct StepRequest {
     pub input: Option<Value>,
     pub started_at: DateTime<Utc>,
     pub journal: Vec<JournalStep>,
+    #[serde(default)]
+    pub journal_limits: WorkflowJournalLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

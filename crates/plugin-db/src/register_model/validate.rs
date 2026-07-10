@@ -61,6 +61,24 @@ pub(crate) async fn validate<B: AuditWriter>(
     ctx: &RegisterContext,
     plan: Plan,
 ) -> Result<ApprovedPlan, String> {
+    let mut reserved_collections: Vec<String> = plan
+        .ops
+        .iter()
+        .map(|op| op.collection.clone())
+        .filter(|collection| collection.starts_with("__zeroship_"))
+        .collect();
+    if ctx.collection.starts_with("__zeroship_") {
+        reserved_collections.push(ctx.collection.clone());
+    }
+    reserved_collections.sort();
+    reserved_collections.dedup();
+    if !reserved_collections.is_empty() {
+        return Err(build_reserved_prefix_refused_envelope(
+            &ctx.deploy_id,
+            &reserved_collections,
+        ));
+    }
+
     let destructive: Vec<&DiffOp> = plan
         .ops
         .iter()
@@ -162,6 +180,30 @@ fn build_validation_refused_envelope(
     .to_string()
 }
 
+fn build_reserved_prefix_refused_envelope(
+    deploy_id: &str,
+    collections: &[String],
+) -> String {
+    let violations: Vec<Value> = collections
+        .iter()
+        .map(|collection| {
+            serde_json::json!({
+                "collection": collection,
+                "code": "reserved_prefix",
+                "message": "collection names starting with __zeroship_ are reserved",
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "code": "validation_refused",
+        "deploy_id": deploy_id,
+        "violations": violations,
+        "destructive_pending": [],
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -235,6 +277,19 @@ mod tests {
         }
     }
 
+    fn additive_plan(collection: &str) -> Plan {
+        Plan {
+            ops: vec![DiffOp {
+                collection: collection.to_string(),
+                change_kind: crate::diff::ChangeKind::CreateTable,
+                class: crate::diff::ChangeClass::Additive,
+                sql: None,
+                details: json!({}),
+                field: None,
+            }],
+        }
+    }
+
     #[test]
     fn lenient_validation_terminalises_refused_destructive_ops() {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
@@ -253,6 +308,39 @@ mod tests {
             assert_eq!(
                 backend.kinds.borrow().as_slice(),
                 &["drop_column".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn reserved_zeroship_collection_prefix_is_refused() {
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        rt.block_on(async {
+            let backend = RecordingAuditWriter::default();
+            let envelope = match validate(
+                &backend,
+                &ctx("strict"),
+                additive_plan("__zeroship_workflow_runs"),
+            )
+            .await
+            {
+                Ok(_) => panic!("reserved creator collection should be refused"),
+                Err(envelope) => envelope,
+            };
+            let parsed: serde_json::Value =
+                serde_json::from_str(&envelope).expect("validation envelope json");
+            assert_eq!(parsed["code"], "validation_refused");
+            assert_eq!(parsed["violations"][0]["code"], "reserved_prefix");
+            assert_eq!(
+                parsed["violations"][0]["collection"],
+                "__zeroship_workflow_runs"
+            );
+            assert_eq!(
+                parsed["destructive_pending"]
+                    .as_array()
+                    .expect("destructive_pending array")
+                    .len(),
+                0
             );
         });
     }

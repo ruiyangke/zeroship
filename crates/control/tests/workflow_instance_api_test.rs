@@ -22,6 +22,7 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -170,6 +171,9 @@ async fn seed_app_on_plan(
         )
         .await
         .expect("insert app");
+    PgStore::provision(fx.pg.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal");
     let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
     let manifest = json!({
         "version": 1,
@@ -242,7 +246,22 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
         )
         .await
         .expect("insert app without deploy");
+    PgStore::provision(fx.pg.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal");
     app_id
+}
+
+fn wf_sql(app_id: Uuid, sql: &str) -> String {
+    let tables = WorkflowTables::for_app_id(&app_id);
+    sql.replace("zeroship.workflow_runs", &tables.runs)
+        .replace("zeroship.workflow_steps", &tables.steps)
+        .replace("zeroship.workflow_signals", &tables.signals)
+        .replace(
+            "zeroship.workflow_subscriptions",
+            &tables.subscriptions,
+        )
+        .replace("zeroship.workflow_blobs", &tables.blobs)
 }
 
 fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
@@ -293,7 +312,10 @@ async fn create_conflicts_status_and_cross_app_isolation() {
     let row = fx
         .pg
         .query_one(
-            "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
+            &wf_sql(
+                app_a,
+                "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
+            ),
             &[&first_run, &app_a],
         )
         .await
@@ -443,10 +465,13 @@ async fn create_conflicts_status_and_cross_app_isolation() {
     let rows = fx
         .pg
         .query(
-            "SELECT id, state, dedup_key \
+            &wf_sql(
+                app_a,
+                "SELECT id, state, dedup_key \
                FROM zeroship.workflow_runs \
               WHERE id = ANY($1) \
               ORDER BY id",
+            ),
             &[&vec![keyed_run.clone(), replacement_run.clone()]],
         )
         .await
@@ -526,9 +551,12 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let future_wake = Utc::now() + ChronoDuration::hours(1);
     fx.pg
         .execute(
-            "UPDATE zeroship.workflow_runs \
+            &wf_sql(
+                app_id,
+                "UPDATE zeroship.workflow_runs \
                 SET state = 'waiting', wake_at = $1, waiting_step_key = 'wait:0:approved:approved:60000' \
               WHERE id = $2",
+            ),
             &[&future_wake, &run_id],
         )
         .await
@@ -553,9 +581,12 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let row = fx
         .pg
         .query_one(
-            "SELECT state, wake_at \
+            &wf_sql(
+                app_id,
+                "SELECT state, wake_at \
                FROM zeroship.workflow_runs \
               WHERE id = $1 AND app_id = $2",
+            ),
             &[&run_id, &app_id],
         )
         .await
@@ -571,9 +602,12 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let signal = fx
         .pg
         .query_one(
-            "SELECT type, payload, origin, delivery \
+            &wf_sql(
+                app_id,
+                "SELECT type, payload, origin, delivery \
                FROM zeroship.workflow_signals \
               WHERE run_id = $1",
+            ),
             &[&run_id],
         )
         .await
@@ -613,7 +647,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let rows = fx
         .pg
         .query(
-            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
+            &wf_sql(
+                create_cap_app,
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
+            ),
             &[&create_cap_app],
         )
         .await
@@ -669,7 +706,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let rows = fx
         .pg
         .query(
-            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_signals WHERE run_id = $1",
+            &wf_sql(
+                signal_cap_app,
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_signals WHERE run_id = $1",
+            ),
             &[&capped_run_id],
         )
         .await
@@ -709,9 +749,12 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let future_wake = Utc::now() + ChronoDuration::minutes(30);
     fx.pg
         .execute(
-            "UPDATE zeroship.workflow_runs \
+            &wf_sql(
+                app_id,
+                "UPDATE zeroship.workflow_runs \
                 SET state = 'sleeping', wake_at = $1, waiting_step_key = 'sleep:0:cooldown' \
               WHERE id = $2",
+            ),
             &[&future_wake, &run_id],
         )
         .await
@@ -732,7 +775,10 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let row = fx
         .pg
         .query_one(
-            "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &wf_sql(
+                app_id,
+                "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            ),
             &[&run_id],
         )
         .await
@@ -763,7 +809,10 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let row = fx
         .pg
         .query_one(
-            "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &wf_sql(
+                app_id,
+                "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            ),
             &[&run_id],
         )
         .await
@@ -782,10 +831,13 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let lease_expires = Utc::now() + ChronoDuration::minutes(5);
     fx.pg
         .execute(
-            "UPDATE zeroship.workflow_runs \
+            &wf_sql(
+                app_id,
+                "UPDATE zeroship.workflow_runs \
                 SET state = 'running', claimed_by = 'owner-a', dispatch_nonce = 'wfd_claim', \
                     lease_expires = $2 \
               WHERE id = $1",
+            ),
             &[&run_id, &lease_expires],
         )
         .await
@@ -806,8 +858,11 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let row = fx
         .pg
         .query_one(
-            "SELECT state, wake_at, claimed_by, dispatch_nonce \
+            &wf_sql(
+                app_id,
+                "SELECT state, wake_at, claimed_by, dispatch_nonce \
                FROM zeroship.workflow_runs WHERE id = $1",
+            ),
             &[&run_id],
         )
         .await

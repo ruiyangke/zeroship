@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use compio_postgres::GenericClient;
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_blob_gc;
 use crate::registry::RegistryError;
@@ -106,13 +107,26 @@ pub async fn tick_with_config(
     config: WorkflowRetentionConfig,
 ) -> Result<RetentionStats, RegistryError> {
     let retention_window_ms = config.retention_window_ms.max(1);
-    let batch_size = config.batch_size.max(1);
+    let mut remaining_batch = config.batch_size.max(1);
     let cutoff = Utc::now() - chrono::Duration::milliseconds(retention_window_ms);
 
-    let mut conn = state.registry.conn().await?;
-    let tx = conn.transaction().await.map_err(RegistryError::from)?;
-    let rows = tx
-        .query(
+    let app_ids = {
+        let conn = state.registry.conn().await?;
+        super::workflow_engine::workflow_app_ids(&conn).await?
+    };
+    let mut stats = RetentionStats::default();
+    for app_id in app_ids {
+        if remaining_batch <= 0 {
+            break;
+        }
+        let mut conn = state.registry.conn().await?;
+        let tx = conn.transaction().await.map_err(RegistryError::from)?;
+        let Some(tables) = super::workflow_engine::existing_tables(&tx, &app_id).await? else {
+            tx.commit().await.map_err(RegistryError::from)?;
+            continue;
+        };
+        let sql = super::workflow_engine::journal_sql(
+            &tables,
             "SELECT r.id \
                FROM zeroship.workflow_runs r \
               WHERE r.state IN ('completed','failed','cancelled','stalled') \
@@ -130,47 +144,52 @@ pub async fn tick_with_config(
               ORDER BY r.tree_depth DESC, r.terminal_at, r.id \
               LIMIT $2 \
               FOR UPDATE SKIP LOCKED",
-            &[&cutoff, &batch_size],
-        )
-        .await
-        .map_err(RegistryError::from)?;
-
-    let mut stats = RetentionStats::default();
-    let mut blob_hashes = BTreeSet::new();
-    for row in rows {
-        let run_id: String = row.get("id");
-        tx.batch_execute("SAVEPOINT workflow_retention_run")
+        );
+        let rows = tx
+            .query(&sql, &[&cutoff, &remaining_batch])
             .await
             .map_err(RegistryError::from)?;
-        match prune_one_run(&tx, &run_id, &cutoff).await {
-            Ok(Some(pruned)) => {
-                tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
-                    .await
-                    .map_err(RegistryError::from)?;
-                stats.add(pruned.stats);
-                blob_hashes.extend(pruned.blob_hashes);
-            }
-            Ok(None) => {
-                tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
-                    .await
-                    .map_err(RegistryError::from)?;
-            }
-            Err(e) => {
-                tracing::warn!(run_id = %run_id, error = %e, "workflow_retention row prune failed");
-                tx.batch_execute("ROLLBACK TO SAVEPOINT workflow_retention_run")
-                    .await
-                    .map_err(RegistryError::from)?;
-                tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
-                    .await
-                    .map_err(RegistryError::from)?;
+
+        let mut app_blob_hashes = BTreeSet::new();
+        for row in rows {
+            let run_id: String = row.get("id");
+            tx.batch_execute("SAVEPOINT workflow_retention_run")
+                .await
+                .map_err(RegistryError::from)?;
+            match prune_one_run(&tx, &tables, &run_id, &cutoff).await {
+                Ok(Some(pruned)) => {
+                    tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
+                        .await
+                        .map_err(RegistryError::from)?;
+                    remaining_batch = remaining_batch.saturating_sub(1);
+                    stats.add(pruned.stats);
+                    app_blob_hashes.extend(pruned.blob_hashes);
+                }
+                Ok(None) => {
+                    tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
+                        .await
+                        .map_err(RegistryError::from)?;
+                }
+                Err(e) => {
+                    tracing::warn!(run_id = %run_id, error = %e, "workflow_retention row prune failed");
+                    tx.batch_execute("ROLLBACK TO SAVEPOINT workflow_retention_run")
+                        .await
+                        .map_err(RegistryError::from)?;
+                    tx.batch_execute("RELEASE SAVEPOINT workflow_retention_run")
+                        .await
+                        .map_err(RegistryError::from)?;
+                }
             }
         }
-    }
-    tx.commit().await.map_err(RegistryError::from)?;
-
-    stats.blobs = workflow_blob_gc::delete_zero_ref_hashes(state, blob_hashes)
+        tx.commit().await.map_err(RegistryError::from)?;
+        stats.blobs = workflow_blob_gc::delete_zero_ref_hashes_for_app(
+            state,
+            &tables,
+            app_blob_hashes,
+        )
         .await?
         .saturating_add(stats.blobs);
+    }
     Ok(stats)
 }
 
@@ -181,6 +200,7 @@ struct PrunedRun {
 
 async fn prune_one_run<C>(
     tx: &C,
+    tables: &WorkflowTables,
     run_id: &str,
     cutoff: &DateTime<Utc>,
 ) -> Result<Option<PrunedRun>, RegistryError>
@@ -189,10 +209,13 @@ where
 {
     let counts = tx
         .query_one(
+            &super::workflow_engine::journal_sql(
+                tables,
             "SELECT \
                 (SELECT COUNT(*)::bigint FROM zeroship.workflow_steps WHERE run_id = $1) AS steps, \
                 (SELECT COUNT(*)::bigint FROM zeroship.workflow_signals WHERE run_id = $1) AS signals, \
                 (SELECT COUNT(*)::bigint FROM zeroship.workflow_subscriptions WHERE run_id = $1) AS subscriptions",
+            ),
             &[&run_id],
         )
         .await
@@ -200,6 +223,8 @@ where
 
     let blob_refs = tx
         .query(
+            &super::workflow_engine::journal_sql(
+                tables,
             "SELECT hash, SUM(refs)::bigint AS refs \
                FROM ( \
                     SELECT output_hash AS hash, COUNT(*)::bigint AS refs \
@@ -218,6 +243,7 @@ where
                ) refs \
               GROUP BY hash \
               ORDER BY hash",
+            ),
             &[&run_id],
         )
         .await
@@ -227,10 +253,13 @@ where
 
     let broadcast_rows = tx
         .query(
+            &super::workflow_engine::journal_sql(
+                tables,
             "SELECT DISTINCT broadcast_id \
                FROM zeroship.workflow_signals \
               WHERE run_id = $1 AND broadcast_id IS NOT NULL \
               ORDER BY broadcast_id",
+            ),
             &[&run_id],
         )
         .await
@@ -242,15 +271,18 @@ where
 
     let deleted = tx
         .execute(
+            &super::workflow_engine::journal_sql(
+                tables,
             "DELETE FROM zeroship.workflow_runs r \
               WHERE r.id = $1 \
                 AND r.state IN ('completed','failed','cancelled','stalled') \
                 AND r.terminal_at IS NOT NULL \
                 AND r.terminal_at <= $2 \
                 AND NOT EXISTS ( \
-                    SELECT 1 FROM zeroship.workflow_runs child \
+                        SELECT 1 FROM zeroship.workflow_runs child \
                      WHERE child.parent_run_id = r.id \
                 )",
+            ),
             &[&run_id, cutoff],
         )
         .await
@@ -261,6 +293,8 @@ where
 
     if !blob_hashes.is_empty() {
         tx.execute(
+            &super::workflow_engine::journal_sql(
+                tables,
             "UPDATE zeroship.workflow_blobs b \
                 SET refcount = GREATEST(b.refcount::bigint - refs.refs, 0)::int, \
                     last_referenced_at = now() \
@@ -268,6 +302,7 @@ where
                     SELECT * FROM unnest($1::text[], $2::bigint[]) AS r(hash, refs) \
                ) refs \
               WHERE b.hash::text = refs.hash",
+            ),
             &[&blob_hashes, &blob_counts],
         )
         .await
@@ -278,14 +313,18 @@ where
     if !broadcast_ids.is_empty() {
         broadcasts = tx
             .execute(
+                &format!(
                 "DELETE FROM zeroship.workflow_broadcasts b \
                   WHERE b.id = ANY($1) \
+                    AND b.app_id = $2 \
                     AND b.expires_at <= now() \
                     AND NOT EXISTS ( \
-                        SELECT 1 FROM zeroship.workflow_signals sig \
+                        SELECT 1 FROM {} sig \
                          WHERE sig.broadcast_id = b.id \
                     )",
-                &[&broadcast_ids],
+                    tables.signals,
+                ),
+                &[&broadcast_ids, &tables.app_id],
             )
             .await
             .map_err(RegistryError::from)? as usize;

@@ -18,12 +18,13 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use compio_postgres::{connect, NoTls};
+use compio_postgres::types::ToSql;
 use futures::channel::oneshot;
 use ntex::web::{self, test};
 use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
-use zeroship_control::cron::{workflow_blob_gc, workflow_retention};
+use zeroship_control::cron::{workflow_blob_gc, workflow_retention, workflow_schedules};
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, RunUpdate, StepCheckpoint, StepDispatcher,
     StepRequest, StepResult, WorkflowEngineConfig,
@@ -32,9 +33,10 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as scheduler_store_engine, SchedulerConfig as StoreSchedulerConfig, TimerWheel,
-    WakeHandle, WorkflowSchedulerStore, WorkflowSchedulerStoreMetrics,
+    WakeHandle, WorkflowSchedulerStore,
 };
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
@@ -73,12 +75,86 @@ fn set_local_workflow_blob_mtime(root: &std::path::Path, hash: &str, modified: S
 
 struct Fixture {
     state: Arc<AppState>,
-    pg: Arc<compio_postgres::Client>,
+    pg: TestPg,
     db_url: String,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     scheduler_store: WorkflowSchedulerStore,
     _db: TestDatabase,
+}
+
+#[derive(Clone)]
+struct TestPg {
+    inner: Arc<compio_postgres::Client>,
+    default_app_id: Arc<Mutex<Option<Uuid>>>,
+}
+
+impl TestPg {
+    fn new(inner: Arc<compio_postgres::Client>) -> Self {
+        Self {
+            inner,
+            default_app_id: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set_default_app_id(&self, app_id: Uuid) {
+        *self
+            .default_app_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app_id);
+    }
+
+    fn workflow_sql_for_app(app_id: Uuid, sql: &str) -> String {
+        let tables = WorkflowTables::for_app_id(&app_id);
+        sql.replace("zeroship.workflow_runs", &tables.runs)
+            .replace("zeroship.workflow_steps", &tables.steps)
+            .replace("zeroship.workflow_signals", &tables.signals)
+            .replace(
+                "zeroship.workflow_subscriptions",
+                &tables.subscriptions,
+            )
+            .replace("zeroship.workflow_blobs", &tables.blobs)
+    }
+
+    fn rewrite(&self, sql: &str) -> String {
+        let app_id = *self
+            .default_app_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        app_id.map_or_else(|| sql.to_string(), |app_id| Self::workflow_sql_for_app(app_id, sql))
+    }
+
+    async fn batch_execute(&self, sql: &str) -> Result<(), compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.batch_execute(&sql).await
+    }
+
+    async fn execute(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.execute(&sql, params).await
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<compio_postgres::Row>, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.query(&sql, params).await
+    }
+
+    async fn query_one(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<compio_postgres::Row, compio_postgres::Error> {
+        let sql = self.rewrite(sql);
+        self.inner.query_one(&sql, params).await
+    }
 }
 
 impl Drop for Fixture {
@@ -264,14 +340,9 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
-async fn scrub_cloned_fixture_data(pg: &compio_postgres::Client) {
+async fn scrub_cloned_fixture_data(pg: &TestPg) {
     pg.batch_execute(
         "TRUNCATE TABLE \
-             zeroship.workflow_steps, \
-             zeroship.workflow_runs, \
-             zeroship.workflow_signals, \
-             zeroship.workflow_subscriptions, \
-             zeroship.workflow_blobs, \
              zeroship.workflow_schedules, \
              zeroship.workflow_rollout_config, \
              zeroship.workflow_broadcasts, \
@@ -343,6 +414,7 @@ async fn build_fixture_with_gateway(
             .expect("workflow blob store"),
     );
     let control_pg = Arc::new(pg(db_url).await);
+    let test_pg = TestPg::new(Arc::clone(&control_pg));
 
     Fixture {
         state: Arc::new(AppState {
@@ -390,7 +462,7 @@ async fn build_fixture_with_gateway(
                 zeroship_control::billing_read::ProjectedChargeCache::default(),
             ),
         }),
-        pg: control_pg,
+        pg: test_pg,
         db_url: db_url.to_string(),
         blob_root,
         deploy_tmp_dir,
@@ -427,6 +499,10 @@ async fn seed_app_and_deploy_on_plan(
         )
         .await
         .expect("insert app");
+    PgStore::provision(fx.pg.inner.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal");
+    fx.pg.set_default_app_id(app_id);
     let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
@@ -481,6 +557,10 @@ async fn seed_run(
     lease_delta_ms: Option<i64>,
     dispatch_nonce: Option<&str>,
 ) -> String {
+    fx.pg.set_default_app_id(app_id);
+    PgStore::provision(fx.pg.inner.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal for run seed");
     let run_id = zeroship_core::typed_id::new_workflow_run_id();
     let wake_at = Utc::now() + ChronoDuration::milliseconds(wake_delta_ms);
     let lease_expires = lease_delta_ms.map(|ms| Utc::now() + ChronoDuration::milliseconds(ms));
@@ -559,6 +639,7 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         max_child_depth: workflow_engine::DEFAULT_MAX_CHILD_DEPTH,
         max_live_descendants: workflow_engine::DEFAULT_MAX_LIVE_DESCENDANTS,
         max_start_many_batch: workflow_engine::DEFAULT_MAX_START_MANY_BATCH,
+        journal_limits: Default::default(),
         owner_id: owner.to_string(),
     }
 }
@@ -1083,7 +1164,7 @@ fn child_dedup_key_is_parent_and_ordinal_deterministic() {
 
 #[compio::test]
 #[serial]
-async fn scheduler_boot_reconcile_seeds_from_journal() {
+async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     let Some(fx) = isolated_fixture("scheduler-boot-reconcile").await else {
         return;
     };
@@ -1117,16 +1198,13 @@ async fn scheduler_boot_reconcile_seeds_from_journal() {
         .batch_execute("TRUNCATE TABLE workflow_scheduler.inflight, workflow_scheduler.timers")
         .await
         .expect("clear scheduler store before boot reconcile");
-    let metrics = Arc::new(WorkflowSchedulerStoreMetrics::default());
-    let store = WorkflowSchedulerStore::new(fx.db_url.clone()).with_metrics(Arc::clone(&metrics));
+    let store = WorkflowSchedulerStore::new(fx.db_url.clone());
     store.provision().await.expect("provision scheduler store");
 
-    let seeded = store
-        .boot_reconcile_from_workflow_runs()
+    let seeded = workflow_engine::reconcile_scheduler_from_journal(&fx.state)
         .await
-        .expect("boot reconcile");
+        .expect("control scheduler reconcile");
     assert_eq!(seeded, 2);
-    assert_eq!(metrics.workflow_runs_reads(), 1);
     assert!(store.timer(&due_run).await.expect("due timer").is_some());
     assert!(store.timer(&future_run).await.expect("future timer").is_some());
 
@@ -1140,24 +1218,14 @@ async fn scheduler_boot_reconcile_seeds_from_journal() {
     .expect("store fire once");
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].run_id, due_run);
-    assert_eq!(
-        metrics.workflow_runs_reads(),
-        1,
-        "steady-state timer fire must not scan workflow_runs"
-    );
 
     let now = Utc::now() + ChronoDuration::milliseconds(180_000);
     let next_deadline = now + ChronoDuration::milliseconds(120_000);
     let lapsed = store
         .claim_lapsed_inflight(now, 16, next_deadline)
-        .await
-        .expect("claim lapsed inflight");
+    .await
+    .expect("claim lapsed inflight");
     assert_eq!(lapsed.len(), 1);
-    assert_eq!(
-        metrics.workflow_runs_reads(),
-        1,
-        "inflight reaper must not scan workflow_runs"
-    );
 }
 
 #[compio::test]
@@ -1365,6 +1433,14 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         )
         .await
         .expect("child terminal apply")
+    );
+    assert!(
+        fx.scheduler_store
+            .timer(&parent)
+            .await
+            .expect("load parent timer after child terminal")
+            .is_some(),
+        "child terminal apply must register the parent wake"
     );
     fx.pg
         .execute(
@@ -1939,6 +2015,7 @@ async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
         return;
     };
     compio::time::timeout(Duration::from_secs(10), async {
+        let (_app_id, _deploy_id) = seed_app_and_deploy(&fx, "blob-orphan-gc").await;
         let old = SystemTime::now()
             .checked_sub(Duration::from_secs(
                 workflow_blob_gc::ORPHAN_SWEEP_GRACE_SECS as u64 + 60,
@@ -2267,6 +2344,126 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
         .await
         .expect("run retention sweep again");
         assert_eq!(again, workflow_retention::RetentionStats::default());
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+#[serial]
+async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
+    let Some(fx) = isolated_fixture("multi-app-sweeps").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_a, deploy_a) = seed_app_and_deploy(&fx, "sweep-a").await;
+        let (app_b, deploy_b) = seed_app_and_deploy(&fx, "sweep-b").await;
+        let old_terminal_at = Utc::now() - ChronoDuration::minutes(10);
+
+        let run_a = seed_run(
+            &fx, app_a, &deploy_a, "completed", -1_000, None, None, None, None,
+        )
+        .await;
+        let run_b = seed_run(
+            &fx, app_b, &deploy_b, "completed", -1_000, None, None, None, None,
+        )
+        .await;
+        for (app_id, run_id) in [(app_a, &run_a), (app_b, &run_b)] {
+            fx.pg
+                .execute(
+                    &TestPg::workflow_sql_for_app(
+                        app_id,
+                        "UPDATE zeroship.workflow_runs \
+                            SET wake_at = NULL, terminal_at = $2 \
+                          WHERE id = $1",
+                    ),
+                    &[run_id, &old_terminal_at],
+                )
+                .await
+                .expect("age terminal run");
+        }
+
+        let stats = workflow_retention::tick_with_config(
+            &fx.state,
+            workflow_retention::WorkflowRetentionConfig {
+                retention_window_ms: 1,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("retention sweep");
+        assert_eq!(stats.runs, 2, "retention must sweep both app journals");
+        for (app_id, run_id) in [(app_a, &run_a), (app_b, &run_b)] {
+            let row = fx
+                .pg
+                .query_one(
+                    &TestPg::workflow_sql_for_app(
+                        app_id,
+                        "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE id = $1",
+                    ),
+                    &[run_id],
+                )
+                .await
+                .expect("retention run count");
+            assert_eq!(row.get::<_, i64>("n"), 0);
+        }
+
+        let planned = Utc::now() - ChronoDuration::milliseconds(1_000);
+        for (app_id, deploy_id, name) in [
+            (app_a, deploy_a.as_str(), "sweep-a"),
+            (app_b, deploy_b.as_str(), "sweep-b"),
+        ] {
+            let schedule_id = zeroship_core::typed_id::new_workflow_schedule_id();
+            fx.pg
+                .execute(
+                    "INSERT INTO zeroship.workflow_schedules \
+                        (id, app_id, deploy_id, deploy_hash, name, workflow_name, kind, \
+                         interval_ms, anchor, input_json, overlap, catch_up, catch_up_max, \
+                         next_fire_at, enabled, updated_at) \
+                     VALUES ($1, $2, $3, $4, $5, 'TestWorkflow', 'interval', \
+                             1000, 'epoch', $6, 'allow', 'skip', 0, $7, true, now())",
+                    &[
+                        &schedule_id,
+                        &app_id,
+                        &deploy_id,
+                        &format!("hash-{deploy_id}"),
+                        &name,
+                        &serde_json::json!({"sweep": name}),
+                        &planned,
+                    ],
+                )
+                .await
+                .expect("insert due schedule");
+        }
+
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            workflow_schedules::ScheduleSweepConfig {
+                batch_size: 4,
+                claim_ttl_ms: 1_500,
+                backfill_hard_max: 4,
+                owner_id: "multi-app-sweeps".to_string(),
+            },
+        )
+        .await
+        .expect("schedule sweep");
+        assert_eq!(fired, 2, "schedule sweep must fire both app journals");
+        for app_id in [app_a, app_b] {
+            let row = fx
+                .pg
+                .query_one(
+                    &TestPg::workflow_sql_for_app(
+                        app_id,
+                        "SELECT COUNT(*)::bigint AS n \
+                           FROM zeroship.workflow_runs \
+                          WHERE dedup_key LIKE 'sched:%'",
+                    ),
+                    &[],
+                )
+                .await
+                .expect("scheduled run count");
+            assert_eq!(row.get::<_, i64>("n"), 1);
+        }
     })
     .await
     .expect("test timeout");

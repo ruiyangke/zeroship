@@ -1,4 +1,8 @@
 use uuid::Uuid;
+use zeroship_plugin_workflow::engine::{
+    workflow_journal_limits_from_plan, WorkflowJournalLimits,
+};
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 
@@ -32,14 +36,47 @@ pub(crate) async fn app_journal_bytes<C>(conn: &C, app_id: &Uuid) -> Result<i64,
 where
     C: compio_postgres::GenericClient + Sync,
 {
+    let tables = WorkflowTables::for_app_id(app_id);
+    let sql = format!(
+        "SELECT COALESCE(SUM(journal_bytes), 0)::bigint AS bytes \
+               FROM {runs}",
+        runs = tables.runs
+    );
+    let rows = conn
+        .query(&sql, &[])
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows[0].get("bytes"))
+}
+
+pub(crate) async fn workflow_journal_limits_for_app<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<WorkflowJournalLimits, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
     let rows = conn
         .query(
-            "SELECT COALESCE(SUM(journal_bytes), 0)::bigint AS bytes \
-               FROM zeroship.workflow_runs \
-              WHERE app_id = $1",
+            "SELECT a.plan_id, p.name, p.runtime_limits_json \
+               FROM zeroship.apps a \
+               LEFT JOIN zeroship.plans p ON p.id = a.plan_id \
+              WHERE a.id = $1",
             &[app_id],
         )
         .await
         .map_err(RegistryError::from)?;
-    Ok(rows[0].get("bytes"))
+    let Some(row) = rows.first() else {
+        return Err(RegistryError::InvalidInput(format!(
+            "app {app_id} not found for workflow journal limits"
+        )));
+    };
+    let plan_id: String = row.get("plan_id");
+    let plan_name: Option<String> = row.get("name");
+    let runtime_limits: Option<serde_json::Value> = row.get("runtime_limits_json");
+    Ok(workflow_journal_limits_from_plan(
+        &plan_id,
+        plan_name.as_deref(),
+        runtime_limits.as_ref(),
+    ))
 }

@@ -91,13 +91,17 @@ pub async fn tick_with_config(
 
 async fn gc_expired_subscriptions(state: &AppState) -> Result<(), RegistryError> {
     let conn = state.registry.conn().await?;
-    conn.execute(
-        "DELETE FROM zeroship.workflow_subscriptions \
-          WHERE expires_at IS NOT NULL AND expires_at < now()",
-        &[],
-    )
-    .await
-    .map_err(RegistryError::from)?;
+    for app_id in super::workflow_engine::workflow_app_ids(&conn).await? {
+        let Some(tables) = super::workflow_engine::existing_tables(&conn, &app_id).await? else {
+            continue;
+        };
+        let sql = format!(
+            "DELETE FROM {} \
+              WHERE expires_at IS NOT NULL AND expires_at < now()",
+            tables.subscriptions
+        );
+        conn.execute(&sql, &[]).await.map_err(RegistryError::from)?;
+    }
     Ok(())
 }
 
@@ -144,6 +148,21 @@ async fn drain_one_broadcast(
     let provider: Option<String> = row.get("provider");
     let idempotency_key: String = row.get("idempotency_key");
     let expires_at: DateTime<Utc> = row.get("expires_at");
+    let Some(tables) = super::workflow_engine::existing_tables(&tx, &app_id).await? else {
+        tx.execute(
+            "UPDATE zeroship.workflow_broadcasts \
+                SET fanout_state = 'completed' \
+              WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(FanoutStats {
+            broadcasts: 1,
+            deliveries: 0,
+        });
+    };
 
     if expires_at <= Utc::now() {
         tx.execute(
@@ -163,6 +182,8 @@ async fn drain_one_broadcast(
 
     let subscribers = tx
         .query(
+            &super::workflow_engine::journal_sql(
+                &tables,
             "SELECT s.run_id, s.ordinal \
                FROM zeroship.workflow_subscriptions s \
                JOIN zeroship.workflow_runs r ON r.id = s.run_id AND r.app_id = s.app_id \
@@ -180,6 +201,7 @@ async fn drain_one_broadcast(
               ORDER BY s.created_at, s.id \
               LIMIT $5 \
               FOR UPDATE OF s SKIP LOCKED",
+            ),
             &[&app_id, &topic, &signal_type, &broadcast_id, &max_deliveries],
         )
         .await
@@ -192,6 +214,8 @@ async fn drain_one_broadcast(
         let signal_id = typed_id::new_workflow_signal_id();
         let inserted = tx
             .execute(
+                &super::workflow_engine::journal_sql(
+                    &tables,
                 "INSERT INTO zeroship.workflow_signals \
                     (id, run_id, type, payload, origin, delivery, topic, broadcast_id, \
                      idempotency_key, provider) \
@@ -200,6 +224,7 @@ async fn drain_one_broadcast(
                     SELECT 1 FROM zeroship.workflow_signals \
                      WHERE broadcast_id = $7 AND run_id = $2 \
                   )",
+                ),
                 &[
                     &signal_id,
                     &run_id,
@@ -221,9 +246,12 @@ async fn drain_one_broadcast(
         if inserted > 0 {
             deliveries += 1;
             let woken = tx.execute(
+                &super::workflow_engine::journal_sql(
+                    &tables,
                 "UPDATE zeroship.workflow_runs \
                     SET wake_at = now() \
                   WHERE id = $1 AND state = 'waiting'",
+                ),
                 &[&run_id],
             )
             .await
@@ -236,6 +264,8 @@ async fn drain_one_broadcast(
 
     let remaining: i64 = tx
         .query_one(
+            &super::workflow_engine::journal_sql(
+                &tables,
             "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_subscriptions s \
                JOIN zeroship.workflow_runs r ON r.id = s.run_id AND r.app_id = s.app_id \
@@ -250,6 +280,7 @@ async fn drain_one_broadcast(
                      WHERE sig.broadcast_id = $4 \
                        AND sig.run_id = s.run_id \
                 )",
+            ),
             &[&app_id, &topic, &signal_type, &broadcast_id],
         )
         .await

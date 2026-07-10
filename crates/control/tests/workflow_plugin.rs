@@ -19,6 +19,7 @@ use zeroship_plugin_workflow::{
     app_scoped_token, is_excluded_workflow_property, WorkflowClientConfig, WorkflowHttpMethod,
     WorkflowPlugin,
 };
+use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
@@ -201,6 +202,9 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
         )
         .await
         .expect("insert app");
+    PgStore::provision(fx.pg.as_ref(), &app_id)
+        .await
+        .expect("provision workflow journal");
     let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
     let manifest = json!({
         "version": 1,
@@ -221,6 +225,18 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
         .await
         .expect("insert deploy");
     app_id
+}
+
+fn wf_sql(app_id: Uuid, sql: &str) -> String {
+    let tables = WorkflowTables::for_app_id(&app_id);
+    sql.replace("zeroship.workflow_runs", &tables.runs)
+        .replace("zeroship.workflow_steps", &tables.steps)
+        .replace("zeroship.workflow_signals", &tables.signals)
+        .replace(
+            "zeroship.workflow_subscriptions",
+            &tables.subscriptions,
+        )
+        .replace("zeroship.workflow_blobs", &tables.blobs)
 }
 
 fn modules(source: &str) -> Vec<ModuleEntry> {
@@ -588,7 +604,10 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
     let run = fx
         .pg
         .query_one(
-            "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
+            &wf_sql(
+                app_id,
+                "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
+            ),
             &[&run_id, &app_id],
         )
         .await
@@ -598,9 +617,12 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
     let signals = fx
         .pg
         .query_one(
-            "SELECT count(*)::int4 AS count \
+            &wf_sql(
+                app_id,
+                "SELECT count(*)::int4 AS count \
                FROM zeroship.workflow_signals \
               WHERE run_id = $1 AND type = 'approved'",
+            ),
             &[&run_id],
         )
         .await

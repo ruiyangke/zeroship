@@ -97,6 +97,7 @@ where
         }
         match tx
             .insert_resolved_step(
+                config,
                 checkpoint,
                 &result.run_id,
                 &result.dispatch_nonce,
@@ -557,6 +558,7 @@ mod tests {
 
         async fn insert_resolved_step(
             &mut self,
+            _config: &WorkflowEngineConfig,
             _checkpoint: &StepCheckpoint,
             _run_id: &str,
             _batch_id: &str,

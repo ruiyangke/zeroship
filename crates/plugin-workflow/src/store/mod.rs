@@ -155,6 +155,7 @@ pub trait WorkflowTx {
 
     async fn insert_resolved_step(
         &mut self,
+        config: &WorkflowEngineConfig,
         checkpoint: &StepCheckpoint,
         run_id: &str,
         batch_id: &str,

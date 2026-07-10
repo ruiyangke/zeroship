@@ -23,7 +23,7 @@ use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
 use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
 use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg;
+use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
 
 use crate::cron::workflow_engine;
 use crate::registry::RegistryError;
@@ -934,7 +934,7 @@ where
     workflow_limits::lock_app_journal_accounting(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    let limits = pg::limits_for_app(conn, app_id)
+    let limits = workflow_limits::workflow_journal_limits_for_app(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
     if cap_exceeded(0, input_journal_bytes, limits.run_max_bytes) {
@@ -988,10 +988,22 @@ where
     workflow_limits::lock_app_journal_accounting(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    let limits = pg::limits_for_app(conn, app_id)
+    let limits = workflow_limits::workflow_journal_limits_for_app(conn, app_id)
         .await
         .map_err(WorkflowApiError::from)?;
     check_app_journal_capacity(conn, app_id, payload_journal_bytes, limits.app_max_bytes).await
+}
+
+async fn provision_workflow_journal<C>(
+    conn: &C,
+    app_id: &Uuid,
+) -> Result<WorkflowTables, WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    workflow_engine::provision_tables(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)
 }
 
 async fn check_app_journal_capacity<C>(
@@ -1016,6 +1028,7 @@ where
 
 async fn insert_run<C>(
     conn: &C,
+    tables: &WorkflowTables,
     app_id: &Uuid,
     workflow_name: &str,
     deploy_id: &str,
@@ -1028,10 +1041,14 @@ async fn insert_run<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    conn.execute(
-        "INSERT INTO zeroship.workflow_runs \
+    let sql = format!(
+        "INSERT INTO {runs} \
             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
          VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now()))",
+        runs = tables.runs
+    );
+    conn.execute(
+        &sql,
         &[
             &run_id,
             &workflow_name,
@@ -1050,6 +1067,7 @@ where
 
 async fn insert_run_on_conflict_do_nothing<C>(
     conn: &C,
+    tables: &WorkflowTables,
     app_id: &Uuid,
     workflow_name: &str,
     deploy_id: &str,
@@ -1062,13 +1080,17 @@ async fn insert_run_on_conflict_do_nothing<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "INSERT INTO zeroship.workflow_runs \
+    let sql = format!(
+        "INSERT INTO {runs} \
                 (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
              VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now())) \
              ON CONFLICT (app_id, workflow_name, dedup_key) DO NOTHING \
              RETURNING id",
+        runs = tables.runs
+    );
+    let rows = conn
+        .query(
+            &sql,
             &[
                 &run_id,
                 &workflow_name,
@@ -1087,6 +1109,7 @@ where
 
 async fn existing_keyed_run<C>(
     conn: &C,
+    tables: &WorkflowTables,
     app_id: &Uuid,
     workflow_name: &str,
     dedup_key: &String,
@@ -1094,14 +1117,15 @@ async fn existing_keyed_run<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let rows = conn
-        .query(
-            "SELECT id \
-               FROM zeroship.workflow_runs \
+    let sql = format!(
+        "SELECT id \
+               FROM {runs} \
               WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
               LIMIT 1",
-            &[app_id, &workflow_name, &dedup_key],
-        )
+        runs = tables.runs
+    );
+    let rows = conn
+        .query(&sql, &[app_id, &workflow_name, &dedup_key])
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     Ok(rows.first().map(|row| row.get("id")))
@@ -1109,6 +1133,7 @@ where
 
 async fn join_or_create_keyed_run<C>(
     tx: &C,
+    tables: &WorkflowTables,
     app_id: &Uuid,
     workflow_name: &str,
     deploy_id: &str,
@@ -1120,13 +1145,14 @@ async fn join_or_create_keyed_run<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    if let Some(existing) = existing_keyed_run(tx, app_id, workflow_name, key).await? {
+    if let Some(existing) = existing_keyed_run(tx, tables, app_id, workflow_name, key).await? {
         return Ok(existing);
     }
     check_create_journal_capacity(tx, app_id, input_journal_bytes).await?;
     let candidate = typed_id::new_workflow_run_id();
     if let Some(inserted) = insert_run_on_conflict_do_nothing(
         tx,
+        tables,
         app_id,
         workflow_name,
         deploy_id,
@@ -1140,7 +1166,7 @@ where
     {
         return Ok(inserted);
     }
-    existing_keyed_run(tx, app_id, workflow_name, key)
+    existing_keyed_run(tx, tables, app_id, workflow_name, key)
         .await?
         .ok_or_else(|| {
             WorkflowApiError::Database("workflow start conflict lost its incumbent".to_string())
@@ -1163,6 +1189,9 @@ where
     ensure_app_workflows_enabled(tx, app_id)
         .await
         .map_err(workflow_api_error_to_registry)?;
+    let tables = provision_workflow_journal(tx, app_id)
+        .await
+        .map_err(workflow_api_error_to_registry)?;
     let key = normalize_key(Some(dedup_key.to_string()))
         .map_err(workflow_api_error_to_registry)?
         .ok_or_else(|| RegistryError::InvalidInput("scheduled workflow key is missing".to_string()))?;
@@ -1173,6 +1202,7 @@ where
     workflow_limits::lock_app_journal_accounting(tx, app_id).await?;
     join_or_create_keyed_run(
         tx,
+        &tables,
         app_id,
         workflow_name,
         deploy_id,
@@ -1228,6 +1258,7 @@ async fn create_run_inner(
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     ensure_app_workflows_enabled(&tx, &app_id).await?;
+    let tables = provision_workflow_journal(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
     let input_journal_bytes = pg::json_column_size(&tx, &body.input)
         .await
@@ -1241,6 +1272,7 @@ async fn create_run_inner(
             ConflictPolicy::Join => {
                 join_or_create_keyed_run(
                     &tx,
+                    &tables,
                     &app_id,
                     &workflow_name,
                     &deploy.id,
@@ -1252,7 +1284,7 @@ async fn create_run_inner(
                 .await?
             }
             ConflictPolicy::Reject => {
-                if existing_keyed_run(&tx, &app_id, &workflow_name, key)
+                if existing_keyed_run(&tx, &tables, &app_id, &workflow_name, key)
                     .await?
                     .is_some()
                 {
@@ -1264,6 +1296,7 @@ async fn create_run_inner(
                 let candidate = typed_id::new_workflow_run_id();
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
                     &tx,
+                    &tables,
                     &app_id,
                     &workflow_name,
                     &deploy.id,
@@ -1285,7 +1318,7 @@ async fn create_run_inner(
             ConflictPolicy::Replace => {
                 check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
                 let cancelled = tx.query(
-                    "UPDATE zeroship.workflow_runs \
+                    &format!("UPDATE {runs} \
                         SET state = 'cancelled', \
                             dedup_key = NULL, \
                             wake_at = NULL, \
@@ -1302,19 +1335,20 @@ async fn create_run_inner(
                             dispatch_nonce = NULL, \
                             claim_epoch = claim_epoch + 1 \
                       WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
-                      RETURNING id",
+                      RETURNING id", runs = tables.runs),
                     &[&app_id, &workflow_name, key],
                 )
                 .await
                 .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
                 for row in cancelled {
                     let cancelled_run_id: String = row.get("id");
-                    workflow_engine::cascade_cancel_children(&tx, &cancelled_run_id).await?;
+                    workflow_engine::cascade_cancel_children_for_app(&tx, &tables, &cancelled_run_id).await?;
                 }
 
                 let candidate = typed_id::new_workflow_run_id();
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
                     &tx,
+                    &tables,
                     &app_id,
                     &workflow_name,
                     &deploy.id,
@@ -1328,7 +1362,7 @@ async fn create_run_inner(
                 {
                     inserted
                 } else {
-                    existing_keyed_run(&tx, &app_id, &workflow_name, key)
+                    existing_keyed_run(&tx, &tables, &app_id, &workflow_name, key)
                         .await?
                         .ok_or_else(|| {
                             WorkflowApiError::Database(
@@ -1343,6 +1377,7 @@ async fn create_run_inner(
         let candidate = typed_id::new_workflow_run_id();
         insert_run(
             &tx,
+            &tables,
             &app_id,
             &workflow_name,
             &deploy.id,
@@ -1390,6 +1425,7 @@ async fn start_many_inner(
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     ensure_app_workflows_enabled(&tx, &app_id).await?;
+    let tables = provision_workflow_journal(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)
         .await
@@ -1405,12 +1441,13 @@ async fn start_many_inner(
         let key = normalize_key(item.key)?;
         if let Some(key) = key.as_ref() {
             let duplicate_in_batch = !seen_keys.insert(key.clone());
-            let existing = existing_keyed_run(&tx, &app_id, &workflow_name, key).await?;
+            let existing = existing_keyed_run(&tx, &tables, &app_id, &workflow_name, key).await?;
             match policy {
                 ConflictPolicy::Join => {
                     let created = existing.is_none() && !duplicate_in_batch;
                     let run_id = join_or_create_keyed_run(
                         &tx,
+                        &tables,
                         &app_id,
                         &workflow_name,
                         &deploy.id,
@@ -1444,6 +1481,7 @@ async fn start_many_inner(
                     let run_id = typed_id::new_workflow_run_id();
                     insert_run(
                         &tx,
+                        &tables,
                         &app_id,
                         &workflow_name,
                         &deploy.id,
@@ -1464,7 +1502,7 @@ async fn start_many_inner(
                 }
                 ConflictPolicy::Replace => {
                     let cancelled = tx.query(
-                        "UPDATE zeroship.workflow_runs \
+                        &format!("UPDATE {runs} \
                             SET state = 'cancelled', \
                                 dedup_key = NULL, \
                                 wake_at = NULL, \
@@ -1481,19 +1519,20 @@ async fn start_many_inner(
                                 dispatch_nonce = NULL, \
                                 claim_epoch = claim_epoch + 1 \
                           WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
-                          RETURNING id",
+                          RETURNING id", runs = tables.runs),
                         &[&app_id, &workflow_name, key],
                     )
                     .await
                     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
                     for row in cancelled {
                         let cancelled_run_id: String = row.get("id");
-                        workflow_engine::cascade_cancel_children(&tx, &cancelled_run_id).await?;
+                        workflow_engine::cascade_cancel_children_for_app(&tx, &tables, &cancelled_run_id).await?;
                     }
                     check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
                     let run_id = typed_id::new_workflow_run_id();
                     insert_run(
                         &tx,
+                        &tables,
                         &app_id,
                         &workflow_name,
                         &deploy.id,
@@ -1519,6 +1558,7 @@ async fn start_many_inner(
             let run_id = typed_id::new_workflow_run_id();
             insert_run(
                 &tx,
+                &tables,
                 &app_id,
                 &workflow_name,
                 &deploy.id,
@@ -1613,14 +1653,16 @@ pub async fn get_run_status(
     if let Err(e) = validate_run_id(&run_id) {
         return e.response();
     }
+    let tables = WorkflowTables::for_app_id(&app_id);
+    let sql = format!(
+        "SELECT state, output, error, output_kind, output_hash, output_size, output_content_type \
+               FROM {runs} \
+              WHERE id = $1 AND app_id = $2",
+        runs = tables.runs
+    );
     let rows = match state
         .control_pg
-        .query(
-            "SELECT state, output, error, output_kind, output_hash, output_size, output_content_type \
-               FROM zeroship.workflow_runs \
-              WHERE id = $1 AND app_id = $2",
-            &[&run_id, &app_id],
-        )
+        .query(&sql, &[&run_id, &app_id])
         .await
     {
         Ok(rows) => rows,
@@ -1651,14 +1693,16 @@ pub async fn get_run_output(
     if let Err(e) = validate_run_id(&run_id) {
         return e.response();
     }
+    let tables = WorkflowTables::for_app_id(&app_id);
+    let sql = format!(
+        "SELECT output, output_kind, output_hash, output_size, output_content_type \
+               FROM {runs} \
+              WHERE id = $1 AND app_id = $2",
+        runs = tables.runs
+    );
     let rows = match state
         .control_pg
-        .query(
-            "SELECT output, output_kind, output_hash, output_size, output_content_type \
-               FROM zeroship.workflow_runs \
-              WHERE id = $1 AND app_id = $2",
-            &[&run_id, &app_id],
-        )
+        .query(&sql, &[&run_id, &app_id])
         .await
     {
         Ok(rows) => rows,
@@ -1689,12 +1733,11 @@ pub async fn get_step_output(
         return WorkflowApiError::BadRequest("step occurrence must be >= 0".to_string())
             .response();
     }
-    let rows = match state
-        .control_pg
-        .query(
-            "SELECT s.output, s.output_kind, s.output_hash, s.output_size, s.output_content_type \
-               FROM zeroship.workflow_steps s \
-               JOIN zeroship.workflow_runs r ON r.id = s.run_id \
+    let tables = WorkflowTables::for_app_id(&app_id);
+    let sql = format!(
+        "SELECT s.output, s.output_kind, s.output_hash, s.output_size, s.output_content_type \
+               FROM {steps} s \
+               JOIN {runs} r ON r.id = s.run_id \
               WHERE s.run_id = $1 \
                 AND r.app_id = $2 \
                 AND s.name = $3 \
@@ -1702,8 +1745,12 @@ pub async fn get_step_output(
                 AND s.state = 'completed' \
               ORDER BY s.ordinal \
               LIMIT 1",
-            &[&path.run_id, &app_id, &path.name, &occurrence],
-        )
+        steps = tables.steps,
+        runs = tables.runs
+    );
+    let rows = match state
+        .control_pg
+        .query(&sql, &[&path.run_id, &app_id, &path.name, &occurrence])
         .await
     {
         Ok(rows) => rows,
@@ -1887,6 +1934,10 @@ pub async fn signal_run(
         Ok(tx) => tx,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
+    let tables = match provision_workflow_journal(&tx, &app_id).await {
+        Ok(tables) => tables,
+        Err(e) => return e.response(),
+    };
     let payload_journal_bytes = match pg::json_column_size(&tx, &body.payload).await {
         Ok(bytes) => bytes,
         Err(e) => return WorkflowApiError::from(e).response(),
@@ -1894,14 +1945,15 @@ pub async fn signal_run(
     if let Err(e) = workflow_limits::lock_app_journal_accounting(&tx, &app_id).await {
         return WorkflowApiError::from(e).response();
     }
-    let rows = match tx
-        .query(
-            "SELECT state, waiting_step_key \
-               FROM zeroship.workflow_runs \
+    let lock_sql = format!(
+        "SELECT state, waiting_step_key \
+               FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE",
-            &[&run_id, &app_id],
-        )
+        runs = tables.runs
+    );
+    let rows = match tx
+        .query(&lock_sql, &[&run_id, &app_id])
         .await
     {
         Ok(rows) => rows,
@@ -1917,11 +1969,15 @@ pub async fn signal_run(
         return e.response();
     }
     let signal_id = typed_id::new_workflow_signal_id();
-    if let Err(e) = tx
-        .execute(
-            "INSERT INTO zeroship.workflow_signals \
+    let insert_signal_sql = format!(
+        "INSERT INTO {signals} \
                 (id, run_id, type, payload, origin, delivery) \
              VALUES ($1, $2, $3, $4, 'app', 'direct')",
+        signals = tables.signals
+    );
+    if let Err(e) = tx
+        .execute(
+            &insert_signal_sql,
             &[&signal_id, &run_id, &body.signal_type, &body.payload],
         )
         .await
@@ -1931,13 +1987,14 @@ pub async fn signal_run(
     let wakes_run = run_state == "waiting"
         && waiting_key_matches_signal(waiting_step_key.as_deref(), &body.signal_type);
     if wakes_run {
-        if let Err(e) = tx
-            .execute(
-                "UPDATE zeroship.workflow_runs \
+        let wake_sql = format!(
+            "UPDATE {runs} \
                     SET wake_at = now() \
                   WHERE id = $1 AND app_id = $2",
-                &[&run_id, &app_id],
-            )
+            runs = tables.runs
+        );
+        if let Err(e) = tx
+            .execute(&wake_sql, &[&run_id, &app_id])
             .await
         {
             return WorkflowApiError::Database(e.to_string()).response();
@@ -1987,13 +2044,15 @@ async fn create_run_signal_token_inner(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-    let rows = tx
-        .query(
-            "SELECT state, signal_epoch \
-               FROM zeroship.workflow_runs \
+    let tables = provision_workflow_journal(&tx, &app_id).await?;
+    let run_sql = format!(
+        "SELECT state, signal_epoch \
+               FROM {runs} \
               WHERE id = $1 AND app_id = $2",
-            &[&run_id, &app_id],
-        )
+        runs = tables.runs
+    );
+    let rows = tx
+        .query(&run_sql, &[&run_id, &app_id])
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     let Some(row) = rows.first() else {
@@ -2246,20 +2305,22 @@ async fn deliver_ingress_run_signal(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let tables = provision_workflow_journal(&tx, &app_id).await?;
     let payload_journal_bytes = pg::json_column_size(&tx, payload)
         .await
         .map_err(WorkflowApiError::from)?;
     workflow_limits::lock_app_journal_accounting(&tx, &app_id)
         .await
         .map_err(WorkflowApiError::from)?;
-    let rows = tx
-        .query(
-            "SELECT state, waiting_step_key, signal_epoch \
-               FROM zeroship.workflow_runs \
+    let lock_sql = format!(
+        "SELECT state, waiting_step_key, signal_epoch \
+               FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE",
-            &[&run_id, &app_id],
-        )
+        runs = tables.runs
+    );
+    let rows = tx
+        .query(&lock_sql, &[&run_id, &app_id])
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     let Some(row) = rows.first() else {
@@ -2291,11 +2352,15 @@ async fn deliver_ingress_run_signal(
     let waiting_step_key: Option<String> = row.get("waiting_step_key");
     check_signal_journal_capacity(&tx, &app_id, payload_journal_bytes).await?;
     let signal_id = typed_id::new_workflow_signal_id();
-    let inserted = tx
-        .execute(
-            "INSERT INTO zeroship.workflow_signals \
+    let insert_sql = format!(
+        "INSERT INTO {signals} \
                 (id, run_id, type, payload, origin, delivery, idempotency_key) \
              VALUES ($1, $2, $3, $4, 'ingress', 'direct', $5)",
+        signals = tables.signals
+    );
+    let inserted = tx
+        .execute(
+            &insert_sql,
             &[&signal_id, &run_id, &signal_type, payload, &idempotency_key],
         )
         .await;
@@ -2310,10 +2375,14 @@ async fn deliver_ingress_run_signal(
     let wakes_run =
         run_state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type);
     if wakes_run {
-        tx.execute(
-            "UPDATE zeroship.workflow_runs \
+        let wake_sql = format!(
+            "UPDATE {runs} \
                 SET wake_at = now() \
               WHERE id = $1 AND app_id = $2",
+            runs = tables.runs
+        );
+        tx.execute(
+            &wake_sql,
             &[&run_id, &app_id],
         )
         .await
@@ -2455,6 +2524,7 @@ async fn restart_run_inner(
         .transaction()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let tables = provision_workflow_journal(&tx, &app_id).await?;
 
     tx.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&run_id])
         .await
@@ -2462,10 +2532,10 @@ async fn restart_run_inner(
 
     let rows = tx
         .query(
-            "SELECT workflow_name, deploy_id, output_kind, output_hash \
-               FROM zeroship.workflow_runs \
+            &format!("SELECT workflow_name, deploy_id, output_kind, output_hash \
+               FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
-              FOR UPDATE",
+              FOR UPDATE", runs = tables.runs),
             &[&run_id, &app_id],
         )
         .await
@@ -2497,9 +2567,11 @@ async fn restart_run_inner(
         }
         let rows = tx
             .query(
-                "SELECT ordinal \
-                   FROM zeroship.workflow_steps \
+                &format!("SELECT ordinal \
+                   FROM {steps} \
                   WHERE run_id = $1 AND name = $2 AND name_occurrence = $3",
+                    steps = tables.steps
+                ),
                 &[&run_id, &target.name, &occurrence],
             )
             .await
@@ -2517,12 +2589,12 @@ async fn restart_run_inner(
     if target_ordinal > 0 {
         let rows = tx
             .query(
-                "SELECT 1 \
-                   FROM zeroship.workflow_steps \
+                &format!("SELECT 1 \
+                   FROM {steps} \
                   WHERE run_id = $1 \
                     AND ordinal < $2 \
                     AND compensation_finished_at IS NOT NULL \
-                  LIMIT 1",
+                  LIMIT 1", steps = tables.steps),
                 &[&run_id, &target_ordinal],
             )
             .await
@@ -2549,14 +2621,14 @@ async fn restart_run_inner(
     };
 
     tx.execute(
-        "UPDATE zeroship.workflow_blobs b \
+        &format!("UPDATE {blobs} b \
             SET refcount = GREATEST(refcount - 1, 0), \
                 last_referenced_at = now() \
-           FROM zeroship.workflow_steps s \
+           FROM {steps} s \
           WHERE s.run_id = $1 \
             AND s.ordinal >= $2 \
             AND s.output_kind = 'blob' \
-            AND b.hash = s.output_hash",
+            AND b.hash = s.output_hash", blobs = tables.blobs, steps = tables.steps),
         &[&run_id, &target_ordinal],
     )
     .await
@@ -2564,10 +2636,10 @@ async fn restart_run_inner(
     if output_kind == "blob" {
         if let Some(hash) = output_hash.as_ref() {
             tx.execute(
-                "UPDATE zeroship.workflow_blobs \
+                &format!("UPDATE {blobs} \
                     SET refcount = GREATEST(refcount - 1, 0), \
                         last_referenced_at = now() \
-                  WHERE hash = $1",
+                  WHERE hash = $1", blobs = tables.blobs),
                 &[hash],
             )
             .await
@@ -2576,52 +2648,56 @@ async fn restart_run_inner(
     }
 
     tx.execute(
-        "UPDATE zeroship.workflow_signals \
+        &format!("UPDATE {signals} \
             SET consumed_by = NULL \
           WHERE consumed_by = $1 \
             AND delivery <> 'topic' \
             AND id IN ( \
                 SELECT consumed_signal_id \
-                  FROM zeroship.workflow_steps \
+                  FROM {steps} \
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )",
+            )", signals = tables.signals, steps = tables.steps),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        "DELETE FROM zeroship.workflow_signals \
+        &format!("DELETE FROM {signals} \
           WHERE run_id = $1 \
             AND delivery = 'topic' \
             AND id IN ( \
                 SELECT consumed_signal_id \
-                  FROM zeroship.workflow_steps \
+                  FROM {steps} \
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )",
+            )", signals = tables.signals, steps = tables.steps),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        "DELETE FROM zeroship.workflow_subscriptions \
+        &format!("DELETE FROM {subscriptions} \
           WHERE run_id = $1 AND ordinal >= $2",
+            subscriptions = tables.subscriptions
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        "DELETE FROM zeroship.workflow_steps \
+        &format!("DELETE FROM {steps} \
           WHERE run_id = $1 AND ordinal >= $2",
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        "UPDATE zeroship.workflow_steps \
+        &format!("UPDATE {steps} \
             SET compensation_state = 'pending', \
                 compensation_attempt = 0, \
                 compensation_wake_at = NULL, \
@@ -2630,6 +2706,8 @@ async fn restart_run_inner(
           WHERE run_id = $1 \
             AND ordinal < $2 \
             AND compensation_state = 'running'",
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
@@ -2638,7 +2716,7 @@ async fn restart_run_inner(
     let restarted_from: Option<i32> = (!full_restart).then_some(target_ordinal);
     let restarted_by = format!("app:{app_id}");
     tx.execute(
-        "UPDATE zeroship.workflow_runs \
+        &format!("UPDATE {runs} \
             SET state = 'queued', \
                 wake_at = now(), \
                 terminal_at = NULL, \
@@ -2665,6 +2743,8 @@ async fn restart_run_inner(
                 restarted_from_ordinal = $5, \
                 restarted_by = $6 \
           WHERE id = $1 AND app_id = $7",
+            runs = tables.runs
+        ),
         &[
             &run_id,
             &target_ordinal,
@@ -2714,12 +2794,16 @@ async fn control_transition(
         Ok(tx) => tx,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
+    let tables = match provision_workflow_journal(&tx, &app_id).await {
+        Ok(tables) => tables,
+        Err(e) => return e.response(),
+    };
     let rows = match tx
         .query(
-            "SELECT state \
-               FROM zeroship.workflow_runs \
+            &format!("SELECT state \
+               FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
-              FOR UPDATE",
+              FOR UPDATE", runs = tables.runs),
             &[&run_id, &app_id],
         )
         .await
@@ -2743,7 +2827,7 @@ async fn control_transition(
                 )))
             } else {
                 tx.query(
-                    "UPDATE zeroship.workflow_runs \
+                    &format!("UPDATE {runs} \
                         SET state = 'paused', \
                             terminal_at = NULL, \
                             paused_from_status = CASE \
@@ -2768,6 +2852,8 @@ async fn control_transition(
                             END \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
+                        runs = tables.runs
+                    ),
                     &[&run_id, &app_id],
                 )
                 .await
@@ -2781,13 +2867,14 @@ async fn control_transition(
                 )))
             } else {
                 let sql = format!(
-                    "UPDATE zeroship.workflow_runs \
+                    "UPDATE {runs} \
                         SET state = {}, \
                             terminal_at = NULL, \
                             paused_from_status = NULL \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
-                    restored_state_expr()
+                    restored_state_expr(),
+                    runs = tables.runs,
                 );
                 tx.query(&sql, &[&run_id, &app_id])
                     .await
@@ -2813,9 +2900,11 @@ async fn control_transition(
             } else if mode == "compensate" {
                 let pending_row = match tx
                     .query_one(
-                        "SELECT COUNT(*)::bigint AS n \
-                           FROM zeroship.workflow_steps \
+                        &format!("SELECT COUNT(*)::bigint AS n \
+                           FROM {steps} \
                           WHERE run_id = $1 AND compensation_state = 'pending'",
+                            steps = tables.steps
+                        ),
                         &[&run_id],
                     )
                     .await
@@ -2827,12 +2916,14 @@ async fn control_transition(
                 if pending > 0 {
                     let progress = match tx
                         .query_one(
-                            "SELECT \
+                            &format!("SELECT \
                                 COUNT(*) FILTER (WHERE compensation_state IS NOT NULL)::bigint AS total, \
                                 COUNT(*) FILTER (WHERE compensation_state = 'completed')::bigint AS completed, \
                                 COUNT(*) FILTER (WHERE compensation_state = 'failed')::bigint AS failed \
-                               FROM zeroship.workflow_steps \
+                               FROM {steps} \
                               WHERE run_id = $1",
+                                steps = tables.steps
+                            ),
                             &[&run_id],
                         )
                         .await
@@ -2851,7 +2942,7 @@ async fn control_transition(
                         },
                     });
                     tx.query(
-                        "UPDATE zeroship.workflow_runs \
+                        &format!("UPDATE {runs} \
                             SET state = 'compensating', \
                                 wake_at = now(), \
                                 terminal_at = NULL, \
@@ -2871,13 +2962,15 @@ async fn control_transition(
                                 claim_epoch = claim_epoch + 1 \
                           WHERE id = $1 AND app_id = $2 \
                           RETURNING state",
+                            runs = tables.runs
+                        ),
                         &[&run_id, &app_id, &error],
                     )
                     .await
                     .map_err(|e| WorkflowApiError::Database(e.to_string()))
                 } else {
                     tx.query(
-                        "UPDATE zeroship.workflow_runs \
+                        &format!("UPDATE {runs} \
                             SET state = 'cancelled', \
                                 wake_at = NULL, \
                                 terminal_at = now(), \
@@ -2894,6 +2987,8 @@ async fn control_transition(
                                 claim_epoch = claim_epoch + 1 \
                           WHERE id = $1 AND app_id = $2 \
                           RETURNING state",
+                            runs = tables.runs
+                        ),
                         &[&run_id, &app_id],
                     )
                     .await
@@ -2901,7 +2996,7 @@ async fn control_transition(
                 }
             } else {
                 tx.query(
-                    "UPDATE zeroship.workflow_runs \
+                    &format!("UPDATE {runs} \
                         SET state = 'cancelled', \
                             wake_at = NULL, \
                             terminal_at = now(), \
@@ -2918,6 +3013,8 @@ async fn control_transition(
                             claim_epoch = claim_epoch + 1 \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
+                        runs = tables.runs
+                    ),
                     &[&run_id, &app_id],
                 )
                 .await
@@ -2986,18 +3083,20 @@ pub async fn list_runs(
     let offset = query.offset.unwrap_or(0).max(0);
     let state_param = state_filter.map(str::to_string);
     let workflow_param = workflow_filter.map(str::to_string);
-    let rows = match state
-        .control_pg
-        .query(
-            "SELECT id, workflow_name, state, created_at::text \
-               FROM zeroship.workflow_runs \
+    let tables = WorkflowTables::for_app_id(&app_id);
+    let sql = format!(
+        "SELECT id, workflow_name, state, created_at::text \
+               FROM {runs} \
               WHERE app_id = $1 \
                 AND ($2::text IS NULL OR state = $2) \
                 AND ($3::text IS NULL OR workflow_name = $3) \
               ORDER BY created_at DESC, id DESC \
               LIMIT $4 OFFSET $5",
-            &[&app_id, &state_param, &workflow_param, &limit, &offset],
-        )
+        runs = tables.runs
+    );
+    let rows = match state
+        .control_pg
+        .query(&sql, &[&app_id, &state_param, &workflow_param, &limit, &offset])
         .await
     {
         Ok(rows) => rows,
