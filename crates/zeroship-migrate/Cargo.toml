@@ -5,11 +5,17 @@ edition = "2021"
 description = "zeroship's versioned DB migration engine — native Postgres fast path plus V8-backed JS authoring front-end"
 
 [features]
-default = []
+# The default build still builds the `zeroship-migrate-js` bin — the platform
+# depends on that binary existing. A pure-library embedder opts out via
+# `--no-default-features` to skip clap.
+default = ["js-cli"]
+# The JS authoring CLI bin (`zeroship-migrate-js`). Gated so the lean library
+# embedder does not compile clap.
+js-cli = ["dep:clap"]
 # Raw standalone apply/runner surface for user-owned databases. Server/control
 # crates must not enable this feature; workspace resolver = "3" keeps dev/test
 # feature use from leaking into normal embedder binaries.
-standalone-cli = []
+standalone-cli = ["dep:clap"]
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -40,7 +46,6 @@ serde_json = { workspace = true }
 # (the keystone parity compares serialized FieldDef maps, so a sorted-vs-declared
 # order would false-mismatch). An insertion-ordered map is the clean carrier.
 indexmap = { workspace = true }
-zeroship-core = { workspace = true }
 # Schema-authority P2: the engine ADOPTS the shared schema core for its
 # schema-DESCRIPTION layer (the DSL→SQL type map + the DDL-shape vocabulary +
 # sentinel codec + shape enums), replacing its own v1-SUBSET re-implementation.
@@ -56,7 +61,8 @@ zeroship-schema = { workspace = true }
 zeroship-runtime = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
-# `zeroship_core::typed_id::uuid_to_base62`, which takes a `&uuid::Uuid`.
+# `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
+# `&uuid::Uuid`.
 uuid = { workspace = true }
 # The Postgres executor (journal + apply flow) talks to PG over the bespoke
 # compio-native driver — ZERO tokio, per the platform invariant. Runs
@@ -86,7 +92,12 @@ tracing = { workspace = true }
 # CLI arg parsing for the `zeroship-migrate` bin (Phase 3, design §9). clap is
 # SYNC — zero tokio — so it does not violate the zero-tokio invariant; the
 # `env` feature backs the `--database-url` / `DATABASE_URL` env fallback.
-clap = { workspace = true }
+# Optional so a pure-library embedder (`--no-default-features`) never compiles
+# it; the `js-cli` / `standalone-cli` features pull it in for the CLI bins.
+clap = { workspace = true, optional = true }
+# The `zeroship-migrate-js` bin sets up a `warn`-level env-filtered subscriber
+# on startup (replacing the former `zeroship_core::observability::init_tracing`).
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # The `zeroship-migrate.toml` project config for the CLI (DX parity). SYNC + leaf —
 # zero tokio. Only the bin reads it; the library trust domain is unchanged.
 toml = { workspace = true }
@@ -123,6 +134,7 @@ required-features = ["standalone-cli"]
 [[bin]]
 name = "zeroship-migrate-js"
 path = "src/bin/zeroship-migrate-js.rs"
+required-features = ["js-cli"]
 
 # The kernel-sandboxed recorder child remains named exactly as before; the
 # parent sandbox resolves this sibling binary from Cargo's target dir.
@@ -131,6 +143,10 @@ name = "zeroship-migrate-recorder-child"
 path = "src/bin/recorder-child.rs"
 
 [dev-dependencies]
+# Drift guard: `tests/core_id_parity.rs` asserts the vendored `id` / `db_url`
+# copies stay byte-identical to core's originals while both crates coexist
+# in-tree. Dev-only — the library no longer depends on core at runtime.
+zeroship-core = { workspace = true }
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro
 # drives the async apply flow on the compio runtime.
 compio = { workspace = true }

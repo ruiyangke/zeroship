@@ -6,7 +6,7 @@
 //! time-ordered versions (sequential ints collide; raw timestamps skew).
 
 use sha2::{Digest, Sha256};
-use zeroship_core::typed_id;
+use crate::id as typed_id;
 
 use crate::model::precondition::PreconditionCheck;
 

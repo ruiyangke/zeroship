@@ -165,7 +165,12 @@ impl RecorderClient for HttpRecorderClient {
 
 #[compio::main]
 async fn main() -> ExitCode {
-    zeroship_core::observability::init_tracing("warn");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new("warn")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+        )
+        .init();
 
     let cli = Cli::parse();
     match cli.command {

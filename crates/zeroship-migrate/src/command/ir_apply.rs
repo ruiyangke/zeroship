@@ -745,7 +745,7 @@ fn platform_ts_ddl_fragment_id(
     let uuid = uuid::Uuid::from_bytes(bytes);
     crate::model::migration::MigrationId::parse(&format!(
         "mig_{}",
-        zeroship_core::typed_id::uuid_to_base62(&uuid)
+        crate::id::uuid_to_base62(&uuid)
     ))
     .expect("derived Platform TS DDL fragment id is a valid mig_ typed id")
 }

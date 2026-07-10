@@ -52,7 +52,7 @@
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use zeroship_core::typed_id;
+use crate::id as typed_id;
 
 use crate::analysis::analyze::analyze;
 use crate::analysis::classify::{classify, ParseError};

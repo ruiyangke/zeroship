@@ -444,8 +444,10 @@ pub enum Engine {
 }
 
 /// Classify a `--database-url` into the [`Engine`] this CLI dispatches to, using
-/// the SAME single-source grammar as `zeroship_core::db_url::is_sqlite_url` /
-/// plugin-db's `backend_for_url` (no drift between the opener and the CLI).
+/// the SAME single-source grammar as `crate::db_url::is_sqlite_url` /
+/// plugin-db's `backend_for_url` (no drift between the opener and the CLI). The
+/// `tests/core_id_parity.rs` drift guard keeps this vendored copy byte-identical
+/// to core's classifier.
 ///
 /// - `postgres://` / `postgresql://` ⇒ [`Engine::Postgres`].
 /// - `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare path ⇒
@@ -474,7 +476,7 @@ pub fn classify_engine(url: &str) -> Engine {
         return Engine::Postgres;
     }
     // The shared classifier: a bare path is SQLite; an unknown scheme is not.
-    if zeroship_core::db_url::is_sqlite_url(trimmed) {
+    if crate::db_url::is_sqlite_url(trimmed) {
         return Engine::Sqlite(sqlite_file_path(trimmed));
     }
     Engine::Unsupported

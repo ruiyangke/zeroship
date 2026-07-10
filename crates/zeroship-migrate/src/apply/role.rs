@@ -90,7 +90,7 @@
 
 use compio_postgres::Client;
 use sha2::{Digest, Sha256};
-use zeroship_core::typed_id::base62_encode_bytes;
+use crate::id::base62_encode_bytes;
 
 use crate::conn::ExecutorConfig;
 

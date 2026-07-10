@@ -69,11 +69,13 @@ pub mod apply;
 pub mod approval;
 pub mod command;
 pub mod conn;
+pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
 pub mod frontend;
 pub mod guard;
+pub mod id;
 pub mod model;
 pub mod ops;
 pub mod plan;
