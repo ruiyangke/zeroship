@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR3 — the FULL `@zeroship/migrate` JS op-builder surface (§3.2/§3.3.1),
 //! exercised through the REAL V8 `op.*` recorder. Each test pins one PR3 behavior
 //! and would FAIL against the PR1 skeletal builder (which had no `t.*` lexicon, no

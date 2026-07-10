@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! Live-PG coverage for Model C Platform `.ts` migrations.
 //!
 //! The Platform profile records trusted `.ts` migrations to transient IR at

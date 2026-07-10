@@ -73,6 +73,7 @@ pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
+#[cfg(feature = "zsv8")]
 pub mod frontend;
 pub mod guard;
 pub mod id;
@@ -110,16 +111,21 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-#[cfg(test)]
+#[cfg(all(test, feature = "zsv8"))]
 pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
+// V8-free re-exports (consumed by plugin-db / migrated per the decoupling design §7).
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    JsDriverConn, JsDriverError, MigrationBackend, MigrationResult, MysqlBackend,
-    MysqlGuardedFragment, MysqlMigratorAccount, MysqlMigratorAccountError, MysqlSessionSnapshot,
-    OnlineSchemaChange, PgSessionSnapshot, PostgresBackend, RowSet, SeedError,
-    ShadowConfig, ShadowDryRun, deprovision_mysql_migrator_account,
-    mysql_migration_lock_name, provision_mysql_migrator_account,
-    provision_mysql_migrator_account_with_password,
+    MigrationBackend, MigrationResult, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend,
+    SeedError, ShadowConfig, ShadowDryRun,
+};
+// MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
+#[cfg(feature = "zsv8")]
+pub use apply::backend::{
+    deprovision_mysql_migrator_account, mysql_migration_lock_name,
+    provision_mysql_migrator_account, provision_mysql_migrator_account_with_password, JsDriverConn,
+    JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
+    MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
 };
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::backend::postgres::online::PgOnline;

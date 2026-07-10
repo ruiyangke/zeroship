@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 code-critic LOW — extend the `generate` autogenerate-parity coverage to ALL
 //! portable column types. The existing parity e2e proves re-diff-to-zero + recorded-
 //! `.ts` checksum == direct IR checksum only for text/int/unique; this extends the

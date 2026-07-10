@@ -20,12 +20,16 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     apply::executor::LockMode,
-    frontend::record_migration_to_ir_unsandboxed,
     model::migration::MigrationId,
     apply::role::deprovision_migrator, provision_migrator, Approval, ExecutorConfig, IrAuthor,
     LiveSchema, MigrationBackend, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect,
     resolve_create_table_policy,
 };
+// The single V8-recorder-backed test below is compiled only under `zsv8`; the
+// rest of this suite is pure-core DML render/apply and survives the V8-free
+// (`--no-default-features`) build.
+#[cfg(feature = "zsv8")]
+use zeroship_migrate::frontend::record_migration_to_ir_unsandboxed;
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -89,6 +93,7 @@ fn registry(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
+#[cfg(feature = "zsv8")]
 fn unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -140,6 +145,7 @@ async fn author_and_apply(
         .expect("apply the authored DML plan on PG")
 }
 
+#[cfg(feature = "zsv8")]
 async fn load_recorded_ir_and_apply(
     conn: &Client,
     cfg: &ExecutorConfig,
@@ -412,6 +418,7 @@ async fn ir_bind_safety_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
+#[cfg(feature = "zsv8")]
 #[compio::test]
 async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
     let conn = pg().await;

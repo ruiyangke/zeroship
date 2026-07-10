@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! **Migration-first P2b §6(a) — the `.d.ts` golden over the FULL type matrix.**
 //!
 //! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full

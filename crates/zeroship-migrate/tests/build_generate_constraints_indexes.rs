@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 code-critic MED-1 regression — `generate_ops` must NOT silently drop a
 //! desired snapshot's indexes / constraints (the re-diff-to-zero invariant).
 //!

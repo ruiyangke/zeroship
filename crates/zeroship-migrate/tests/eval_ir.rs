@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! Eval a sample `schema.js` (with encrypted/vector/mask/ref facets) in the V8
 //! sandbox and assert the produced descriptor IR matches the expected
 //! `CollectionDescriptor`s. No DB required — this exercises the front-end's

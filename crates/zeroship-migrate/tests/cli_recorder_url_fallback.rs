@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 code-critic LOW #1 — `build --recorder-url` honesty: the dev CLI embeds NO
 //! hosted-recorder HTTP client, so it ALWAYS falls back to the LOCAL recorder. That
 //! downgrade must be LOUD (a per-file warning on stderr), not a silent substitution

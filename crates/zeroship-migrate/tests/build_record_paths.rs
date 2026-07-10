@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 deliverable A3 / test #3 — the two record paths + the §8.9.2
 //! recorder-unreachable FALLBACK:
 //!

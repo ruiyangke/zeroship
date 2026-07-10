@@ -6,6 +6,7 @@
 //! control uses mysql2's `beginTransaction`/`commit`/`rollback` on the same
 //! connection.
 
+pub mod embedding;
 pub mod snapshot;
 pub mod transport;
 

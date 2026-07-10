@@ -60,7 +60,13 @@ use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, LockMode};
 use crate::apply::journal::{DeployRecoveryScope, PendingContract};
 use crate::approval::ApprovalScope;
-use crate::frontend::{record_migration_transient, BuildError, DiscoveredMigration, RecordVia};
+// The `.ts`-record apply path lives in the `zsv8`-gated `ts_record` submodule
+// (it drives the V8 authoring front-end). The V8-free IR-load / sealed-apply
+// surface below carries no `crate::frontend` edge.
+#[cfg(feature = "zsv8")]
+mod ts_record;
+#[cfg(feature = "zsv8")]
+pub use ts_record::apply_platform_ts_postgres;
 use crate::PolicyProfile;
 use crate::model::migration::Migration;
 use crate::model::profile::{SealError, SealVerifier, SealedProfile};
@@ -179,13 +185,17 @@ pub enum PostgresIrApplyError {
     },
     /// Recording a trusted Platform `.ts` migration failed before transient IR
     /// apply. The committed-IR creator path is unaffected.
-    #[error("record platform TS migration ({file}): {source}")]
+    ///
+    /// The front-end recorder error is carried as its rendered text so this
+    /// variant (and the `PostgresIrApplyError` enum dependents match on) stays
+    /// V8-free — the `.ts`-record path lives behind `zsv8`, but the enum shape
+    /// does not.
+    #[error("record platform TS migration ({file}): {message}")]
     Record {
         /// The `.ts` filename or directory.
         file: String,
-        /// The recorder/build-front-end error.
-        #[source]
-        source: BuildError,
+        /// The recorder/build-front-end error, rendered to text.
+        message: String,
     },
     /// Platform `.ts` migrations use the 14-digit filename prefix as the corpus
     /// order key; duplicates are ambiguous and refused before any apply.
@@ -432,110 +442,6 @@ pub async fn apply_standalone(
     .await
 }
 
-/// Apply a Platform `.ts` migration corpus to Postgres by recording each source
-/// file to transient IR at migrate time, then feeding that IR through the same
-/// guarded lower + apply core as IR bundle apply.
-///
-/// This is Model C for trusted platform authors: `.ts` is the committed source of
-/// truth, `.ir.json` is never written, and the existing sandboxed recorder is reused
-/// as the TypeScript front-end. The project advisory lock is held once across the
-/// corpus, matching [`apply_bundle_ir_postgres`].
-#[allow(clippy::too_many_arguments)]
-pub async fn apply_platform_ts_postgres(
-    backend: &PostgresBackend<'_>,
-    project_schema: &str,
-    owner_app: &str,
-    migrations_dir: &Path,
-    record_via: &RecordVia<'_>,
-    exec_cfg: &ExecutorConfig,
-    guard_cfg: &GuardConfig,
-    policy_profile: &PolicyProfile,
-    approval: Approval,
-    applied_by: &str,
-) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
-    let ts_migrations = crate::frontend::discover_migrations(migrations_dir).map_err(|source| {
-        PostgresIrApplyError::Record {
-            file: migrations_dir.display().to_string(),
-            source,
-        }
-    })?;
-    if ts_migrations.is_empty() {
-        return Ok(PostgresIrApplyOutcome::default());
-    }
-    reject_duplicate_ts_versions(&ts_migrations)?;
-
-    let mut state = postgres_ir_apply_state(backend, exec_cfg, owner_app).await?;
-
-    backend
-        .acquire_project_lock(exec_cfg)
-        .await
-        .map_err(|e| PostgresIrApplyError::Apply(DeclarativeApplyError::Plain(
-            EngineError::Apply(e),
-        )))?;
-
-    let mut outcome = PostgresIrApplyOutcome::default();
-    let body = async {
-        for migration in &ts_migrations {
-            let display = migration
-                .ts_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("<unknown>")
-                .to_string();
-            let recorded =
-                record_migration_transient(migration, owner_app, record_via, &PolicyProfile::platform())
-                .map_err(|source| PostgresIrApplyError::Record {
-                    file: display.clone(),
-                    source,
-                })?;
-            debug_assert_eq!(recorded.stem, migration.stem);
-            debug_assert_eq!(recorded.version, migration.version);
-
-            let file_outcome = apply_one_ir_document_postgres(
-                backend,
-                project_schema,
-                owner_app,
-                &display,
-                &recorded.ir_json,
-                &mut state,
-                exec_cfg,
-                guard_cfg,
-                policy_profile,
-                approval,
-                &ApprovalScope::All,
-                applied_by,
-                LockMode::AlreadyHeld,
-                None,
-                Some(PlatformTsVersionSeed {
-                    version: &migration.version,
-                }),
-            )
-            .await?;
-            outcome.extend(file_outcome);
-        }
-        Ok::<(), PostgresIrApplyError>(())
-    }
-    .await;
-
-    let unlock = backend.release_project_lock(exec_cfg).await;
-    match (body, unlock) {
-        (Ok(()), Ok(())) => Ok(outcome),
-        (Ok(()), Err(e)) => Err(PostgresIrApplyError::Apply(
-            DeclarativeApplyError::Plain(EngineError::Apply(e)),
-        )),
-        (Err(e), unlock_result) => {
-            if let Err(unlock_err) = unlock_result {
-                tracing::warn!(
-                    error = %unlock_err,
-                    project = %exec_cfg.project_id,
-                    "zeroship-migrate: failed to release project lock after Platform TS apply"
-                );
-            }
-            Err(e)
-        }
-    }
-}
-
 /// Apply one PG `.ir.json` file using caller-managed state and lock mode.
 ///
 /// The control-plane deploy path calls this inside its existing whole-deploy lock
@@ -668,32 +574,6 @@ async fn apply_one_ir_document_postgres(
         opened_obligations: outcome.opened_obligations,
         lowered_migrations,
     })
-}
-
-fn reject_duplicate_ts_versions(
-    migrations: &[DiscoveredMigration],
-) -> Result<(), PostgresIrApplyError> {
-    let mut seen: BTreeMap<&str, &DiscoveredMigration> = BTreeMap::new();
-    for migration in migrations {
-        if let Some(first) = seen.insert(&migration.version, migration) {
-            return Err(PostgresIrApplyError::DuplicateTsVersion {
-                version: migration.version.clone(),
-                first: first
-                    .ts_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<unknown>")
-                    .to_string(),
-                second: migration
-                    .ts_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("<unknown>")
-                    .to_string(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn restamp_platform_ts_ddl_versions(

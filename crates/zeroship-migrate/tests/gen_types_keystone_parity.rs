@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! **Migration-first P2b §6(b) — THE KEYSTONE.**
 //!
 //! A schema authored DECLARATIVELY (`eval_schema_to_ir` → `CollectionDescriptor` →

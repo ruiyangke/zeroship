@@ -15,7 +15,9 @@ path = "src/lib.rs"
 [dev-dependencies]
 # P3/S4 — the JS schema front-end (`frontend`) plus the engine
 # (`migrator_role_name`, IR discovery, provision, and sealed apply).
-zeroship-migrate = { workspace = true }
+# This capstone genuinely imports `frontend::*` (schema eval/generate), so it opts
+# into the V8 host explicitly now that the workspace edge defaults V8-free.
+zeroship-migrate = { workspace = true, features = ["zsv8"] }
 # P4/P5 — the data plane: introspection-driven CRUD (encrypt-on-write,
 # decrypt-on-read, mask sibling). `test-helpers` exposes the real pipeline fns.
 zeroship-plugin-db = { workspace = true, features = ["test-helpers"] }

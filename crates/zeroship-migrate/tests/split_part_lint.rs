@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR6b — the JS-side `.splitPart` GRAMMAR lint (§9), exercised through the
 //! REAL V8 `op.*` recorder. The record-time JS recorder is DIALECT-NEUTRAL, so it
 //! enforces only the dialect-NEUTRAL grammar (a non-empty string-literal delimiter,

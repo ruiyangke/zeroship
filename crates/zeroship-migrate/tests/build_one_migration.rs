@@ -1,3 +1,4 @@
+#![cfg(feature = "zsv8")]
 //! PR4 code-critic LOW regression — `record <file.ts>` (build_one_migration) must
 //! record ONLY the requested file, never an unrelated in-progress sibling.
 //!

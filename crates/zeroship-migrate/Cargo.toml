@@ -2,20 +2,29 @@
 name = "zeroship-migrate"
 version = "0.1.0"
 edition = "2021"
-description = "zeroship's versioned DB migration engine — native Postgres fast path plus V8-backed JS authoring front-end"
+description = "zeroship's versioned DB migration engine — native Postgres fast path; the V8-backed JS authoring front-end + live-MySQL backend are optional behind the `zsv8` feature, so library embedders can build the guard/IR/render/PG+SQLite-apply core V8-free"
 
 [features]
 # The default build still builds the `zeroship-migrate-js` bin — the platform
 # depends on that binary existing. A pure-library embedder opts out via
-# `--no-default-features` to skip clap.
+# `--no-default-features` to skip clap AND the in-Rust V8 host (see `zsv8`).
 default = ["js-cli"]
-# The JS authoring CLI bin (`zeroship-migrate-js`). Gated so the lean library
-# embedder does not compile clap.
-js-cli = ["dep:clap"]
-# Raw standalone apply/runner surface for user-owned databases. Server/control
-# crates must not enable this feature; workspace resolver = "3" keeps dev/test
-# feature use from leaking into normal embedder binaries.
-standalone-cli = ["dep:clap"]
+# The in-Rust V8 host: JS/TS schema-authoring front-end (`src/frontend/`) + the
+# live-MySQL backend (`src/apply/backend/mysql/`, mysql2 in a V8 isolate over
+# node:net) + the kernel-sandboxed recorder child. This is the ONLY feature that
+# pulls `zeroship-runtime` / `v8` (and the Linux sandbox deps) into the tree;
+# `--no-default-features` compiles a V8-free core (guard + IR + render + PG/SQLite
+# apply + journal), with V8 absent from the dependency graph.
+zsv8 = ["dep:v8", "dep:zeroship-runtime", "dep:seccompiler", "dep:landlock", "dep:libc"]
+# The JS authoring CLI bin (`zeroship-migrate-js`). Authoring needs the V8 host,
+# so `js-cli` pulls `zsv8`. Gated so the lean library embedder does not compile
+# clap.
+js-cli = ["dep:clap", "zsv8"]
+# Raw standalone apply/runner surface for user-owned databases. Its live path can
+# reach the MySQL backend, so it also rides `zsv8`. Server/control crates must not
+# enable this feature; workspace resolver = "3" keeps dev/test feature use from
+# leaking into normal embedder binaries.
+standalone-cli = ["dep:clap", "zsv8"]
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -55,10 +64,11 @@ indexmap = { workspace = true }
 # crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
 # snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
 zeroship-schema = { workspace = true }
-# The JS-first authoring front-end is now part of this crate. Evaluating
-# `schema.js` and recording op.* migrations uses the platform V8 runtime
-# unconditionally; native compio-postgres remains the deploy/apply fast path.
-zeroship-runtime = { workspace = true }
+# The JS-first authoring front-end + live-MySQL backend use the platform V8
+# runtime; native compio-postgres remains the deploy/apply fast path. OPTIONAL —
+# pulled only by `zsv8` (via `js-cli`/`standalone-cli`), so a library embedder can
+# build the guard/IR/render/PG+SQLite-apply core V8-free (`--no-default-features`).
+zeroship-runtime = { workspace = true, optional = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
@@ -105,17 +115,21 @@ toml = { workspace = true }
 # canonical content-addressed hash validation. The V8 front-end build path emits
 # bundle migration entries over committed `.ir.json` bytes.
 zeroship-bundle = { workspace = true }
-v8 = { workspace = true }
+# OPTIONAL — the in-Rust V8 host; pulled only by `zsv8`.
+v8 = { workspace = true, optional = true }
 # Raw syscalls for the kernel-sandboxed recorder child (rlimits, no-new-privs,
-# namespaces), matching the existing sandbox-agent raw-libc posture.
-libc = { workspace = true }
+# namespaces), matching the existing sandbox-agent raw-libc posture. OPTIONAL —
+# its only users are the V8-gated sandbox / recorder-child paths, so it is folded
+# into `zsv8` (no in-core consumers → kept out of the V8-free tree).
+libc = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Kernel sandbox for the V8 recorder child: seccomp-bpf default-deny plus a
 # Landlock read-only filesystem ruleset. Linux-only; other targets keep the
-# userland budget floor.
-seccompiler = { workspace = true }
-landlock = { workspace = true }
+# userland budget floor. OPTIONAL — used only in the V8-gated `frontend/` +
+# recorder-child paths, so folded into `zsv8`.
+seccompiler = { workspace = true, optional = true }
+landlock = { workspace = true, optional = true }
 
 # ---------------------------------------------------------------------------
 # The operator-side CLI binary (Phase 3, design §9). compio (NOT tokio): the
@@ -141,6 +155,8 @@ required-features = ["js-cli"]
 [[bin]]
 name = "zeroship-migrate-recorder-child"
 path = "src/bin/recorder-child.rs"
+# The recorder child is entirely V8/sandbox code; it only builds with the V8 host.
+required-features = ["zsv8"]
 
 [dev-dependencies]
 # Drift guard: `tests/core_id_parity.rs` asserts the vendored `id` / `db_url`
