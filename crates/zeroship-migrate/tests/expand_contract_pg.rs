@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful expand-contract (Plan 8) tests against a REAL Postgres (no shims).
 //!
 //! Covers the online column-RENAME dual-write sequence end to end:

@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Live-PG coverage for the IR-document apply core used by deploy plumbing.
 //!
 //! Model C removed the Platform runner's physical IR corpus branch: platform

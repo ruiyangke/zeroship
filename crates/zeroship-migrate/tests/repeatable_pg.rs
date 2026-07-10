@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful repeatable-migration tests (v3 Plan E — Flyway `R__` / Liquibase
 //! `runOnChange`) against a REAL Postgres (no shims).
 //!

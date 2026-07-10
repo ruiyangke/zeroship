@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Partition-aware drift detection against live Postgres.
 //!
 //! Requires `zeroship_migrate_test` on :5440, matching the other `*_pg` tests.

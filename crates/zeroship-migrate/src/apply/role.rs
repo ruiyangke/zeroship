@@ -88,6 +88,7 @@
 //! (re-granting an existing grant is a no-op, re-altering `search_path` is a no-op).
 //! Schema ownership is only (re)assigned when it differs.
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::Client;
 use sha2::{Digest, Sha256};
 use crate::id::base62_encode_bytes;
@@ -99,6 +100,7 @@ use crate::conn::ExecutorConfig;
 pub enum RoleError {
     /// A database error during provisioning.
     #[error("role provisioning db error: {0}")]
+    #[cfg(feature = "native-pg")]
     Db(#[from] compio_postgres::Error),
     /// The derived role name was empty or otherwise unusable.
     #[error("invalid migrator role name derived from project id '{0}'")]
@@ -143,6 +145,7 @@ fn quote_lit(s: &str) -> String {
 /// the same catalog tuple at once. Each provisioning step is idempotent, so a
 /// bounded retry is safe and resolves the race. This is a real production
 /// concern (concurrent project provisioning), not just a test artifact.
+#[cfg(feature = "native-pg")]
 async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Error> {
     const MAX_ATTEMPTS: u32 = 8;
     let mut attempt = 0;
@@ -222,6 +225,7 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 /// # Errors
 /// - [`RoleError::BadRoleName`] if the project id yields no valid role name.
 /// - [`RoleError::Db`] on any DDL failure (e.g. the caller lacks `CREATEROLE`).
+#[cfg(feature = "native-pg")]
 pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<(), RoleError> {
     let role = migrator_role_name(&cfg.project_id)?;
     let role_q = quote_ident(&role)?;
@@ -373,6 +377,7 @@ pub async fn provision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<
 /// # Errors
 /// - [`RoleError::BadRoleName`] if the project id yields no valid role name.
 /// - [`RoleError::Db`] on any DDL failure.
+#[cfg(feature = "native-pg")]
 pub async fn deprovision_migrator(admin: &Client, cfg: &ExecutorConfig) -> Result<(), RoleError> {
     let role = migrator_role_name(&cfg.project_id)?;
     let role_q = quote_ident(&role)?;

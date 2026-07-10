@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful drift-detection tests against a REAL Postgres (no shims).
 //!
 //! B1 checksum/tamper/orphan drift + B2 structural introspection + pure diff.

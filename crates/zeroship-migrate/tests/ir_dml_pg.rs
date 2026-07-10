@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! §PR6a — FAITHFUL e2e for the creator DML surface on **real Postgres** (`:5440`),
 //! driven through the AUTHORING path: a `.ir.json` → the REAL load-gate + the
 //! creator-DML assembler (`IrAuthor::lower_plan`) → `MigrationEngine::apply_plan`

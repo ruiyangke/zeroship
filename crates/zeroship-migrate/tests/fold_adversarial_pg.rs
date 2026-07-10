@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! ADVERSARIAL probe (review of mig-first P1 `fold_ops`): construct op streams the
 //! headline oracle's corpus does NOT exercise and check `fold_ops == introspect`.
 //!

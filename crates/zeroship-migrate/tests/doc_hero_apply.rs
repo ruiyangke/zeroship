@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! CI DOC-EXAMPLE GATE (PR8, Rust leg) — the bi-dialect HERO example documented
 //! in `docs/reference/migrate-op-dsl.md` must actually APPLY, byte-identically,
 //! on a real Postgres AND a real SQLite. A future engine change that rots the

@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Seam-boundary tests for the `MigrationBackend` trait (SQLite-parity design
 //! §2.0/§2.1, M3 — P1).
 //!

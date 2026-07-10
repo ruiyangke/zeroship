@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Migration round-trip harness coverage against a REAL Postgres.
 //!
 //! Requires the dedicated `zeroship_migrate_test` database on `:5440`; the full PG

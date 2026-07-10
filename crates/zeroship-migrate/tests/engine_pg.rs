@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful `MigrationEngine` pipeline tests against a REAL Postgres (no shims).
 //!
 //! Exercises the full public API end-to-end: author -> plan -> gate(approval) ->

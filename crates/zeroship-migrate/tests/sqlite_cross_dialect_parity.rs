@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Cross-dialect op.* parity fixture.
 //!
 //! This is deliberately creator-shaped rather than platform-shaped: a small app

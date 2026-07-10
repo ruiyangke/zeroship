@@ -8,14 +8,29 @@ description = "zeroship's versioned DB migration engine — native Postgres fast
 # The default build still builds the `zeroship-migrate-js` bin — the platform
 # depends on that binary existing. A pure-library embedder opts out via
 # `--no-default-features` to skip clap AND the in-Rust V8 host (see `zsv8`).
-default = ["js-cli"]
+default = ["js-cli", "native-pg"]
+# The compio-postgres driver: the default (and today only) `PgSession` impl. Gates
+# the `compio-postgres` dep AND the entire PG apply seam — the `PgSession` trait +
+# `impl PgSession for compio_postgres::Client`, `mod postgres` (PostgresBackend /
+# PgOnline / PgShadow / backfill), the PG-apply leaf error arms (the
+# `From<compio_postgres::Error>` impls + `Db(#[from] …)` variants in the SHARED
+# journal/drift/baseline/precondition/capability/executor error enums), the
+# journal `ToSql` array, `conn.rs`'s connect path, `role.rs`, and the PG `lib.rs`
+# re-exports. The trait names `compio_postgres::{Row, Error, ToSql}`, so it cannot
+# be ungated; a `native-pg`-off build OMITS the PG path (SQLite + IR + render +
+# guard remain) rather than compiling it driverless. Default-on, so the default
+# build/test is byte-for-byte unchanged.
+native-pg = ["dep:compio-postgres"]
 # The in-Rust V8 host: JS/TS schema-authoring front-end (`src/frontend/`) + the
 # live-MySQL backend (`src/apply/backend/mysql/`, mysql2 in a V8 isolate over
 # node:net) + the kernel-sandboxed recorder child. This is the ONLY feature that
 # pulls `zeroship-runtime` / `v8` (and the Linux sandbox deps) into the tree;
 # `--no-default-features` compiles a V8-free core (guard + IR + render + PG/SQLite
-# apply + journal), with V8 absent from the dependency graph.
-zsv8 = ["dep:v8", "dep:zeroship-runtime", "dep:seccompiler", "dep:landlock", "dep:libc"]
+# apply + journal), with V8 absent from the dependency graph. The JS authoring
+# front-end always does LIVE PG introspection (`conn::connect` + `snapshot_schema`
+# in `frontend/generate.rs` + the `zeroship-migrate-js` bin), so `zsv8` pulls in
+# `native-pg` — the V8 host and the compio-PG driver ship together.
+zsv8 = ["dep:v8", "dep:zeroship-runtime", "dep:seccompiler", "dep:landlock", "dep:libc", "native-pg"]
 # The JS authoring CLI bin (`zeroship-migrate-js`). Authoring needs the V8 host,
 # so `js-cli` pulls `zsv8`. Gated so the lean library embedder does not compile
 # clap.
@@ -76,8 +91,11 @@ zeroship-runtime = { workspace = true, optional = true }
 uuid = { workspace = true }
 # The Postgres executor (journal + apply flow) talks to PG over the bespoke
 # compio-native driver — ZERO tokio, per the platform invariant. Runs
-# out-of-band at deploy (not the request hot path), async on compio.
-compio-postgres = { workspace = true }
+# out-of-band at deploy (not the request hot path), async on compio. OPTIONAL:
+# the sole `PgSession` driver impl, gated behind `native-pg` (default-on). A
+# `native-pg`-off embedder builds the SQLite + IR + render + guard core without
+# it.
+compio-postgres = { workspace = true, optional = true }
 compio = { workspace = true }
 # SQLite migration backend (design 2026-06-19 §2.1.1). The migration connection
 # is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse

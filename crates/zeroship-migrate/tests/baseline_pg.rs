@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful baseline (Plan 9 sub-feature A) tests against a REAL Postgres.
 //!
 //! Baseline is the ADOPTION path: an existing project DB already carries its

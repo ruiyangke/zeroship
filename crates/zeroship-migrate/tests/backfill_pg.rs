@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful large-table batched / resumable backfill tests against a REAL
 //! Postgres (no shims) — design §5 "Large-table backfill".
 //!

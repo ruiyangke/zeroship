@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful executor + journal tests against a REAL Postgres (no shims).
 //!
 //! Requires a dedicated database `zeroship_migrate_test` on :5440 (recreated by

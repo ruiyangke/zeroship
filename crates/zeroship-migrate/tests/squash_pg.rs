@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful squash (Plan 9 sub-feature B) tests against a REAL Postgres.
 //!
 //! Squash collapses a contiguous prefix `[v1..vN]` of applied history into a

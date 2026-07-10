@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! **Migration-first P1 — the ROUND-TRIP ORACLE for `fold_ops` on real Postgres
 //! (`:5440`).**
 //!

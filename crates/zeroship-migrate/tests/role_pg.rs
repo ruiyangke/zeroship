@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Line-2 (DB-privilege) defense — the least-privilege per-project `migrator`
 //! role (design §1.3 / §1.7). Faithful tests against a REAL Postgres (no shims).
 //!

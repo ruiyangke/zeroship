@@ -62,7 +62,8 @@
 //! `information_schema` / `&Client` appears in the generic executor body — it is
 //! all contained here, the PG leaf.
 
-use compio_postgres::Client;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::postgres::PgSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
@@ -102,6 +103,7 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
+    #[cfg(feature = "native-pg")]
     Db(#[from] compio_postgres::Error),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
@@ -174,8 +176,9 @@ fn quote_ident(ident: &str) -> String {
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
 ///   boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] — a query failed.
-pub async fn evaluate(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub async fn evaluate<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     pre: &Precondition,
 ) -> Result<bool, PreconditionError> {
@@ -234,8 +237,9 @@ pub async fn evaluate(
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
 /// check failed and at least one `Skip` check is unmet.
-pub(crate) async fn evaluate_all(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn evaluate_all<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<PreconditionVerdict, ApplyError> {
@@ -273,8 +277,9 @@ pub(crate) async fn evaluate_all(
 
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the
 /// project schema. Schema + table are BOUND ($1/$2), never interpolated.
-async fn table_exists(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn table_exists<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
 ) -> Result<bool, PreconditionError> {
@@ -292,8 +297,9 @@ async fn table_exists(
 
 /// `information_schema.columns` lookup: a column named `column` on the
 /// project-schema table `table`. All three are BOUND, never interpolated.
-async fn column_exists(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn column_exists<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
     column: &str,
@@ -318,8 +324,9 @@ async fn column_exists(
 /// [`validate_ident`] (the schema is the engine-owned `cfg.project_schema`, the
 /// table has passed `validate_ident`). This mirrors `backfill::build_batch_sql`,
 /// which quotes the same validated identifiers into relation position.
-async fn row_count(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn row_count<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
 ) -> Result<i64, PreconditionError> {
@@ -457,8 +464,9 @@ fn last_string_part(parts: &[Value]) -> Option<String> {
 
 /// Evaluate an untrusted `SqlBoolean` precondition: guard → shape gate → run
 /// under the migrator role in a READ ONLY transaction → read one boolean.
-async fn evaluate_sql_boolean(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn evaluate_sql_boolean<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     sql: &str,
 ) -> Result<bool, PreconditionError> {
@@ -508,8 +516,9 @@ async fn evaluate_sql_boolean(
 /// The body of [`evaluate_sql_boolean`] run INSIDE the `BEGIN READ ONLY`
 /// transaction: pin the project `search_path`, drop to the migrator role (both
 /// `SET LOCAL`, transaction-scoped), then run the `SELECT` and read one boolean.
-async fn run_sql_boolean_in_txn(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn run_sql_boolean_in_txn<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     sql: &str,
 ) -> Result<bool, PreconditionError> {

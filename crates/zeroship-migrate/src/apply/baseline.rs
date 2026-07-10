@@ -28,7 +28,8 @@
 //!   immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //!   deleted.
 
-use compio_postgres::Client;
+#[cfg(feature = "native-pg")]
+use crate::apply::backend::postgres::PgSession;
 
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
@@ -50,6 +51,7 @@ pub struct BaselineOutcome {
 pub enum BaselineError {
     /// A database error outside a guarded/journaled step.
     #[error("db error: {0}")]
+    #[cfg(feature = "native-pg")]
     Db(#[from] compio_postgres::Error),
     /// A journal operation failed.
     #[error(transparent)]
@@ -130,8 +132,9 @@ pub enum BaselineError {
 ///   migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
-pub(crate) async fn baseline(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+pub(crate) async fn baseline<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     baseline_migration: &Migration,
     applied_by: &str,
@@ -167,8 +170,9 @@ pub(crate) async fn baseline(
 }
 
 /// The baseline body, run while holding the project advisory lock.
-async fn baseline_locked(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn baseline_locked<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     baseline_migration: &Migration,
     applied_by: &str,
@@ -234,8 +238,9 @@ async fn baseline_locked(
 }
 
 /// The version of the earliest recorded `kind='baseline'` event, if any.
-async fn first_baseline_version(
-    conn: &Client,
+#[cfg(feature = "native-pg")]
+async fn first_baseline_version<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
     // Engine-supplied meta schema: route through the ONE shared engine seam so it

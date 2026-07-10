@@ -1,3 +1,4 @@
+#![cfg(feature = "native-pg")]
 //! Faithful PG tests for the `zeroship-migrate` CLI runner functions (Phase 3,
 //! design §9). Drives the REAL `command::runner::run_*` functions (not a
 //! spawned process, not a shim) against a real Postgres on :5440.
