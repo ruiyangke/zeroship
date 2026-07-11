@@ -76,6 +76,16 @@ impl LagoProvider {
             .map_err(|e| ProviderError::Transport(format!("lago: read body: {e}")))?;
         if (200..300).contains(&status) {
             Ok(())
+        } else if status == 422 && is_transaction_already_exists(&bytes) {
+            // Lago's idempotency dedup. The usage-event POST is keyed by
+            // `transaction_id` = the stable `UsageEvent.event_id`; Lago answers a
+            // re-POST of an already-recorded id with 422
+            // `transaction_id: value_already_exist`. The stream is at-least-once,
+            // so a re-delivery WILL hit this — and it means the event is already
+            // billed exactly once, i.e. SUCCESS. Treating it as a permanent
+            // reject would dead-letter every re-delivered event and bury real
+            // rejects in the noise.
+            Ok(())
         } else if (400..500).contains(&status) {
             Err(ProviderError::permanent_reject(
                 status,
@@ -348,4 +358,47 @@ fn hex_upper(nibble: u8) -> char {
 
 fn body_snippet(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).chars().take(200).collect()
+}
+
+/// True when a Lago 422 body is the idempotency dedup for a usage event — the
+/// `transaction_id` (our stable `UsageEvent.event_id`) is already recorded. Lago
+/// returns `{"code":"validation_errors","error_details":{"transaction_id":
+/// ["value_already_exist"]}}`. This is the ONLY 422 we treat as success; every
+/// other validation error stays a permanent reject.
+fn is_transaction_already_exists(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error_details"))
+        .and_then(|d| d.get("transaction_id"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|codes| {
+            codes
+                .iter()
+                .any(|c| c.as_str() == Some("value_already_exist"))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transaction_already_exists;
+
+    #[test]
+    fn idempotency_reject_is_recognized_but_other_422s_are_not() {
+        // The exact Lago dedup reject → treated as an already-recorded success.
+        let dup = br#"{"status":422,"error":"Unprocessable Entity","code":"validation_errors","error_details":{"transaction_id":["value_already_exist"]}}"#;
+        assert!(is_transaction_already_exists(dup));
+
+        // A DIFFERENT validation error on transaction_id must NOT be swallowed.
+        let other_field = br#"{"code":"validation_errors","error_details":{"external_subscription_id":["value_is_invalid"]}}"#;
+        assert!(!is_transaction_already_exists(other_field));
+
+        // A real transaction_id validation error (not the dedup code) stays a reject.
+        let other_code = br#"{"code":"validation_errors","error_details":{"transaction_id":["value_is_invalid"]}}"#;
+        assert!(!is_transaction_already_exists(other_code));
+
+        // Non-JSON / unrelated bodies are never mistaken for the dedup reject.
+        assert!(!is_transaction_already_exists(b"Internal Server Error"));
+        assert!(!is_transaction_already_exists(b"{}"));
+    }
 }
