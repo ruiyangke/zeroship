@@ -282,6 +282,87 @@ pub fn apply(
     detach_promise(env, promise)
 }
 
+/// `applyIr` — the HOST-AUTHORING apply entry (§D.1): take a pure-JS `.ir.json`
+/// ENVELOPE (`{ ir_version, name, ops }`), run the fail-closed LOAD GATE + LOWER
+/// **in Rust** (stamping `owner_app` + folding the authoritative `Checksum::of_ir`
+/// — the checksum is NEVER computed in JS), then drive `executor::apply` over the
+/// host driver. The envelope must NOT carry `owner_app`; it is stamped from the
+/// `owner_app` arg (provenance, §D.1).
+///
+/// This is the entry the `@zeroship/migrate/host` facade's `apply` calls: the host
+/// recorder produces the envelope purely in JS, this addon owns the checksum.
+/// Returns a `Promise<string>` resolving to a JSON `ApplyOutcome`.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn apply_ir(
+    env: Env,
+    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    host_driver: HostDriverFn,
+    owner_app: String,
+    project_schema: String,
+    migrator_role: Option<String>,
+    dialect: String,
+    registry_json: String,
+    envelope_json: String,
+    approved: bool,
+    applied_by: String,
+) -> Result<Object<'static>> {
+    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here, §D.1).
+    let migrations: Vec<Migration> = {
+        let json = crate::lower::lower_envelope_to_migrations_json(
+            &envelope_json,
+            &owner_app,
+            &project_schema,
+            &dialect,
+            &registry_json,
+        )
+        .map_err(Error::from_reason)?;
+        serde_json::from_str(&json)
+            .map_err(|e| Error::from_reason(format!("lowered migrations re-parse failed: {e}")))?
+    };
+
+    let dispatch = build_host_dispatch(host_driver)?;
+    let (deferred, promise) = env.create_deferred::<String, _>()?;
+    let approval = if approved { Approval::Approved } else { Approval::None };
+
+    run_engine_blocking(
+        move || async move {
+            let session = NapiHostSession::new(dispatch);
+            let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
+            if let Some(role) = migrator_role {
+                cfg = cfg.with_migrator_role(role);
+            }
+            let out = zeroship_migrate::apply::executor::apply(
+                &session, &cfg, &migrations, approval, &applied_by,
+            )
+            .await;
+            match out {
+                Ok(outcome) => Ok(serde_json::json!({
+                    "applied": outcome.applied,
+                    "skipped": outcome.skipped,
+                    "recovered": outcome.recovered,
+                })
+                .to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        },
+        move |outcome: EngineOutcome| match outcome {
+            Ok(json) => deferred.resolve(move |_| Ok(json)),
+            Err(msg) => deferred.reject(Error::from_reason(msg)),
+        },
+    );
+
+    detach_promise(env, promise)
+}
+
+/// The `project_id` an `ExecutorConfig` carries. The IR host path uses the project
+/// schema as the project id (a fresh single-app project's schema == its id in the
+/// create-first posture), matching the native oracle's `ExecutorConfig::new(schema,
+/// schema)` (`build_new_generate_pg.rs`). A distinct project id can be threaded
+/// through a future facade arg.
+fn owner_app_project(project_schema: &str) -> String {
+    project_schema.to_string()
+}
+
 /// `status` — the generic `ops::status::status` over the host driver (§C.5).
 /// Migrations cross as a JSON `Vec<Migration>`. Resolves to a JSON `MigrationStatus`.
 #[napi(ts_return_type = "Promise<string>")]

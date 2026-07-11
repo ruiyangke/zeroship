@@ -10,6 +10,20 @@
 export declare function apply(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, projectId: string, projectSchema: string, migratorRole: string | undefined | null, migrationsJson: string, approved: boolean, appliedBy: string): Promise<string>
 
 /**
+ * `applyIr` — the HOST-AUTHORING apply entry (§D.1): take a pure-JS `.ir.json`
+ * ENVELOPE (`{ ir_version, name, ops }`), run the fail-closed LOAD GATE + LOWER
+ * **in Rust** (stamping `owner_app` + folding the authoritative `Checksum::of_ir`
+ * — the checksum is NEVER computed in JS), then drive `executor::apply` over the
+ * host driver. The envelope must NOT carry `owner_app`; it is stamped from the
+ * `owner_app` arg (provenance, §D.1).
+ *
+ * This is the entry the `@zeroship/migrate/host` facade's `apply` calls: the host
+ * recorder produces the envelope purely in JS, this addon owns the checksum.
+ * Returns a `Promise<string>` resolving to a JSON `ApplyOutcome`.
+ */
+export declare function applyIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, ownerApp: string, projectSchema: string, migratorRole: string | undefined | null, dialect: string, registryJson: string, envelopeJson: string, approved: boolean, appliedBy: string): Promise<string>
+
+/**
  * `history` — the generic `ops::status::history` over the host driver (§C.5).
  * Resolves to a JSON `Vec<HistoryEvent>`.
  */

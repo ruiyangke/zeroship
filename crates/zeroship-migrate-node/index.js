@@ -588,6 +588,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.apply = nativeBinding.apply
+module.exports.applyIr = nativeBinding.applyIr
 module.exports.history = nativeBinding.history
 module.exports.irVersion = nativeBinding.irVersion
 module.exports.loadVerify = nativeBinding.loadVerify
