@@ -101,11 +101,6 @@ indexmap = { workspace = true }
 # crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
 # snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
 zeroship-schema = { workspace = true }
-# The reviewed-allowlist net-policy security type (`HostPort`/`ReviewedAllowlist`)
-# the engine-owned `runtime_host::NetPolicy` reuses (design §2.5). NORMAL dep this
-# phase (Phase B vendors it + drops this edge). The engine's public MySQL surface +
-# its TLS-pin/net-policy construction stay runtime-`NetPolicy`-free.
-zeroship-core = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
@@ -151,10 +146,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # The `zeroship-migrate.toml` project config for the CLI (DX parity). SYNC + leaf —
 # zero tokio. Only the bin reads it; the library trust domain is unchanged.
 toml = { workspace = true }
-# PR4 build step: deploy-bundle manifest entry type (`MigrationFileEntry`) plus
-# canonical content-addressed hash validation. The V8 front-end build path emits
-# bundle migration entries over committed `.ir.json` bytes.
-zeroship-bundle = { workspace = true }
 # Raw syscalls for the kernel-sandboxed recorder child (rlimits, no-new-privs,
 # namespaces), matching the existing sandbox-agent raw-libc posture. OPTIONAL —
 # its only users are the sandbox paths, so it is folded into `sandbox` (no in-core

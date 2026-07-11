@@ -29,7 +29,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use zeroship_bundle::manifest::MigrationFileEntry;
+use crate::manifest_entry::MigrationFileEntry;
 use crate::model::ir::CanonicalOpList;
 use crate::model::ir::Op;
 use crate::plan::loader;
@@ -769,7 +769,7 @@ fn build_discovered(
         warn_on_confined_rejected_raw_sql(&m.stem, &ir);
 
         let filename = format!("{}.ir.json", m.stem);
-        let hash = zeroship_bundle::sha256_hex(&committed_bytes);
+        let hash = crate::manifest_entry::sha256_hex(&committed_bytes);
         out.push(BuiltMigration {
             stem: m.stem.clone(),
             filename: filename.clone(),

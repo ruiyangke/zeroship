@@ -93,7 +93,15 @@ pub mod fault;
 pub mod frontend;
 pub mod guard;
 pub mod id;
+// The deploy-bundle migration-file record + content-addressed hash, vendored
+// byte-identically from `zeroship-bundle` (extraction Phase B) so the build
+// front-end emits bundle entries without a `zeroship-bundle` normal-graph dep.
+pub mod manifest_entry;
 pub mod model;
+// The reviewed-allowlist net-policy security types, vendored byte-identically
+// from `zeroship-core` (extraction Phase B) so the recorder-sandbox / MySQL
+// JS-driver `NetPolicy` names no `zeroship-core` type.
+pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;

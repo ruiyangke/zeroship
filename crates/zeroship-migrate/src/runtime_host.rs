@@ -23,11 +23,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-// The reviewed-allowlist security type is reused verbatim from `zeroship-core`
-// (Phase A brings core in as a normal dep; Phase B drops it). The engine's
-// `NetPolicy` construction + TLS-pin validation stay engine-owned; the adapter
-// maps `NetPolicy` → `zeroship_runtime::NetPolicy` at `open_js_driver`.
-pub use zeroship_core::net_policy::{HostPort, ReviewedAllowlist};
+// The reviewed-allowlist security type is vendored into the engine (extraction
+// Phase B — `crate::net_policy`, a byte-identical copy of `zeroship_core::
+// net_policy`), so the engine carries no `zeroship-core` normal-graph dep. The
+// engine's `NetPolicy` construction + TLS-pin validation stay engine-owned; the
+// adapter maps `NetPolicy` → `zeroship_runtime::NetPolicy` at `open_js_driver`.
+pub use crate::net_policy::{HostPort, ReviewedAllowlist};
 
 /// An in-memory JS module (specifier → source). Vendored into the engine so the
 /// trait signatures carry no `zeroship_runtime::ModuleEntry`. The adapter maps
@@ -200,7 +201,7 @@ pub trait JsDriverHost {
 /// Engine-owned outbound raw-TCP policy for the MySQL JS-driver isolate.
 ///
 /// This is the portable peer of `zeroship_runtime::NetPolicy` — it names only
-/// `zeroship-core`'s reviewed-allowlist security type, so the migrate engine's
+/// the engine-vendored reviewed-allowlist security type, so the migrate engine's
 /// public MySQL surface + its TLS-pin/net-policy construction stay
 /// runtime-`NetPolicy`-free (design §2.5). The adapter maps this to
 /// `zeroship_runtime::NetPolicy` at `open_js_driver`. Only the subset migrate
