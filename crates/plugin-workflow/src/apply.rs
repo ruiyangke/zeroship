@@ -20,13 +20,6 @@ pub async fn apply_step_result_on_store<S>(
 where
     S: WorkflowStore,
 {
-    let compensation_outcomes = compensation_outcomes_from_step_outcomes(&result.outcomes)
-        .map_err(WorkflowError::Invalid)?;
-    let (checkpoints, run_update) = fold_outcomes(&result.outcomes).map_err(WorkflowError::Invalid)?;
-    result.checkpoints = checkpoints;
-    result.run_update = run_update;
-    result.checkpoints.sort_by_key(|s| s.ordinal);
-    let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
     let mut tx = store.begin().await?;
 
     let Some(row) = tx.lock_run_for_apply(&result.run_id).await? else {
@@ -40,6 +33,47 @@ where
         tx.commit().await?;
         return Ok(false);
     }
+    if row.cancel_requested && row.state != "compensating" {
+        let error = child_cancelled_error();
+        let changed = tx
+            .cancel_requested_run(config, &result.run_id, &result.dispatch_nonce)
+            .await?;
+        if changed > 0 {
+            tx.emit_child_terminal_signal(
+                &result.run_id,
+                ChildTerminalPayload {
+                    state: "cancelled",
+                    output: None,
+                    output_ref: None,
+                    error: Some(error),
+                },
+            )
+            .await?;
+            tx.cascade_cancel_children(&result.run_id).await?;
+        }
+        tx.commit().await?;
+        return Ok(changed > 0);
+    }
+
+    let compensation_outcomes = match compensation_outcomes_from_step_outcomes(&result.outcomes) {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            tx.commit().await?;
+            return Err(WorkflowError::Invalid(error));
+        }
+    };
+    let (checkpoints, run_update) = match fold_outcomes(&result.outcomes) {
+        Ok(folded) => folded,
+        Err(error) => {
+            tx.commit().await?;
+            return Err(WorkflowError::Invalid(error));
+        }
+    };
+    result.checkpoints = checkpoints;
+    result.run_update = run_update;
+    result.checkpoints.sort_by_key(|s| s.ordinal);
+    let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
+
     if row.state == "compensating" {
         let applied = apply_compensation_result(
             &mut tx,
@@ -433,6 +467,14 @@ fn child_limit_error(message: impl Into<String>) -> Value {
     })
 }
 
+fn child_cancelled_error() -> Value {
+    serde_json::json!({
+        "type": "ChildCancelledError",
+        "message": "child workflow was cancelled",
+        "retryable": false,
+    })
+}
+
 fn fail_child_checkpoint_with_limit(checkpoint: &mut StepCheckpoint, message: String) {
     checkpoint.state = "failed".to_string();
     checkpoint.output = None;
@@ -469,9 +511,11 @@ mod tests {
         owner_id: String,
         dispatch_nonce: String,
         state: String,
+        cancel_requested: bool,
         steps_written: usize,
         transitioned_state: Option<String>,
         transitioned_output: Option<Value>,
+        cancel_requested_applied: bool,
         pending_compensation_count: i64,
         continued_as_new_run_id: Option<String>,
         continued_seed_input: Option<Value>,
@@ -519,6 +563,7 @@ mod tests {
                 claimed_by: Some(state.owner_id.clone()),
                 state: state.state.clone(),
                 dispatch_nonce: Some(state.dispatch_nonce.clone()),
+                cancel_requested: state.cancel_requested,
                 stuck_strikes: 0,
                 tree_depth: 0,
                 compensation_target: None,
@@ -669,6 +714,19 @@ mod tests {
             Ok(1)
         }
 
+        async fn cancel_requested_run(
+            &mut self,
+            _config: &WorkflowEngineConfig,
+            _run_id: &str,
+            _dispatch_nonce: &str,
+        ) -> Result<u64, WorkflowError> {
+            let mut state = self.state.borrow_mut();
+            state.cancel_requested_applied = true;
+            state.cancel_requested = false;
+            state.transitioned_state = Some("cancelled".to_string());
+            Ok(1)
+        }
+
         async fn upsert_blob_ref(
             &mut self,
             _output_ref: &WorkflowOutputRef,
@@ -761,6 +819,54 @@ mod tests {
         assert_eq!(state.steps_written, 1);
         assert_eq!(state.transitioned_state.as_deref(), Some("completed"));
         assert_eq!(state.transitioned_output, Some(serde_json::json!({"done": true})));
+    }
+
+    #[compio::test]
+    async fn apply_cancel_requested_run_writes_no_checkpoints() {
+        let app_id = Uuid::new_v4();
+        let store = MemStore {
+            state: Rc::new(RefCell::new(MemState {
+                app_id,
+                deploy_id: "dep_test".to_string(),
+                owner_id: "owner-a".to_string(),
+                dispatch_nonce: "wfd_test".to_string(),
+                state: "running".to_string(),
+                cancel_requested: true,
+                ..MemState::default()
+            })),
+        };
+        let config = WorkflowEngineConfig {
+            owner_id: "owner-a".to_string(),
+            ..WorkflowEngineConfig::default()
+        };
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 0,
+                    "name": "step",
+                    "output": {"should": "not-write"}
+                },
+                {
+                    "kind": "RunCompleted",
+                    "output": {"should": "not-commit"}
+                }
+            ]
+        }))
+        .expect("step result");
+
+        let applied = apply_step_result_on_store(&store, &config, result)
+            .await
+            .expect("apply");
+        let state = store.state.borrow();
+        assert!(applied);
+        assert!(state.committed);
+        assert!(state.cancel_requested_applied);
+        assert_eq!(state.steps_written, 0);
+        assert_eq!(state.transitioned_state.as_deref(), Some("cancelled"));
+        assert!(state.transitioned_output.is_none());
     }
 
     #[compio::test]
