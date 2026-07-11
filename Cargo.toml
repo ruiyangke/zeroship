@@ -3,6 +3,7 @@ members = ["crates/*", "crates/authz", "crates/compio-s3"]
 resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
+    "crates/zeroship-migrate-node",
     "refs",
 ]
 

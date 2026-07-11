@@ -1,0 +1,4 @@
+/target
+/node_modules
+# napi build artifacts (per-platform prebuilds are shipped, not committed here)
+*.node
