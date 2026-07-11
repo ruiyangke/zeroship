@@ -361,8 +361,8 @@ pub enum JournalError {
 }
 
 #[cfg(feature = "native-pg")]
-impl From<compio_postgres::Error> for JournalError {
-    fn from(error: compio_postgres::Error) -> Self {
+impl From<crate::apply::backend::postgres::seam::SeamError> for JournalError {
+    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -980,7 +980,13 @@ pub async fn record_rolled_back<D: PgSession>(
                  VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
                 rolled_back = EventKind::RolledBack.as_str()
             ),
-            &[&version, &name, &checksum, &rolled_back_by, &exec_ms],
+            &[
+                version.into(),
+                name.into(),
+                checksum.into(),
+                rolled_back_by.into(),
+                exec_ms.into(),
+            ],
         )
         .await?;
     debug_assert_eq!(n, 1, "record_rolled_back must insert exactly one event row");
@@ -1010,7 +1016,7 @@ pub async fn record_started<D: PgSession>(
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (version) DO NOTHING"
         ),
-        &[&version, &name, &checksum, &applied_by],
+        &[version.into(), name.into(), checksum.into(), applied_by.into()],
     )
     .await?;
     Ok(())
@@ -1063,19 +1069,19 @@ pub async fn record_completed<D: PgSession>(
                 applied = EventKind::Applied.as_str()
             ),
             &[
-                &rec.version,
-                &rec.name,
-                &rec.checksum,
-                &rec.applied_by,
-                &rec.exec_ms,
-                &rec.kind,
+                rec.version.into(),
+                rec.name.into(),
+                rec.checksum.into(),
+                rec.applied_by.into(),
+                rec.exec_ms.into(),
+                rec.kind.into(),
             ],
         )
         .await?;
     debug_assert_eq!(n, 1, "record_completed must insert exactly one journal row");
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
-        &[&rec.version],
+        &[rec.version.into()],
     )
     .await?;
     Ok(())
@@ -1196,15 +1202,15 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
          VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
         pending = PendingState::Pending.as_str()
     );
-    let obligation_params: [&(dyn compio_postgres::types::ToSql + Sync); 8] = [
-        &rec.table,
-        &rec.from_col,
-        &rec.to_col,
-        &rec.ty,
-        &rec.pending_version,
-        &rec.plan_version,
-        &cv_json,
-        &rec.by,
+    let obligation_params: [crate::apply::backend::postgres::seam::SeamBind; 8] = [
+        rec.table.into(),
+        rec.from_col.into(),
+        rec.to_col.into(),
+        rec.ty.into(),
+        rec.pending_version.into(),
+        rec.plan_version.into(),
+        (&cv_json).into(),
+        rec.by.into(),
     ];
 
     // No recovery scope (routine / resolve / abort path) — a single autocommit
@@ -1229,7 +1235,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
                          (deploy_id, pending_version, state, \"by\")
                      VALUES ($1, $2, 'in_progress', $3)"
                 ),
-                &[&scope.deploy_id, &rec.pending_version, &rec.by],
+                &[scope.deploy_id.into(), rec.pending_version.into(), rec.by.into()],
             )
             .await?;
         debug_assert_eq!(m, 1, "the in_progress recovery marker must insert exactly one row");
@@ -1285,15 +1291,15 @@ pub async fn resolve_pending_contract<D: PgSession>(
                 resolved = PendingState::Resolved.as_str()
             ),
             &[
-                &pc.table,
-                &pc.from_col,
-                &pc.to_col,
-                &pc.ty,
-                &pc.pending_version,
-                &pc.plan_version,
-                &cv_json,
-                &resolution.as_str(),
-                &by,
+                (&pc.table).into(),
+                (&pc.from_col).into(),
+                (&pc.to_col).into(),
+                (&pc.ty).into(),
+                (&pc.pending_version).into(),
+                (&pc.plan_version).into(),
+                (&cv_json).into(),
+                resolution.as_str().into(),
+                by.into(),
             ],
         )
         .await?;
@@ -1353,7 +1359,7 @@ pub async fn mark_deploy_recovery_committed<D: PgSession>(
                      (deploy_id, pending_version, state, \"by\")
                  VALUES ($1, $2, 'committed', $3)"
             ),
-            &[&deploy_id, &pending_version, &by],
+            &[deploy_id.into(), pending_version.into(), by.into()],
         )
         .await?;
     debug_assert_eq!(
@@ -1440,7 +1446,7 @@ pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
                      (deploy_id, pending_version, state, \"by\")
                  VALUES ($1, $2, 'reconciled', $3)"
             ),
-            &[&deploy_id, &pending_version, &by],
+            &[deploy_id.into(), pending_version.into(), by.into()],
         )
         .await?;
     debug_assert_eq!(
@@ -1738,7 +1744,13 @@ async fn record_baseline_inner<D: PgSession>(
                  VALUES ('{applied}', $1, $2, $3, $4, 0, 'completed', 'success', $5)",
                 applied = EventKind::Applied.as_str()
             ),
-            &[&rec.version, &rec.name, &rec.checksum, &rec.applied_by, &rec.kind],
+            &[
+                rec.version.into(),
+                rec.name.into(),
+                rec.checksum.into(),
+                rec.applied_by.into(),
+                rec.kind.into(),
+            ],
         )
         .await?;
     debug_assert_eq!(n, 1, "record_baseline must insert exactly one journal row");
@@ -1749,7 +1761,7 @@ async fn record_baseline_inner<D: PgSession>(
                      (squash_version, superseded_version)
                  VALUES ($1, $2)"
             ),
-            &[&rec.version, sup],
+            &[rec.version.into(), sup.into()],
         )
         .await?;
     }
@@ -1770,7 +1782,7 @@ pub async fn clear_inflight<D: PgSession>(
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     conn.execute(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
-        &[&version],
+        &[version.into()],
     )
     .await?;
     Ok(())

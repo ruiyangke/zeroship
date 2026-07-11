@@ -52,7 +52,7 @@ pub enum BaselineError {
     /// A database error outside a guarded/journaled step.
     #[error("db error: {0}")]
     #[cfg(feature = "native-pg")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -153,14 +153,14 @@ pub(crate) async fn baseline<D: PgSession>(
     // exactly like apply. Held for the whole operation; released on every exit.
     conn.execute(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[&cfg.project_id],
+        &[(&cfg.project_id).into()],
     )
     .await?;
     let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
     let unlock = conn
         .execute(
             "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&cfg.project_id],
+            &[(&cfg.project_id).into()],
         )
         .await;
     match result {

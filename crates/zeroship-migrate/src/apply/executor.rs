@@ -161,6 +161,18 @@ impl Error for BackendError {
 }
 
 #[cfg(feature = "native-pg")]
+impl From<crate::apply::backend::postgres::seam::SeamError> for BackendError {
+    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+        Self::new(error)
+    }
+}
+
+// Concrete-`Client` paths OFF the `PgSession` seam (the `command/runner`
+// standalone trailer/status reads, which call the inherent `compio_postgres`
+// verbs directly) still surface a `compio_postgres::Error`. `BackendError` boxes
+// either shape, so both `From` impls coexist — the seam path funnels `SeamError`,
+// the off-seam concrete path keeps its raw driver error.
+#[cfg(feature = "native-pg")]
 impl From<compio_postgres::Error> for BackendError {
     fn from(error: compio_postgres::Error) -> Self {
         Self::new(error)
@@ -443,8 +455,8 @@ pub enum ApplyError {
 }
 
 #[cfg(feature = "native-pg")]
-impl From<compio_postgres::Error> for ApplyError {
-    fn from(error: compio_postgres::Error) -> Self {
+impl From<crate::apply::backend::postgres::seam::SeamError> for ApplyError {
+    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -472,7 +484,7 @@ pub(crate) async fn acquire_project_lock<D: PgSession>(
 ) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[&project_id],
+        &[project_id.into()],
     )
     .await?;
     Ok(())
@@ -485,7 +497,7 @@ pub(crate) async fn release_project_lock<D: PgSession>(
 ) -> Result<(), ApplyError> {
     conn.execute(
         "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-        &[&project_id],
+        &[project_id.into()],
     )
     .await?;
     Ok(())
@@ -534,9 +546,9 @@ pub(crate) async fn restore_session<D: PgSession>(
                 set_config('lock_timeout', $2, false), \
                 set_config('search_path', $3, false)",
         &[
-            &snap.statement_timeout,
-            &snap.lock_timeout,
-            &snap.search_path,
+            (&snap.statement_timeout).into(),
+            (&snap.lock_timeout).into(),
+            (&snap.search_path).into(),
         ],
     )
     .await?;
@@ -2190,12 +2202,12 @@ pub(crate) async fn apply_transactional<D: PgSession>(
                 applied = journal::EventKind::Applied.as_str()
             ),
             &[
-                &m.version.as_str(),
-                &m.name,
-                &m.checksum.as_str(),
-                &applied_by,
-                &exec_ms,
-                &kind,
+                m.version.as_str().into(),
+                (&m.name).into(),
+                m.checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
+                kind.into(),
             ],
         )
         .await
@@ -2350,7 +2362,13 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
                  VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
                 applied = journal::EventKind::Applied.as_str()
             ),
-            &[&version, &name, &checksum.as_str(), &applied_by, &exec_ms],
+            &[
+                version.into(),
+                name.into(),
+                checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
+            ],
         )
         .await
     {
@@ -2390,7 +2408,7 @@ async fn insert_supersedes_edges<D: PgSession>(
                      (squash_version, superseded_version)
                  VALUES ($1, $2)"
             ),
-            &[&squash_version, sup],
+            &[squash_version.into(), sup.into()],
         )
         .await
         .map_err(|e| JournalError::Db(e.into()))?;
@@ -2664,7 +2682,7 @@ async fn recover_non_transactional<D: PgSession>(
                        JOIN pg_namespace n ON n.oid = c.relnamespace
                       WHERE n.nspname = $1 AND c.relname = $2 AND x.indisvalid = false
                  ) AS invalid",
-                &[&cfg.project_schema, &idx],
+                &[(&cfg.project_schema).into(), (&idx).into()],
             )
             .await?
             .get("invalid");
@@ -2984,8 +3002,8 @@ pub enum RollbackError {
 }
 
 #[cfg(feature = "native-pg")]
-impl From<compio_postgres::Error> for RollbackError {
-    fn from(error: compio_postgres::Error) -> Self {
+impl From<crate::apply::backend::postgres::seam::SeamError> for RollbackError {
+    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -3491,11 +3509,11 @@ pub(crate) async fn rollback_one_transactional<D: PgSession>(
                 rolled_back = journal::EventKind::RolledBack.as_str()
             ),
             &[
-                &m.version.as_str(),
-                &m.name,
-                &m.checksum.as_str(),
-                &applied_by,
-                &exec_ms,
+                m.version.as_str().into(),
+                (&m.name).into(),
+                m.checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
             ],
         )
         .await

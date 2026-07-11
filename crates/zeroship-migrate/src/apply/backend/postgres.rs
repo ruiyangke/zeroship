@@ -2,6 +2,7 @@
 
 pub mod backfill;
 pub mod online;
+pub mod seam;
 pub mod session;
 pub mod shadow;
 
@@ -398,68 +399,81 @@ impl<D: PgSession> CrossDeployObligations for PostgresBackend<'_, D> {
     }
 }
 
-/// Genericity proof (design §6d): the apply path monomorphizes over a **non-compio**
-/// [`PgSession`] driver. An in-crate recording driver records the SQL each verb
-/// receives (and returns canned/`Err` for the read verbs, since a `compio_postgres::Row`
-/// cannot be constructed outside its crate). This proves `PostgresBackend<'a, D>` is
-/// genuinely generic — the seam is swappable, not merely compio behind a trait.
+/// Genericity proof (design §6d + §A): the apply path monomorphizes over a
+/// **non-compio** [`PgSession`] driver. An in-crate recording driver records the
+/// SQL of every WRITE verb, and — now that the read side is widened to the
+/// driver-neutral [`SeamRow`]/[`SeamError`] (§A) — RETURNS canned `SeamRow`s from
+/// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
+/// that a host driver can build return values without a `compio_postgres::Row`,
+/// closing the old `unreachable!("read verbs…")` gap.
 #[cfg(test)]
 mod recording_session_genericity {
+    use super::seam::{SeamBind, SeamError, SeamRow, SeamValue};
     use super::*;
     use std::cell::RefCell;
 
-    /// A non-compio [`PgSession`] that records the SQL of every verb.
+    /// A non-compio [`PgSession`] that records the SQL + binds of every verb and
+    /// returns canned neutral rows for the read verbs.
     struct RecordingSession {
         log: RefCell<Vec<String>>,
+        binds: RefCell<Vec<Vec<SeamBind>>>,
+        /// Canned rows the next `query`/`query_one` returns.
+        canned: RefCell<Vec<SeamRow>>,
     }
 
     impl RecordingSession {
         fn new() -> Self {
-            Self { log: RefCell::new(Vec::new()) }
+            Self {
+                log: RefCell::new(Vec::new()),
+                binds: RefCell::new(Vec::new()),
+                canned: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_canned(rows: Vec<SeamRow>) -> Self {
+            let s = Self::new();
+            *s.canned.borrow_mut() = rows;
+            s
         }
     }
 
     impl PgSession for RecordingSession {
-        async fn batch_execute(&self, sql: &str) -> Result<(), compio_postgres::Error> {
+        async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
             self.log.borrow_mut().push(format!("batch_execute: {sql}"));
             Ok(())
         }
-        async fn execute(
-            &self,
-            sql: &str,
-            _params: &[&(dyn compio_postgres::types::ToSql + Sync)],
-        ) -> Result<u64, compio_postgres::Error> {
+        async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError> {
             self.log.borrow_mut().push(format!("execute: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
             Ok(1)
         }
         async fn execute_text_params(
             &self,
             sql: &str,
             _params: &[Option<String>],
-        ) -> Result<u64, compio_postgres::Error> {
-            self.log.borrow_mut().push(format!("execute_text_params: {sql}"));
+        ) -> Result<u64, SeamError> {
+            self.log
+                .borrow_mut()
+                .push(format!("execute_text_params: {sql}"));
             Ok(1)
         }
         async fn query(
             &self,
-            _sql: &str,
-            _params: &[&(dyn compio_postgres::types::ToSql + Sync)],
-        ) -> Result<Vec<compio_postgres::Row>, compio_postgres::Error> {
-            // A non-compio driver can construct NEITHER a `compio_postgres::Row`
-            // (private fields) NOR a `compio_postgres::Error` (no public
-            // constructor) — this is exactly the read-path coupling the design's
-            // §3.2 `SeamRow` + §9.1 P1/P2 widening removes. So the read verbs are
-            // unreachable in this proof; their VALUE is that the impl COMPILES,
-            // proving the `query`/`query_one` generic signatures monomorphize over
-            // a non-compio `D` (the write path below is what runs generically).
-            unreachable!("read verbs are not exercised by the write-path genericity proof");
+            sql: &str,
+            params: &[SeamBind],
+        ) -> Result<Vec<SeamRow>, SeamError> {
+            self.log.borrow_mut().push(format!("query: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
+            Ok(self.canned.borrow().clone())
         }
-        async fn query_one(
-            &self,
-            _sql: &str,
-            _params: &[&(dyn compio_postgres::types::ToSql + Sync)],
-        ) -> Result<compio_postgres::Row, compio_postgres::Error> {
-            unreachable!("read verbs are not exercised by the write-path genericity proof");
+        async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError> {
+            self.log.borrow_mut().push(format!("query_one: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
+            self.canned
+                .borrow()
+                .first()
+                .cloned()
+                .ok_or_else(|| SeamError::message("query_one: no canned row"))
         }
     }
 
@@ -496,28 +510,54 @@ mod recording_session_genericity {
             log.iter().any(|s| s.contains("pg_advisory_unlock")),
             "advisory-unlock release ran through the trait's execute: {log:?}"
         );
+
+        // The advisory-lock verbs bound the project id through the neutral
+        // SeamBind path (§A.1) — the param widening ran, not just the return one.
+        let binds = rec.binds.borrow();
+        assert!(
+            binds
+                .iter()
+                .any(|b| b.iter().any(|v| matches!(v, SeamBind::Text(t) if t == "prj_x"))),
+            "project id crossed the seam as a neutral SeamBind::Text: {binds:?}"
+        );
     }
 
-    /// Compile-only proof that the READ path monomorphizes over a non-compio `D`.
-    ///
-    /// Building a future from `PostgresBackend::<'_, RecordingSession>::applied` /
-    /// `::superseded_versions` (both `query`-issuing journal reads) forces the
-    /// compiler to instantiate their generic bodies against `RecordingSession` —
-    /// a non-compio `D`. The futures are dropped un-awaited: a recording driver
-    /// cannot construct a `compio_postgres::Row`/`Error` to return (§6d), so the
-    /// read path type-checks generically but is not run-proven this milestone
-    /// (deferred to the §3.2 `SeamRow` widening). This code compiling IS the
-    /// monomorphization proof.
-    #[test]
-    fn read_path_signatures_monomorphize_over_a_non_compio_driver() {
-        let rec = RecordingSession::new();
+    /// The read side is now RUN, not merely compiled: the generic journal read
+    /// (`applied`) is driven against canned neutral `SeamRow`s and its decode
+    /// (`SeamRow → AppliedEntry`) runs end-to-end over a non-compio driver — the
+    /// §A closure of the old `unreachable!("read verbs…")` gap.
+    #[compio::test]
+    async fn read_path_runs_generically_over_canned_seam_rows() {
+        // One completed journal event, shaped like the `applied()` CTE output:
+        // (version, checksum, mig_kind, phase).
+        let row = SeamRow::new(
+            vec![
+                "version".to_string(),
+                "checksum".to_string(),
+                "mig_kind".to_string(),
+                "phase".to_string(),
+            ],
+            vec![
+                SeamValue::Text("mig_0001".to_string()),
+                SeamValue::Text("deadbeef".to_string()),
+                SeamValue::Text("apply".to_string()),
+                SeamValue::Text("completed".to_string()),
+            ],
+        );
+        let rec = RecordingSession::with_canned(vec![row]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
-        // Constructing these futures instantiates the generic read fn bodies over
-        // `RecordingSession`; we never poll them (the read verbs `unreachable!`).
-        let applied_fut = backend.applied(&cfg);
-        let superseded_fut = backend.superseded_versions(&cfg);
-        drop(applied_fut);
-        drop(superseded_fut);
+
+        let applied = backend.applied(&cfg).await.expect("applied read runs");
+        assert_eq!(applied.len(), 1, "one canned journal row decoded");
+        assert_eq!(applied[0].version, "mig_0001");
+        assert_eq!(applied[0].checksum, "deadbeef");
+
+        // The read verb issued a `query` (not `execute`) through the trait.
+        assert!(
+            rec.log.borrow().iter().any(|s| s.starts_with("query")),
+            "applied() drove a query through the neutral read seam: {:?}",
+            rec.log.borrow()
+        );
     }
 }

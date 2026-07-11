@@ -100,8 +100,8 @@ pub enum DriftError {
 }
 
 #[cfg(feature = "native-pg")]
-impl From<compio_postgres::Error> for DriftError {
-    fn from(error: compio_postgres::Error) -> Self {
+impl From<crate::apply::backend::postgres::seam::SeamError> for DriftError {
+    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -623,7 +623,7 @@ pub async fn snapshot_schema<D: PgSession>(
              WHERE n.nspname = $1 AND pn.nspname = $1 AND child.relispartition = true \
                AND child.relkind IN ('r', 'p') \
              ORDER BY child.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &partition_rows {
@@ -647,7 +647,7 @@ pub async fn snapshot_schema<D: PgSession>(
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relispartition = false \
              ORDER BY c.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &table_rows {
@@ -680,7 +680,7 @@ pub async fn snapshot_schema<D: PgSession>(
              WHERE n.nspname = $1 \
              GROUP BY c.relname, p.partstrat \
              ORDER BY c.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &partitioned_table_rows {
@@ -710,7 +710,7 @@ pub async fn snapshot_schema<D: PgSession>(
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('v', 'm') \
              ORDER BY c.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &view_rows {
@@ -733,7 +733,7 @@ pub async fn snapshot_schema<D: PgSession>(
              JOIN pg_namespace n ON n.oid = t.typnamespace \
              WHERE n.nspname = $1 AND t.typtype IN ('e', 'd') \
              ORDER BY t.typname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &type_rows {
@@ -776,7 +776,7 @@ pub async fn snapshot_schema<D: PgSession>(
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.table_name, c.column_name",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &col_rows {
@@ -888,7 +888,7 @@ pub async fn snapshot_schema<D: PgSession>(
                  WHERE con.conindid = x.indexrelid AND con.contype = 'x' \
                ) \
              ORDER BY c.relname, ic.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &idx_rows {
@@ -951,7 +951,7 @@ pub async fn snapshot_schema<D: PgSession>(
              JOIN pg_namespace n ON n.oid = con.connamespace \
              WHERE n.nspname = $1 AND con.contype IN ('p', 'f', 'u', 'c', 'x') \
              ORDER BY c.relname, con.conname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     for r in &constraint_rows {
@@ -1006,7 +1006,7 @@ pub async fn snapshot_schema<D: PgSession>(
                    AND d.deptype = 'i' \
                ) \
              ORDER BY c.relname",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     let mut sequences = std::collections::BTreeMap::new();
@@ -1049,7 +1049,7 @@ pub async fn snapshot_schema<D: PgSession>(
              FROM pg_namespace n \
              JOIN pg_roles owner ON owner.oid = n.nspowner \
              WHERE n.nspname = $1",
-            &[&project_schema],
+            &[project_schema.into()],
         )
         .await?;
     let mut schemas = BTreeMap::new();

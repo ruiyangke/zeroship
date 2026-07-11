@@ -186,14 +186,35 @@ async fn column_exists(conn: &Client, schema: &str, table: &str, column: &str) -
     !rows.is_empty()
 }
 
-/// Walk an error's `source()` chain and report whether ANY link is a
-/// `compio_postgres::Error` carrying SQLSTATE `55P03 lock_not_available`.
+/// Walk an error's `source()` chain and report whether ANY link carries SQLSTATE
+/// `55P03 lock_not_available`. Accepts BOTH shapes the widened `PgSession` seam
+/// can surface: a `SeamError` (seam path; `.code` holds the SQLSTATE) OR the
+/// concrete `compio_postgres::Error` (off-seam). At each link we also unwrap
+/// `BackendError` (its typed `downcast_ref`) so a boxed inner error is reached.
 fn chain_has_lock_not_available(err: &(dyn std::error::Error + 'static)) -> bool {
+    let lock_not_available = compio_postgres::error::SqlState::LOCK_NOT_AVAILABLE.code();
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(e) = cur {
-        if let Some(pg) = e.downcast_ref::<compio_postgres::Error>() {
-            if pg.code() == Some(&compio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
+        if let Some(seam) = e.downcast_ref::<zeroship_migrate::SeamError>() {
+            if seam.code.as_deref() == Some(lock_not_available) {
                 return true;
+            }
+        }
+        if let Some(pg) = e.downcast_ref::<compio_postgres::Error>() {
+            if pg.code().map(compio_postgres::error::SqlState::code) == Some(lock_not_available) {
+                return true;
+            }
+        }
+        if let Some(backend) = e.downcast_ref::<zeroship_migrate::BackendError>() {
+            if let Some(seam) = backend.downcast_ref::<zeroship_migrate::SeamError>() {
+                if seam.code.as_deref() == Some(lock_not_available) {
+                    return true;
+                }
+            }
+            if let Some(pg) = backend.downcast_ref::<compio_postgres::Error>() {
+                if pg.code().map(compio_postgres::error::SqlState::code) == Some(lock_not_available) {
+                    return true;
+                }
             }
         }
         cur = e.source();

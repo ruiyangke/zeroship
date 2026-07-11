@@ -24,6 +24,41 @@ use zeroship_migrate::{
     Migration, MigrationEngine, MigrationFlags, MigrationId, Phase,
 };
 
+/// Extract the SQLSTATE (as a string, e.g. "42501") from the `BackendError`
+/// carried by `RollbackError::DownFailed`, accepting BOTH shapes the widened
+/// `PgSession` seam can surface: a boxed `SeamError` (seam path; `.code` holds
+/// the SQLSTATE) OR the concrete `compio_postgres::Error` (off-seam). We try the
+/// wrapper's typed `downcast_ref` first, then fall back to walking the `source()`
+/// chain so a deeper link still resolves.
+fn sqlstate_of(backend: &zeroship_migrate::BackendError) -> Option<String> {
+    if let Some(seam) = backend.downcast_ref::<zeroship_migrate::SeamError>() {
+        if let Some(code) = &seam.code {
+            return Some(code.clone());
+        }
+    }
+    if let Some(pg) = backend.downcast_ref::<compio_postgres::Error>() {
+        if let Some(code) = pg.code() {
+            return Some(code.code().to_string());
+        }
+    }
+    let mut cur: Option<&(dyn std::error::Error + 'static)> =
+        std::error::Error::source(backend);
+    while let Some(e) = cur {
+        if let Some(seam) = e.downcast_ref::<zeroship_migrate::SeamError>() {
+            if let Some(code) = &seam.code {
+                return Some(code.clone());
+            }
+        }
+        if let Some(pg) = e.downcast_ref::<compio_postgres::Error>() {
+            if let Some(code) = pg.code() {
+                return Some(code.code().to_string());
+            }
+        }
+        cur = e.source();
+    }
+    None
+}
+
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
 
@@ -1039,13 +1074,15 @@ async fn cross_schema_down_is_permission_denied_by_the_migrator_role() {
     let RollbackError::DownFailed { source, .. } = &err else {
         panic!("expected DownFailed (permission denied), got {err:?}");
     };
-    let source = source
-        .downcast_ref::<compio_postgres::Error>()
-        .expect("DownFailed source remains the original Postgres driver error");
+    // The failing `down` flows through the widened `PgSession` seam, so the
+    // SQLSTATE is carried EITHER as a boxed `SeamError` (seam path) OR as the
+    // concrete `compio_postgres::Error` (off-seam). Accept both, still asserting
+    // the exact SQLSTATE 42501 (insufficient_privilege).
+    let code = sqlstate_of(source);
     assert_eq!(
-        source.code(),
-        Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
-        "cross-schema down must be permission-denied by the role"
+        code.as_deref(),
+        Some(compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE.code()),
+        "cross-schema down must be permission-denied by the role (42501), got {code:?}"
     );
     // The foreign table survives; the txn rolled back so no rolled_back event.
     assert!(

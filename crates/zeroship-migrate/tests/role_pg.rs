@@ -172,34 +172,52 @@ async fn as_migrator(conn: &Client, role: &str, sql: &str) -> Result<(), compio_
     r
 }
 
-/// Assert a DB error is `insufficient_privilege` (SQLSTATE 42501) — the
-/// signature of line-2 confinement. The opaque `Error` Display is just
-/// "db error"; the real signal is the SQLSTATE on the underlying `DbError`.
-fn postgres_error<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-    ctx: &str,
-) -> &'a compio_postgres::Error {
-    if let Some(pg) = err.downcast_ref::<compio_postgres::Error>() {
-        return pg;
-    }
-    if let Some(backend) = err.downcast_ref::<zeroship_migrate::BackendError>() {
-        if let Some(pg) = backend.downcast_ref::<compio_postgres::Error>() {
-            return pg;
+/// Extract the SQLSTATE (as a string, e.g. "42501") from an error, walking the
+/// `source()` chain and accepting BOTH error shapes the widened `PgSession` seam
+/// can surface:
+///   * `SeamError` — the driver-neutral error boxed inside `BackendError` /
+///     `RollbackError` for seam-path ops; its `.code` carries the SQLSTATE.
+///   * `compio_postgres::Error` — the concrete driver error still raised OFF the
+///     seam (e.g. the `as_migrator` helper's direct `Client` calls).
+/// At each chain link we also unwrap `BackendError` (which exposes a typed
+/// `downcast_ref`) so a boxed `SeamError`/`compio_postgres::Error` is reached even
+/// when the intermediate wrapper's `source()` is the concrete inner box.
+fn sqlstate(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if let Some(seam) = e.downcast_ref::<zeroship_migrate::SeamError>() {
+            if let Some(code) = &seam.code {
+                return Some(code.clone());
+            }
         }
+        if let Some(pg) = e.downcast_ref::<compio_postgres::Error>() {
+            if let Some(code) = pg.code() {
+                return Some(code.code().to_string());
+            }
+        }
+        if let Some(backend) = e.downcast_ref::<zeroship_migrate::BackendError>() {
+            if let Some(seam) = backend.downcast_ref::<zeroship_migrate::SeamError>() {
+                if let Some(code) = &seam.code {
+                    return Some(code.clone());
+                }
+            }
+            if let Some(pg) = backend.downcast_ref::<compio_postgres::Error>() {
+                if let Some(code) = pg.code() {
+                    return Some(code.code().to_string());
+                }
+            }
+        }
+        cur = e.source();
     }
-    panic!("{ctx}: expected a Postgres driver error, got {err:?}");
+    None
 }
 
 fn assert_permission_denied(err: &(dyn std::error::Error + 'static), ctx: &str) {
-    let err = postgres_error(err, ctx);
-    let code = err.code();
-    let detail = err
-        .as_db_error()
-        .map_or_else(|| err.to_string(), ToString::to_string);
+    let code = sqlstate(err);
     assert_eq!(
-        code,
-        Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
-        "{ctx}: expected SQLSTATE 42501 (insufficient_privilege), got code={code:?} detail={detail}"
+        code.as_deref(),
+        Some(compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE.code()),
+        "{ctx}: expected SQLSTATE 42501 (insufficient_privilege), got code={code:?} detail={err:?}"
     );
 }
 
@@ -810,10 +828,10 @@ async fn migration_up_cannot_forge_journal_via_unqualified_insert() {
     };
     // Either permission-denied (grant revoked) or relation-not-found (meta off the
     // search_path) — both prove the forge cannot land.
-    let code = postgres_error(source, "unqualified journal forge").code();
+    let code = sqlstate(source);
     assert!(
-        code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-            || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
+        code.as_deref() == Some(compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE.code())
+            || code.as_deref() == Some(compio_postgres::error::SqlState::UNDEFINED_TABLE.code()),
         "unqualified journal forge must be denied (42501) or unresolved (42P01), got {code:?}"
     );
 
@@ -983,10 +1001,10 @@ async fn migration_up_cannot_delete_inflight_markers() {
     let zeroship_migrate::ApplyError::MigrationFailed { source, .. } = &err else {
         panic!("expected MigrationFailed, got {err:?}");
     };
-    let code = postgres_error(source, "inflight DELETE").code();
+    let code = sqlstate(source);
     assert!(
-        code == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
-            || code == Some(&compio_postgres::error::SqlState::UNDEFINED_TABLE),
+        code.as_deref() == Some(compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE.code())
+            || code.as_deref() == Some(compio_postgres::error::SqlState::UNDEFINED_TABLE.code()),
         "inflight DELETE must be denied (42501) or unresolved (42P01), got {code:?}"
     );
 

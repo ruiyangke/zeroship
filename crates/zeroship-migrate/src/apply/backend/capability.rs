@@ -34,7 +34,7 @@ pub enum BackfillError {
     /// A database error outside a guarded/progress step.
     #[cfg(feature = "native-pg")]
     #[error("db error: {0}")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
     /// A progress / journal-schema operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -89,7 +89,7 @@ pub enum BackfillError {
         at_cursor: Option<String>,
         /// The DB error from the failed batch.
         #[source]
-        source: compio_postgres::Error,
+        source: crate::apply::backend::postgres::seam::SeamError,
     },
     /// SQLite analog of [`BackfillError::BatchFailed`].
     #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
