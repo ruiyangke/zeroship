@@ -16,7 +16,9 @@ TableSnapshot {
             name: "created_at",
             data_type: "timestamp with time zone",
             nullable: false,
-            default: None,
+            default: Some(
+                "CURRENT_TIMESTAMP",
+            ),
             generated: None,
             identity: None,
             case_sensitive: None,
@@ -116,7 +118,9 @@ TableSnapshot {
             name: "updated_at",
             data_type: "timestamp with time zone",
             nullable: false,
-            default: None,
+            default: Some(
+                "CURRENT_TIMESTAMP",
+            ),
             generated: None,
             identity: None,
             case_sensitive: None,
@@ -140,7 +144,9 @@ TableSnapshot {
             name: "version",
             data_type: "integer",
             nullable: false,
-            default: None,
+            default: Some(
+                "1",
+            ),
             generated: None,
             identity: None,
             case_sensitive: None,
