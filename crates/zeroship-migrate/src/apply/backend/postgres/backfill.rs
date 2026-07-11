@@ -279,7 +279,7 @@ pub async fn backfill_progress<D: PgSession>(
                         to_char(updated_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS updated_at
                    FROM {meta}.schema_backfills WHERE backfill_id = $1"
             ),
-            &[&backfill_id],
+            &[backfill_id.into()],
         )
         .await?;
     let Some(row) = rows.into_iter().next() else {
@@ -363,7 +363,11 @@ async fn resolve_cursor_type<D: PgSession>(
                 AND a.attnum > 0 AND NOT a.attisdropped",
             // #149: introspect the backfill's EFFECTIVE schema (under Confined ==
             // cfg.project_schema), not the deploy-time project schema.
-            &[&spec.schema, &spec.table, &spec.cursor_column],
+            &[
+                (&spec.schema).into(),
+                (&spec.table).into(),
+                (&spec.cursor_column).into(),
+            ],
         )
         .await?;
     rows.into_iter()
@@ -422,7 +426,11 @@ async fn validate_cursor_column<D: PgSession>(
                 AND a.attnum > 0 AND NOT a.attisdropped",
             // #149: introspect the backfill's EFFECTIVE schema (under Confined ==
             // cfg.project_schema), not the deploy-time project schema.
-            &[&spec.schema, &spec.table, &spec.cursor_column],
+            &[
+                (&spec.schema).into(),
+                (&spec.table).into(),
+                (&spec.cursor_column).into(),
+            ],
         )
         .await?;
     let Some(row) = rows.into_iter().next() else {
@@ -725,12 +733,12 @@ async fn upsert_progress_row<D: PgSession>(
              ON CONFLICT (backfill_id) DO NOTHING"
         ),
         &[
-            &backfill_id,
-            &spec.name,
-            &spec.schema,
-            &spec.table,
-            &spec.cursor_column,
-            &applied_by,
+            backfill_id.into(),
+            (&spec.name).into(),
+            (&spec.schema).into(),
+            (&spec.table).into(),
+            (&spec.cursor_column).into(),
+            applied_by.into(),
         ],
     )
     .await?;
@@ -750,7 +758,7 @@ async fn mark_complete<D: PgSession>(
                 SET complete = true, updated_at = now()
               WHERE backfill_id = $1"
         ),
-        &[&backfill_id],
+        &[backfill_id.into()],
     )
     .await?;
     Ok(())
@@ -781,7 +789,7 @@ async fn run_one_batch<D: PgSession>(
     if let Err(e) = conn
         .execute(
             "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-            &[&cfg.project_id],
+            &[(&cfg.project_id).into()],
         )
         .await
     {
@@ -830,7 +838,7 @@ async fn run_one_batch<D: PgSession>(
     // statement as the UPDATE.
     let query_result = if have_cursor {
         let lc = last_cursor.expect("have_cursor implies Some");
-        conn.query_one(&batch_sql, &[&lc]).await
+        conn.query_one(&batch_sql, &[lc.into()]).await
     } else {
         conn.query_one(&batch_sql, &[]).await
     };
@@ -876,9 +884,9 @@ async fn run_one_batch<D: PgSession>(
                       WHERE backfill_id = $1"
                 ),
                 &[
-                    &backfill_id,
-                    &max_cursor,
-                    &i64::try_from(n).unwrap_or(i64::MAX),
+                    backfill_id.into(),
+                    (&max_cursor).into(),
+                    i64::try_from(n).unwrap_or(i64::MAX).into(),
                 ],
             )
             .await

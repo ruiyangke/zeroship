@@ -104,7 +104,7 @@ pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
     #[cfg(feature = "native-pg")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
     /// attempt, whitespace, or punctuation. Rejected before any query runs.
@@ -289,7 +289,7 @@ async fn table_exists<D: PgSession>(
                  SELECT 1 FROM information_schema.tables
                   WHERE table_schema = $1 AND table_name = $2
              ) AS present",
-            &[&cfg.project_schema, &table],
+            &[(&cfg.project_schema).into(), table.into()],
         )
         .await?;
     Ok(row.get("present"))
@@ -310,7 +310,7 @@ async fn column_exists<D: PgSession>(
                  SELECT 1 FROM information_schema.columns
                   WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
              ) AS present",
-            &[&cfg.project_schema, &table, &column],
+            &[(&cfg.project_schema).into(), table.into(), column.into()],
         )
         .await?;
     Ok(row.get("present"))
