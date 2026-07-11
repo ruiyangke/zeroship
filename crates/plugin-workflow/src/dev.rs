@@ -1612,6 +1612,7 @@ fn dev_run_update(update: crate::engine::RunUpdate) -> RunUpdate {
         crate::engine::RunUpdate::Sleeping { wake_at } => RunUpdate::Sleeping { wake_at },
         crate::engine::RunUpdate::Waiting { wake_at } => RunUpdate::Waiting { wake_at },
         crate::engine::RunUpdate::Completed { output, .. } => RunUpdate::Completed { output },
+        crate::engine::RunUpdate::ContinuedAsNew { .. } => RunUpdate::Completed { output: None },
         crate::engine::RunUpdate::Failed { error } => RunUpdate::Failed { error },
         crate::engine::RunUpdate::Stalled { error } => RunUpdate::Stalled { error },
         crate::engine::RunUpdate::Cancelled => RunUpdate::Cancelled,

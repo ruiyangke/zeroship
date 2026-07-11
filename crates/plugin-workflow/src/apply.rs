@@ -146,6 +146,7 @@ where
         let paused_from_status = match &result.run_update {
             RunUpdate::Queued
             | RunUpdate::Completed { .. }
+            | RunUpdate::ContinuedAsNew { .. }
             | RunUpdate::Failed { .. }
             | RunUpdate::Stalled { .. }
             | RunUpdate::Cancelled => "queued",

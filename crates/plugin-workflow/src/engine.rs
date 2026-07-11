@@ -492,6 +492,12 @@ pub enum StepOutcome {
         #[serde(default, rename = "outputRef")]
         output_ref: Option<WorkflowOutputRef>,
     },
+    ContinueAsNew {
+        #[serde(default)]
+        input: Option<Value>,
+        #[serde(default, rename = "inputRef")]
+        input_ref: Option<WorkflowOutputRef>,
+    },
     RunFailed {
         #[serde(default)]
         ordinal: Option<i32>,
@@ -572,6 +578,12 @@ pub enum RunUpdate {
         #[serde(default, rename = "outputRef")]
         output_ref: Option<WorkflowOutputRef>,
     },
+    ContinuedAsNew {
+        #[serde(default, rename = "seedInput")]
+        seed_input: Option<Value>,
+        #[serde(default, rename = "seedInputRef")]
+        seed_input_ref: Option<WorkflowOutputRef>,
+    },
     Failed { error: Value },
     Stalled { error: Value },
     Cancelled,
@@ -584,6 +596,7 @@ impl RunUpdate {
             Self::Sleeping { .. } => "sleeping",
             Self::Waiting { .. } => "waiting",
             Self::Completed { .. } => "completed",
+            Self::ContinuedAsNew { .. } => "completed",
             Self::Failed { .. } => "failed",
             Self::Stalled { .. } => "stalled",
             Self::Cancelled => "cancelled",
@@ -594,6 +607,7 @@ impl RunUpdate {
         match self {
             Self::Queued => Some(Utc::now()),
             Self::Sleeping { wake_at } | Self::Waiting { wake_at } => *wake_at,
+            Self::ContinuedAsNew { .. } => None,
             _ => None,
         }
     }
@@ -871,6 +885,12 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     output_ref: output_ref.clone(),
                 };
             }
+            StepOutcome::ContinueAsNew { input, input_ref } => {
+                run_update = RunUpdate::ContinuedAsNew {
+                    seed_input: input.clone(),
+                    seed_input_ref: input_ref.clone(),
+                };
+            }
             StepOutcome::RunFailed {
                 ordinal,
                 name,
@@ -1119,6 +1139,13 @@ pub fn outcomes_from_apply_parts(
             output: output.clone(),
             output_ref: output_ref.clone(),
         }),
+        RunUpdate::ContinuedAsNew {
+            seed_input,
+            seed_input_ref,
+        } => outcomes.push(StepOutcome::ContinueAsNew {
+            input: seed_input.clone(),
+            input_ref: seed_input_ref.clone(),
+        }),
         RunUpdate::Failed { error } if !failed_checkpoint_encoded => {
             outcomes.push(StepOutcome::RunFailed {
                 ordinal: None,
@@ -1202,4 +1229,71 @@ pub fn state_cap_error(current: i64, delta: i64, cap: i64) -> Value {
         "delta_bytes": delta,
         "max_bytes": cap,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fold_continue_as_new_is_completed_terminal_update() {
+        let input = json!({"generation": 1, "carry": "state"});
+        let (checkpoints, update) = fold_outcomes(&[StepOutcome::ContinueAsNew {
+            input: Some(input.clone()),
+            input_ref: None,
+        }])
+        .expect("continue-as-new should fold");
+
+        assert!(checkpoints.is_empty());
+        assert_eq!(update.state(), "completed");
+        assert!(update.output().is_none());
+        match update {
+            RunUpdate::ContinuedAsNew {
+                seed_input,
+                seed_input_ref,
+            } => {
+                assert_eq!(seed_input, Some(input));
+                assert!(seed_input_ref.is_none());
+            }
+            other => panic!("unexpected run update: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_as_new_round_trips_from_apply_parts() {
+        let seed = json!({"next": true});
+        let update = RunUpdate::ContinuedAsNew {
+            seed_input: Some(seed.clone()),
+            seed_input_ref: None,
+        };
+
+        let outcomes = outcomes_from_apply_parts(&[], &update);
+
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            StepOutcome::ContinueAsNew { input, input_ref } => {
+                assert_eq!(input.as_ref(), Some(&seed));
+                assert!(input_ref.is_none());
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_as_new_must_be_trailing() {
+        let err = fold_outcomes(&[
+            StepOutcome::ContinueAsNew {
+                input: Some(json!({"generation": 1})),
+                input_ref: None,
+            },
+            StepOutcome::RunCompleted {
+                output: Some(json!({"done": true})),
+                output_ref: None,
+            },
+        ])
+        .expect_err("terminal outcome must reject trailing entries");
+
+        assert!(err.contains("trailing"));
+    }
 }
