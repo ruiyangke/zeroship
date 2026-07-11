@@ -1,7 +1,9 @@
-// Drives the built `zero-migrate` (standalone-cli) + `recorder-child` (zsv8)
-// binaries as subprocesses via `CARGO_BIN_EXE_*`, so it requires the CLI build
-// (`standalone-cli` → `zsv8` → `native-pg`), not a bare `native-pg` library build.
-#![cfg(feature = "standalone-cli")]
+// Drives the built `zero-migrate` (standalone-cli) binary as a subprocess and uses
+// the compio-concrete `compio_postgres` driver for throwaway-DB setup — so it needs
+// BOTH `standalone-cli` and `native-pg`. This standalone ships no native PG driver
+// (host-pg + SQLite only), so this is permanently-off dead code here; the platform
+// `.ts` recorder path it exercised now runs on Node via the napi bridge.
+#![cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 //! Phase-6 BINARY-level e2e (design §9/§12): the COMPOSE `migrate` flow, proven
 //! end-to-end through the ACTUAL `zero-migrate` binary as a SUBPROCESS — not
 //! the library `run_*` functions, not a shim.

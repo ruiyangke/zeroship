@@ -978,8 +978,32 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// [`RunError::ResolvePending`] on a bad/absent version, missing `--yes`,
 /// both/neither flag, a non-PG engine, or a re-author/apply failure;
 /// [`RunError`] sub-arms on connect/apply/journal failure.
-#[cfg(feature = "native-pg")]
+///
+/// PG-only, and the online-rename resolve drives the compio-concrete apply path,
+/// so the actual work lives in `run_resolve_pending_pg` (`native-pg`). This
+/// standalone ships no native PG driver (host-pg + SQLite only), so the host-pg
+/// build returns [`RunError::PgRequiresNativePg`]. The always-present dispatcher
+/// keeps the CLI wiring feature-agnostic.
 pub async fn run_resolve_pending(
+    cfg: &RunConfig,
+    version: &str,
+    apply: bool,
+    abort: bool,
+    ack_data_loss: bool,
+) -> Result<RunReport, RunError> {
+    #[cfg(feature = "native-pg")]
+    {
+        run_resolve_pending_pg(cfg, version, apply, abort, ack_data_loss).await
+    }
+    #[cfg(not(feature = "native-pg"))]
+    {
+        let _ = (cfg, version, apply, abort, ack_data_loss);
+        Err(RunError::PgRequiresNativePg)
+    }
+}
+
+#[cfg(feature = "native-pg")]
+async fn run_resolve_pending_pg(
     cfg: &RunConfig,
     version: &str,
     apply: bool,

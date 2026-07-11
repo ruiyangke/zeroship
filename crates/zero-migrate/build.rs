@@ -28,6 +28,17 @@ fn main() {
     // `unexpected_cfgs` warnings without resurrecting the feature or the driver.
     println!("cargo::rustc-check-cfg=cfg(feature, values(\"native-pg\"))");
 
+    // The former `v8-host` / `zsv8` features (the in-Rust-V8 authoring front-end +
+    // live-MySQL backend) are gone: Node owns authoring/MySQL/PG execution via the
+    // `zero-migrate-node` napi bridge, and NO `v8` may enter the build graph. The
+    // gated source (`src/frontend/`, `src/apply/backend/mysql/`, and their
+    // re-exports) stays in-tree as permanently never-compiled dead code, still
+    // spelled `#[cfg(feature = "v8-host")]` / `#[cfg(feature = "zsv8")]`. Declaring
+    // these as expected cfg values keeps the build free of `unexpected_cfgs`
+    // warnings without resurrecting the features or the `v8` dependency.
+    println!("cargo::rustc-check-cfg=cfg(feature, values(\"v8-host\"))");
+    println!("cargo::rustc-check-cfg=cfg(feature, values(\"zsv8\"))");
+
     let native_pg = std::env::var_os("CARGO_FEATURE_NATIVE_PG").is_some();
     let host_pg = std::env::var_os("CARGO_FEATURE_HOST_PG").is_some();
     if native_pg || host_pg {

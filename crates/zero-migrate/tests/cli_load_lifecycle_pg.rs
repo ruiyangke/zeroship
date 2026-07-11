@@ -1,4 +1,7 @@
-#![cfg(feature = "standalone-cli")]
+// Also requires `native-pg`: the throwaway-DB setup helpers use the compio-concrete
+// `compio_postgres` driver, which this standalone does not ship (host-pg + SQLite
+// only). Permanently-off dead code here.
+#![cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 //! Schema-lifecycle dbmate parity (PG leg) — BINARY-level e2e driving the ACTUAL
 //! `zero-migrate` binary as a subprocess against a fresh throwaway DB on the
 //! `zero_migrate_test` cluster.

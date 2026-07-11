@@ -1,4 +1,7 @@
-#![cfg(feature = "standalone-cli")]
+// Also requires `native-pg`: the throwaway-DB setup uses the compio-concrete
+// `compio_postgres` driver, which this standalone does not ship (host-pg + SQLite
+// only). Permanently-off dead code here.
+#![cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 //! BINARY-level e2e for the `zero-migrate` subcommands that were previously
 //! ONLY unit/library-tested — driven through the REAL binary as a subprocess on a
 //! fresh throwaway Postgres DB, asserting real DB state (table existence) + `status`

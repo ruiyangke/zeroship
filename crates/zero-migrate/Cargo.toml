@@ -3,19 +3,24 @@ name = "zero-migrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Portable, security-first, multi-dialect DB migration engine — native Postgres fast path plus in-process SQLite; the V8-backed JS authoring front-end + live-MySQL backend are optional behind the `v8-host` feature, so library embedders can build the guard/IR/render/PG+SQLite-apply core V8-free"
+description = "Portable, security-first, multi-dialect DB migration engine — driver-neutral Postgres seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zero-migrate-node napi bridge; the engine ships NO embedded V8."
 
 [features]
-# Extraction: the engine is a clean, runtime-free LIBRARY. The V8 bins
-# (`zero-migrate-js`, the recorder child) + the in-Rust-V8 host impls live in the
-# sibling host crate `zero-migrate-host` (which owns `clap` + the
-# `js-cli`/`standalone-cli` CLIs). This standalone is **host-pg + SQLite only** —
-# there is NO native compio Postgres driver (the vendored `compio-postgres` was a
-# monorepo private crate and is out of scope here). The engine's PG path is the
+# Extraction: the engine is a clean, runtime-free, V8-FREE LIBRARY. Authoring,
+# MySQL, and Postgres all execute in the Node process (the `@zeroship/migrate`
+# host-recorder evals the DSL → op-IR envelope; the `zero-migrate-node` napi
+# addon LOWERs + applies it over the host `pg` / `mysql2` npm drivers). This
+# standalone is **host-pg + SQLite only** — there is NO native compio Postgres
+# driver, and NO embedded V8 in the Rust build graph. The engine's PG path is the
 # driver-neutral `PgSession` seam (host-callback / napi bridge); a native Rust PG
-# driver is intentionally absent. The default build is the V8-host authoring path
-# (`v8-host`) over that generic PG seam (`host-pg`), with NO `v8` in the graph.
-default = ["v8-host"]
+# driver is intentionally absent. The default build is the driver-neutral PG seam
+# (`host-pg`) + the standalone CLI, with NO `v8` anywhere in the graph or dev-deps.
+#
+# The former `v8-host` feature — which gated the in-Rust-V8 authoring front-end
+# (`src/frontend/`) and live-MySQL backend (`src/apply/backend/mysql/`) — is GONE.
+# That Rust source remains in-tree but is permanently never-compiled (gated on the
+# `v8_host` internal cfg, which build.rs never emits); Node owns that work now.
+default = ["host-pg", "standalone-cli"]
 # The host-callback PG plumbing: the driver-neutral `PgSession` seam + the whole
 # GENERIC PG apply path (journal/drift/precondition/baseline free fns, the generic
 # `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`). It
@@ -26,32 +31,23 @@ default = ["v8-host"]
 # build (`--no-default-features --features host-pg`) stays cross-platform (no
 # io_uring), since no compio PG driver is ever present.
 host-pg = []
-# The V8-backed authoring front-end (`src/frontend/`) + live-MySQL backend
-# (`src/apply/backend/mysql/`) — made GENERIC over the `AuthoringHost`/
-# `JsDriverHost`/`RecorderPlatform` seam traits. This feature does NOT pull
-# `v8` — the in-Rust-V8 impl is the sibling host crate `zero-migrate-host`. It
-# pulls the kernel sandbox deps (via `sandbox`) and the generic PG seam
-# (`host-pg`), since the JS authoring front-end drives PG apply/introspection over
-# the driver-neutral `PgSession` seam. `--no-default-features` compiles a
-# V8-consumer-free core (guard + IR + render + PG-seam/SQLite apply + journal).
-v8-host = ["sandbox", "host-pg"]
-# Back-name alias kept for the test suite + external callers that still say `zsv8`
-# (~30 `#![cfg(feature = "zsv8")]` test files). Pre-launch we could rename them, but
-# the seam edit is orthogonal to the feature spelling — the load-bearing invariant
-# is that NEITHER `zsv8` NOR `v8-host` pulls `zeroship-runtime`/`v8` into the graph.
-zsv8 = ["v8-host"]
+# NOTE: the former `v8-host` / `zsv8` features are REMOVED. They used to gate the
+# in-Rust-V8 authoring front-end (`src/frontend/`) + live-MySQL backend
+# (`src/apply/backend/mysql/`). Node now owns authoring/MySQL/PG execution (via the
+# `@zeroship/migrate` host-recorder + the `zero-migrate-node` napi bridge over the
+# `pg`/`mysql2` npm drivers), so no in-Rust V8 host exists. That Rust source stays
+# in-tree as permanently never-compiled dead code, still spelled
+# `#[cfg(feature = "v8-host")]` / `#[cfg(feature = "zsv8")]`; build.rs declares
+# those as expected cfg values (checked-cfg) so the build stays warning-free
+# without resurrecting the feature or pulling `v8`.
+#
 # The kernel sandbox for the recorder child (seccomp/landlock/netns/rlimits). These
-# are KERNEL primitives — independent of V8 and of `zeroship-runtime`. An embedder
-# wanting the sandbox but a host-side authoring impl enables `sandbox` alone.
+# are KERNEL primitives — independent of V8. Kept for embedders that want the
+# sandbox around a host-side recorder child; not on the default path.
 sandbox = ["dep:seccompiler", "dep:landlock", "dep:libc"]
-# The JS authoring CLI + standalone runner CLIs. Pull `clap`. The V8-host bins
-# (`zeroship-migrate-js`, the recorder child) MOVED to `zeroship-migrate-runtime`
-# (they link the adapter — see §5.2), so `js-cli` no longer names a bin here; it is
-# kept only so the standalone `zeroship-migrate` bin (which STAYS) resolves clap.
-js-cli = ["dep:clap", "v8-host"]
-# Raw standalone apply/runner surface (the `zeroship-migrate` bin, which STAYS in
-# this crate — it needs no in-Rust V8 host, only child-mediated recording).
-standalone-cli = ["dep:clap", "v8-host"]
+# The standalone apply/runner CLI (the `zero-migrate` bin, which STAYS in this
+# crate — it needs no in-Rust V8 host, only child-mediated recording). Pulls clap.
+standalone-cli = ["dep:clap"]
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -167,12 +163,6 @@ required-features = ["standalone-cli"]
 # recorder resolves the child binary by name.
 
 [dev-dependencies]
-# The in-Rust-V8 host impl — injected into the seam-exercising tests so the
-# authoring/record/lint + MySQL-echo suites run THROUGH the public-`v8`-backed
-# host. A dev-dependency cycle (host → engine → [dev] host) is permitted by cargo
-# because dev-deps don't affect the normal build graph, so the runtime-free normal
-# tree is unaffected.
-zero-migrate-host = { path = "../zero-migrate-host" }
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro
 # drives the async apply flow on the compio runtime.
 compio = { workspace = true }
@@ -180,11 +170,6 @@ compio = { workspace = true }
 # (design §3 P2 gate — every confinement claim proven on a REAL temp-file
 # SQLite, never a shim). Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
-# `mysql_jsdriver_e2e` reuses the runtime real-world node:net helpers. That
-# support module also defines TLS fixtures, so its transitive test-only imports
-# must be available here even though this suite only calls `ensure_mysql` and
-# `allowlist`.
-rcgen = "0.14"
 
 [lints]
 workspace = true

@@ -425,7 +425,12 @@ pub async fn apply_sealed(
 /// This is intentionally absent from default/server builds. It takes a raw
 /// [`GuardConfig`] and performs no seal verification; only the standalone CLI
 /// feature may link it.
-#[cfg(feature = "standalone-cli")]
+///
+/// It names the compio-concrete [`PostgresBackend`] and drives the native-PG
+/// apply entrypoints, so it additionally requires `native-pg`. This standalone
+/// ships no native PG driver (host-pg + SQLite only), so it is permanently-off
+/// dead code here; the bin's PG path runs over the driver-neutral seam instead.
+#[cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_standalone(
     backend: &PostgresBackend<'_>,

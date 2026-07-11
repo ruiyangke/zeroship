@@ -341,7 +341,7 @@ pub use command::ir_apply::{
 pub use command::ir_apply::{
     apply_bundle_ir_postgres, apply_one_ir_file_postgres, apply_sealed, postgres_ir_apply_state,
 };
-#[cfg(feature = "standalone-cli")]
+#[cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 pub use command::ir_apply::apply_standalone;
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +

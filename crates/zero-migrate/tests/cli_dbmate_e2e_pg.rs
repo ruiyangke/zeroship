@@ -1,4 +1,7 @@
-#![cfg(feature = "standalone-cli")]
+// Also requires `native-pg`: the throwaway-DB setup helpers `connect`/`create_db`
+// use the compio-concrete `compio_postgres` driver, which this standalone does not
+// ship (host-pg + SQLite only). Permanently-off dead code here.
+#![cfg(all(feature = "standalone-cli", feature = "native-pg"))]
 //! Track A, Phase A3 — BINARY-level dbmate e2e: drive the ACTUAL
 //! `zero-migrate` binary as a SUBPROCESS through the full public dbmate
 //! workflow under the DEFAULT Trusted profile, on a fresh throwaway DB.
