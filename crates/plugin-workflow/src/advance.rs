@@ -230,6 +230,11 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             copy_workflow_output(result, &mut outcome);
             Ok(outcome)
         }
+        "ContinueAsNew" => {
+            let mut outcome = serde_json::json!({ "kind": "ContinueAsNew" });
+            copy_continue_as_new_input(result, &mut outcome);
+            Ok(outcome)
+        }
         "RunFailed" => {
             let mut outcome = serde_json::json!({
                 "kind": "RunFailed",
@@ -313,6 +318,14 @@ fn copy_workflow_output(source: &Value, target: &mut Value) {
     }
 }
 
+fn copy_continue_as_new_input(source: &Value, target: &mut Value) {
+    if let Some(input_ref) = source.get("inputRef").filter(|value| !value.is_null()) {
+        target["inputRef"] = input_ref.clone();
+    } else {
+        target["input"] = source.get("input").cloned().unwrap_or(Value::Null);
+    }
+}
+
 fn ensure_workflow_output(outcome: &mut Value) {
     let has_ref = outcome
         .get("outputRef")
@@ -320,6 +333,16 @@ fn ensure_workflow_output(outcome: &mut Value) {
     let has_output = outcome.get("output").is_some();
     if !has_ref && !has_output {
         outcome["output"] = Value::Null;
+    }
+}
+
+fn ensure_continue_as_new_input(outcome: &mut Value) {
+    let has_ref = outcome
+        .get("inputRef")
+        .is_some_and(|value| !value.is_null());
+    let has_input = outcome.get("input").is_some();
+    if !has_ref && !has_input {
+        outcome["input"] = Value::Null;
     }
 }
 
@@ -360,6 +383,7 @@ fn normalize_workflow_outcomes(
                 ensure_workflow_output(outcome);
             }
             "RunCompleted" => ensure_workflow_output(outcome),
+            "ContinueAsNew" => ensure_continue_as_new_input(outcome),
             "RunFailed" => {
                 if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
                     let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
@@ -1169,5 +1193,36 @@ where
         Ok(Some(wake_at))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::StepOutcome;
+
+    #[test]
+    fn continue_as_new_worker_result_round_trips_to_step_outcome() {
+        let result = worker_value_to_step_result(
+            "run_test",
+            "wfd_test",
+            serde_json::json!({
+                "kind": "ContinueAsNew",
+                "runId": "run_test",
+                "nonce": "wfd_test",
+                "workflowName": "Checkout",
+                "input": {"generation": 1}
+            }),
+        )
+        .expect("continue-as-new result");
+
+        assert_eq!(result.outcomes.len(), 1);
+        match &result.outcomes[0] {
+            StepOutcome::ContinueAsNew { input, input_ref } => {
+                assert_eq!(input.as_ref(), Some(&serde_json::json!({"generation": 1})));
+                assert!(input_ref.is_none());
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
     }
 }

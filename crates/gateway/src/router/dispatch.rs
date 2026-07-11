@@ -278,6 +278,11 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             copy_workflow_output(result, &mut outcome);
             Ok(outcome)
         }
+        "ContinueAsNew" => {
+            let mut outcome = serde_json::json!({ "kind": "ContinueAsNew" });
+            copy_continue_as_new_input(result, &mut outcome);
+            Ok(outcome)
+        }
         "RunFailed" => {
             let mut outcome = serde_json::json!({
                 "kind": "RunFailed",
@@ -364,6 +369,15 @@ fn copy_workflow_output(source: &Value, target: &mut Value) {
 }
 
 #[cfg(test)]
+fn copy_continue_as_new_input(source: &Value, target: &mut Value) {
+    if let Some(input_ref) = source.get("inputRef").filter(|value| !value.is_null()) {
+        target["inputRef"] = input_ref.clone();
+    } else {
+        target["input"] = source.get("input").cloned().unwrap_or(Value::Null);
+    }
+}
+
+#[cfg(test)]
 fn ensure_workflow_output(outcome: &mut Value) {
     let has_ref = outcome
         .get("outputRef")
@@ -371,6 +385,17 @@ fn ensure_workflow_output(outcome: &mut Value) {
     let has_output = outcome.get("output").is_some();
     if !has_ref && !has_output {
         outcome["output"] = Value::Null;
+    }
+}
+
+#[cfg(test)]
+fn ensure_continue_as_new_input(outcome: &mut Value) {
+    let has_ref = outcome
+        .get("inputRef")
+        .is_some_and(|value| !value.is_null());
+    let has_input = outcome.get("input").is_some();
+    if !has_ref && !has_input {
+        outcome["input"] = Value::Null;
     }
 }
 
@@ -399,9 +424,9 @@ fn normalize_workflow_outcomes(
             .ok_or_else(|| "outcome missing kind".to_string())?;
         // StepCompleted and Child may appear non-trailing: a dispatch can settle
         // multiple concurrent steps and spawn multiple children (startMany) in one
-        // batch. A true suspension/terminal (Sleep/Wait/RunCompleted/RunFailed) is
-        // mutually exclusive and must be the trailing entry. Compensation is a
-        // serial reverse-frontier outcome and is trailing too.
+        // batch. A true suspension/terminal is mutually exclusive and must be the
+        // trailing entry. Compensation is a serial reverse-frontier outcome and is
+        // trailing too.
         if kind != "StepCompleted" && kind != "Child" && idx != last {
             return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
@@ -418,6 +443,7 @@ fn normalize_workflow_outcomes(
                 ensure_workflow_output(outcome);
             }
             "RunCompleted" => ensure_workflow_output(outcome),
+            "ContinueAsNew" => ensure_continue_as_new_input(outcome),
             "RunFailed" => {
                 if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
                     let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
@@ -2920,6 +2946,27 @@ mod tests {
         assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
         assert_eq!(result["outcomes"][0]["stepKind"], "sideEffect");
         assert_eq!(result["outcomes"][0]["name"], "v");
+    }
+
+    #[test]
+    fn workflow_continue_as_new_preserves_seed_input() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "ContinueAsNew",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "input": {"generation": 1}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("continue-as-new result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "ContinueAsNew");
+        assert_eq!(result["outcomes"][0]["input"], serde_json::json!({"generation": 1}));
     }
 
     #[test]

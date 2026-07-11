@@ -147,6 +147,16 @@ export class SuspendSignal extends Error {
   }
 }
 
+export class ContinueAsNewSignal extends Error {
+  readonly input: unknown;
+
+  constructor(input: unknown) {
+    super("workflow continue-as-new requested");
+    this.name = "ContinueAsNewSignal";
+    this.input = input;
+  }
+}
+
 export class WorkflowMicrotaskQuiescenceBarrier {
   #version = 0;
   #stopped = false;
@@ -501,6 +511,11 @@ class JournalBackedStep implements WorkflowStep {
     })));
   }
 
+  continueAsNew<P>(input: P): Promise<never> {
+    this.#assertNotNested();
+    throw new ContinueAsNewSignal(input);
+  }
+
   async #runFrontier<T>(
     issued: { ordinal: number; nameOccurrence: number },
     name: string,
@@ -524,6 +539,7 @@ class JournalBackedStep implements WorkflowStep {
         ...outputConfig,
       };
     } catch (e) {
+      if (e instanceof ContinueAsNewSignal) throw e;
       if (e instanceof WorkflowNestedStepError) throw e;
       return {
         kind: "run",
