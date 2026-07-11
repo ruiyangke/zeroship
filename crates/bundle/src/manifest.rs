@@ -127,6 +127,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<serde_json::Value>,
 
+    /// Workflow declarations discovered at build time.
+    /// Preserved verbatim through ingest reserialization so control and worker-side
+    /// apply can fail closed when a workflow is not declared by the active deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<serde_json::Value>,
+
     /// Build-time export discovery.
     ///
     /// **Deprecated as of Stage 5c (ZS-standard refactor).** The runtime
@@ -205,6 +211,7 @@ impl Default for Manifest {
             net: NetConfig::default(),
             metadata: ManifestMetadata::default(),
             schedules: Vec::new(),
+            workflows: None,
             exports: None,
             runtime_descriptor: None,
         }
@@ -440,6 +447,7 @@ impl Manifest {
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
             schedules: Vec::new(),
+            workflows: None,
             exports: None,
             runtime_descriptor: None,
         }

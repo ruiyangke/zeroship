@@ -80,7 +80,7 @@ build_zship() {
   cp "$js_file" "$stage/blobs/$hash"
   now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   cat > "$stage/manifest.json" <<EOF
-{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"schedules":[{"name":"dw14-scheduled","workflowName":"ScheduledWorkflow","input":{"case":"schedule"},"overlap":"allow","catchUp":{"mode":"skip"},"schedule":{"kind":"cron","cron_expr":"* * * * *","tz":"UTC","overlap":"allow","catchUp":{"mode":"skip"}}}],"metadata":{"compiler":"dw07-e2e","built_at":"$now"}}
+{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"workflows":["KeystoneWorkflow","SignalWorkflow","TopicSignalWorkflow","ConcurrentWorkflow","ConcurrentCommitWorkflow","SingleCommitWorkflow","SideEffectWorkflow","BareAwaitWorkflow","NameDivergenceWorkflow","CompensationWorkflow","CompensationNameDivergenceWorkflow","ScheduledWorkflow","BenchWorkflow","BlobOutputWorkflow","StreamLimitWorkflow","ChildEchoWorkflow","ChildFailWorkflow","ChildBlockWorkflow","ChildTrackedBlockWorkflow","ParentCallWorkflow","ParentStartManyWorkflow","ParentCatchChildFailureWorkflow","ParentCascadeWorkflow","ParentManyCascadeWorkflow","ContinueAsNewWorkflow","CompensableCarryWorkflow"],"schedules":[{"name":"dw14-scheduled","workflowName":"ScheduledWorkflow","input":{"case":"schedule"},"overlap":"allow","catchUp":{"mode":"skip"},"schedule":{"kind":"cron","cron_expr":"* * * * *","tz":"UTC","overlap":"allow","catchUp":{"mode":"skip"}}}],"metadata":{"compiler":"dw07-e2e","built_at":"$now"}}
 EOF
   (cd "$stage" && tar --format=ustar -cf - manifest.json "blobs/$hash") \
     | zstd -q -f -o "$out_path"
@@ -481,6 +481,47 @@ export class ParentManyCascadeWorkflow {
   }
 }
 
+export class ContinueAsNewWorkflow {
+  async run(trigger, step) {
+    if (!trigger.input.generation) {
+      const before = await step.run("before-can", () => bump(trigger.runId, "before-can"));
+      await step.continueAsNew({
+        generation: 1,
+        case: trigger.input.case,
+        previousRunId: trigger.runId,
+        marker: before,
+      });
+    }
+    const after = await step.run("after-can", () => bump(trigger.runId, "after-can"));
+    return {
+      generation: trigger.input.generation,
+      case: trigger.input.case,
+      previousRunId: trigger.input.previousRunId,
+      marker: trigger.input.marker,
+      after,
+    };
+  }
+}
+
+export class CompensableCarryWorkflow {
+  async run(trigger, step) {
+    const done = await step.run(
+      "compensable",
+      {
+        compensate: async (output) => {
+          await commit(trigger.runId, "undo:compensable", output.step);
+        },
+      },
+      () => bump(trigger.runId, "compensable"),
+    );
+    await step.continueAsNew({
+      generation: 1,
+      case: trigger.input.case,
+      done,
+    });
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
@@ -510,6 +551,8 @@ export default {
     ParentCatchChildFailureWorkflow,
     ParentCascadeWorkflow,
     ParentManyCascadeWorkflow,
+    ContinueAsNewWorkflow,
+    CompensableCarryWorkflow,
   },
 };
 EOF

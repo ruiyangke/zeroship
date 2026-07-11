@@ -98,6 +98,8 @@ interface Manifest {
   net?: NetConfig;
   /** Build-time workflow schedule registrations. */
   schedules?: WireScheduleRegistration[];
+  /** Build-time workflow declarations. */
+  workflows?: unknown;
   /**
    * The generated runtime schema descriptor (`schema.runtime.json`) carried by
    * the bundle. `{ hash }` is the sha256 of the `gen-types`-emitted descriptor
@@ -209,6 +211,7 @@ export interface ZshipOptions {
     transformer: "superjson" | "json";
     net?: NetConfig;
     schedules?: WireScheduleRegistration[];
+    workflows?: unknown;
   };
   /**
    * Migration/typegen settings. The packer never carries migration documents in
@@ -463,6 +466,9 @@ export async function emitZship(
   }
   if (options.rpcExtras?.schedules && options.rpcExtras.schedules.length > 0) {
     manifest.schedules = options.rpcExtras.schedules;
+  }
+  if (options.rpcExtras?.workflows != null) {
+    manifest.workflows = options.rpcExtras.workflows;
   }
 
   // 8b. Carry the generated runtime schema descriptor. Migration documents are
