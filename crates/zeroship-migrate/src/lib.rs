@@ -134,6 +134,14 @@ pub use apply::backend::{
 // struct, but its only consumers are the PG session leaves). Behind `native-pg`.
 #[cfg(feature = "native-pg")]
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
+// The driver-neutral `PgSession` seam types (§A). Public so a host (napi) driver
+// can construct return values / binds, and so error consumers read the neutral
+// `SeamError` (SQLSTATE in `.code`) instead of downcasting to the concrete
+// `compio_postgres::Error`. Behind `native-pg` (the seam module's gate).
+#[cfg(feature = "native-pg")]
+pub use apply::backend::postgres::seam::{FromSeam, SeamBind, SeamError, SeamRow, SeamValue};
+#[cfg(feature = "native-pg")]
+pub use apply::backend::postgres::session::PgSession;
 // MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
 #[cfg(feature = "zsv8")]
 pub use apply::backend::{
