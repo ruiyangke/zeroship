@@ -27,6 +27,12 @@ pub mod session;
 /// JSON strings, callable directly or through the napi entrypoints.
 pub mod api;
 
+/// Host-authoring lower (§D.1): turn a pure-JS `.ir.json` envelope into the
+/// `Vec<Migration>` the engine consumes, folding the authoritative
+/// `Checksum::of_ir` in Rust. Pure functions (no napi); the `applyIr`/`statusIr`
+/// bridge entrypoints wrap them.
+pub mod lower;
+
 /// The N-API transport: `#[napi]` entrypoints, the `ThreadsafeFunction`-backed
 /// [`session::VerbDispatch`], and the `JsDeferred` fire-and-resolve wrapper. Only
 /// compiled with the `napi` feature (needs the Node ABI); the pure-Rust core above

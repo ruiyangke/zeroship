@@ -13,7 +13,16 @@ const shared = {
 export default defineConfig([
   {
     ...shared,
-    entry: ["src/index.ts"],
+    // The public DSL entry (`.`) + the HOST facade (`./host`, §D.3) + the pure-JS
+    // host recorder (`./host-recorder`, §D.1). `pg`/`mysql2` are optionalDependencies
+    // resolved at runtime — external so the bundle never inlines them; the addon is
+    // loaded via `createRequire` at runtime (a `.node`), never bundled.
+    entry: {
+      index: "src/index.ts",
+      host: "src/host/index.ts",
+      "host-recorder": "src/host-recorder.ts",
+    },
+    external: ["pg", "mysql2", "mysql2/promise"],
     clean: true,
   },
   // The engine-embedded recorder artifact (DSL redesign S0.5): ONE

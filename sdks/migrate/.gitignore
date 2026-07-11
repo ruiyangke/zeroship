@@ -1,0 +1,4 @@
+# napi prebuild binary — built by `napi build` / published to npm, never committed
+native/*.node
+# dev-only native-pg reference binary for the differential oracle (heavy: compio + zsv8)
+tests/host/native-ref/target/
