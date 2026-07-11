@@ -161,6 +161,7 @@ interface WorkflowStep {
     items: readonly StartManyItem<P>[],
     opts?: ChildWorkflowOptions,
   ): Promise<O[]>;
+  continueAsNew<P = unknown>(input: P): Promise<never>;
 }
 ```
 
@@ -318,6 +319,28 @@ const outputs = await step.startMany(SendReceipt, [
 
 Results are returned in issue order. The shipped batch cap is 1,000 items; over
 the cap throws `LimitExceededError`.
+
+### `step.continueAsNew`
+
+`step.continueAsNew(input)` completes the current generation and starts a fresh
+root generation of the same workflow with `input`.
+
+```ts
+if (trigger.input.page < nextPage) {
+  await step.continueAsNew({
+    page: nextPage,
+    cursor,
+  });
+}
+```
+
+The call never returns. Use it as the final action in the workflow body. The
+fresh generation starts from ordinal `0`, receives the supplied input as its
+trigger input, and uses the active deploy when the transition is applied.
+
+`step.continueAsNew` cannot be called from inside a step body. If the current
+generation has pending compensators, the transition is rejected with
+`CompensableCarryError` and no successor generation is created.
 
 ## Instances
 
@@ -674,6 +697,7 @@ The SDK exports these workflow error classes:
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over 1,000 items or output over the blob cap. | Sometimes. Local `step.startMany` cap is catchable; committed cap failures are terminal. |
+| `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. Finish or clear compensation first; no successor generation is created. |
 | `RestartError` | A run restart request is invalid or cannot be applied. | Outside `run()` only, around `run.restart(...)`. |
 
 The package also exports compatibility classes for stored wait timeouts and
