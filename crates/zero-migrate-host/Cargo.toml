@@ -1,0 +1,22 @@
+[package]
+name = "zero-migrate-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-Rust V8 host impl for the zero-migrate engine seams (AuthoringHost / RecorderPlatform / JsDriverHost), backed by the public `v8` crate. Injected into the engine's V8-host tests and linked by the authoring/recorder CLIs."
+
+[dependencies]
+# The engine, with the V8-host seam surface (traits + the frontend/mysql host-
+# generic code) enabled. This host crate provides the concrete impls.
+zero-migrate = { path = "../zero-migrate", default-features = false, features = ["v8-host", "js-cli"] }
+
+# The public V8 bindings (rusty_v8). This is the ONLY heavy dependency — the host
+# impl adapts the module-graph eval / global-install logic onto public v8, with no
+# dependency on any zeroship-internal runtime crate.
+v8 = "147"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
