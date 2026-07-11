@@ -129,6 +129,14 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         deploy_hash: &str,
     ) -> Result<Bytes, BlobError>;
 
+    /// Delete one per-deploy manifest object. Returns `true` when an object was
+    /// present and removed, `false` when it was already absent.
+    ///
+    /// Content-addressed blobs under `blobs/` are NOT app-owned and are not
+    /// deleted here; this only removes the manifest handle
+    /// `manifests/<app_id>/<deploy_hash>.json`.
+    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError>;
+
     /// Delete every manifest object owned by `app_id` (the
     /// `manifests/<app_id>/` keyspace). Called by control's `purge_app`
     /// BEFORE the registry cascade, replacing the legacy VFS delete.
@@ -470,6 +478,15 @@ impl BlobStore for LocalDiskBlobStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(BlobError::NotFound(
                 format!("{app_id}/{deploy_hash}"),
             )),
+            Err(e) => Err(BlobError::Io(e)),
+        }
+    }
+
+    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError> {
+        let path = self.manifest_path(app_id, deploy_hash);
+        match compio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(BlobError::Io(e)),
         }
     }

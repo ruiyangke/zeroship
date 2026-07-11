@@ -171,6 +171,14 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
     }
 
+    async fn delete_manifest(
+        &self,
+        _a: &Uuid,
+        _d: &str,
+    ) -> Result<bool, zeroship_bundle::BlobError> {
+        Ok(false)
+    }
+
     async fn delete_app_manifests(
         &self,
         _a: &Uuid,

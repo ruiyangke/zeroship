@@ -16,6 +16,7 @@
 pub mod audit_retention;
 pub mod billing_notify;
 pub mod billing_reconcile;
+pub mod deploy_retention;
 pub mod dunning;
 pub mod metering_export;
 pub mod orphaned_app_reaper;
@@ -176,6 +177,13 @@ pub fn spawn_all_with_options(
                 workflow_retention::DEFAULT_TICK_SECS,
             )
             .await;
+        })
+        .detach();
+
+        let deploy_retention_state = Arc::clone(&state);
+        compio::runtime::spawn(async move {
+            deploy_retention::run(deploy_retention_state, deploy_retention::DEFAULT_TICK_SECS)
+                .await;
         })
         .detach();
     }

@@ -756,6 +756,13 @@ mod tests {
         ) -> Result<bytes::Bytes, BlobError> {
             unimplemented!("not used by the gateway")
         }
+        async fn delete_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+        ) -> Result<bool, BlobError> {
+            unimplemented!("not used by the gateway")
+        }
         async fn delete_app_manifests(&self, _app_id: &uuid::Uuid) -> Result<(), BlobError> {
             unimplemented!("not used by the gateway")
         }

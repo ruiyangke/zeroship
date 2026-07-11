@@ -439,6 +439,32 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
         .await
         .expect("[{tag}] identical manifest replay is ok");
 
+    assert!(
+        store
+            .delete_manifest(&app_a, "deploytwo")
+            .await
+            .expect("[{tag}] delete one manifest"),
+        "[{tag}] deploytwo should exist before single delete"
+    );
+    assert!(
+        matches!(
+            store.get_manifest(&app_a, "deploytwo").await,
+            Err(BlobError::NotFound(_))
+        ),
+        "[{tag}] deploytwo gone after single delete"
+    );
+    assert!(
+        !store
+            .delete_manifest(&app_a, "deploytwo")
+            .await
+            .expect("[{tag}] repeat single delete"),
+        "[{tag}] repeated single delete reports absent"
+    );
+    store
+        .put_manifest(&app_a, "deploytwo", &manifest_a2)
+        .await
+        .expect("[{tag}] restore deploytwo before app purge");
+
     // get of a missing manifest → NotFound.
     assert!(
         matches!(store.get_manifest(&app_a, "nope").await, Err(BlobError::NotFound(_))),

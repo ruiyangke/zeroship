@@ -140,6 +140,21 @@ async fn local_disk_round_trip_manifest() {
     let got = store.get_manifest(&app_id, &deploy_hash).await.unwrap();
     assert_eq!(got.as_ref(), json);
 
+    assert!(store
+        .delete_manifest(&app_id, &deploy_hash)
+        .await
+        .expect("delete manifest"));
+    assert!(matches!(
+        store.get_manifest(&app_id, &deploy_hash).await,
+        Err(BlobError::NotFound(_))
+    ));
+    assert!(!store
+        .delete_manifest(&app_id, &deploy_hash)
+        .await
+        .expect("repeat delete manifest"));
+
+    store.put_manifest(&app_id, &deploy_hash, json).await.unwrap();
+
     // Missing manifest → NotFound.
     let other = Uuid::new_v4();
     let err = store

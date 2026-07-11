@@ -24,7 +24,9 @@ use ntex::web::{self, test};
 use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
-use zeroship_control::cron::{workflow_blob_gc, workflow_retention, workflow_schedules};
+use zeroship_control::cron::{
+    deploy_retention, workflow_blob_gc, workflow_retention, workflow_schedules,
+};
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, RunUpdate, StepCheckpoint, StepDispatcher,
     StepRequest, StepResult, WorkflowEngineConfig,
@@ -525,6 +527,57 @@ async fn seed_app_and_deploy_on_plan(
         .await
         .expect("insert deploy");
     (app_id, deploy_id)
+}
+
+async fn seed_additional_deploy(fx: &Fixture, app_id: Uuid, label: &str) -> String {
+    let deploy_id = format!("dep_{}_{}", label, Uuid::new_v4().simple());
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
+             VALUES ($1, $2, $3, $4, now())",
+            &[
+                &deploy_id,
+                &app_id,
+                &format!("hash-{deploy_id}"),
+                &serde_json::json!({"version":1,"workflows":["TestWorkflow"]}).to_string(),
+            ],
+        )
+        .await
+        .expect("insert additional deploy");
+    deploy_id
+}
+
+async fn age_deploy(fx: &Fixture, deploy_id: &str, activated_at: DateTime<Utc>) {
+    fx.pg
+        .execute(
+            "UPDATE zeroship.app_deploys \
+                SET activated_at = $2, created_at = $2 \
+              WHERE id = $1",
+            &[&deploy_id, &activated_at],
+        )
+        .await
+        .expect("age deploy");
+}
+
+async fn put_manifest_for_deploy(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> String {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT deploy_hash, manifest_json \
+               FROM zeroship.app_deploys \
+              WHERE id = $1 AND app_id = $2",
+            &[&deploy_id, &app_id],
+        )
+        .await
+        .expect("load deploy manifest");
+    let deploy_hash: String = row.get("deploy_hash");
+    let manifest_json: String = row.get("manifest_json");
+    fx.state
+        .blob_store
+        .put_manifest(&app_id, &deploy_hash, manifest_json.as_bytes())
+        .await
+        .expect("put deploy manifest");
+    deploy_hash
 }
 
 async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap: i64) -> String {
@@ -3024,6 +3077,247 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
         .await
         .expect("run retention sweep again");
         assert_eq!(again, workflow_retention::RetentionStats::default());
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+#[serial]
+async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal() {
+    let Some(fx) = isolated_fixture("deploy-retention-drain").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, old_deploy) = seed_app_and_deploy(&fx, "deploy-retention-drain").await;
+        age_deploy(
+            &fx,
+            &old_deploy,
+            Utc::now() - ChronoDuration::minutes(10),
+        )
+        .await;
+        let old_hash = put_manifest_for_deploy(&fx, app_id, &old_deploy).await;
+        let live_run = seed_run(
+            &fx,
+            app_id,
+            &old_deploy,
+            "sleeping",
+            60_000,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let active_deploy = seed_additional_deploy(&fx, app_id, "deploy-retention-active").await;
+        let active_hash = put_manifest_for_deploy(&fx, app_id, &active_deploy).await;
+
+        let count = deploy_retention::deploy_pinned_run_count(
+            fx.pg.inner.as_ref(),
+            &app_id,
+            &old_deploy,
+        )
+        .await
+        .expect("count pinned runs");
+        assert_eq!(count, 1);
+        assert!(
+            !deploy_retention::deploy_bundle_reclaimable(
+                fx.pg.inner.as_ref(),
+                &app_id,
+                &old_deploy,
+            )
+            .await
+            .expect("old deploy guard while live"),
+            "superseded deploy with a live pinned run must be retained"
+        );
+        assert!(
+            !deploy_retention::deploy_bundle_reclaimable(
+                fx.pg.inner.as_ref(),
+                &app_id,
+                &active_deploy,
+            )
+            .await
+            .expect("active deploy guard"),
+            "active deploy must not be reclaimable even with no pinned runs"
+        );
+
+        let retained = deploy_retention::tick_with_config(
+            &fx.state,
+            deploy_retention::DeployRetentionConfig {
+                grace_window_ms: 0,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("deploy retention tick with live pin");
+        assert_eq!(retained.candidates, 1);
+        assert_eq!(retained.retained_live_pins, 1);
+        assert_eq!(retained.manifests_deleted, 0);
+        assert!(fx
+            .state
+            .blob_store
+            .get_manifest(&app_id, &old_hash)
+            .await
+            .is_ok());
+
+        fx.pg
+            .execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET state = 'completed', wake_at = NULL, terminal_at = now() \
+                  WHERE id = $1",
+                &[&live_run],
+            )
+            .await
+            .expect("complete pinned run");
+
+        let drained_count = deploy_retention::deploy_pinned_run_count(
+            fx.pg.inner.as_ref(),
+            &app_id,
+            &old_deploy,
+        )
+        .await
+        .expect("count drained runs");
+        assert_eq!(drained_count, 0);
+        assert!(
+            deploy_retention::deploy_bundle_reclaimable(
+                fx.pg.inner.as_ref(),
+                &app_id,
+                &old_deploy,
+            )
+            .await
+            .expect("old deploy guard after drain"),
+            "superseded deploy with zero live pins must be reclaimable"
+        );
+
+        let reclaimed = deploy_retention::tick_with_config(
+            &fx.state,
+            deploy_retention::DeployRetentionConfig {
+                grace_window_ms: 0,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("deploy retention tick after drain");
+        assert_eq!(reclaimed.candidates, 1);
+        assert_eq!(reclaimed.retained_live_pins, 0);
+        assert_eq!(reclaimed.manifests_deleted, 1);
+        assert!(matches!(
+            fx.state.blob_store.get_manifest(&app_id, &old_hash).await,
+            Err(zeroship_bundle::BlobError::NotFound(_))
+        ));
+        assert!(
+            fx.state
+                .blob_store
+                .get_manifest(&app_id, &active_hash)
+                .await
+                .is_ok(),
+            "active deploy manifest must survive deploy retention"
+        );
+    })
+    .await
+    .expect("test timeout");
+}
+
+#[compio::test]
+#[serial]
+async fn deploy_retention_counts_are_per_app() {
+    let Some(fx) = isolated_fixture("deploy-retention-per-app").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_a, old_a) = seed_app_and_deploy(&fx, "deploy-retention-app-a").await;
+        let (app_b, old_b) = seed_app_and_deploy(&fx, "deploy-retention-app-b").await;
+        let old_at = Utc::now() - ChronoDuration::minutes(10);
+        age_deploy(&fx, &old_a, old_at).await;
+        age_deploy(&fx, &old_b, old_at).await;
+        let old_a_hash = put_manifest_for_deploy(&fx, app_a, &old_a).await;
+        let old_b_hash = put_manifest_for_deploy(&fx, app_b, &old_b).await;
+
+        let _run_a = seed_run(
+            &fx, app_a, &old_a, "queued", 60_000, None, None, None, None,
+        )
+        .await;
+        let _run_b = seed_run(
+            &fx, app_b, &old_b, "completed", -1_000, None, None, None, None,
+        )
+        .await;
+        let active_a = seed_additional_deploy(&fx, app_a, "deploy-retention-app-a-live").await;
+        let active_b = seed_additional_deploy(&fx, app_b, "deploy-retention-app-b-live").await;
+        let active_a_hash = put_manifest_for_deploy(&fx, app_a, &active_a).await;
+        let active_b_hash = put_manifest_for_deploy(&fx, app_b, &active_b).await;
+
+        let count_a = deploy_retention::deploy_pinned_run_count(
+            fx.pg.inner.as_ref(),
+            &app_a,
+            &old_a,
+        )
+        .await
+        .expect("count app a pins");
+        let count_b = deploy_retention::deploy_pinned_run_count(
+            fx.pg.inner.as_ref(),
+            &app_b,
+            &old_b,
+        )
+        .await
+        .expect("count app b pins");
+        assert_eq!(count_a, 1);
+        assert_eq!(count_b, 0);
+        assert!(
+            !deploy_retention::deploy_bundle_reclaimable(
+                fx.pg.inner.as_ref(),
+                &app_a,
+                &old_a,
+            )
+            .await
+            .expect("app a guard")
+        );
+        assert!(
+            deploy_retention::deploy_bundle_reclaimable(
+                fx.pg.inner.as_ref(),
+                &app_b,
+                &old_b,
+            )
+            .await
+            .expect("app b guard")
+        );
+
+        let stats = deploy_retention::tick_with_config(
+            &fx.state,
+            deploy_retention::DeployRetentionConfig {
+                grace_window_ms: 0,
+                batch_size: 16,
+            },
+        )
+        .await
+        .expect("deploy retention tick");
+        assert_eq!(stats.candidates, 2);
+        assert_eq!(stats.retained_live_pins, 1);
+        assert_eq!(stats.manifests_deleted, 1);
+
+        assert!(
+            fx.state
+                .blob_store
+                .get_manifest(&app_a, &old_a_hash)
+                .await
+                .is_ok(),
+            "app A old deploy stays because app A still has a live pin"
+        );
+        assert!(matches!(
+            fx.state.blob_store.get_manifest(&app_b, &old_b_hash).await,
+            Err(zeroship_bundle::BlobError::NotFound(_))
+        ));
+        assert!(fx
+            .state
+            .blob_store
+            .get_manifest(&app_a, &active_a_hash)
+            .await
+            .is_ok());
+        assert!(fx
+            .state
+            .blob_store
+            .get_manifest(&app_b, &active_b_hash)
+            .await
+            .is_ok());
     })
     .await
     .expect("test timeout");
