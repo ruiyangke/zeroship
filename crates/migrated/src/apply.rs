@@ -962,7 +962,11 @@ async fn provision_runtime_app_role(
     .await?;
 
     conn.batch_execute(&format!(
-        "GRANT USAGE, CREATE ON SCHEMA {schema_q} TO {role_q};
+        // USAGE only — the runtime role does DML, never DDL. Object creation
+        // (tables, sequences) is the migrator role's job; plugin-db's
+        // register_model is a no-op on Postgres. Granting CREATE here would let
+        // app runtime code author schema objects, which it must not.
+        "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
