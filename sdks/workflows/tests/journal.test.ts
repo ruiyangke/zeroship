@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { FrontierOutcome, JournalEnvelope } from "../src/journal.ts";
 import {
   createJournalStep,
+  ContinueAsNewSignal,
   getJournalFrontierDrainPromise,
   isWorkflowStepPromise,
   isJournalFrontierObserved,
@@ -692,6 +693,26 @@ test("nested step call after an await inside a frontier callback throws Workflow
         await Promise.resolve();
         return step.run("inner", () => "inner");
       }),
+    WorkflowNestedStepError,
+  );
+});
+
+test("step.continueAsNew throws terminal signal with seed input", { timeout: TEST_TIMEOUT_MS }, () => {
+  const step = createJournalStep(envelope());
+  assert.throws(
+    () => step.continueAsNew({ generation: 1 }),
+    (err) => {
+      assert.ok(err instanceof ContinueAsNewSignal);
+      assert.deepEqual(err.input, { generation: 1 });
+      return true;
+    },
+  );
+});
+
+test("step.continueAsNew is illegal inside a step callback", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  await assert.rejects(
+    () => step.run("outer", () => step.continueAsNew({ generation: 1 })),
     WorkflowNestedStepError,
   );
 });

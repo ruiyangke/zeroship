@@ -127,6 +127,7 @@ export interface WorkflowStep {
     items: readonly StartManyItem<P>[],
     opts?: ChildWorkflowOptions,
   ): Promise<O[]>;
+  continueAsNew<P = unknown>(input: P): Promise<never>;
 }
 
 export type Step = WorkflowStep;
@@ -223,6 +224,15 @@ export class LimitExceededError extends Error {
   constructor(message = "workflow limit exceeded") {
     super(message);
     this.name = "LimitExceededError";
+  }
+}
+
+export class CompensableCarryError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "cannot continue as new while compensable steps are pending") {
+    super(message);
+    this.name = "CompensableCarryError";
   }
 }
 

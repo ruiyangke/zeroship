@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   ChildCancelledError,
   ChildTimeoutError,
+  CompensableCarryError,
   LimitExceededError,
   NondeterministicError,
   PermanentError,
@@ -912,16 +913,18 @@ function deserializeError(error: JournalStepRecord["error"]): Error {
           : error?.type === "ChildTimeoutError"
             ? new ChildTimeoutError(message)
             : error?.type === "LimitExceededError"
-              ? new LimitExceededError(message)
-              : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
-                ? new WorkflowStepTimeoutError(message)
-                : error?.type === "WorkflowTimeoutError"
-                  ? new WorkflowTimeoutError(message)
-                  : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
-                    ? new WorkflowNestedStepError(message)
-                    : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
-                      ? new WorkflowUnsupportedError(message)
-                      : new Error(message);
+            ? new LimitExceededError(message)
+              : error?.type === "CompensableCarryError"
+                ? new CompensableCarryError(message)
+                : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
+                  ? new WorkflowStepTimeoutError(message)
+                  : error?.type === "WorkflowTimeoutError"
+                    ? new WorkflowTimeoutError(message)
+                    : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
+                      ? new WorkflowNestedStepError(message)
+                      : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
+                        ? new WorkflowUnsupportedError(message)
+                        : new Error(message);
   e.name = error?.type ?? e.name;
   if (error?.stack) e.stack = error.stack;
   return e;
