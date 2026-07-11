@@ -1312,6 +1312,11 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
     }
     const workflowName = typeof envelope.workflowName === "string" ? envelope.workflowName : "";
     if (!workflowName) throw wfErr("workflowName is required", 400, "INVALID_ARGUMENT");
+    const env = envelope;
+    const terminalBatch = workflowTerminalResult;
+    const resultBatch = workflowBatchResult;
+    const ContinueAsNewSignal = ZsWorkflowContinueAsNewSignal;
+    const SuspendSignal = ZsWorkflowSuspendSignal;
     try {
         const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
         const workflow = new WorkflowClass();
@@ -1357,14 +1362,18 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             output,
         });
     } catch (e) {
-        if (e instanceof ZsWorkflowContinueAsNewSignal) return workflowTerminalResult(envelope, {
-            kind: "ContinueAsNew",
-            runId: envelope.runId,
-            nonce: envelope.nonce,
-            workflowName,
-            input: e.input,
+      if (e instanceof ContinueAsNewSignal) {
+        return terminalBatch(env, {
+          kind: "ContinueAsNew",
+          runId: env.runId,
+          nonce: env.nonce,
+          workflowName,
+          input: e.input,
         });
-        if (e instanceof ZsWorkflowSuspendSignal) return workflowBatchResult(envelope, e.outcomes);
+      }
+      if (e instanceof SuspendSignal) {
+        return resultBatch(env, e.outcomes);
+      }
         return workflowTerminalResult(envelope, {
             kind: "RunFailed",
             runId: envelope.runId,
