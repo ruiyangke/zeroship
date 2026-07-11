@@ -1,0 +1,30 @@
+# Native-pg REFERENCE binary for the Phase-D differential oracle (design §7 Phase D
+# / §F.5). This is NOT part of the shipped addon — it is a dev-only genuine
+# `native-pg` (compio) apply of an `.ir.json` on PG, so the oracle can assert the
+# host apply's journal == a REAL native-pg apply's journal (Oracle 1), not
+# host==self. It depends on `zeroship-migrate` with the DEFAULT `native-pg` feature
+# (compio-postgres), so it necessarily pulls io_uring — which is exactly why it
+# stays OUT of the cross-platform addon and lives here as an oracle fixture.
+#
+# Standalone workspace (own [workspace] table) so it does not perturb the addon's
+# excluded-leaf feature isolation or the platform lockfile.
+[workspace]
+
+[package]
+name = "migrate-native-ref"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "migrate-native-ref"
+path = "src/main.rs"
+
+[dependencies]
+# native-pg (compio) apply core + the standalone `.ir.json` PG apply entry.
+# `standalone-cli` exposes `apply_standalone` (the public `.ir.json` PG apply entry);
+# it transitively pulls `zsv8` (V8), so this reference binary is heavy — acceptable
+# for a dev-only oracle fixture, and kept OUT of the shipped addon.
+zeroship-migrate = { path = "../../../../../crates/zeroship-migrate", default-features = false, features = ["native-pg", "standalone-cli"] }
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+serde_json = "1"
