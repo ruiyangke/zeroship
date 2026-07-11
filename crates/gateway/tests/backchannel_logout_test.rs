@@ -342,6 +342,14 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
     }
 
+    async fn delete_manifest(
+        &self,
+        _app_id: &Uuid,
+        _deploy_hash: &str,
+    ) -> Result<bool, zeroship_bundle::BlobError> {
+        Ok(false)
+    }
+
     async fn delete_app_manifests(
         &self,
         _app_id: &Uuid,
