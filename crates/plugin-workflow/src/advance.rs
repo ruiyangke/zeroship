@@ -786,6 +786,8 @@ where
         registrations.push(registration);
     }
     collect_parent_after_child_apply(conn, tables, run_id, &mut seen, &mut registrations).await?;
+    collect_continued_as_new_successor(conn, tables, run_id, &mut seen, &mut registrations)
+        .await?;
     Ok(registrations)
 }
 
@@ -831,6 +833,55 @@ where
         )
         .await?;
     if let Some(row) = parent_rows.first() {
+        let registration = registration_for_row(conn, tables, row).await?;
+        seen.insert(registration.run_id.clone());
+        registrations.push(registration);
+    }
+    Ok(())
+}
+
+async fn collect_continued_as_new_successor<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+    seen: &mut HashSet<String>,
+    registrations: &mut Vec<WorkflowAdvanceRegistration>,
+) -> Result<(), WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT continued_as_new_run_id \
+                   FROM {} \
+                  WHERE id = $1 \
+                    AND continued_as_new_run_id IS NOT NULL",
+                tables.runs
+            ),
+            &[&run_id],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(());
+    };
+    let successor_run_id: String = row.get("continued_as_new_run_id");
+    if seen.contains(&successor_run_id) {
+        return Ok(());
+    }
+
+    let successor_rows = conn
+        .query(
+            &format!(
+                "SELECT id, app_id, state, wake_at, cancel_requested, claimed_by, dispatch_nonce, waiting_step_key \
+                   FROM {} \
+                  WHERE id = $1",
+                tables.runs
+            ),
+            &[&successor_run_id],
+        )
+        .await?;
+    if let Some(row) = successor_rows.first() {
         let registration = registration_for_row(conn, tables, row).await?;
         seen.insert(registration.run_id.clone());
         registrations.push(registration);
