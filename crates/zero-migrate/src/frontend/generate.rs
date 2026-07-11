@@ -48,7 +48,14 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// `generate_migration` introspects a LIVE Postgres over the compio-concrete
+// `conn::connect` (`Client`) — both `native-pg`-only. This standalone ships no
+// native PG driver (host-pg + SQLite only), so the live-DB generate path is
+// permanently-off dead code here; the pure `render_dbmate`/slug/timestamp
+// helpers below stay live.
+#[cfg(feature = "native-pg")]
 use crate::apply::drift::snapshot_schema;
+#[cfg(feature = "native-pg")]
 use crate::conn;
 use crate::model::migration::Migration;
 use crate::render::declarative::{
@@ -58,6 +65,7 @@ use crate::render::declarative::{
 use super::eval::{eval_schema_to_ir, EvalError};
 
 /// A failure from [`generate_migration`].
+#[cfg(feature = "native-pg")]
 #[derive(Debug, thiserror::Error)]
 pub enum GenerateError {
     /// The `schema.js` eval / lowering failed.
@@ -77,6 +85,7 @@ pub enum GenerateError {
 }
 
 /// The result of a successful [`generate_migration`].
+#[cfg(feature = "native-pg")]
 #[derive(Debug)]
 pub struct GenerateOutcome {
     /// The migration file written (absolute or as-passed dir + name). `None`
@@ -103,6 +112,7 @@ pub struct GenerateOutcome {
 ///
 /// # Errors
 /// See [`GenerateError`].
+#[cfg(feature = "native-pg")]
 pub async fn generate_migration(
     schema_source: &str,
     database_url: &str,

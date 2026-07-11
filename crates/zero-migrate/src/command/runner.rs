@@ -889,10 +889,13 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 
 /// The Platform Postgres `.ts` leg of `migrate`.
 ///
-/// Drives the V8 authoring front-end (records `.ts` → transient IR), so it is
-/// compiled only under `zsv8`; the V8-free build routes the `Ts` arm to
-/// [`RunError::TsRecordRequiresZsv8`] instead.
-#[cfg(feature = "v8-host")]
+/// Drives the V8 authoring front-end (records `.ts` → transient IR) and applies
+/// the recorded IR to LIVE Postgres over the compio-concrete `connect` /
+/// `apply_platform_ts_postgres` (`native-pg`-only). It is only reachable from the
+/// `native-pg`-gated `run_migrate_pg`, so it is gated on BOTH features; the
+/// V8-free build routes the `Ts` arm to [`RunError::TsRecordRequiresZsv8`], and
+/// this standalone (no native PG driver) never reaches it.
+#[cfg(all(feature = "v8-host", feature = "native-pg"))]
 async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);

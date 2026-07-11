@@ -62,12 +62,17 @@ use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, LockMode};
 use crate::apply::journal::{DeployRecoveryScope, PendingContract};
 use crate::approval::ApprovalScope;
-// The `.ts`-record apply path lives in the `zsv8`-gated `ts_record` submodule
-// (it drives the V8 authoring front-end). The V8-free IR-load / sealed-apply
-// surface below carries no `crate::frontend` edge.
-#[cfg(feature = "v8-host")]
+// The `.ts`-record apply path lives in the `ts_record` submodule (it drives the
+// V8 authoring front-end). It applies recorded IR to LIVE Postgres over the
+// compio-concrete apply entrypoints (`postgres_ir_apply_state` /
+// `apply_one_ir_document_postgres`, both `native-pg`-only), so it requires BOTH
+// the V8 host AND a native PG driver. This standalone ships no native PG driver
+// (host-pg + SQLite only), so `native-pg` is never enabled and this path is
+// permanently-off dead code. The V8-free IR-load / sealed-apply surface below
+// carries no `crate::frontend` edge.
+#[cfg(all(feature = "v8-host", feature = "native-pg"))]
 mod ts_record;
-#[cfg(feature = "v8-host")]
+#[cfg(all(feature = "v8-host", feature = "native-pg"))]
 pub use ts_record::apply_platform_ts_postgres;
 use crate::PolicyProfile;
 use crate::model::migration::Migration;

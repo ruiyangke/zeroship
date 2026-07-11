@@ -20,6 +20,14 @@ fn main() {
     // `--no-default-features` build does not warn on the `cfg(pg_seam)` gates.
     println!("cargo::rustc-check-cfg=cfg(pg_seam)");
 
+    // The native compio Postgres driver (`native-pg` feature) was a monorepo
+    // private crate and is out of scope for this standalone (host-pg + SQLite
+    // only). The `native-pg` feature is no longer declared in Cargo.toml, but the
+    // compio-CONCRETE PG code (`#[cfg(feature = "native-pg")]`) stays as
+    // permanently-off dead code. Declaring the cfg keeps the build free of
+    // `unexpected_cfgs` warnings without resurrecting the feature or the driver.
+    println!("cargo::rustc-check-cfg=cfg(feature, values(\"native-pg\"))");
+
     let native_pg = std::env::var_os("CARGO_FEATURE_NATIVE_PG").is_some();
     let host_pg = std::env::var_os("CARGO_FEATURE_HOST_PG").is_some();
     if native_pg || host_pg {

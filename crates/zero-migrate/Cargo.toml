@@ -6,56 +6,35 @@ license.workspace = true
 description = "Portable, security-first, multi-dialect DB migration engine — native Postgres fast path plus in-process SQLite; the V8-backed JS authoring front-end + live-MySQL backend are optional behind the `v8-host` feature, so library embedders can build the guard/IR/render/PG+SQLite-apply core V8-free"
 
 [features]
-# Extraction Phase A: the engine is now a clean, runtime-free LIBRARY. The V8 bins
-# (`zeroship-migrate-js`, the recorder child) + the in-Rust-V8 host impls moved to
-# the monorepo adapter crate `zeroship-migrate-runtime` (which owns `clap` + the
-# `js-cli`/`standalone-cli` CLIs). The default engine build is the V8-host consumer
-# path (`v8-host`) + native PG — but with NO `zeroship-runtime`/`v8` in the graph.
-default = ["v8-host", "native-pg"]
-# The compio-postgres driver: the FIRST (native) `PgSession` impl. Gates the
-# `compio-postgres` dep AND the compio-CONCRETE PG pieces — `impl PgSession for
-# compio_postgres::Client` + the `SeamBind→ToSql` / `Row→SeamRow` /
-# `Error→SeamError` adapters (`postgres/session.rs`), `PgOnline`/`PgShadow` (the
-# online + shadow-dry-run harnesses on a compio run-loop `JoinHandle`), the
-# `From<compio_postgres::Error>` leaf error arms, `conn.rs`'s connect path,
-# `role.rs` provisioning, and the compio `&Client` executor/IR-apply entries.
-# Since Phase A neutralised the trait (`SeamBind`/`SeamRow`/`SeamError`), the
-# GENERIC apply path no longer names any `compio_postgres` type, so it is shared
-# with `host-pg` via the internal `pg_seam` cfg (see build.rs), NOT gated here.
-# Default-on, so the default build/test is byte-for-byte unchanged.
-# `zeroship-schema/introspect` rides `native-pg`: it is the profile where the
-# compio-postgres driver is present, and the declarative round-trip tests
-# (`declarative_pg.rs`, `#![cfg(feature = "native-pg")]`) call the SHARED
-# `zero_migrate_schema::diff::read_live_schema` to prove the generated DDL's
-# sentinels survive live introspection byte-identically. The engine's own
-# production path does its introspection over the driver-neutral `PgSession`
-# seam (`apply/backend/postgres/drift.rs`) and never names `read_live_schema`,
-# so the EXTRACT profile (`--no-default-features --features host-pg`, native-pg
-# OFF) leaves `introspect` off — keeping compio-postgres/core/bundle out of the
-# graph.
-native-pg = ["dep:compio-postgres", "zero-migrate-schema/introspect"]
+# Extraction: the engine is a clean, runtime-free LIBRARY. The V8 bins
+# (`zero-migrate-js`, the recorder child) + the in-Rust-V8 host impls live in the
+# sibling host crate `zero-migrate-host` (which owns `clap` + the
+# `js-cli`/`standalone-cli` CLIs). This standalone is **host-pg + SQLite only** —
+# there is NO native compio Postgres driver (the vendored `compio-postgres` was a
+# monorepo private crate and is out of scope here). The engine's PG path is the
+# driver-neutral `PgSession` seam (host-callback / napi bridge); a native Rust PG
+# driver is intentionally absent. The default build is the V8-host authoring path
+# (`v8-host`) over that generic PG seam (`host-pg`), with NO `v8` in the graph.
+default = ["v8-host"]
 # The host-callback PG plumbing: the driver-neutral `PgSession` seam + the whole
 # GENERIC PG apply path (journal/drift/precondition/baseline free fns, the generic
-# `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`),
-# compiled WITHOUT the compio-postgres driver. It supplies NO `PgSession` impl of
-# its own in this phase — the in-crate recording driver (behind `cfg(test)`) is the
-# first host-shaped producer, proving genericity ahead of the Phase-C napi bridge.
-# `native-pg` and `host-pg` both light up the shared generic path (the internal
-# `pg_seam` cfg = either feature, emitted by build.rs); `native-pg` ADDITIONALLY
-# provides the compio impl + PgOnline/PgShadow + connect + role provisioning.
-# The addon build (`--no-default-features --features host-pg`) omits
-# compio-postgres entirely, so the `.node` stays cross-platform (no io_uring).
+# `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`). It
+# supplies NO in-Rust `PgSession` impl — the in-crate recording driver (behind
+# `cfg(test)`) is the first host-shaped producer, and the napi bridge / Node
+# `PgSession` host is the production producer. `host-pg` lights up the shared
+# generic path via the internal `pg_seam` cfg (emitted by build.rs). The addon
+# build (`--no-default-features --features host-pg`) stays cross-platform (no
+# io_uring), since no compio PG driver is ever present.
 host-pg = []
 # The V8-backed authoring front-end (`src/frontend/`) + live-MySQL backend
 # (`src/apply/backend/mysql/`) — made GENERIC over the `AuthoringHost`/
-# `JsDriverHost`/`RecorderPlatform` seam traits (design §2). Extraction Phase A
-# renamed `zsv8` → `v8-host` and, crucially, this feature NO LONGER pulls
-# `zeroship-runtime` / `v8` — the in-Rust-V8 impl is the monorepo adapter crate
-# `zeroship-migrate-runtime`. It still pulls the kernel sandbox deps (via `sandbox`)
-# and `native-pg` (the JS authoring front-end does live PG introspection).
-# `--no-default-features` compiles a V8-consumer-free core (guard + IR + render +
-# PG/SQLite apply + journal), with V8 + `zeroship-runtime` absent from the graph.
-v8-host = ["sandbox", "native-pg"]
+# `JsDriverHost`/`RecorderPlatform` seam traits. This feature does NOT pull
+# `v8` — the in-Rust-V8 impl is the sibling host crate `zero-migrate-host`. It
+# pulls the kernel sandbox deps (via `sandbox`) and the generic PG seam
+# (`host-pg`), since the JS authoring front-end drives PG apply/introspection over
+# the driver-neutral `PgSession` seam. `--no-default-features` compiles a
+# V8-consumer-free core (guard + IR + render + PG-seam/SQLite apply + journal).
+v8-host = ["sandbox", "host-pg"]
 # Back-name alias kept for the test suite + external callers that still say `zsv8`
 # (~30 `#![cfg(feature = "zsv8")]` test files). Pre-launch we could rename them, but
 # the seam edit is orthogonal to the feature spelling — the load-bearing invariant
@@ -117,13 +96,10 @@ zero-migrate-schema = { workspace = true }
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
 # `&uuid::Uuid`.
 uuid = { workspace = true }
-# The Postgres executor (journal + apply flow) talks to PG over the bespoke
-# compio-native driver — ZERO tokio, per the platform invariant. Runs
-# out-of-band at deploy (not the request hot path), async on compio. OPTIONAL:
-# the sole `PgSession` driver impl, gated behind `native-pg` (default-on). A
-# `native-pg`-off embedder builds the SQLite + IR + render + guard core without
-# it.
-compio-postgres = { workspace = true, optional = true }
+# The Postgres apply flow (journal + apply) runs async on compio — ZERO tokio,
+# per the platform invariant — but always through the driver-neutral `PgSession`
+# seam. This standalone ships NO native Rust PG driver; the seam is fed by the
+# napi/Node host (production) or the in-crate recording driver (tests).
 compio = { workspace = true }
 # SQLite migration backend (design 2026-06-19 §2.1.1). The migration connection
 # is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse

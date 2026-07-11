@@ -60,6 +60,11 @@ pub use gen_types::{
     check_artifacts, load_dir_ops, render_artifacts, write_artifacts, GenTypesError,
     GeneratedArtifacts, ENV_DTS_FILE, RUNTIME_DESCRIPTOR_FILE,
 };
+// The live-DB PLATFORM generate path (`generate_migration`) introspects live
+// Postgres over the compio-concrete `conn::connect` (`native-pg`-only). This
+// standalone ships no native PG driver, so it is permanently-off dead code; the
+// pure `render_dbmate` helper stays available on the `generate` module.
+#[cfg(feature = "native-pg")]
 pub use generate::{generate_migration, GenerateError, GenerateOutcome};
 pub use scaffold::{
     generate_ops, scaffold_new_ts, timestamp_14, GeneratedMigration, ScaffoldError,
