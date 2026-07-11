@@ -1,7 +1,8 @@
 //! Leaf-crate error types for the schema layer.
 //!
-//! `zeroship-schema` is a leaf crate (deps: `serde_json` + `compio-postgres`
-//! + `zeroship-core` only). It therefore CANNOT depend on plugin-db's
+//! `zeroship-schema` is a leaf crate (deps: `serde_json` + `sha2`, plus
+//! `compio-postgres` behind the `introspect` feature). It therefore CANNOT
+//! depend on plugin-db's
 //! [`DbError`](../../zeroship_plugin_db/error/enum.DbError.html), which is
 //! built on `zeroship_runtime::state::OpError` (and would drag v8/runtime
 //! into the leaf). Instead the two fallible surfaces this crate exposes —
@@ -19,6 +20,11 @@
 /// `coded_sql("diff: <context>", e)` shape — the SQLSTATE classification
 /// is preserved because the raw driver error is carried through, and the
 /// `"diff: "` module prefix is re-attached at the boundary.
+///
+/// Gated behind the `introspect` feature: it names `compio_postgres::Error`,
+/// so it rides the introspection profile with the PG driver. The write/diff
+/// profile (the migration engine's consumer path) never sees it.
+#[cfg(feature = "introspect")]
 #[derive(Debug)]
 pub struct SchemaError {
     /// The module-local context phrase (no `"diff: "` prefix — plugin-db
@@ -31,6 +37,7 @@ pub struct SchemaError {
     pub source: compio_postgres::Error,
 }
 
+#[cfg(feature = "introspect")]
 impl SchemaError {
     /// Wrap a `compio_postgres::Error` with a context phrase.
     #[must_use]
@@ -42,12 +49,14 @@ impl SchemaError {
     }
 }
 
+#[cfg(feature = "introspect")]
 impl std::fmt::Display for SchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.context, self.source)
     }
 }
 
+#[cfg(feature = "introspect")]
 impl std::error::Error for SchemaError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)

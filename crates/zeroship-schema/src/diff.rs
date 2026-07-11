@@ -25,9 +25,11 @@
 //! introspection scaffolding so a future change can plug a real
 //! pg_get_expr inspection in.
 
+#[cfg(feature = "introspect")]
 use compio_postgres::Pool;
 use serde_json::Value;
 
+#[cfg(feature = "introspect")]
 use crate::error::SchemaError;
 
 /// Wrap a `compio_postgres::Error` in [`SchemaError`] with a context
@@ -41,6 +43,9 @@ use crate::error::SchemaError;
 /// `coded_sql("diff: <context>", e)` shape — re-attaching the `"diff: "`
 /// prefix and preserving the SQLSTATE-derived `.code` from the carried
 /// driver error. Behaviour at the V8 boundary is byte-identical.
+///
+/// Gated behind the `introspect` feature (names `compio_postgres::Error`).
+#[cfg(feature = "introspect")]
 fn coded_sql(context: &str, e: compio_postgres::Error) -> SchemaError {
     SchemaError::new(context, e)
 }
@@ -600,6 +605,7 @@ fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String>
 /// `pg_namespace -> pg_class -> pg_attribute / pg_index` and pulls
 /// `pg_get_expr(adbin, adrelid)` for default expressions along with
 /// `provolatile` for any function the default invokes.
+#[cfg(feature = "introspect")]
 pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, SchemaError> {
     let mut out = LiveSchema::default();
     let app_param = app_id.to_string();
@@ -859,6 +865,10 @@ SELECT c.relname AS table_name,
 /// Decode Postgres' single-character FK action code into the SQL
 /// keyword equivalent. The pg_constraint columns confdeltype and
 /// confupdtype use these codes (per the Postgres source: `gram.y`).
+///
+/// Called only from `read_live_schema`, so it rides the `introspect`
+/// feature (else it would be dead code in the write/diff profile).
+#[cfg(feature = "introspect")]
 fn decode_fk_action(code: &str) -> &'static str {
     match code.chars().next().unwrap_or('a') {
         'a' => "NO ACTION",
@@ -875,6 +885,7 @@ fn decode_fk_action(code: &str) -> &'static str {
 /// estimation when the table is large; the cold-start orchestrator
 /// already holds the advisory lock so an estimate is good enough for the
 /// "empty vs. non-empty" decision.
+#[cfg(feature = "introspect")]
 pub async fn estimate_row_count(
     pool: &Pool,
     app_id: &str,

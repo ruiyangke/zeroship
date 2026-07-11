@@ -22,7 +22,17 @@ default = ["v8-host", "native-pg"]
 # GENERIC apply path no longer names any `compio_postgres` type, so it is shared
 # with `host-pg` via the internal `pg_seam` cfg (see build.rs), NOT gated here.
 # Default-on, so the default build/test is byte-for-byte unchanged.
-native-pg = ["dep:compio-postgres"]
+# `zeroship-schema/introspect` rides `native-pg`: it is the profile where the
+# compio-postgres driver is present, and the declarative round-trip tests
+# (`declarative_pg.rs`, `#![cfg(feature = "native-pg")]`) call the SHARED
+# `zeroship_schema::diff::read_live_schema` to prove the generated DDL's
+# sentinels survive live introspection byte-identically. The engine's own
+# production path does its introspection over the driver-neutral `PgSession`
+# seam (`apply/backend/postgres/drift.rs`) and never names `read_live_schema`,
+# so the EXTRACT profile (`--no-default-features --features host-pg`, native-pg
+# OFF) leaves `introspect` off — keeping compio-postgres/core/bundle out of the
+# graph.
+native-pg = ["dep:compio-postgres", "zeroship-schema/introspect"]
 # The host-callback PG plumbing: the driver-neutral `PgSession` seam + the whole
 # GENERIC PG apply path (journal/drift/precondition/baseline free fns, the generic
 # `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`),

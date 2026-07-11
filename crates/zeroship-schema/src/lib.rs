@@ -42,10 +42,16 @@
 //!
 //! ## Leaf purity
 //!
-//! Deps: `serde_json` + `compio-postgres` + `zeroship-core` (+ the `tracing`
-//! observability facade). **No v8, no `zeroship-runtime`, no crypto
-//! (aes/hkdf/hmac), no `zeroship-metering`.** The trust domain is preserved:
-//! nothing in this crate can touch a key, an isolate, or a usage counter.
+//! Deps: `serde_json` + `sha2` (always-on) + — behind the `introspect`
+//! feature only — `compio-postgres` + the `tracing` observability facade.
+//! The DEFAULT (write/diff/describe) profile pulls NO PG driver and NO
+//! `zeroship-core`/`zeroship-bundle`/tokio chain: the migration engine
+//! consumes exactly that profile (it does its own introspection over the
+//! `PgSession` seam and never calls `read_live_schema`). plugin-db enables
+//! `introspect` because its data plane reads live column behaviour at runtime.
+//! **No v8, no `zeroship-runtime`, no crypto (aes/hkdf/hmac), no
+//! `zeroship-metering`.** The trust domain is preserved: nothing in this crate
+//! can touch a key, an isolate, or a usage counter.
 
 // **Schema-authority P1 — inherited lint posture.** `query.rs` and `diff.rs`
 // were relocated *verbatim* out of `zeroship-plugin-db` (a pure refactor: the
