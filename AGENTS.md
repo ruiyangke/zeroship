@@ -96,7 +96,7 @@ Creator Platform                          App Runtime
 ────────────────                          ───────────
 Control Plane ───deploy bundle──────────→ Object Storage
               ───update routes──────────→ Gateway (HTTP pull every 5s)
-              ───register model─────────→ PostgreSQL (per-app schema)
+zeroship-migrated ─apply app migrations──→ PostgreSQL (per-app schema)
 
 Auth Service ←──401 redirect────────────← Gateway (end-user not logged in)
              ───JWT cookie──────────────→ Gateway (validates per request)
