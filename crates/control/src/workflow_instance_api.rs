@@ -290,6 +290,7 @@ impl From<WorkflowError> for WorkflowApiError {
     fn from(value: WorkflowError) -> Self {
         match value {
             WorkflowError::Invalid(msg) => Self::BadRequest(msg),
+            WorkflowError::CompensableCarry(msg) => Self::BadRequest(format!("CompensableCarryError: {msg}")),
             WorkflowError::Deadlock(msg) => Self::Database(format!("retryable deadlock: {msg}")),
             WorkflowError::Db(msg) => Self::Database(msg),
         }
