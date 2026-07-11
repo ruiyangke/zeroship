@@ -273,6 +273,16 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     }
   }
 
+  class ContinueAsNewSignal extends Error {
+    readonly input: unknown;
+
+    constructor(input: unknown) {
+      super("workflow continue-as-new requested");
+      this.name = "ContinueAsNewSignal";
+      this.input = input;
+    }
+  }
+
   class CompensationReplayReady extends Error {
     constructor() {
       super("workflow compensation registry is ready");
@@ -832,6 +842,11 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       })));
     }
 
+    continueAsNew(input: unknown): Promise<never> {
+      this.#assertNotNested();
+      throw new ContinueAsNewSignal(input);
+    }
+
     async #runFrontier<T>(
       issued: { ordinal: number; nameOccurrence: number },
       name: string,
@@ -854,6 +869,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
           ...outputConfig,
         };
       } catch (e) {
+        if (e instanceof ContinueAsNewSignal) throw e;
         if (e instanceof SuspendSignal) throw e;
         return {
           kind: "run",
@@ -1370,7 +1386,8 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         } catch (error) {
           if (
             !(error instanceof CompensationReplayReady) &&
-            !(error instanceof SuspendSignal)
+            !(error instanceof SuspendSignal) &&
+            !(error instanceof ContinueAsNewSignal)
           ) {
             // Terminal forward errors are expected while rebuilding the registry.
             // NondeterministicError still fails closed below if no compensator can
@@ -1424,6 +1441,15 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         output,
       });
     } catch (e) {
+      if (e instanceof ContinueAsNewSignal) {
+        return terminalBatch(env, {
+          kind: "ContinueAsNew",
+          runId: env.runId,
+          nonce: env.nonce,
+          workflowName,
+          input: e.input,
+        });
+      }
       if (e instanceof SuspendSignal) {
         return resultBatch(env, e.outcomes);
       }

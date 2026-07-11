@@ -560,6 +560,14 @@ class ZsWorkflowSuspendSignal extends Error {
     }
 }
 
+class ZsWorkflowContinueAsNewSignal extends Error {
+    constructor(input) {
+        super("workflow continue-as-new requested");
+        this.name = "ContinueAsNewSignal";
+        this.input = input;
+    }
+}
+
 class ZsWorkflowTimeoutError extends Error {
     constructor(message = "workflow signal wait timed out") {
         super(message);
@@ -942,6 +950,11 @@ class ZsJournalBackedStep {
         }));
     }
 
+    continueAsNew(input) {
+        this.#assertNotNested();
+        throw new ZsWorkflowContinueAsNewSignal(input);
+    }
+
     async #runFrontier(issued, name, config, fn) {
         const bodyPromise = this.#invokeStepBody(fn);
         try {
@@ -959,6 +972,7 @@ class ZsJournalBackedStep {
                 ...outputConfig,
             };
         } catch (e) {
+            if (e instanceof ZsWorkflowContinueAsNewSignal) throw e;
             if (e instanceof ZsWorkflowSuspendSignal) throw e;
             return {
                 kind: "run",
@@ -1321,7 +1335,8 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             } catch (e) {
                 if (
                     !(e instanceof ZsWorkflowCompensationReplayReady) &&
-                    !(e instanceof ZsWorkflowSuspendSignal)
+                    !(e instanceof ZsWorkflowSuspendSignal) &&
+                    !(e instanceof ZsWorkflowContinueAsNewSignal)
                 ) {
                     // Terminal forward errors are expected while rebuilding the registry.
                     // Corrupt prefixes still fail closed if no pending compensator
@@ -1342,6 +1357,13 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             output,
         });
     } catch (e) {
+        if (e instanceof ZsWorkflowContinueAsNewSignal) return workflowTerminalResult(envelope, {
+            kind: "ContinueAsNew",
+            runId: envelope.runId,
+            nonce: envelope.nonce,
+            workflowName,
+            input: e.input,
+        });
         if (e instanceof ZsWorkflowSuspendSignal) return workflowBatchResult(envelope, e.outcomes);
         return workflowTerminalResult(envelope, {
             kind: "RunFailed",
