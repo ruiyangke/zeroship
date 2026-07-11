@@ -64,12 +64,20 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// When the `native-pg` driver seam is omitted (`--no-default-features`), the whole
-// PG apply path (journal/drift/baseline/precondition free fns, the connect path,
-// role provisioning, the PG CLI/IR legs) is gated out. The dialect-neutral helpers
-// and imports those gated leaves are the sole consumers of then read as dead —
-// expected for the PG-omitted core. Scope the allowance to that config ONLY so the
-// default (`native-pg`-on) build stays strict and warning-clean.
+// Dead-code / unused-import allowance for the two PG-partial build shapes:
+//
+//  * `--no-default-features` (neither `native-pg` nor `host-pg`): the WHOLE PG
+//    apply path is gated out, so its dialect-neutral helpers read as dead.
+//  * `--features host-pg` (no `native-pg`): the GENERIC apply path compiles, but
+//    the compio-CONCRETE legs stay `native-pg`-only — the CLI `runner`, the
+//    `ir_apply`-postgres entries, standalone `rollback`/`run_expand`, role
+//    provisioning helpers, and the shadow harness. The helpers those legs are the
+//    sole callers of are unreachable in the addon build (they are Phase-C /
+//    out-of-v1 surface), so they read as dead there too.
+//
+// Both are `not(feature = "native-pg")`. The DEFAULT (`native-pg`-on) build has
+// every path reachable, so it stays strict and warning-clean — the allowance
+// never relaxes the platform build.
 #![cfg_attr(not(feature = "native-pg"), allow(dead_code, unused_imports))]
 
 pub mod analysis;
@@ -130,17 +138,19 @@ pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-// PG-only re-exports (consumer-based gate: `PgSessionSnapshot` is a pure-`String`
-// struct, but its only consumers are the PG session leaves). Behind `native-pg`.
-#[cfg(feature = "native-pg")]
+// PG-seam re-exports (consumer-based gate: `PgSessionSnapshot` is a pure-`String`
+// struct, but its only consumers are the PG session leaves). Behind the PG seam
+// (`native-pg` OR `host-pg`) — the generic `PostgresBackend<D>` compiles on both.
+#[cfg(pg_seam)]
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
 // The driver-neutral `PgSession` seam types (§A). Public so a host (napi) driver
 // can construct return values / binds, and so error consumers read the neutral
 // `SeamError` (SQLSTATE in `.code`) instead of downcasting to the concrete
-// `compio_postgres::Error`. Behind `native-pg` (the seam module's gate).
-#[cfg(feature = "native-pg")]
+// `compio_postgres::Error`. On the whole PG seam — the addon (`host-pg`) is the
+// primary consumer of these neutral types.
+#[cfg(pg_seam)]
 pub use apply::backend::postgres::seam::{FromSeam, SeamBind, SeamError, SeamRow, SeamValue};
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub use apply::backend::postgres::session::PgSession;
 // MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
 #[cfg(feature = "zsv8")]
@@ -189,15 +199,20 @@ pub use apply::drift::{
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
 // `check_checksum_drift` reads the journal over a `&D: PgSession`; `snapshot_schema`
-// introspects `pg_catalog` — both PG-only (SQLite has its own peers). Gated.
-#[cfg(feature = "native-pg")]
+// introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
+// On the whole PG seam.
+#[cfg(pg_seam)]
 pub use apply::drift::{check_checksum_drift, snapshot_schema};
 pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
+// `apply` is generic over the `PgSession` seam (§C.5 holdout 1) — on the whole PG
+// seam. `rollback` is still `&Client`-typed (out of v1 scope) — native-pg only.
+#[cfg(pg_seam)]
+pub use apply::executor::apply;
 #[cfg(feature = "native-pg")]
-pub use apply::executor::{apply, rollback};
+pub use apply::executor::rollback;
 // **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
@@ -229,8 +244,8 @@ pub use apply::journal::{
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
 };
 // The PG journal free functions (each takes a `&D: PgSession` connection). The
-// SQLite backend has its own `sqlite/journal_sql.rs` peers. Gated behind `native-pg`.
-#[cfg(feature = "native-pg")]
+// SQLite backend has its own `sqlite/journal_sql.rs` peers. On the whole PG seam.
+#[cfg(pg_seam)]
 pub use apply::journal::{
     applied, applied_count, ensure_journal, history as journal_history,
     latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
@@ -251,8 +266,9 @@ pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-// `history` / `status` take a concrete `&Client` PG connection — PG-only.
-#[cfg(feature = "native-pg")]
+// `history` / `status` are generic over the `PgSession` seam (§C.5 holdout 3) —
+// on the whole PG seam so a host driver can drive the pending-migrations flow.
+#[cfg(pg_seam)]
 pub use ops::status::{history, status};
 // The confined submit path is PG-only (§4.5); gated with `mod ops::submit`.
 #[cfg(feature = "native-pg")]
@@ -349,7 +365,7 @@ pub use render::sql_preview::{
     PreviewOpts, RUNTIME_RESOLVED,
 };
 pub use apply::precondition::PreconditionError;
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub use apply::precondition::evaluate as evaluate_precondition;
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 // `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
