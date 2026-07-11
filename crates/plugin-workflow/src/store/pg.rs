@@ -350,7 +350,7 @@ impl WorkflowTx for PgTx {
         run_id: &str,
     ) -> Result<Option<RunLockRow>, WorkflowError> {
         let sql = format!(
-            "SELECT app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, stuck_strikes, \
+            "SELECT app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, cancel_requested, stuck_strikes, \
                     tree_depth, compensation_target, error \
                FROM {runs} \
               WHERE id = $1 \
@@ -368,6 +368,7 @@ impl WorkflowTx for PgTx {
             claimed_by: row.get("claimed_by"),
             state: row.get("state"),
             dispatch_nonce: row.get("dispatch_nonce"),
+            cancel_requested: row.get("cancel_requested"),
             stuck_strikes: row.get("stuck_strikes"),
             tree_depth: row.get("tree_depth"),
             compensation_target: row.get("compensation_target"),
@@ -775,6 +776,44 @@ impl WorkflowTx for PgTx {
                     &update.compensation_outcome,
                 ],
             )
+            .await
+            .map_err(WorkflowError::from)
+    }
+
+    async fn cancel_requested_run(
+        &mut self,
+        config: &WorkflowEngineConfig,
+        run_id: &str,
+        dispatch_nonce: &str,
+    ) -> Result<u64, WorkflowError> {
+        let sql = format!(
+            "UPDATE {runs} \
+                SET state = 'cancelled', \
+                    output = NULL, \
+                    error = $4, \
+                    output_kind = 'inline', \
+                    output_hash = NULL, \
+                    output_size = NULL, \
+                    output_content_type = NULL, \
+                    cancel_requested = false, \
+                    wake_at = NULL, \
+                    terminal_at = now(), \
+                    waiting_step_key = NULL, \
+                    paused_from_status = NULL, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL, \
+                    claim_epoch = claim_epoch + 1 \
+              WHERE id = $1 \
+                AND claimed_by = $2 \
+                AND dispatch_nonce = $3 \
+                AND cancel_requested \
+                AND state IN ('running','paused')",
+            runs = self.tables.runs
+        );
+        let error = child_cancelled_error();
+        self.conn
+            .execute(&sql, &[&run_id, &config.owner_id, &dispatch_nonce, &error])
             .await
             .map_err(WorkflowError::from)
     }

@@ -16,6 +16,7 @@ pub struct RunLockRow {
     pub claimed_by: Option<String>,
     pub state: String,
     pub dispatch_nonce: Option<String>,
+    pub cancel_requested: bool,
     pub stuck_strikes: i16,
     pub tree_depth: i16,
     pub compensation_target: Option<String>,
@@ -212,6 +213,13 @@ pub trait WorkflowTx {
         run_id: &str,
         dispatch_nonce: &str,
         update: &TransitionRunUpdate,
+    ) -> Result<u64, WorkflowError>;
+
+    async fn cancel_requested_run(
+        &mut self,
+        config: &WorkflowEngineConfig,
+        run_id: &str,
+        dispatch_nonce: &str,
     ) -> Result<u64, WorkflowError>;
 
     async fn upsert_blob_ref(

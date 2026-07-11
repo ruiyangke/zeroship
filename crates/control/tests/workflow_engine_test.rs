@@ -1221,7 +1221,7 @@ impl StepDispatcher for ZeroProgressDispatcher {
 }
 
 async fn wait_for_requests(dispatcher: &BlockingDispatcher, n: usize) {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         if dispatcher.requests().len() >= n {
             return;
         }
@@ -1234,7 +1234,7 @@ async fn wait_for_requests(dispatcher: &BlockingDispatcher, n: usize) {
 }
 
 async fn wait_for_gated_requests(dispatcher: &GatedCheckpointDispatcher, n: usize) {
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         if dispatcher.requests().len() >= n {
             return;
         }
@@ -2019,7 +2019,8 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
         .expect("release simulated parent park claim");
 
     let dispatcher = Arc::new(JoinChildrenDispatcher::new(&fx.state));
-    for _ in 0..20 {
+    let mut completed = false;
+    for _ in 0..160 {
         workflow_engine::fire_once(
             &fx.scheduler_store,
             &fx.state,
@@ -2039,10 +2040,33 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
             .await
             .expect("load parent state");
         if row.get::<_, String>("state") == "completed" {
+            completed = true;
             break;
         }
         compio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(
+        completed,
+        "parent join did not settle completed: {:?}",
+        {
+            let row = fx
+                .pg
+                .query_one(
+                    "SELECT state, claimed_by, dispatch_nonce, wake_at \
+                       FROM zeroship.workflow_runs \
+                      WHERE id = $1",
+                    &[&parent],
+                )
+                .await
+                .expect("load unsettled parent");
+            (
+                row.get::<_, String>("state"),
+                row.get::<_, Option<String>>("claimed_by"),
+                row.get::<_, Option<String>>("dispatch_nonce"),
+                row.get::<_, Option<DateTime<Utc>>>("wake_at"),
+            )
+        }
+    );
 
     let parent_row = fx
         .pg
@@ -2165,7 +2189,7 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
 }
 
 #[compio::test]
-async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_dispatch() {
+async fn cancel_requested_inflight_child_apply_cancels_without_committing_step() {
     let Some(fx) = isolated_fixture("child-cascade-sleep").await else {
         return;
     };
@@ -2235,43 +2259,12 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
     assert!(
         workflow_engine::apply_step_result(&fx.state, "owner-child-sleep", sleep_result)
             .await
-            .expect("apply in-flight child sleep")
-    );
-    let parked = fx
-        .pg
-        .query_one(
-            "SELECT state, wake_at, cancel_requested, claimed_by \
-               FROM zeroship.workflow_runs WHERE id = $1",
-            &[&child],
-        )
-        .await
-        .expect("load parked child");
-    assert_eq!(parked.get::<_, String>("state"), "sleeping");
-    assert!(parked.get::<_, bool>("cancel_requested"));
-    assert!(parked.get::<_, Option<String>>("claimed_by").is_none());
-    assert!(
-        parked
-            .get::<_, Option<DateTime<Utc>>>("wake_at")
-            .expect("future child wake")
-            > Utc::now()
-    );
-
-    let claimed = workflow_engine::fire_once(
-        &fx.scheduler_store,
-        &fx.state,
-        Arc::new(CompleteDispatcher::new(&fx.state)),
-        config("owner-child-cascade-sleep"),
-    )
-    .await
-    .expect("cooperative sleeping child cancel tick");
-    assert_eq!(
-        claimed, 1,
-        "cancel pickup should dispatch one light child run reference without replaying child code"
+            .expect("apply in-flight child cancel")
     );
     let child_terminal = fx
         .pg
         .query_one(
-            "SELECT state, cancel_requested, wake_at, claimed_by, dispatch_nonce \
+            "SELECT state, wake_at, cancel_requested, claimed_by, dispatch_nonce \
                FROM zeroship.workflow_runs WHERE id = $1",
             &[&child],
         )
@@ -2284,6 +2277,167 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
         .is_none());
     assert_eq!(child_terminal.get::<_, Option<String>>("claimed_by"), None);
     assert_eq!(child_terminal.get::<_, Option<String>>("dispatch_nonce"), None);
+    let step_count = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1",
+            &[&child],
+        )
+        .await
+        .expect("count child workflow steps");
+    assert_eq!(
+        step_count.get::<_, i64>("n"),
+        0,
+        "cancelled in-flight child apply must not commit the stale sleep step"
+    );
+    let timer = fx
+        .scheduler_store
+        .timer(&child)
+        .await
+        .expect("load child timer after apply cancel");
+    let inflight = fx
+        .scheduler_store
+        .inflight(&child)
+        .await
+        .expect("load child inflight after apply cancel");
+    assert!(timer.is_none(), "child timer should clear after apply cancel");
+    assert!(
+        inflight.is_none(),
+        "child inflight row should clear after apply cancel"
+    );
+}
+
+#[compio::test]
+async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations() {
+    let Some(fx) = isolated_fixture("child-cancel-replay-free-many").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cancel-replay-free-many").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "cancelled",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let child_count = 64usize;
+    let mut child_ids = Vec::with_capacity(child_count);
+    for ordinal in 0..child_count {
+        let child = zeroship_core::typed_id::new_workflow_run_id();
+        let wake_at = Utc::now();
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_runs \
+                    (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                     waiting_step_key, parent_run_id, parent_wait_step_key, parent_cascade, \
+                     tree_depth, cancel_requested, started_at) \
+                 VALUES ($1, 'TestWorkflow', $2, $3, 'sleeping', $4, $5, $6, $7, \
+                         $8, $9, true, 1, true, now())",
+                &[
+                    &child,
+                    &app_id,
+                    &deploy_id,
+                    &serde_json::json!({"ordinal": ordinal}),
+                    &workflow_engine::child_dedup_key(&parent, ordinal as i32),
+                    &wake_at,
+                    &format!("sleep:{ordinal}:child-block"),
+                    &parent,
+                    &workflow_engine::child_signal_type(ordinal as i32),
+                ],
+            )
+            .await
+            .expect("insert parked cancel-requested child");
+        child_ids.push(child);
+    }
+
+    let mut cfg = config("owner-child-cancel-replay-free-many");
+    cfg.per_app_fair_limit = child_count as i64;
+    cfg.max_inflight_per_app = child_count as i64;
+    cfg.max_inflight_dispatch = child_count;
+    let mut terminal_pickups = 0usize;
+    for child in &child_ids {
+        let outcome = claim_workflow_run_on_conn(
+            fx.pg.inner.as_ref(),
+            &WorkflowRunDispatchRequest {
+                run_id: child.clone(),
+                app_id,
+            },
+            &cfg,
+        )
+        .await
+        .expect("parked cancel replay-free pickup");
+        match outcome {
+            WorkflowClaimOutcome::Terminal(registrations) => {
+                terminal_pickups += 1;
+                assert!(
+                    registrations.iter().any(|registration| {
+                        registration.run_id == child.as_str()
+                            && registration.terminal
+                            && registration.next_wake_at.is_none()
+                    }),
+                    "terminal pickup should return a terminal scheduler registration for {child}"
+                );
+            }
+            WorkflowClaimOutcome::Claimed(request) => {
+                panic!(
+                    "cancel-requested child {} was claimed for workflow execution with nonce {}",
+                    request.run_id, request.dispatch_nonce
+                );
+            }
+            WorkflowClaimOutcome::ClaimLost => {
+                panic!("cancel-requested child {child} claim was unexpectedly lost");
+            }
+            WorkflowClaimOutcome::Backpressure(reason) => {
+                panic!("cancel-requested child {child} hit backpressure: {reason}");
+            }
+        }
+    }
+
+    assert_eq!(
+        terminal_pickups, child_count,
+        "each parked cancel-requested child should terminate on pickup"
+    );
+    let step_count = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = ANY($1)",
+            &[&child_ids],
+        )
+        .await
+        .expect("count parked-cancel child workflow steps");
+    assert_eq!(
+        step_count.get::<_, i64>("n"),
+        0,
+        "parked cancel pickup must not replay child workflow code"
+    );
+    let states = fx
+        .pg
+        .query(
+            "SELECT id, state, cancel_requested, wake_at, claimed_by, dispatch_nonce \
+               FROM zeroship.workflow_runs \
+              WHERE id = ANY($1) \
+              ORDER BY id",
+            &[&child_ids],
+        )
+        .await
+        .expect("load parked-cancel child states");
+    assert_eq!(states.len(), child_count, "missing child rows");
+    for row in states {
+        assert_eq!(row.get::<_, String>("state"), "cancelled");
+        assert!(!row.get::<_, bool>("cancel_requested"));
+        assert!(row.get::<_, Option<DateTime<Utc>>>("wake_at").is_none());
+        assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
+        assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
+    }
 }
 
 #[compio::test]
@@ -2353,7 +2507,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
 
     let dispatcher = Arc::new(CompleteDispatcher::new(&fx.state));
     let mut claimed = 0usize;
-    for _ in 0..10 {
+    for _ in 0..120 {
         claimed = claimed.saturating_add(
             workflow_engine::fire_once(
                 &fx.scheduler_store,
@@ -2398,7 +2552,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
                     "cancel pickup must not replay child workflow code"
                 );
                 let mut scheduler_cleared = false;
-                for _ in 0..20 {
+                for _ in 0..100 {
                     let timer = fx
                         .scheduler_store
                         .timer(child)

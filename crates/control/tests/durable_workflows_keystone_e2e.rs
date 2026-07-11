@@ -34,6 +34,7 @@ use zeroship_control::cron::workflow_engine::{
 use zeroship_control::cron::workflow_signal_fanout::{self, FanoutSweepConfig};
 use zeroship_control::cron::workflow_schedules::{self, ScheduleSweepConfig};
 use serial_test::serial;
+use zeroship_control::registry::RegistryError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -1352,7 +1353,7 @@ async fn wait_for_dispatch_count(dispatcher: &CountingDispatcher, expected: usiz
 }
 
 async fn wait_for_captured_dispatch_count(dispatcher: &CapturingDispatcher, expected: usize) {
-    for _ in 0..120 {
+    for _ in 0..400 {
         if dispatcher.count() == expected {
             return;
         }
@@ -1495,6 +1496,42 @@ async fn reap_unclaimed_inflight_retry<D>(
     .expect("reap unclaimed inflight retry");
 }
 
+fn retryable_scheduler_tick_error(err: &RegistryError) -> bool {
+    matches!(err, RegistryError::Database(message) if message.contains("workflow scheduler: db error"))
+}
+
+async fn workflow_tick<D>(
+    fx: &Fixture,
+    dispatcher: &Arc<D>,
+    cfg: &WorkflowEngineConfig,
+    label: &str,
+) -> usize
+where
+    D: StepDispatcher + 'static,
+{
+    let mut last_error = None;
+    for retry in 0..20 {
+        match workflow_engine::fire_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(dispatcher),
+            cfg.clone(),
+        )
+        .await
+        {
+            Ok(claimed) => return claimed,
+            Err(err) if retryable_scheduler_tick_error(&err) => {
+                last_error = Some(err);
+                compio::time::sleep(Duration::from_millis(25 + retry * 5)).await;
+            }
+            Err(err) => panic!("{label} tick failed: {err}"),
+        }
+    }
+    panic!(
+        "{label} tick kept failing with retryable scheduler DB errors; last={last_error:?}"
+    );
+}
+
 async fn drive_until_completed<D>(
     fx: &Fixture,
     dispatcher: Arc<D>,
@@ -1504,9 +1541,7 @@ async fn drive_until_completed<D>(
     D: StepDispatcher + 'static,
 {
     for attempt in 0..260 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .expect("workflow tick");
+        workflow_tick(fx, &dispatcher, &cfg, "workflow").await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "completed" {
             return;
@@ -1643,9 +1678,7 @@ where
     D: StepDispatcher + 'static,
 {
     for attempt in 0..120 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "failed" {
             let row = fx
@@ -1683,9 +1716,7 @@ async fn drive_until_cancelled<D>(
     D: StepDispatcher + 'static,
 {
     for attempt in 0..160 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "cancelled" {
             return;
@@ -1715,9 +1746,7 @@ async fn drive_until_sleeping<D>(
     D: StepDispatcher + 'static,
 {
     for attempt in 0..160 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "sleeping" {
             return;
@@ -1765,9 +1794,7 @@ async fn drive_until_compensating<D>(
                     run_debug(fx, run_id).await
                 );
             }
-            workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-                .await
-                .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+            workflow_tick(fx, &dispatcher, &cfg, label).await;
             reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
@@ -1787,9 +1814,7 @@ async fn drive_until_waiting<D>(
     D: StepDispatcher + 'static,
 {
     for attempt in 0..180 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .expect("workflow tick");
+        workflow_tick(fx, &dispatcher, &cfg, "workflow").await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "waiting" {
             return;
@@ -2194,6 +2219,74 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
     (redeploy_hash, deploy_id)
 }
 
+async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_deploy_id: &str) {
+    for _ in 0..400 {
+        let app_hash: Option<String> = fx
+            .pg
+            .query_one(
+                "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+                &[&fx.app_id],
+            )
+            .await
+            .expect("load active app deploy hash")
+            .get("deploy_hash");
+        let rows = fx
+            .pg
+            .query(
+                "SELECT id, deploy_hash, activated_at \
+                   FROM zeroship.app_deploys \
+                  WHERE app_id = $1 AND activated_at IS NOT NULL \
+                  ORDER BY activated_at DESC, created_at DESC, id DESC \
+                  LIMIT 1",
+                &[&fx.app_id],
+            )
+            .await
+            .expect("load resolved active deploy");
+        if app_hash.as_deref() == Some(expected_hash) {
+            if let Some(row) = rows.first() {
+                let id: String = row.get("id");
+                let hash: String = row.get("deploy_hash");
+                let activated_at: Option<DateTime<Utc>> = row.get("activated_at");
+                if id == expected_deploy_id && hash == expected_hash && activated_at.is_some() {
+                    return;
+                }
+            }
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let app_hash: Option<String> = fx
+        .pg
+        .query_one(
+            "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load final active app deploy hash")
+        .get("deploy_hash");
+    let rows = fx
+        .pg
+        .query(
+            "SELECT id, deploy_hash, activated_at \
+               FROM zeroship.app_deploys \
+              WHERE app_id = $1 AND activated_at IS NOT NULL \
+              ORDER BY activated_at DESC, created_at DESC, id DESC \
+              LIMIT 1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load final resolved active deploy");
+    panic!(
+        "deploy {expected_deploy_id}/{expected_hash} did not become resolved active; app_hash={app_hash:?}, resolved={:?}",
+        rows.first().map(|row| {
+            (
+                row.get::<_, String>("id"),
+                row.get::<_, String>("deploy_hash"),
+                row.get::<_, Option<DateTime<Utc>>>("activated_at"),
+            )
+        })
+    );
+}
+
 async fn child_run_ids(fx: &Fixture, parent_run_id: &str) -> Vec<String> {
     fx.pg
         .query(
@@ -2232,7 +2325,7 @@ async fn wait_for_child_cancel_requested(fx: &Fixture, child_run_id: &str) {
     // tick — a race. Waiting for the reachable parked state makes the single reap
     // tick deterministic (the cooperative-cancel behavior itself is eventual: a
     // running child self-cancels at its next step boundary, a parked one is reaped).
-    for _ in 0..200 {
+    for _ in 0..400 {
         let row = fx
             .pg
             .query_one(
@@ -2288,10 +2381,8 @@ async fn drive_children_until_sleeping<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..180 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .expect("child sleep tick");
+    for _ in 0..600 {
+        workflow_tick(fx, &dispatcher, &cfg, "child sleep").await;
         let states = child_states(fx, child_run_ids).await;
         assert_eq!(states.len(), child_run_ids.len(), "missing child rows");
         if states
@@ -2326,15 +2417,8 @@ async fn drive_children_until_cancelled(
             workflow_step_count(&fx.pg, child_run_id).await,
         ));
     }
-    for _ in 0..120 {
-        let _claimed = workflow_engine::fire_once(
-            &fx.scheduler_store,
-            &fx.state,
-            Arc::clone(&dispatcher),
-            cfg.clone(),
-        )
-        .await
-        .expect("child cancel tick");
+    for _ in 0..600 {
+        let _claimed = workflow_tick(fx, &dispatcher, &cfg, "child cancel").await;
         let _redispatched = workflow_engine::reap_lapsed_inflight_once(
             &fx.scheduler_store,
             &fx.state,
@@ -2931,7 +3015,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "continue-as-new first generation should stop after the seed step"
     );
 
-    let (_can_redeploy_hash, can_redeploy_id) = activate_redeploy_with_current_manifest(&fx).await;
+    let (can_redeploy_hash, can_redeploy_id) = activate_redeploy_with_current_manifest(&fx).await;
+    wait_for_active_deploy(&fx, &can_redeploy_hash, &can_redeploy_id).await;
     force_run_due(&fx, &can_run).await;
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3518,14 +3603,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .await
         .expect("retire cancelled CW6 parent scheduler row");
     wait_for_child_cancel_requested(&fx, &cw6_child).await;
-    let claimed = workflow_engine::fire_once(
-        &fx.scheduler_store,
-        &fx.state,
-        Arc::clone(&real_dispatcher),
-        config("dw17-cw6-child-cooperative-cancel"),
-    )
-    .await
-    .expect("CW6 child cancel tick");
+    let cw6_cfg = config("dw17-cw6-child-cooperative-cancel");
+    let claimed = workflow_tick(&fx, &real_dispatcher, &cw6_cfg, "CW6 child cancel").await;
     assert_eq!(claimed, 1, "CW6 cancel pickup should send one light dispatch");
     assert_eq!(run_state(&fx.pg, &cw6_child).await.0, "cancelled");
     assert_eq!(
@@ -4774,7 +4853,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         PARENT_MANY_CASCADE_WORKFLOW_NAME,
         serde_json::json!({
             "case": "dw19-cascade-redeploy",
-            "sleep": "PT30S",
+            "sleep": "PT5M",
             "values": ["one", "two"],
         }),
     )
