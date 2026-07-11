@@ -318,6 +318,13 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         Err(e) => tracing::error!(error = %e, "workflow scheduler DR reconcile failed"),
     }
     loop {
+        match reap_parked_cancel_requested_batch(&store, &state.registry, 64).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(registered = n, "workflow parked-cancel reaper registered due timers")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "workflow parked-cancel reaper tick failed"),
+        }
         match reconcile_scheduler_from_journal_with_store(&store, &state.registry, true).await {
             Ok(n) if n > 0 => {
                 tracing::info!(registered = n, "workflow scheduler DR reconcile seeded due timers")
@@ -370,16 +377,83 @@ async fn reconcile_scheduler_from_journal_with_store(
             continue;
         };
         let sql = format!(
-            "SELECT id, app_id, wake_at \
+            "SELECT id, app_id, wake_at, cancel_requested \
                FROM {} \
               WHERE state IN ('queued','running','sleeping','waiting','compensating') \
                 AND wake_at IS NOT NULL \
-                AND ($1::bool = false OR wake_at <= now()) \
-                AND (claimed_by IS NULL OR lease_expires IS NULL OR lease_expires <= now()) \
+                AND ($1::bool = false OR wake_at <= now() OR cancel_requested) \
               ORDER BY wake_at, id",
             tables.runs
         );
         let rows = conn.query(&sql, &[&due_only]).await.map_err(RegistryError::from)?;
+        for row in rows {
+            let run_id: String = row.get("id");
+            let app_id: Uuid = row.get("app_id");
+            let cancel_requested: bool = row.get("cancel_requested");
+            let wake_at: DateTime<Utc> = if cancel_requested {
+                Utc::now()
+            } else {
+                row.get("wake_at")
+            };
+            scheduler_store
+                .ack_register_next(&run_id, app_id, wake_at)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
+            registered = registered.saturating_add(1);
+        }
+    }
+    Ok(registered)
+}
+
+/// Pull parked cancel requests into the scheduler store as due-now timers.
+///
+/// Cascade cancellation updates the per-app journal first. The scheduler store
+/// remains the timer authority, so a sleeping/waiting child with an old future
+/// store row must be repaired before the normal due-timer scan can dispatch it.
+#[allow(clippy::future_not_send)]
+pub async fn reap_parked_cancel_requested_batch(
+    scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
+    limit: i64,
+) -> Result<usize, RegistryError> {
+    if limit <= 0 {
+        return Ok(0);
+    }
+
+    let conn = registry.conn().await?;
+    let mut registered = 0usize;
+    for app_id in workflow_app_ids(&conn).await? {
+        if registered >= usize::try_from(limit).unwrap_or(usize::MAX) {
+            break;
+        }
+        let Some(tables) = existing_tables(&conn, &app_id).await? else {
+            continue;
+        };
+        let remaining = limit.saturating_sub(i64::try_from(registered).unwrap_or(i64::MAX));
+        if remaining <= 0 {
+            break;
+        }
+        let sql = format!(
+            "WITH candidates AS ( \
+                 SELECT id \
+                   FROM {runs} \
+                  WHERE cancel_requested \
+                    AND state IN ('queued','sleeping','waiting','compensating') \
+                  ORDER BY wake_at NULLS FIRST, id \
+                  LIMIT $1 \
+                  FOR UPDATE SKIP LOCKED \
+             ) \
+             UPDATE {runs} r \
+                SET wake_at = now() \
+               FROM candidates c \
+              WHERE r.id = c.id \
+              RETURNING r.id, r.app_id, r.wake_at",
+            runs = tables.runs,
+        );
+        let rows = conn
+            .query(&sql, &[&remaining])
+            .await
+            .map_err(RegistryError::from)?;
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");
@@ -435,6 +509,7 @@ where
         .max(1);
     let per_app_fair_limit = config.per_app_fair_limit.max(1);
     let per_app_fair_limit_usize = usize::try_from(per_app_fair_limit).unwrap_or(usize::MAX);
+    reap_parked_cancel_requested_batch(scheduler_store, &state.registry, per_app_fair_limit).await?;
     let mut scheduler_config = SchedulerConfig::default();
     scheduler_config.max_due_per_tick = per_app_fair_limit_usize;
     scheduler_config.max_loaded_timers = fair_limit;

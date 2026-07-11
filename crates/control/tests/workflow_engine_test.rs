@@ -2234,6 +2234,167 @@ async fn cancel_requested_sleeping_child_with_future_wake_is_reaped_without_disp
 }
 
 #[compio::test]
+async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
+    let Some(fx) = isolated_fixture("child-cascade-sleep-two").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep-two").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "cancelled",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let mut child_ids = Vec::new();
+    for ordinal in 0..2 {
+        let child = zeroship_core::typed_id::new_workflow_run_id();
+        let future_wake = Utc::now() + ChronoDuration::seconds(60);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_runs \
+                    (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                     waiting_step_key, parent_run_id, parent_wait_step_key, parent_cascade, \
+                     tree_depth, cancel_requested, started_at) \
+                 VALUES ($1, 'TestWorkflow', $2, $3, 'sleeping', $4, $5, $6, $7, \
+                         $8, $9, true, 1, true, now())",
+                &[
+                    &child,
+                    &app_id,
+                    &deploy_id,
+                    &serde_json::json!({}),
+                    &workflow_engine::child_dedup_key(&parent, ordinal),
+                    &future_wake,
+                    &format!("sleep:{ordinal}:child-block"),
+                    &parent,
+                    &workflow_engine::child_signal_type(ordinal),
+                ],
+            )
+            .await
+            .expect("insert sleeping cascade child");
+        fx.scheduler_store
+            .register_timer(&child, app_id, future_wake)
+            .await
+            .expect("register stale future child timer");
+        child_ids.push(child);
+    }
+
+    for child in &child_ids {
+        let timer = fx
+            .scheduler_store
+            .timer(child)
+            .await
+            .expect("load stale child timer")
+            .expect("stale child timer exists");
+        assert!(
+            timer.wake_at > Utc::now(),
+            "test must start with a future scheduler-store timer"
+        );
+    }
+
+    let dispatcher = Arc::new(CompleteDispatcher::new(&fx.state));
+    let mut claimed = 0usize;
+    for _ in 0..10 {
+        claimed = claimed.saturating_add(
+            workflow_engine::fire_once(
+                &fx.scheduler_store,
+                &fx.state,
+                Arc::clone(&dispatcher),
+                config("owner-child-cascade-sleep-two"),
+            )
+            .await
+            .expect("cascade cancel repair tick"),
+        );
+        let states = fx
+            .pg
+            .query(
+                "SELECT state, cancel_requested, wake_at, claimed_by, dispatch_nonce \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = ANY($1) \
+                  ORDER BY id",
+                &[&child_ids],
+            )
+            .await
+            .expect("load child states");
+        if states.iter().all(|row| row.get::<_, String>("state") == "cancelled") {
+            assert_eq!(claimed, 2, "both sleeping children should be fired exactly once");
+            for row in states {
+                assert!(!row.get::<_, bool>("cancel_requested"));
+                assert!(row.get::<_, Option<DateTime<Utc>>>("wake_at").is_none());
+                assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
+                assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
+            }
+            for child in &child_ids {
+                let step_count = fx
+                    .pg
+                    .query_one(
+                        "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                        &[child],
+                    )
+                    .await
+                    .expect("count child workflow steps");
+                assert_eq!(
+                    step_count.get::<_, i64>("n"),
+                    0,
+                    "cancel pickup must not replay child workflow code"
+                );
+                let mut scheduler_cleared = false;
+                for _ in 0..20 {
+                    let timer = fx
+                        .scheduler_store
+                        .timer(child)
+                        .await
+                        .expect("load child timer after cancel");
+                    let inflight = fx
+                        .scheduler_store
+                        .inflight(child)
+                        .await
+                        .expect("load child inflight after cancel");
+                    if timer.is_none() && inflight.is_none() {
+                        scheduler_cleared = true;
+                        break;
+                    }
+                    compio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(scheduler_cleared, "child scheduler rows should clear after cancel ack");
+            }
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!(
+        "sleeping children did not cancel after {claimed} dispatches: {:?}",
+        fx.pg
+            .query(
+                "SELECT id, state, cancel_requested, wake_at \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = ANY($1) \
+                  ORDER BY id",
+                &[&child_ids],
+            )
+            .await
+            .expect("load final child states")
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>("id"),
+                    row.get::<_, String>("state"),
+                    row.get::<_, bool>("cancel_requested"),
+                    row.get::<_, Option<DateTime<Utc>>>("wake_at"),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[compio::test]
 async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
     let Some(fx) = isolated_fixture("child-live-cap").await else {
         return;
