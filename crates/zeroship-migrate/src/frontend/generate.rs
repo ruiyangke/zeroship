@@ -24,16 +24,15 @@
 //!
 //! There are TWO generate-from-schema-diff surfaces; pick by artifact shape:
 //!
-//! - **`generate_migration` (THIS module)** — the PLATFORM schema-authority path.
-//!   Renders a deployable `.sql` (dbmate) migration via the declarative differ,
-//!   covering the FULL goodie surface (`vector(N)` ANN indexes, PostGIS GiST
-//!   spatial indexes, FOREIGN KEY / CHECK constraints, FTS). The control-plane
-//!   deploy seam (`zeroship_control::deploy_migrate::apply_bundle_migrations`)
-//!   consumes these `.sql` files, and the schema-authority capstone e2e exercises
-//!   the whole `schema.js → generate → pack → deploy-apply → data-plane` pipeline
-//!   through it. It is the only generate path that emits a goodie/constraint-bearing
-//!   schema end-to-end. NOT a creator hand-authoring surface — property A's raw-SQL
-//!   ban governs what a CREATOR writes by hand, not platform-emitted deploy `.sql`.
+//! - **`generate_migration` (THIS module)** — the platform-side SQL generation
+//!   path. Renders a deployable `.sql` (dbmate) migration via the declarative
+//!   differ, covering the FULL goodie surface (`vector(N)` ANN indexes, PostGIS
+//!   GiST spatial indexes, FOREIGN KEY / CHECK constraints, FTS). Current
+//!   creator-app Postgres deploys apply recorded IR documents through the
+//!   standalone `zeroship-migrated` service; the deleted in-control deploy-time
+//!   applier is no longer the deploy authority. NOT a creator hand-authoring
+//!   surface — property A's raw-SQL ban
+//!   governs what a CREATOR writes by hand, not platform-emitted SQL.
 //!
 //! - **`super::scaffold::generate_ops`** — the CREATOR-FACING PORTABLE autogenerate
 //!   path (PR4). Emits the op.* DSL (`.ts`) for the portable structural subset

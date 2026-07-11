@@ -1051,18 +1051,13 @@ the SQLite rebuild apply end-to-end in
 `crates/zeroship-migrate/tests/ir_rename_pr2_pg.rs` /
 `ir_rename_pr2_sqlite.rs`).
 
-**What is not yet wired for production deploy.** The production control-plane
-deploy handler (`crates/control/src/api.rs:702`, `run_deploy_migrations`) applies
-migrations through `apply_bundle_migrations` under `Approval::None`, which
-**refuses** an online rename's EXPAND phase before it can complete. The
-approved-apply go-live surfaces (`apply_bundle_migrations_approved` /
-`apply_bundle_ir_sqlite` with `Approval::Approved`,
-`crates/control/src/deploy_migrate.rs:286`,
-`crates/zeroship-migrate/src/ir_apply.rs:130`) are reachable only from tests
-today. That test-only status is load-bearing and pinned by a regression test
-(`production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`,
-`crates/control/tests/deploy_migrate_test.rs:643`), which fails RED the instant
-the approved surface is wired into a production handler.
+**What is not yet wired for routine production deploy.** Creator-app Postgres
+migrations are applied by the standalone `zeroship-migrated` service, not by the
+deleted in-control deploy-time applier. The routine
+`POST /v1/apps/{id}/migrations/apply` flow uses `Approval::None`, so it refuses
+an online rename's approval-gated phase before it can complete; approved
+migrations go through the explicit
+`POST /v1/apps/{id}/migrations/{migration_id}/approve` operator path instead.
 
 Production go-live gating:
 

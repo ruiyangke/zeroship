@@ -1558,9 +1558,10 @@ fn column_snapshot_for_field(
 
 /// The seven platform-managed system fields, in canonical order, as
 /// [`ColumnSnapshot`]s. Replicated from `plugin-db`'s
-/// `build_system_field_columns` (`id TEXT PRIMARY KEY`, `created_at`/`updated_at`
-/// `TIMESTAMPTZ NOT NULL`, `created_by`/`updated_by` `TEXT NULL`, `version`
-/// `INTEGER NOT NULL`, `deleted_at` `TIMESTAMPTZ NULL`), expressed in
+/// `build_system_field_columns` (`id TEXT PRIMARY KEY`,
+/// `created_at`/`updated_at` `TIMESTAMPTZ NOT NULL DEFAULT now()`,
+/// `created_by`/`updated_by` `TEXT NULL`, `version`
+/// `INTEGER NOT NULL DEFAULT 1`, `deleted_at` `TIMESTAMPTZ NULL`), expressed in
 /// `information_schema` data-type spelling.
 ///
 /// Every collection table gets these injected by [`desired_snapshot`], matching
@@ -1572,7 +1573,7 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
     shape
         .columns
         .iter()
-        .map(system_column_snapshot)
+        .map(|column| system_column_snapshot(column, SqlDialect::Postgres))
         .collect()
 }
 
@@ -1585,12 +1586,26 @@ const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"]
 
 fn system_column_snapshot(
     column: &crate::model::profile::InjectedSystemColumnPolicy,
+    dialect: SqlDialect,
 ) -> ColumnSnapshot {
     ColumnSnapshot {
         name: column.name.clone(),
         data_type: column.data_type.clone(),
         nullable: column.nullable,
+        default: system_column_default(&column.name, dialect),
         ..Default::default()
+    }
+}
+
+fn system_column_default(name: &str, dialect: SqlDialect) -> Option<String> {
+    match name {
+        "created_at" | "updated_at" => Some(match dialect {
+            SqlDialect::Postgres => "now()".to_string(),
+            SqlDialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
+            SqlDialect::Mysql => "CURRENT_TIMESTAMP(6)".to_string(),
+        }),
+        "version" => Some("1".to_string()),
+        _ => None,
     }
 }
 
@@ -1864,7 +1879,7 @@ pub(crate) fn build_table_snapshot(
         project_schema,
         d,
         dialect,
-        SnapshotResolvedShape::confined(&d.name),
+        SnapshotResolvedShape::confined(&d.name, dialect),
         SnapshotColumnOrder::NameSorted,
         true,
     )
@@ -1927,7 +1942,7 @@ impl SnapshotResolvedShape {
         }
     }
 
-    fn confined(table: &str) -> Self {
+    fn confined(table: &str, dialect: SqlDialect) -> Self {
         let shape = crate::model::profile::PolicyProfile::confined().system_shape;
         let primary_key = match shape.primary_key {
             crate::model::profile::TablePrimaryKeyPolicy::ExplicitColumns(columns) => {
@@ -1936,7 +1951,11 @@ impl SnapshotResolvedShape {
             crate::model::profile::TablePrimaryKeyPolicy::Author(_) => None,
         };
         Self {
-            columns: shape.columns.iter().map(system_column_snapshot).collect(),
+            columns: shape
+                .columns
+                .iter()
+                .map(|column| system_column_snapshot(column, dialect))
+                .collect(),
             indexes: system_index_snapshots(table, &shape.indexes),
             primary_key,
         }
