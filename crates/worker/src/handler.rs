@@ -825,6 +825,11 @@ async fn apply_workflow_advance_json(
             WorkflowAdvanceNackKind::Invalid,
             e,
         )),
+        Err(WorkflowError::CompensableCarry(e)) => Err(WorkflowAdvanceResponse::nack(
+            request.run_id.clone(),
+            WorkflowAdvanceNackKind::Invalid,
+            format!("CompensableCarryError: {e}"),
+        )),
         Err(WorkflowError::Db(e)) => Err(WorkflowAdvanceResponse::nack(
             request.run_id.clone(),
             WorkflowAdvanceNackKind::ApplyFailed,

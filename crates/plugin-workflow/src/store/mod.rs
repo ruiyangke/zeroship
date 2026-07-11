@@ -11,6 +11,7 @@ use crate::errors::WorkflowError;
 #[derive(Debug, Clone)]
 pub struct RunLockRow {
     pub app_id: Uuid,
+    pub workflow_name: String,
     pub deploy_id: String,
     pub claimed_by: Option<String>,
     pub state: String,
@@ -152,6 +153,16 @@ pub trait WorkflowTx {
         parent_tree_depth: i16,
         checkpoint: &mut StepCheckpoint,
     ) -> Result<Result<(), String>, WorkflowError>;
+
+    async fn continue_as_new(
+        &mut self,
+        config: &WorkflowEngineConfig,
+        current_run_id: &str,
+        app_id: &Uuid,
+        workflow_name: &str,
+        seed_input: Option<&Value>,
+        seed_input_ref: Option<&WorkflowOutputRef>,
+    ) -> Result<String, WorkflowError>;
 
     async fn insert_resolved_step(
         &mut self,

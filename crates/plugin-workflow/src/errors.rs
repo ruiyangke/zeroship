@@ -3,6 +3,7 @@ use compio_postgres::error::SqlState;
 #[derive(Debug)]
 pub enum WorkflowError {
     Invalid(String),
+    CompensableCarry(String),
     Deadlock(String),
     Db(String),
 }
@@ -11,6 +12,7 @@ impl std::fmt::Display for WorkflowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(msg) => write!(f, "invalid workflow StepResult: {msg}"),
+            Self::CompensableCarry(msg) => write!(f, "CompensableCarryError: {msg}"),
             Self::Deadlock(msg) => write!(f, "deadlock: {msg}"),
             Self::Db(msg) => write!(f, "{msg}"),
         }

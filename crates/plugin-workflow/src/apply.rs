@@ -60,6 +60,14 @@ where
             "compensation outcome received outside compensating phase".to_string(),
         ));
     }
+    if matches!(result.run_update, RunUpdate::ContinuedAsNew { .. })
+        && tx.pending_compensation_count(&result.run_id).await? > 0
+    {
+        tx.commit().await?;
+        return Err(WorkflowError::CompensableCarry(
+            "cannot continue as new while compensable steps are pending".to_string(),
+        ));
+    }
 
     let child_checkpoint_count = result
         .checkpoints
@@ -201,6 +209,21 @@ where
             wake_at = Some(Utc::now());
             let progress = tx.compensation_progress(&result.run_id).await?;
             error = Some(compensation_progress_error(error, progress, None));
+        }
+        if let RunUpdate::ContinuedAsNew {
+            seed_input,
+            seed_input_ref,
+        } = &result.run_update
+        {
+            tx.continue_as_new(
+                config,
+                &result.run_id,
+                &row.app_id,
+                &row.workflow_name,
+                seed_input.as_ref(),
+                seed_input_ref.as_ref(),
+            )
+            .await?;
         }
         let changed = tx
             .transition_run(
@@ -449,6 +472,10 @@ mod tests {
         steps_written: usize,
         transitioned_state: Option<String>,
         transitioned_output: Option<Value>,
+        pending_compensation_count: i64,
+        continued_as_new_run_id: Option<String>,
+        continued_seed_input: Option<Value>,
+        continued_seed_input_ref: Option<WorkflowOutputRef>,
         committed: bool,
     }
 
@@ -487,6 +514,7 @@ mod tests {
             let state = self.state.borrow();
             Ok(Some(RunLockRow {
                 app_id: state.app_id,
+                workflow_name: "TestWorkflow".to_string(),
                 deploy_id: state.deploy_id.clone(),
                 claimed_by: Some(state.owner_id.clone()),
                 state: state.state.clone(),
@@ -512,7 +540,7 @@ mod tests {
         }
 
         async fn pending_compensation_count(&mut self, _run_id: &str) -> Result<i64, WorkflowError> {
-            Ok(0)
+            Ok(self.state.borrow().pending_compensation_count)
         }
 
         async fn compensation_progress(
@@ -555,6 +583,22 @@ mod tests {
             _checkpoint: &mut StepCheckpoint,
         ) -> Result<Result<(), String>, WorkflowError> {
             Ok(Ok(()))
+        }
+
+        async fn continue_as_new(
+            &mut self,
+            _config: &WorkflowEngineConfig,
+            _current_run_id: &str,
+            _app_id: &Uuid,
+            _workflow_name: &str,
+            seed_input: Option<&Value>,
+            seed_input_ref: Option<&WorkflowOutputRef>,
+        ) -> Result<String, WorkflowError> {
+            let mut state = self.state.borrow_mut();
+            state.continued_as_new_run_id = Some("run_successor".to_string());
+            state.continued_seed_input = seed_input.cloned();
+            state.continued_seed_input_ref = seed_input_ref.cloned();
+            Ok("run_successor".to_string())
         }
 
         async fn insert_resolved_step(
@@ -717,5 +761,91 @@ mod tests {
         assert_eq!(state.steps_written, 1);
         assert_eq!(state.transitioned_state.as_deref(), Some("completed"));
         assert_eq!(state.transitioned_output, Some(serde_json::json!({"done": true})));
+    }
+
+    #[compio::test]
+    async fn apply_continue_as_new_creates_successor_before_terminal_transition() {
+        let app_id = Uuid::new_v4();
+        let store = MemStore {
+            state: Rc::new(RefCell::new(MemState {
+                app_id,
+                deploy_id: "dep_test".to_string(),
+                owner_id: "owner-a".to_string(),
+                dispatch_nonce: "wfd_test".to_string(),
+                state: "running".to_string(),
+                ..MemState::default()
+            })),
+        };
+        let config = WorkflowEngineConfig {
+            owner_id: "owner-a".to_string(),
+            ..WorkflowEngineConfig::default()
+        };
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "ContinueAsNew",
+                    "input": {"generation": 1}
+                }
+            ]
+        }))
+        .expect("step result");
+
+        let applied = apply_step_result_on_store(&store, &config, result)
+            .await
+            .expect("apply");
+        let state = store.state.borrow();
+        assert!(applied);
+        assert!(state.committed);
+        assert_eq!(state.continued_as_new_run_id.as_deref(), Some("run_successor"));
+        assert_eq!(
+            state.continued_seed_input,
+            Some(serde_json::json!({"generation": 1}))
+        );
+        assert_eq!(state.steps_written, 0);
+        assert_eq!(state.transitioned_state.as_deref(), Some("completed"));
+        assert!(state.transitioned_output.is_none());
+    }
+
+    #[compio::test]
+    async fn apply_continue_as_new_rejects_pending_compensation_before_writes() {
+        let app_id = Uuid::new_v4();
+        let store = MemStore {
+            state: Rc::new(RefCell::new(MemState {
+                app_id,
+                deploy_id: "dep_test".to_string(),
+                owner_id: "owner-a".to_string(),
+                dispatch_nonce: "wfd_test".to_string(),
+                state: "running".to_string(),
+                pending_compensation_count: 1,
+                ..MemState::default()
+            })),
+        };
+        let config = WorkflowEngineConfig {
+            owner_id: "owner-a".to_string(),
+            ..WorkflowEngineConfig::default()
+        };
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "ContinueAsNew",
+                    "input": {"generation": 1}
+                }
+            ]
+        }))
+        .expect("step result");
+
+        let err = apply_step_result_on_store(&store, &config, result)
+            .await
+            .expect_err("pending compensation must reject continue-as-new");
+        assert!(matches!(err, WorkflowError::CompensableCarry(_)));
+        let state = store.state.borrow();
+        assert!(state.committed);
+        assert_eq!(state.steps_written, 0);
+        assert!(state.continued_as_new_run_id.is_none());
+        assert!(state.transitioned_state.is_none());
     }
 }

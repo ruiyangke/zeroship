@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS {runs} (
   restarted_at timestamptz,
   restarted_from_ordinal integer,
   restarted_by text,
+  continued_as_new_run_id text,
   dedup_key text,
   started_at timestamptz NOT NULL,
   terminal_at timestamptz,
@@ -349,7 +350,7 @@ impl WorkflowTx for PgTx {
         run_id: &str,
     ) -> Result<Option<RunLockRow>, WorkflowError> {
         let sql = format!(
-            "SELECT app_id, deploy_id, claimed_by, state, dispatch_nonce, stuck_strikes, \
+            "SELECT app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, stuck_strikes, \
                     tree_depth, compensation_target, error \
                FROM {runs} \
               WHERE id = $1 \
@@ -362,6 +363,7 @@ impl WorkflowTx for PgTx {
             .await?;
         Ok(rows.first().map(|row| RunLockRow {
             app_id: row.get("app_id"),
+            workflow_name: row.get("workflow_name"),
             deploy_id: row.get("deploy_id"),
             claimed_by: row.get("claimed_by"),
             state: row.get("state"),
@@ -540,6 +542,28 @@ impl WorkflowTx for PgTx {
             deploy_id,
             parent_tree_depth,
             checkpoint,
+        )
+        .await
+    }
+
+    async fn continue_as_new(
+        &mut self,
+        config: &WorkflowEngineConfig,
+        current_run_id: &str,
+        app_id: &Uuid,
+        workflow_name: &str,
+        seed_input: Option<&Value>,
+        seed_input_ref: Option<&WorkflowOutputRef>,
+    ) -> Result<String, WorkflowError> {
+        continue_as_new(
+            &self.conn,
+            &self.tables,
+            config,
+            current_run_id,
+            app_id,
+            workflow_name,
+            seed_input,
+            seed_input_ref,
         )
         .await
     }
@@ -897,6 +921,148 @@ where
     checkpoint.child_run_id = Some(actual_child_id);
     checkpoint.signal_type = Some(parent_wait_step_key);
     Ok(Ok(()))
+}
+
+async fn continue_as_new<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    config: &WorkflowEngineConfig,
+    current_run_id: &str,
+    app_id: &Uuid,
+    workflow_name: &str,
+    seed_input: Option<&Value>,
+    seed_input_ref: Option<&WorkflowOutputRef>,
+) -> Result<String, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let deploy_id = active_deploy_for_workflow(conn, app_id, workflow_name).await?;
+    let fresh_run_id = typed_id::new_workflow_run_id();
+    let (input, input_hash, input_size, input_content_type, journal_bytes, blob_bytes) =
+        if let Some(input_ref) = seed_input_ref {
+            upsert_workflow_blob_ref(conn, tables, input_ref).await?;
+            (
+                None,
+                Some(input_ref.hash.clone()),
+                Some(input_ref.size),
+                input_ref
+                    .content_type
+                    .clone()
+                    .or_else(|| Some("application/json".to_string())),
+                BLOB_REF_JOURNAL_BYTES,
+                input_ref.size.max(0),
+            )
+        } else {
+            let input = seed_input.cloned().unwrap_or(Value::Null);
+            let journal_bytes = json_column_size(conn, &input).await?;
+            (Some(input), None, None, None, journal_bytes, 0)
+        };
+
+    if cap_exceeded(0, journal_bytes, config.journal_limits.run_max_bytes) {
+        return Err(WorkflowError::Invalid(format!(
+            "workflow run input exceeds per-run journal cap ({} > {})",
+            journal_bytes, config.journal_limits.run_max_bytes
+        )));
+    }
+
+    let insert_sql = format!(
+        "INSERT INTO {runs} \
+                (id, workflow_name, app_id, deploy_id, state, input, input_hash, input_size, \
+                 input_content_type, journal_bytes, blob_bytes, dedup_key, wake_at, tree_depth, started_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10, NULL, now(), 0, now())",
+        runs = tables.runs
+    );
+    conn.execute(
+        &insert_sql,
+        &[
+            &fresh_run_id,
+            &workflow_name,
+            app_id,
+            &deploy_id,
+            &input,
+            &input_hash,
+            &input_size,
+            &input_content_type,
+            &journal_bytes,
+            &blob_bytes,
+        ],
+    )
+    .await?;
+
+    let stamp_sql = format!(
+        "UPDATE {runs} \
+            SET continued_as_new_run_id = $2 \
+          WHERE id = $1",
+        runs = tables.runs
+    );
+    conn.execute(&stamp_sql, &[&current_run_id, &fresh_run_id])
+        .await?;
+    Ok(fresh_run_id)
+}
+
+async fn active_deploy_for_workflow<C>(
+    conn: &C,
+    app_id: &Uuid,
+    workflow_name: &str,
+) -> Result<String, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT id, manifest_json \
+               FROM zeroship.app_deploys \
+              WHERE app_id = $1 \
+                AND activated_at IS NOT NULL \
+              ORDER BY activated_at DESC, created_at DESC, id DESC \
+              LIMIT 1",
+            &[app_id],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Err(WorkflowError::Invalid(
+            "app has no active deploy".to_string(),
+        ));
+    };
+    let deploy_id: String = row.get("id");
+    let manifest_json: String = row.get("manifest_json");
+    match manifest_declares_workflow(&manifest_json, workflow_name) {
+        Ok(true) => Ok(deploy_id),
+        Ok(false) => Err(WorkflowError::Invalid(format!(
+            "workflow '{workflow_name}' is not declared by the active deploy"
+        ))),
+        Err(e) => Err(WorkflowError::Invalid(format!(
+            "active deploy manifest is invalid: {e}"
+        ))),
+    }
+}
+
+fn manifest_declares_workflow(raw: &str, workflow_name: &str) -> Result<bool, String> {
+    let manifest: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let Some(workflows) = manifest
+        .get("workflows")
+        .or_else(|| manifest.get("workflow"))
+        .or_else(|| manifest.get("durable_workflows"))
+        .or_else(|| manifest.get("durableWorkflows"))
+    else {
+        return Ok(false);
+    };
+    Ok(workflow_container_has(workflows, workflow_name))
+}
+
+fn workflow_container_has(value: &Value, workflow_name: &str) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| match item {
+            Value::String(name) => name == workflow_name,
+            Value::Object(map) => map
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name == workflow_name),
+            _ => false,
+        }),
+        Value::Object(map) => map.contains_key(workflow_name),
+        _ => false,
+    }
 }
 
 async fn live_descendant_count<C>(

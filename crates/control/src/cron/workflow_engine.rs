@@ -752,6 +752,7 @@ impl Drop for InflightDispatchGuard {
 fn workflow_error_to_registry(error: WorkflowError) -> RegistryError {
     match error {
         WorkflowError::Invalid(msg) => RegistryError::InvalidInput(msg),
+        WorkflowError::CompensableCarry(msg) => RegistryError::InvalidInput(format!("CompensableCarryError: {msg}")),
         WorkflowError::Deadlock(msg) => RegistryError::Database(format!("retryable deadlock: {msg}")),
         WorkflowError::Db(msg) => RegistryError::Database(msg),
     }
