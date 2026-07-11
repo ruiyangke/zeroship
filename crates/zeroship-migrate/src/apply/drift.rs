@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 use crate::apply::backend::postgres::PgSession;
 
 use crate::apply::executor::BackendError;
@@ -99,7 +99,7 @@ pub enum DriftError {
     Backend(String),
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 impl From<crate::apply::backend::postgres::seam::SeamError> for DriftError {
     fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
@@ -148,7 +148,7 @@ impl ChecksumDriftReport {
 ///
 /// # Errors
 /// [`DriftError::Journal`] if the journal read fails.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn check_checksum_drift<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -601,7 +601,7 @@ fn parse_index_storage_params_pg(
     Ok((!params.is_empty()).then_some(params))
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn snapshot_schema<D: PgSession>(
     conn: &D,
     project_schema: &str,

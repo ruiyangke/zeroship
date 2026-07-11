@@ -9,18 +9,30 @@ description = "zeroship's versioned DB migration engine — native Postgres fast
 # depends on that binary existing. A pure-library embedder opts out via
 # `--no-default-features` to skip clap AND the in-Rust V8 host (see `zsv8`).
 default = ["js-cli", "native-pg"]
-# The compio-postgres driver: the default (and today only) `PgSession` impl. Gates
-# the `compio-postgres` dep AND the entire PG apply seam — the `PgSession` trait +
-# `impl PgSession for compio_postgres::Client`, `mod postgres` (PostgresBackend /
-# PgOnline / PgShadow / backfill), the PG-apply leaf error arms (the
-# `From<compio_postgres::Error>` impls + `Db(#[from] …)` variants in the SHARED
-# journal/drift/baseline/precondition/capability/executor error enums), the
-# journal `ToSql` array, `conn.rs`'s connect path, `role.rs`, and the PG `lib.rs`
-# re-exports. The trait names `compio_postgres::{Row, Error, ToSql}`, so it cannot
-# be ungated; a `native-pg`-off build OMITS the PG path (SQLite + IR + render +
-# guard remain) rather than compiling it driverless. Default-on, so the default
-# build/test is byte-for-byte unchanged.
+# The compio-postgres driver: the FIRST (native) `PgSession` impl. Gates the
+# `compio-postgres` dep AND the compio-CONCRETE PG pieces — `impl PgSession for
+# compio_postgres::Client` + the `SeamBind→ToSql` / `Row→SeamRow` /
+# `Error→SeamError` adapters (`postgres/session.rs`), `PgOnline`/`PgShadow` (the
+# online + shadow-dry-run harnesses on a compio run-loop `JoinHandle`), the
+# `From<compio_postgres::Error>` leaf error arms, `conn.rs`'s connect path,
+# `role.rs` provisioning, and the compio `&Client` executor/IR-apply entries.
+# Since Phase A neutralised the trait (`SeamBind`/`SeamRow`/`SeamError`), the
+# GENERIC apply path no longer names any `compio_postgres` type, so it is shared
+# with `host-pg` via the internal `pg_seam` cfg (see build.rs), NOT gated here.
+# Default-on, so the default build/test is byte-for-byte unchanged.
 native-pg = ["dep:compio-postgres"]
+# The host-callback PG plumbing: the driver-neutral `PgSession` seam + the whole
+# GENERIC PG apply path (journal/drift/precondition/baseline free fns, the generic
+# `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`),
+# compiled WITHOUT the compio-postgres driver. It supplies NO `PgSession` impl of
+# its own in this phase — the in-crate recording driver (behind `cfg(test)`) is the
+# first host-shaped producer, proving genericity ahead of the Phase-C napi bridge.
+# `native-pg` and `host-pg` both light up the shared generic path (the internal
+# `pg_seam` cfg = either feature, emitted by build.rs); `native-pg` ADDITIONALLY
+# provides the compio impl + PgOnline/PgShadow + connect + role provisioning.
+# The addon build (`--no-default-features --features host-pg`) omits
+# compio-postgres entirely, so the `.node` stays cross-platform (no io_uring).
+host-pg = []
 # The in-Rust V8 host: JS/TS schema-authoring front-end (`src/frontend/`) + the
 # live-MySQL backend (`src/apply/backend/mysql/`, mysql2 in a V8 isolate over
 # node:net) + the kernel-sandboxed recorder child. This is the ONLY feature that

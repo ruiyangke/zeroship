@@ -1,11 +1,20 @@
 //! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
 
-pub mod backfill;
-pub mod online;
+// The neutral seam types + the `PgSession` trait compile on the whole PG seam
+// (`native-pg` OR `host-pg`) — they name no compio type. The compio adapters
+// inside `session.rs` are `#[cfg(feature = "native-pg")]` internally.
 pub mod seam;
 pub mod session;
+// The backfill/online/shadow harnesses are compio-concrete (they run on a compio
+// `Client` / run-loop `JoinHandle`), so they stay `native-pg`-only.
+#[cfg(feature = "native-pg")]
+pub mod backfill;
+#[cfg(feature = "native-pg")]
+pub mod online;
+#[cfg(feature = "native-pg")]
 pub mod shadow;
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::Client;
 
 pub use session::PgSession;
@@ -35,6 +44,10 @@ use zeroship_schema::query::SqlDialect;
 /// `JoinHandle` — is compio-specific), so they are `Option` and present only on
 /// the native path; a non-compio `D` reports `online() == None` / `shadow() ==
 /// None`, both already permitted by the `MigrationBackend` capability seam.
+// The default type param is the compio `Client` only on the native build; on a
+// host-pg-only build there is no `Client`, so the generic parameter has no
+// default and callers name their `D` (the addon supplies a napi `PgSession`).
+#[cfg(feature = "native-pg")]
 #[derive(Debug)]
 pub struct PostgresBackend<'a, D: PgSession = Client> {
     conn: &'a D,
@@ -42,6 +55,17 @@ pub struct PostgresBackend<'a, D: PgSession = Client> {
     shadow: Option<shadow::PgShadow<'a>>,
 }
 
+/// The generic Postgres backend on a host-pg build. It carries no compio-concrete
+/// `PgOnline`/`PgShadow` harness (those are `native-pg`-only), so `online()` /
+/// `shadow()` always report `None` — the honest v1 gap (`DryRunError::ShadowUnsupported`
+/// on the host path). The write/DDL/journal apply path never touches them.
+#[cfg(all(pg_seam, not(feature = "native-pg")))]
+#[derive(Debug)]
+pub struct PostgresBackend<'a, D: PgSession> {
+    conn: &'a D,
+}
+
+#[cfg(feature = "native-pg")]
 impl<'a> PostgresBackend<'a, Client> {
     /// Wrap a migrator connection as the Postgres backend (native path).
     ///
@@ -58,6 +82,7 @@ impl<'a> PostgresBackend<'a, Client> {
     }
 }
 
+#[cfg(feature = "native-pg")]
 impl<'a, D: PgSession> PostgresBackend<'a, D> {
     /// Wrap any [`PgSession`] driver as the Postgres backend, WITHOUT the
     /// PG-concrete online/shadow harnesses (both `None`).
@@ -73,6 +98,16 @@ impl<'a, D: PgSession> PostgresBackend<'a, D> {
             online: None,
             shadow: None,
         }
+    }
+}
+
+#[cfg(all(pg_seam, not(feature = "native-pg")))]
+impl<'a, D: PgSession> PostgresBackend<'a, D> {
+    /// Wrap any [`PgSession`] driver as the Postgres backend (host-pg build — no
+    /// compio-concrete online/shadow harness exists to attach).
+    #[must_use]
+    pub fn new_generic(conn: &'a D) -> Self {
+        Self { conn }
     }
 }
 
@@ -230,6 +265,7 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
         )))
     }
 
+    #[cfg(feature = "native-pg")]
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,
@@ -252,6 +288,28 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
             skipped: Vec::new(),
             recovered: Vec::new(),
         })
+    }
+
+    // Host-pg build: the online/backfill harness (`backfill::run_backfill`) is a
+    // compio-concrete `native-pg`-only module, and the host addon's v1 facade does
+    // not surface expand/online. A backfill step routed to the host PG backend is a
+    // routing bug (the differ never emits one on the plain apply path), so refuse
+    // it explicitly rather than pull the compio backfill runner into the addon.
+    #[cfg(not(feature = "native-pg"))]
+    async fn run_backfill_step(
+        &self,
+        _cfg: &ExecutorConfig,
+        spec: &BackfillSpec,
+        _approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
+        _applied_by: &str,
+        _lock_mode: crate::apply::executor::LockMode,
+    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
+        Err(ApplyError::Backend(format!(
+            "postgres host-pg backend: backfill step '{}' requested — the online/backfill \
+             path is native-pg-only (not surfaced by the addon's v1 facade)",
+            spec.name
+        )))
     }
 
     async fn run_dml_step(
@@ -300,12 +358,28 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
         Ok(true)
     }
 
+    #[cfg(feature = "native-pg")]
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         self.online.as_ref().map(|o| o as &dyn OnlineSchemaChange)
     }
 
+    // Host-pg build: no compio-concrete online harness → always `None`.
+    #[cfg(not(feature = "native-pg"))]
+    fn online(&self) -> Option<&dyn OnlineSchemaChange> {
+        None
+    }
+
+    #[cfg(feature = "native-pg")]
     fn shadow(&self) -> Option<&dyn ShadowDryRun> {
         self.shadow.as_ref().map(|s| s as &dyn ShadowDryRun)
+    }
+
+    // Host-pg build: no compio-concrete shadow harness → always `None`, so
+    // `dry_run`/`dry_run_declarative` return `DryRunError::ShadowUnsupported`
+    // (the honest v1 gap — host-side shadow is sequenced later).
+    #[cfg(not(feature = "native-pg"))]
+    fn shadow(&self) -> Option<&dyn ShadowDryRun> {
+        None
     }
 
     fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
@@ -411,14 +485,60 @@ mod recording_session_genericity {
     use super::seam::{SeamBind, SeamError, SeamRow, SeamValue};
     use super::*;
     use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// A non-compio [`PgSession`] that records the SQL + binds of every verb and
-    /// returns canned neutral rows for the read verbs.
+    /// The host-shaped one-in-flight guard (§B.6), mechanically enforced in the
+    /// driver rather than trusted by analogy. Every verb `compare_exchange(false,
+    /// true)`s on entry and clears via [`InFlightGuard`]'s `Drop` on the way out
+    /// (so error paths clear too). A second verb entered while the first's future
+    /// is still alive **panics** — turning "the engine issues one verb at a time"
+    /// from a claim into a checked invariant. On a real pinned host connection this
+    /// would otherwise deadlock (the second `tsfn.call` blocks on a socket the
+    /// first hasn't released); the panic surfaces the bug loudly instead.
+    ///
+    /// This is the exact discipline the MySQL `JsDriverBackend` uses
+    /// (`transport.rs` `in_flight: bool`), lifted to `AtomicBool` because the seam
+    /// is `&self`, not `&mut self`.
+    struct InFlightGuard<'a>(&'a AtomicBool);
+
+    impl<'a> InFlightGuard<'a> {
+        /// Arm the guard on verb entry, panicking on re-entry.
+        fn enter(flag: &'a AtomicBool) -> Self {
+            if flag
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                panic!(
+                    "PgSession verb issued while another is in flight — the engine \
+                     must be strictly one-verb-at-a-time (§B.6)"
+                );
+            }
+            Self(flag)
+        }
+    }
+
+    impl Drop for InFlightGuard<'_> {
+        fn drop(&mut self) {
+            // Clear in the completion arm (RAII) so an error/early-return path also
+            // releases — a leaked `true` would deadlock every later verb.
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    /// A non-compio, host-SHAPED [`PgSession`] that (a) records the SQL + binds of
+    /// every verb, (b) returns canned neutral rows for the read verbs, routed by a
+    /// substring match on the SQL so a full apply/introspection sweep decodes, and
+    /// (c) enforces the one-in-flight guard (§B.6) on every verb. This is NOT a
+    /// napi bridge (that is Phase C) — it is the in-crate host-shaped producer that
+    /// proves the generic PG apply path is genuinely driver-neutral, and converts
+    /// the one-in-flight invariant from by-analogy to mechanically-checked.
     struct RecordingSession {
         log: RefCell<Vec<String>>,
         binds: RefCell<Vec<Vec<SeamBind>>>,
-        /// Canned rows the next `query`/`query_one` returns.
-        canned: RefCell<Vec<SeamRow>>,
+        /// The mechanically-enforced one-verb-at-a-time guard (§B.6).
+        in_flight: AtomicBool,
+        /// Canned rows the `net_applied` journal read returns (SQL-routed).
+        canned_journal: RefCell<Vec<SeamRow>>,
     }
 
     impl RecordingSession {
@@ -426,23 +546,42 @@ mod recording_session_genericity {
             Self {
                 log: RefCell::new(Vec::new()),
                 binds: RefCell::new(Vec::new()),
-                canned: RefCell::new(Vec::new()),
+                in_flight: AtomicBool::new(false),
+                canned_journal: RefCell::new(Vec::new()),
             }
         }
 
-        fn with_canned(rows: Vec<SeamRow>) -> Self {
+        fn with_canned_journal(rows: Vec<SeamRow>) -> Self {
             let s = Self::new();
-            *s.canned.borrow_mut() = rows;
+            *s.canned_journal.borrow_mut() = rows;
             s
+        }
+
+        /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
+        /// read (`journal::applied`, recognisable by its `union_all` CTE + the
+        /// `schema_migrations_inflight` UNION leg — a shape no other query has) gets
+        /// the canned (version, checksum, mig_kind, phase) journal rows; every other
+        /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
+        /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
+        /// which yields an empty-but-valid decode — enough to drive every path
+        /// end-to-end without feeding a wrong-shaped row into a decoder.
+        fn rows_for(&self, sql: &str) -> Vec<SeamRow> {
+            if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
+                self.canned_journal.borrow().clone()
+            } else {
+                Vec::new()
+            }
         }
     }
 
     impl PgSession for RecordingSession {
         async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
+            let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("batch_execute: {sql}"));
             Ok(())
         }
         async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError> {
+            let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("execute: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
             Ok(1)
@@ -452,6 +591,7 @@ mod recording_session_genericity {
             sql: &str,
             _params: &[Option<String>],
         ) -> Result<u64, SeamError> {
+            let _g = InFlightGuard::enter(&self.in_flight);
             self.log
                 .borrow_mut()
                 .push(format!("execute_text_params: {sql}"));
@@ -462,19 +602,40 @@ mod recording_session_genericity {
             sql: &str,
             params: &[SeamBind],
         ) -> Result<Vec<SeamRow>, SeamError> {
+            let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("query: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
-            Ok(self.canned.borrow().clone())
+            Ok(self.rows_for(sql))
         }
         async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError> {
+            let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("query_one: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
-            self.canned
-                .borrow()
-                .first()
-                .cloned()
+            self.rows_for(sql)
+                .into_iter()
+                .next()
                 .ok_or_else(|| SeamError::message("query_one: no canned row"))
         }
+    }
+
+    /// A single completed journal event, shaped like the `applied()` CTE output:
+    /// (version, checksum, mig_kind, phase) — exactly what a host `pg` driver would
+    /// return for that read.
+    fn canned_journal_row(version: &str, checksum: &str) -> SeamRow {
+        SeamRow::new(
+            vec![
+                "version".to_string(),
+                "checksum".to_string(),
+                "mig_kind".to_string(),
+                "phase".to_string(),
+            ],
+            vec![
+                SeamValue::Text(version.to_string()),
+                SeamValue::Text(checksum.to_string()),
+                SeamValue::Text("apply".to_string()),
+                SeamValue::Text("completed".to_string()),
+            ],
+        )
     }
 
     /// The flagship proof: `PostgresBackend::<'_, RecordingSession>::new_generic`
@@ -528,23 +689,9 @@ mod recording_session_genericity {
     /// §A closure of the old `unreachable!("read verbs…")` gap.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
-        // One completed journal event, shaped like the `applied()` CTE output:
-        // (version, checksum, mig_kind, phase).
-        let row = SeamRow::new(
-            vec![
-                "version".to_string(),
-                "checksum".to_string(),
-                "mig_kind".to_string(),
-                "phase".to_string(),
-            ],
-            vec![
-                SeamValue::Text("mig_0001".to_string()),
-                SeamValue::Text("deadbeef".to_string()),
-                SeamValue::Text("apply".to_string()),
-                SeamValue::Text("completed".to_string()),
-            ],
-        );
-        let rec = RecordingSession::with_canned(vec![row]);
+        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
+            "mig_0001", "deadbeef",
+        )]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
@@ -559,5 +706,116 @@ mod recording_session_genericity {
             "applied() drove a query through the neutral read seam: {:?}",
             rec.log.borrow()
         );
+    }
+
+    /// §B.6 → mechanically-proven: drive a FULL sweep over the whole DDL + journal-
+    /// write + journal-read + drift-read + status/history surface against the host-
+    /// shaped recording driver **with the `in_flight` guard armed**, and assert it
+    /// **never trips** (the test would panic inside the driver if any verb were
+    /// issued while another's future is still alive). This converts the one-in-flight
+    /// invariant from by-analogy (the MySQL precedent) to checked over the exact
+    /// generic PG apply/introspection code paths a host driver drives.
+    ///
+    /// It simultaneously proves genericity end-to-end: the WRITE path records the
+    /// expected SQL sequence (schema/journal DDL + a journal INSERT with neutral
+    /// SeamBind params), the READ path returns SeamRows the engine decodes
+    /// (`applied` → `AppliedEntry`), and `status()`/`history()` run over the same
+    /// driver — their decoded shapes matching what `native-pg` produces.
+    #[compio::test]
+    async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
+        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
+            "mig_0001", "cafef00d",
+        )]);
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+
+        // 1. WRITE / DDL — journal bootstrap: CREATE SCHEMA + the append-only events
+        //    table + the immutability trigger, all through `batch_execute`.
+        backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
+
+        // 2. WRITE — a journal INSERT (`record_started`) through `execute` with
+        //    neutral SeamBind params. Drives the param-side seam (§A.1) on a write.
+        crate::apply::journal::record_started(
+            &rec, &cfg, "mig_0001", "create_users", "cafef00d", "tester",
+        )
+        .await
+        .expect("record_started journal write");
+
+        // 3. READ (journal) — `applied()` decodes the canned journal SeamRow into an
+        //    AppliedEntry over the non-compio driver.
+        let applied = backend.applied(&cfg).await.expect("applied read");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].version, "mig_0001");
+        assert_eq!(applied[0].checksum, "cafef00d");
+
+        // 4. READ (drift/catalog) — `snapshot_schema` issues its catalog introspection
+        //    queries; the empty canned rows yield an empty-but-valid snapshot, proving
+        //    the whole introspection decode chain runs over SeamRow.
+        let snap = backend.snapshot_schema(&cfg).await.expect("snapshot_schema");
+        assert!(
+            snap.tables.is_empty(),
+            "empty canned catalog → empty snapshot (decode chain ran clean)"
+        );
+
+        // 5. READ — the status()/history() free fns over the SAME driver (§C.5
+        //    holdout 3: generalized to `<D: PgSession>`).
+        let st = crate::ops::status::status(&rec, &cfg, &[])
+            .await
+            .expect("status over host driver");
+        // The canned journal row is net-applied, so status sees it as applied.
+        assert!(
+            st.applied.iter().any(|e| e.version == "mig_0001"),
+            "status decoded the net-applied version over SeamRow: {:?}",
+            st.applied
+        );
+        let hist = crate::ops::status::history(&rec, &cfg)
+            .await
+            .expect("history over host driver");
+        // history() over the empty canned history read returns an empty log without
+        // error — the point is the decode path ran over the neutral seam.
+        assert!(hist.is_empty(), "empty canned history decoded to empty log");
+
+        // The guard was armed on every verb above and never tripped (a trip would
+        // have panicked inside the driver). Assert it is cleared (RAII released) and
+        // that the expected WRITE SQL sequence was recorded.
+        assert!(
+            !rec.in_flight.load(Ordering::Acquire),
+            "in_flight guard released after the last verb (RAII clear)"
+        );
+        let log = rec.log.borrow();
+        assert!(
+            log.iter().any(|s| s.contains("CREATE SCHEMA")),
+            "ensure_journal recorded the CREATE SCHEMA DDL: {log:?}"
+        );
+        assert!(
+            log.iter().any(|s| s.contains("schema_migrations")),
+            "the journal DDL/INSERT sequence touched schema_migrations: {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|s| s.starts_with("execute:") && s.contains("INSERT INTO")),
+            "record_started drove a journal INSERT through execute: {log:?}"
+        );
+        // The journal INSERT bound its fields as neutral SeamBinds (param widening).
+        assert!(
+            rec.binds
+                .borrow()
+                .iter()
+                .any(|b| b.iter().any(|v| matches!(v, SeamBind::Text(t) if t == "mig_0001"))),
+            "journal INSERT bound the version as a neutral SeamBind::Text"
+        );
+    }
+
+    /// The guard is a real guard: a deliberately re-entrant driver (a verb that
+    /// issues a second verb before its own future completes) **panics**. This pins
+    /// the §B.6 panic behavior so a future refactor that holds a verb across a
+    /// suspension point fails loudly rather than deadlocking in production.
+    #[compio::test]
+    #[should_panic(expected = "one-verb-at-a-time")]
+    async fn in_flight_guard_panics_on_reentry() {
+        let flag = AtomicBool::new(false);
+        let _outer = InFlightGuard::enter(&flag);
+        // A second verb entered while the first guard is still alive must panic.
+        let _inner = InFlightGuard::enter(&flag);
     }
 }

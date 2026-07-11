@@ -70,14 +70,22 @@ pub trait PgSession {
 
 // ---------------------------------------------------------------------------
 // The native, compio-postgres impl — the FIRST producer of every neutral type.
+// `native-pg`-only: it is the ONLY place still touching `compio_postgres::{types::
+// ToSql, types::FromSql, Row, Error}`. The `PgSession` trait above is neutral, so
+// it compiles on the whole PG seam; a `host-pg`-only build gets the trait but no
+// compio adapter (the addon supplies its own host `PgSession` in Phase C, and the
+// in-crate recording driver proves genericity in the meantime).
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "native-pg")]
 use compio_postgres::types::{Kind, ToSql, Type};
+#[cfg(feature = "native-pg")]
 use compio_postgres::{Error as PgError, Row as PgRow};
 
 /// `compio_postgres::Error → SeamError`. The consumer census treats the error
 /// opaquely (wrap as `#[source]`/`Display`), so `Display` + an optional SQLSTATE
 /// is a faithful, lossless-enough projection.
+#[cfg(feature = "native-pg")]
 impl From<PgError> for SeamError {
     fn from(e: PgError) -> Self {
         let code = e.code().map(|c| c.code().to_string());
@@ -100,6 +108,7 @@ impl From<PgError> for SeamError {
 /// `Decimal` maps to a text bind (the IR carries decimals as strings; PG infers
 /// the target type from context) — no bind site binds `Decimal`/`Bool`/`Null`
 /// today, so those arms are exercised only by the enum-completeness test.
+#[cfg(feature = "native-pg")]
 enum ToSqlHolder {
     Null,
     Bool(bool),
@@ -107,6 +116,7 @@ enum ToSqlHolder {
     Text(String),
 }
 
+#[cfg(feature = "native-pg")]
 impl ToSqlHolder {
     fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
         match self {
@@ -119,6 +129,7 @@ impl ToSqlHolder {
     }
 }
 
+#[cfg(feature = "native-pg")]
 fn to_holder(bind: &SeamBind) -> ToSqlHolder {
     match bind {
         SeamBind::Null => ToSqlHolder::Null,
@@ -133,10 +144,12 @@ fn to_holder(bind: &SeamBind) -> ToSqlHolder {
 /// Map a neutral bind slice into a compio-accepted `&[&(dyn ToSql + Sync)]`. The
 /// holders own the values; the returned refs borrow from `holders`, so both live
 /// to the end of the call.
+#[cfg(feature = "native-pg")]
 fn bind_params(params: &[SeamBind]) -> Vec<ToSqlHolder> {
     params.iter().map(to_holder).collect()
 }
 
+#[cfg(feature = "native-pg")]
 fn holder_refs(holders: &[ToSqlHolder]) -> Vec<&(dyn ToSql + Sync)> {
     holders.iter().map(ToSqlHolder::as_to_sql).collect()
 }
@@ -149,6 +162,7 @@ fn holder_refs(holders: &[ToSqlHolder]) -> Vec<&(dyn ToSql + Sync)> {
 /// `TextArray` (element-NULLs preserved); SQL NULL → `Null` — reproducing exactly
 /// what today's `FromSql` decode + `.unwrap_or_default()`/`.ok().flatten()` idioms
 /// yield (§A.8), so the native path stays byte-identical.
+#[cfg(feature = "native-pg")]
 fn cell_to_seam(row: &PgRow, idx: usize, ty: &Type) -> Result<SeamValue, SeamError> {
     // `information_schema` columns (data_type/udt_name = `sql_identifier`,
     // character_maximum_length = `cardinal_number`, is_nullable = `yes_or_no`,
@@ -209,6 +223,7 @@ fn cell_to_seam(row: &PgRow, idx: usize, ty: &Type) -> Result<SeamValue, SeamErr
 /// Resolve a `Kind::Domain(base)` chain down to its concrete base type, so an
 /// `information_schema` domain (`cardinal_number` over `int4`, `sql_identifier`
 /// over `name`, `yes_or_no` over `varchar`) routes to the right decode arm.
+#[cfg(feature = "native-pg")]
 fn resolve_domain(ty: &Type) -> &Type {
     let mut cur = ty;
     while let Kind::Domain(inner) = cur.kind() {
@@ -218,6 +233,7 @@ fn resolve_domain(ty: &Type) -> &Type {
 }
 
 /// A text-family base type — decoded as `String`/`TextArray` element.
+#[cfg(feature = "native-pg")]
 fn is_text_family(ty: &Type) -> bool {
     matches!(
         *ty,
@@ -226,6 +242,7 @@ fn is_text_family(ty: &Type) -> bool {
 }
 
 /// `compio_postgres::Row → SeamRow` — iterate columns, decode each cell.
+#[cfg(feature = "native-pg")]
 fn row_to_seam(row: &PgRow) -> Result<SeamRow, SeamError> {
     let cols = row.columns();
     let mut names = Vec::with_capacity(cols.len());
@@ -240,6 +257,7 @@ fn row_to_seam(row: &PgRow) -> Result<SeamRow, SeamError> {
 /// The native, compio-postgres [`PgSession`] impl — one forward per verb (mapping
 /// binds/rows/errors through the neutral seam), so the default build's SQL, txn
 /// boundaries, and behavior are identical to pre-seam.
+#[cfg(feature = "native-pg")]
 impl PgSession for compio_postgres::Client {
     async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
         compio_postgres::Client::batch_execute(self, sql)

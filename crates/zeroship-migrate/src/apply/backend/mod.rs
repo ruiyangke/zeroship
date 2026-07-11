@@ -39,7 +39,12 @@
 pub mod capability;
 #[cfg(feature = "zsv8")]
 pub mod mysql;
-#[cfg(feature = "native-pg")]
+// The PG backend module compiles on the whole PG seam (`native-pg` OR `host-pg`):
+// its generic core (`PostgresBackend<D>` + the `PgSession` trait + the neutral
+// seam types) names no compio type. The compio-concrete pieces inside it
+// (`impl PgSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
+// `#[cfg(feature = "native-pg")]` internally.
+#[cfg(pg_seam)]
 pub mod postgres;
 pub mod sqlite;
 
@@ -47,7 +52,7 @@ pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
 #[cfg(all(test, feature = "zsv8"))]
 pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};

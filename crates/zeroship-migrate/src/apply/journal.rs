@@ -30,7 +30,7 @@
 //! schema, so a creator migration confined to its own schema cannot touch its
 //! own history. Bootstrap ([`ensure_journal`]) is idempotent.
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 use crate::apply::backend::postgres::PgSession;
 
 use crate::apply::executor::BackendError;
@@ -360,7 +360,7 @@ pub enum JournalError {
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 impl From<crate::apply::backend::postgres::seam::SeamError> for JournalError {
     fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
@@ -391,7 +391,7 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 ///
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema))?;
@@ -725,7 +725,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
 /// # Errors
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
 /// phase value is unrecognized.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn applied<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -857,7 +857,7 @@ pub struct HistoryEvent {
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn net_rolled_back<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -906,7 +906,7 @@ pub async fn net_rolled_back<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn history<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -961,7 +961,7 @@ pub async fn history<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn record_rolled_back<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -999,7 +999,7 @@ pub async fn record_rolled_back<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn record_started<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1048,7 +1048,7 @@ pub struct CompletedRecord<'a> {
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn record_completed<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1100,7 +1100,7 @@ pub async fn record_completed<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn outstanding_pending_contracts<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1184,7 +1184,7 @@ pub async fn outstanding_pending_contracts<D: PgSession>(
 /// [`JournalError::Db`] on insert/commit failure. When a scope is present and any
 /// statement fails, the whole transaction is rolled back so there is never an
 /// obligation without its marker (nor a marker without its obligation).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn record_pending_contract_with_recovery<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1269,7 +1269,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn resolve_pending_contract<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1343,7 +1343,7 @@ pub struct DeployRecovery {
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn mark_deploy_recovery_committed<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1390,7 +1390,7 @@ pub async fn mark_deploy_recovery_committed<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on any insert/commit failure (the partial batch is rolled
 /// back so no marker is left half-promoted).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1430,7 +1430,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1483,7 +1483,7 @@ pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn outstanding_deploy_recoveries<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1534,7 +1534,7 @@ pub async fn outstanding_deploy_recoveries<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let row = conn
@@ -1574,7 +1574,7 @@ pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Resu
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn superseded_versions<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1644,7 +1644,7 @@ pub async fn superseded_versions<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn latest_completed_checksums<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1707,7 +1707,7 @@ pub struct BaselineRecord<'a> {
 ///
 /// # Errors
 /// [`JournalError::Db`] on insert failure (the partial work is rolled back).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn record_baseline<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1729,7 +1729,7 @@ pub async fn record_baseline<D: PgSession>(
 /// The row + edge INSERTs of [`record_baseline`], run INSIDE its `BEGIN … COMMIT`
 /// (#3). Split out so the caller can ROLLBACK on the first failure, making the
 /// completed row and its full edge set atomic.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn record_baseline_inner<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1773,7 +1773,7 @@ async fn record_baseline_inner<D: PgSession>(
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn clear_inflight<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
