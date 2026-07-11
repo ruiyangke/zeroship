@@ -96,6 +96,7 @@ export interface ManifestExtras {
   transformer: "superjson" | "json";
   net?: NetConfig;
   schedules?: WireScheduleRegistration[];
+  workflows?: unknown;
   /** Hint for the manifest schema version (1 — the initial published shape). */
   versionHint: 1;
 }

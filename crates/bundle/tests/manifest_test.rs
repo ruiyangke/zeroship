@@ -107,6 +107,29 @@ fn handler_entries_round_trip() {
     assert_eq!(handlers[0].name, "listTodos");
 }
 
+#[test]
+fn workflow_declarations_round_trip() {
+    let mut m = Manifest::default();
+    m.workflows = Some(json!(["Checkout", {"name": "Fulfillment"}]));
+
+    let json_str = serde_json::to_string(&m).expect("serialize");
+    let m2: Manifest = serde_json::from_str(&json_str).expect("parse");
+    assert_eq!(
+        m2.workflows,
+        Some(json!(["Checkout", {"name": "Fulfillment"}]))
+    );
+}
+
+#[test]
+fn empty_workflow_declarations_omit_field() {
+    let m = Manifest::default();
+    let v: Value = serde_json::to_value(&m).expect("serialize");
+    assert!(
+        v.get("workflows").is_none(),
+        "workflows must be omitted when absent - got {v}"
+    );
+}
+
 // ── auth.scopes (declared-scope vocabulary, Slice 3a) ────────────────────────
 
 /// A manifest declaring `auth.scopes` round-trips through serde with every

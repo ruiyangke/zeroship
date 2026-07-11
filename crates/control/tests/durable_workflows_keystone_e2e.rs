@@ -37,7 +37,9 @@ use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_plugin_workflow::advance::{WorkflowAdvanceResponse, WorkflowRunDispatchRequest};
+use zeroship_plugin_workflow::advance::{
+    WorkflowAdvanceNackKind, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
+};
 use zeroship_plugin_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
@@ -63,6 +65,8 @@ const PARENT_START_MANY_WORKFLOW_NAME: &str = "ParentStartManyWorkflow";
 const PARENT_CATCH_CHILD_FAILURE_WORKFLOW_NAME: &str = "ParentCatchChildFailureWorkflow";
 const PARENT_CASCADE_WORKFLOW_NAME: &str = "ParentCascadeWorkflow";
 const PARENT_MANY_CASCADE_WORKFLOW_NAME: &str = "ParentManyCascadeWorkflow";
+const CONTINUE_AS_NEW_WORKFLOW_NAME: &str = "ContinueAsNewWorkflow";
+const COMPENSABLE_CARRY_WORKFLOW_NAME: &str = "CompensableCarryWorkflow";
 
 static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
 static SCHEDULER_PROVISIONED_DB: OnceLock<AsyncMutex<Option<String>>> = OnceLock::new();
@@ -371,6 +375,41 @@ impl StepDispatcher for CountingDispatcher {
     async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.inner.dispatch(request).await
+    }
+}
+
+#[derive(Clone)]
+struct CapturingDispatcher {
+    inner: GatewayStepDispatcher,
+    outcomes: Arc<Mutex<Vec<DispatchOutcome>>>,
+}
+
+impl CapturingDispatcher {
+    fn new(gateway_url: String) -> Self {
+        Self {
+            inner: GatewayStepDispatcher::new(gateway_url),
+            outcomes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn outcomes(&self) -> Vec<DispatchOutcome> {
+        self.outcomes.lock().expect("outcomes lock").clone()
+    }
+
+    fn count(&self) -> usize {
+        self.outcomes.lock().expect("outcomes lock").len()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for CapturingDispatcher {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let outcome = self.inner.dispatch(request).await;
+        self.outcomes
+            .lock()
+            .expect("outcomes lock")
+            .push(outcome.clone());
+        outcome
     }
 }
 
@@ -1287,7 +1326,7 @@ async fn wait_for_any_state(
 }
 
 async fn wait_for_step_count(fx: &Fixture, run_id: &str, expected: usize) {
-    for _ in 0..120 {
+    for _ in 0..400 {
         if step_rows(fx, run_id).await.len() == expected {
             return;
         }
@@ -1308,6 +1347,19 @@ async fn wait_for_dispatch_count(dispatcher: &CountingDispatcher, expected: usiz
     }
     panic!(
         "dispatcher reached {} calls, expected {expected}",
+        dispatcher.count()
+    );
+}
+
+async fn wait_for_captured_dispatch_count(dispatcher: &CapturingDispatcher, expected: usize) {
+    for _ in 0..120 {
+        if dispatcher.count() == expected {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "capturing dispatcher reached {} calls, expected {expected}",
         dispatcher.count()
     );
 }
@@ -2100,6 +2152,48 @@ async fn run_output(fx: &Fixture, run_id: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, String) {
+    let manifest_raw = fx
+        .pg
+        .query_one(
+            "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
+            &[&fx.app_id],
+        )
+        .await
+        .expect("load current app manifest")
+        .get::<_, Option<String>>("manifest_json")
+        .expect("current manifest json");
+    let redeploy_hash = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&manifest_raw).expect("manifest json parses");
+    manifest["deploy_hash"] = serde_json::Value::String(redeploy_hash.clone());
+    let redeploy_manifest = serde_json::to_string(&manifest).expect("serialize redeploy manifest");
+    fx.state
+        .blob_store
+        .put_manifest(&fx.app_id, &redeploy_hash, redeploy_manifest.as_bytes())
+        .await
+        .expect("write redeploy manifest blob");
+    let updated = fx
+        .state
+        .registry
+        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest)
+        .await
+        .expect("activate redeploy manifest");
+    assert!(updated, "redeploy should update app");
+    let deploy_id: String = fx
+        .pg
+        .query_one(
+            "SELECT id \
+               FROM zeroship.app_deploys \
+              WHERE app_id = $1 AND deploy_hash = $2",
+            &[&fx.app_id, &redeploy_hash],
+        )
+        .await
+        .expect("load redeploy id")
+        .get("id");
+    (redeploy_hash, deploy_id)
+}
+
 async fn child_run_ids(fx: &Fixture, parent_run_id: &str) -> Vec<String> {
     fx.pg
         .query(
@@ -2267,7 +2361,8 @@ async fn drive_children_until_cancelled(
         compio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
-        "children did not cancel: {:?}",
+        "children did not cancel after {} dispatch attempts: {:?}",
+        dispatcher.count(),
         child_states(fx, child_run_ids).await
     );
 }
@@ -2807,6 +2902,191 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .expect("parse scheduled startedAt")
     .with_timezone(&Utc);
     assert_eq!(output_started, planned);
+
+    let can_run = seed_workflow_run(
+        &fx,
+        CONTINUE_AS_NEW_WORKFLOW_NAME,
+        serde_json::json!({"case": "can", "generation": 0}),
+    )
+    .await;
+    let can_dispatcher = Arc::new(CapturingDispatcher::new(gateway_url.clone()));
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&can_dispatcher),
+        config("p4-can-first"),
+    )
+    .await
+    .expect("continue-as-new first tick");
+    assert_eq!(claimed, 1, "continue-as-new first step should dispatch once");
+    wait_for_step_count(&fx, &can_run, 1).await;
+    assert_eq!(
+        step_rows(&fx, &can_run).await,
+        vec![(
+            0,
+            "before-can".to_string(),
+            "run".to_string(),
+            "completed".to_string(),
+        )],
+        "continue-as-new first generation should stop after the seed step"
+    );
+
+    let (_can_redeploy_hash, can_redeploy_id) = activate_redeploy_with_current_manifest(&fx).await;
+    force_run_due(&fx, &can_run).await;
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&can_dispatcher),
+        config("p4-can-terminal"),
+    )
+    .await
+    .expect("continue-as-new terminal tick");
+    assert_eq!(claimed, 1, "continue-as-new terminal should dispatch once");
+    wait_for_captured_dispatch_count(&can_dispatcher, 2).await;
+    let outcomes = can_dispatcher.outcomes();
+    match outcomes.last().expect("continue-as-new terminal dispatch") {
+        DispatchOutcome::Completed(response) => {
+            assert!(response.is_ack(), "continue-as-new terminal returned nack: {response:?}");
+        }
+        other => panic!("continue-as-new terminal returned backpressure: {other:?}"),
+    }
+    let can_row = fx
+        .pg
+        .query_one(
+            "SELECT state, continued_as_new_run_id \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&can_run],
+        )
+        .await
+        .expect("load continued generation");
+    assert_eq!(can_row.get::<_, String>("state"), "completed");
+    let fresh_run: String = can_row
+        .get::<_, Option<String>>("continued_as_new_run_id")
+        .expect("continued generation should stamp successor");
+    let fresh_row = fx
+        .pg
+        .query_one(
+            "SELECT workflow_name, deploy_id, state, input, parent_run_id, dedup_key, next_ordinal \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&fresh_run],
+        )
+        .await
+        .expect("load fresh continued run");
+    assert_eq!(
+        fresh_row.get::<_, String>("workflow_name"),
+        CONTINUE_AS_NEW_WORKFLOW_NAME
+    );
+    assert_eq!(fresh_row.get::<_, String>("deploy_id"), can_redeploy_id);
+    assert_eq!(fresh_row.get::<_, String>("state"), "queued");
+    assert_eq!(fresh_row.get::<_, i32>("next_ordinal"), 0);
+    assert!(fresh_row.get::<_, Option<String>>("parent_run_id").is_none());
+    assert!(fresh_row.get::<_, Option<String>>("dedup_key").is_none());
+    let fresh_input: serde_json::Value = fresh_row.get("input");
+    assert_eq!(fresh_input["generation"], serde_json::json!(1));
+    assert_eq!(fresh_input["case"], serde_json::json!("can"));
+    assert_eq!(fresh_input["previousRunId"], serde_json::json!(can_run));
+    assert_eq!(fresh_input["marker"]["step"], serde_json::json!("before-can"));
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("p4-can-fresh"),
+        &fresh_run,
+    )
+    .await;
+    let fresh_output = run_output(&fx, &fresh_run).await;
+    assert_eq!(fresh_output["generation"], serde_json::json!(1));
+    assert_eq!(fresh_output["previousRunId"], serde_json::json!(can_run));
+    assert_eq!(fresh_output["marker"]["step"], serde_json::json!("before-can"));
+    assert_eq!(fresh_output["after"]["step"], serde_json::json!("after-can"));
+
+    let carry_run = seed_workflow_run(
+        &fx,
+        COMPENSABLE_CARRY_WORKFLOW_NAME,
+        serde_json::json!({"case": "carry"}),
+    )
+    .await;
+    let carry_dispatcher = Arc::new(CapturingDispatcher::new(gateway_url.clone()));
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&carry_dispatcher),
+        config("p4-carry-first"),
+    )
+    .await
+    .expect("compensable carry first tick");
+    assert_eq!(claimed, 1);
+    wait_for_step_count(&fx, &carry_run, 1).await;
+    let compensation_state: Option<String> = fx
+        .pg
+        .query_one(
+            "SELECT compensation_state \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = 0",
+            &[&carry_run],
+        )
+        .await
+        .expect("load compensable step")
+        .get("compensation_state");
+    assert_eq!(compensation_state.as_deref(), Some("pending"));
+
+    force_run_due(&fx, &carry_run).await;
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&carry_dispatcher),
+        config("p4-carry-reject"),
+    )
+    .await
+    .expect("compensable carry reject tick");
+    assert_eq!(claimed, 1);
+    let outcomes = carry_dispatcher.outcomes();
+    let response = match outcomes.last().expect("captured carry response") {
+        DispatchOutcome::Completed(response) => response,
+        other => panic!("expected carry apply response, got {other:?}"),
+    };
+    assert!(response.is_nack(), "carry response should nack: {response:?}");
+    assert_eq!(response.nack_kind, Some(WorkflowAdvanceNackKind::Invalid));
+    assert!(
+        response
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("CompensableCarryError")),
+        "carry response should be typed: {response:?}"
+    );
+    let carry_row = fx
+        .pg
+        .query_one(
+            "SELECT continued_as_new_run_id \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1",
+            &[&carry_run],
+        )
+        .await
+        .expect("load carry run");
+    assert!(
+        carry_row
+            .get::<_, Option<String>>("continued_as_new_run_id")
+            .is_none(),
+        "compensable carry must not stamp a successor"
+    );
+    let carry_successors: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs \
+              WHERE workflow_name = $1 AND id <> $2",
+            &[&COMPENSABLE_CARRY_WORKFLOW_NAME, &carry_run],
+        )
+        .await
+        .expect("count carry successors")
+        .get("n");
+    assert_eq!(carry_successors, 0, "compensable carry must not create a fresh run");
+    fx.scheduler_store
+        .ack_terminal(&carry_run)
+        .await
+        .expect("retire rejected compensable-carry scheduler row");
 
     let concurrent_planned = DateTime::<Utc>::from_timestamp_millis(
         (Utc::now() - ChronoDuration::minutes(2)).timestamp_millis(),
@@ -3420,6 +3700,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
         "pause-mid-dispatch should land a checkpoint exactly once"
     );
+    wait_for_scheduler_counts(&fx, &pause_run, (1, 0)).await;
     let skipped = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,

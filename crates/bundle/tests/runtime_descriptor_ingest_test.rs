@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde_json::json;
 use uuid::Uuid;
 use zeroship_bundle::blob::{sha256_hex, BlobStore, LocalDiskBlobStore};
 use zeroship_bundle::{ingest, IngestError, Manifest, RuntimeDescriptorEntry};
@@ -116,6 +117,28 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
         fetched.as_ref(),
         descriptor_bytes.as_slice(),
         "the schema.runtime.json blob must round-trip byte-identical"
+    );
+}
+
+#[compio::test]
+async fn workflow_declarations_survive_pack_then_ingest() {
+    let mut manifest = base_manifest();
+    manifest.workflows = Some(json!(["ContinueAsNewWorkflow", {"name": "CompensableCarryWorkflow"}]));
+
+    let archive = pack(&manifest, &[]);
+    let store: Arc<dyn BlobStore> =
+        Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
+    let app_id = Uuid::now_v7();
+
+    let success = ingest(&store, &app_id, &archive)
+        .await
+        .expect("ingest must accept a manifest carrying workflow declarations");
+
+    let stored: Manifest = serde_json::from_str(&success.manifest_json).unwrap();
+    assert_eq!(
+        stored.workflows,
+        Some(json!(["ContinueAsNewWorkflow", {"name": "CompensableCarryWorkflow"}])),
+        "ingest must preserve workflow declarations for live-deploy checks"
     );
 }
 

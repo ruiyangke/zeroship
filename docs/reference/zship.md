@@ -23,6 +23,8 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 - `sourcemaps`
 - `net`
 - `metadata`
+- `schedules`
+- `workflows`
 - `exports` (deprecated compatibility field; ignored)
 - `migrations`
 - `runtime_descriptor`
@@ -44,6 +46,11 @@ op.* migration artifacts, and `runtime_descriptor` points to the generated
 build-time static assets; `runtime_assets` holds runtime-emitted assets;
 `asset_version` is the change counter the gateway uses to know when to resync
 runtime assets.
+
+`workflows` carries the build-discovered workflow declarations. Control and
+worker-side workflow apply use it to reject starts or continue-as-new successors
+for workflows that are not declared by the active deploy. `schedules` carries
+build-discovered workflow schedule registrations.
 
 ## Network Requests
 
