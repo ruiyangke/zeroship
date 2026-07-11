@@ -131,7 +131,7 @@ fn corpus_is_byte_stable_and_value_equal() {
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
         // Record through the REAL V8 op.* recorder -> canonical IR JSON string.
-        let raw = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
+        let raw = record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
         let raw_ir: MigrationIr = serde_json::from_str(&raw)
             .unwrap_or_else(|e| panic!("{stem}: raw recorded IR violates contract: {e}"));
@@ -188,7 +188,7 @@ fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_exports() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
-        let raw = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
+        let raw = record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("in-process record {stem}: {e}"));
         let raw_ir: MigrationIr = serde_json::from_str(&raw)
             .unwrap_or_else(|e| panic!("{stem}: raw recorded IR violates contract: {e}"));
@@ -242,7 +242,7 @@ fn every_op_variant_has_a_fixture() {
     for stem in fixture_stems() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
-        let recorded = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
+        let recorded = record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
         let ir: MigrationIr = serde_json::from_str(&recorded).expect("recorded IR");
         for op in &ir.ops {

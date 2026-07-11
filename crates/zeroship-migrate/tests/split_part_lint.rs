@@ -16,7 +16,7 @@ use zeroship_migrate::frontend::record_migration_to_json_unsandboxed;
 const OWNER: &str = "app_lint";
 
 fn record(src: &str) -> Result<String, String> {
-    record_migration_to_json_unsandboxed(src, OWNER, "lint").map_err(|e| e.to_string())
+    record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "lint").map_err(|e| e.to_string())
 }
 
 /// In-envelope `col("name").splitPart(" ", 1)` records cleanly and emits a

@@ -17,13 +17,13 @@ const OWNER: &str = "app_pr3";
 /// Record a migration source → its recorded IR as a `serde_json::Value` (so a
 /// test can assert on the wire ops without re-deserializing the typed IR).
 fn record(src: &str, name: &str) -> Value {
-    let ir = record_migration_to_ir_unsandboxed(src, OWNER, name)
+    let ir = record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, name)
         .unwrap_or_else(|e| panic!("record {name}: {e}"));
     serde_json::to_value(&ir).expect("ir -> value")
 }
 
 fn record_err(src: &str, name: &str) -> String {
-    record_migration_to_ir_unsandboxed(src, OWNER, name)
+    record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, name)
         .err()
         .map(|e| e.to_string())
         .unwrap_or_else(|| panic!("{name}: expected a recording error, got Ok"))
@@ -437,8 +437,8 @@ fn date_now_symbol_is_deterministic_across_records() {
             table("t").insert({ rows: [ { at: Date.now } ] });
         }};
     "#;
-    let a = record_migration_to_ir_unsandboxed(src, OWNER, "date_now_symbol_a").unwrap();
-    let b = record_migration_to_ir_unsandboxed(src, OWNER, "date_now_symbol_a").unwrap();
+    let a = record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "date_now_symbol_a").unwrap();
+    let b = record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "date_now_symbol_a").unwrap();
     let checksum = |ir: &zeroship_migrate::MigrationIr| {
         Checksum::of_ir(
             &CanonicalOpList(&ir.ops),
@@ -464,7 +464,7 @@ fn date_now_call_just_evaluates_no_error() {
             table("t").insert({ rows: [ { at: Date.now() } ] });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "date_now_call")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "date_now_call")
         .expect("Date.now() call should evaluate and record");
     let value = serde_json::to_value(&outcome.ir).expect("ir -> value");
     let cell = &ops(&value)[0]["rows"][0][0];
@@ -486,7 +486,7 @@ fn determinism_lint_flags_date_now_in_op_arg() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
-    let findings = lint_migration_determinism(dirty).expect("lint runs");
+    let findings = lint_migration_determinism(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dirty).expect("lint runs");
     assert!(
         !findings.is_empty(),
         "Date.now() in an op argument must be flagged by the determinism lint"
@@ -504,7 +504,7 @@ fn determinism_lint_flags_date_now_in_op_arg() {
         }};
     "#;
     assert!(
-        lint_migration_determinism(clean).expect("lint runs").is_empty(),
+        lint_migration_determinism(&zeroship_migrate_runtime::ZeroshipRuntimeHost, clean).expect("lint runs").is_empty(),
         "the Date.now symbol form must produce NO determinism findings"
     );
 }
@@ -526,7 +526,7 @@ fn determinism_lint_flags_rng_and_clock_constructor() {
             }}}};
             "#
         );
-        let findings = lint_migration_determinism(&src).expect("lint runs");
+        let findings = lint_migration_determinism(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &src).expect("lint runs");
         assert!(
             findings.iter().any(|f| f.accessor.contains(needle)),
             "{src_frag} must be flagged; findings: {findings:?}"
@@ -548,9 +548,9 @@ fn same_source_records_same_json() {
         }};
     "#;
     let a =
-        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(src, OWNER, "det").unwrap();
+        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "det").unwrap();
     let b =
-        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(src, OWNER, "det").unwrap();
+        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "det").unwrap();
     assert_eq!(a, b, "the same source must record byte-identical .ir.json");
 }
 
@@ -672,7 +672,7 @@ fn record_path_allows_date_now_call_with_soft_warning() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "date_call")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "date_call")
         .expect("Date.now() call evaluates and records");
     assert_eq!(outcome.ir.ops.len(), 1);
     let created_at = match &outcome.ir.ops[0] {
@@ -699,7 +699,7 @@ fn record_path_allows_date_now_call_with_soft_warning() {
             table("t").insert({ rows: [ { v: 1 } ] });
         }};
     "#;
-    let clean_outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "clean")
+    let clean_outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, clean, OWNER, "clean")
         .expect("clean migration records");
     assert!(
         clean_outcome.warnings.is_empty(),
@@ -719,7 +719,7 @@ fn record_path_allows_math_random_calls_with_soft_warning() {
             table("t").insert({ rows: [ { sample: collapsed } ] });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "random_difference")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "random_difference")
         .expect("Math.random() calls evaluate and record");
     assert_eq!(outcome.ir.ops.len(), 1);
     let sample = match &outcome.ir.ops[0] {
@@ -750,7 +750,7 @@ fn record_path_allows_argless_new_date_call_with_soft_warning() {
             table("t").insert({ rows: [ { year: new Date().getUTCFullYear() } ] });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "argless_date")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, src, OWNER, "argless_date")
         .expect("argless new Date() call evaluates and records");
     assert_eq!(outcome.ir.ops.len(), 1);
     let year = match &outcome.ir.ops[0] {
@@ -781,7 +781,7 @@ fn record_path_allows_explicit_new_date_argument() {
             table("t").insert({ rows: [ { ms: new Date(0).getTime() } ] });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "explicit_date")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, clean, OWNER, "explicit_date")
         .expect("new Date(<explicit ms>) records normally");
     assert_eq!(outcome.ir.ops.len(), 1);
 }
@@ -799,7 +799,7 @@ fn record_path_allows_date_now_inside_comment_or_string() {
             });
         }};
     "#;
-    let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "comment_string")
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, clean, OWNER, "comment_string")
         .expect("inert Date.now/Math.random text records normally");
     assert_eq!(outcome.ir.ops.len(), 1);
 }

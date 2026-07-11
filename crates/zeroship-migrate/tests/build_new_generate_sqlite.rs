@@ -104,7 +104,7 @@ fn scaffold_is_deterministic_by_construction_and_records_zero_warnings() {
     // Recording the SCAFFOLD has ZERO determinism findings (the scaffold is
     // deterministic by construction).
     write(dir.path(), "20240617140000_seed_table.ts", &ts);
-    let outcome = build_migrations(dir.path(), APP, &via()).expect("build the scaffold");
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), APP, &via()).expect("build the scaffold");
     let m = &outcome.migrations[0];
     assert!(
         m.warnings.is_empty(),
@@ -124,7 +124,7 @@ async fn new_edit_build_apply_on_sqlite() {
     write(mig_dir.path(), &format!("{stem}.ts"), EDITED_TS);
 
     // `build` records via the LOCAL sandboxed child → transient canonical IR.
-    let outcome = build_migrations(mig_dir.path(), APP, &via()).expect("build records transient IR");
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, mig_dir.path(), APP, &via()).expect("build records transient IR");
     assert_eq!(outcome.migrations.len(), 1);
     let committed = String::from_utf8(outcome.migrations[0].committed_bytes.clone()).unwrap();
     assert!(committed.contains("createTable") || committed.contains("\"op\": \"createTable\""));
@@ -175,13 +175,13 @@ async fn build_records_deterministic_transient_ir_without_writing_artifact() {
     write(mig_dir.path(), &format!("{stem}.ts"), EDITED_TS);
 
     // First build records transient canonical IR.
-    let first = build_migrations(mig_dir.path(), APP, &via()).expect("first build");
+    let first = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, mig_dir.path(), APP, &via()).expect("first build");
     assert_eq!(first.migrations[0].record_path, zeroship_migrate::frontend::RecordPath::Local);
     let first_bytes = first.migrations[0].committed_bytes.clone();
 
     // A second build re-records from the same deterministic source and the bytes are
     // identical; no committed artifact is used.
-    let second = build_migrations(mig_dir.path(), APP, &via()).expect("second build");
+    let second = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, mig_dir.path(), APP, &via()).expect("second build");
     assert_eq!(
         second.migrations[0].record_path,
         zeroship_migrate::frontend::RecordPath::Local,

@@ -89,7 +89,7 @@ pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 pub mod frontend;
 pub mod guard;
 pub mod id;
@@ -97,6 +97,10 @@ pub mod model;
 pub mod ops;
 pub mod plan;
 pub mod render;
+// The V8-host seam (extraction Phase A). UNGATED — the traits name no
+// `zeroship-runtime` / `v8` type, so they compile with zero runtime dep. Only the
+// *consumers* (`frontend/`, `apply/backend/mysql/`) are `v8-host`-gated.
+pub mod runtime_host;
 // PG integration-test helpers (all consumers are `*_pg.rs` suites that connect to
 // a live PG at :5440). PG-only, so gated with `native-pg`.
 #[cfg(feature = "native-pg")]
@@ -122,6 +126,13 @@ pub mod test_support;
 #[cfg(all(doctest, not(feature = "standalone-cli")))]
 pub struct StandaloneCliFeatureAbsent;
 
+// The V8-host seam types (extraction Phase A) — UNGATED. Runtime adapters impl
+// these; the engine names only them (never a `zeroship_runtime` type).
+pub use runtime_host::{
+    AuthoringHost, GlobalsProfile, HostEvalError, HostPort, JsDriverHost, JsDriverTimeout,
+    ModuleEntry, NetPolicy, RecorderPlatform, ReviewedAllowlist,
+};
+
 pub use analysis::{analyze, classify};
 
 // ---------------------------------------------------------------------------
@@ -130,7 +141,7 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-#[cfg(all(test, feature = "zsv8"))]
+#[cfg(all(test, feature = "v8-host"))]
 pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 // V8-free, driver-neutral re-exports (consumed by plugin-db / migrated per the
 // decoupling design §7). Name no compio type and back the SQLite path too — ungated.
@@ -153,7 +164,7 @@ pub use apply::backend::postgres::seam::{FromSeam, SeamBind, SeamError, SeamRow,
 #[cfg(pg_seam)]
 pub use apply::backend::postgres::session::PgSession;
 // MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 pub use apply::backend::{
     deprovision_mysql_migrator_account, mysql_migration_lock_name,
     provision_mysql_migrator_account, provision_mysql_migrator_account_with_password, JsDriverConn,

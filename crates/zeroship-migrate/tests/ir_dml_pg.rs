@@ -461,9 +461,9 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
         }};
     "#;
     let recorded_at = unix_secs();
-    let symbol_ir = record_migration_to_ir_unsandboxed(symbol_src, APP, "pg_fnsynth_symbol")
+    let symbol_ir = record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, symbol_src, APP, "pg_fnsynth_symbol")
         .expect("record symbol-form fnSynth insert");
-    let explicit_ir = record_migration_to_ir_unsandboxed(explicit_src, APP, "pg_fnsynth_explicit")
+    let explicit_ir = record_migration_to_ir_unsandboxed(&zeroship_migrate_runtime::ZeroshipRuntimeHost, explicit_src, APP, "pg_fnsynth_explicit")
         .expect("record explicit top-level constructor insert");
     assert_eq!(
         symbol_ir.ops, explicit_ir.ops,

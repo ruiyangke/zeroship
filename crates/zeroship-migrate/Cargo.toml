@@ -5,10 +5,12 @@ edition = "2021"
 description = "zeroship's versioned DB migration engine — native Postgres fast path; the V8-backed JS authoring front-end + live-MySQL backend are optional behind the `zsv8` feature, so library embedders can build the guard/IR/render/PG+SQLite-apply core V8-free"
 
 [features]
-# The default build still builds the `zeroship-migrate-js` bin — the platform
-# depends on that binary existing. A pure-library embedder opts out via
-# `--no-default-features` to skip clap AND the in-Rust V8 host (see `zsv8`).
-default = ["js-cli", "native-pg"]
+# Extraction Phase A: the engine is now a clean, runtime-free LIBRARY. The V8 bins
+# (`zeroship-migrate-js`, the recorder child) + the in-Rust-V8 host impls moved to
+# the monorepo adapter crate `zeroship-migrate-runtime` (which owns `clap` + the
+# `js-cli`/`standalone-cli` CLIs). The default engine build is the V8-host consumer
+# path (`v8-host`) + native PG — but with NO `zeroship-runtime`/`v8` in the graph.
+default = ["v8-host", "native-pg"]
 # The compio-postgres driver: the FIRST (native) `PgSession` impl. Gates the
 # `compio-postgres` dep AND the compio-CONCRETE PG pieces — `impl PgSession for
 # compio_postgres::Client` + the `SeamBind→ToSql` / `Row→SeamRow` /
@@ -33,25 +35,33 @@ native-pg = ["dep:compio-postgres"]
 # The addon build (`--no-default-features --features host-pg`) omits
 # compio-postgres entirely, so the `.node` stays cross-platform (no io_uring).
 host-pg = []
-# The in-Rust V8 host: JS/TS schema-authoring front-end (`src/frontend/`) + the
-# live-MySQL backend (`src/apply/backend/mysql/`, mysql2 in a V8 isolate over
-# node:net) + the kernel-sandboxed recorder child. This is the ONLY feature that
-# pulls `zeroship-runtime` / `v8` (and the Linux sandbox deps) into the tree;
-# `--no-default-features` compiles a V8-free core (guard + IR + render + PG/SQLite
-# apply + journal), with V8 absent from the dependency graph. The JS authoring
-# front-end always does LIVE PG introspection (`conn::connect` + `snapshot_schema`
-# in `frontend/generate.rs` + the `zeroship-migrate-js` bin), so `zsv8` pulls in
-# `native-pg` — the V8 host and the compio-PG driver ship together.
-zsv8 = ["dep:v8", "dep:zeroship-runtime", "dep:seccompiler", "dep:landlock", "dep:libc", "native-pg"]
-# The JS authoring CLI bin (`zeroship-migrate-js`). Authoring needs the V8 host,
-# so `js-cli` pulls `zsv8`. Gated so the lean library embedder does not compile
-# clap.
-js-cli = ["dep:clap", "zsv8"]
-# Raw standalone apply/runner surface for user-owned databases. Its live path can
-# reach the MySQL backend, so it also rides `zsv8`. Server/control crates must not
-# enable this feature; workspace resolver = "3" keeps dev/test feature use from
-# leaking into normal embedder binaries.
-standalone-cli = ["dep:clap", "zsv8"]
+# The V8-backed authoring front-end (`src/frontend/`) + live-MySQL backend
+# (`src/apply/backend/mysql/`) — made GENERIC over the `AuthoringHost`/
+# `JsDriverHost`/`RecorderPlatform` seam traits (design §2). Extraction Phase A
+# renamed `zsv8` → `v8-host` and, crucially, this feature NO LONGER pulls
+# `zeroship-runtime` / `v8` — the in-Rust-V8 impl is the monorepo adapter crate
+# `zeroship-migrate-runtime`. It still pulls the kernel sandbox deps (via `sandbox`)
+# and `native-pg` (the JS authoring front-end does live PG introspection).
+# `--no-default-features` compiles a V8-consumer-free core (guard + IR + render +
+# PG/SQLite apply + journal), with V8 + `zeroship-runtime` absent from the graph.
+v8-host = ["sandbox", "native-pg"]
+# Back-name alias kept for the test suite + external callers that still say `zsv8`
+# (~30 `#![cfg(feature = "zsv8")]` test files). Pre-launch we could rename them, but
+# the seam edit is orthogonal to the feature spelling — the load-bearing invariant
+# is that NEITHER `zsv8` NOR `v8-host` pulls `zeroship-runtime`/`v8` into the graph.
+zsv8 = ["v8-host"]
+# The kernel sandbox for the recorder child (seccomp/landlock/netns/rlimits). These
+# are KERNEL primitives — independent of V8 and of `zeroship-runtime`. An embedder
+# wanting the sandbox but a host-side authoring impl enables `sandbox` alone.
+sandbox = ["dep:seccompiler", "dep:landlock", "dep:libc"]
+# The JS authoring CLI + standalone runner CLIs. Pull `clap`. The V8-host bins
+# (`zeroship-migrate-js`, the recorder child) MOVED to `zeroship-migrate-runtime`
+# (they link the adapter — see §5.2), so `js-cli` no longer names a bin here; it is
+# kept only so the standalone `zeroship-migrate` bin (which STAYS) resolves clap.
+js-cli = ["dep:clap", "v8-host"]
+# Raw standalone apply/runner surface (the `zeroship-migrate` bin, which STAYS in
+# this crate — it needs no in-Rust V8 host, only child-mediated recording).
+standalone-cli = ["dep:clap", "v8-host"]
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -91,11 +101,11 @@ indexmap = { workspace = true }
 # crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
 # snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
 zeroship-schema = { workspace = true }
-# The JS-first authoring front-end + live-MySQL backend use the platform V8
-# runtime; native compio-postgres remains the deploy/apply fast path. OPTIONAL —
-# pulled only by `zsv8` (via `js-cli`/`standalone-cli`), so a library embedder can
-# build the guard/IR/render/PG+SQLite-apply core V8-free (`--no-default-features`).
-zeroship-runtime = { workspace = true, optional = true }
+# The reviewed-allowlist net-policy security type (`HostPort`/`ReviewedAllowlist`)
+# the engine-owned `runtime_host::NetPolicy` reuses (design §2.5). NORMAL dep this
+# phase (Phase B vendors it + drops this edge). The engine's public MySQL surface +
+# its TLS-pin/net-policy construction stay runtime-`NetPolicy`-free.
+zeroship-core = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
@@ -145,12 +155,10 @@ toml = { workspace = true }
 # canonical content-addressed hash validation. The V8 front-end build path emits
 # bundle migration entries over committed `.ir.json` bytes.
 zeroship-bundle = { workspace = true }
-# OPTIONAL — the in-Rust V8 host; pulled only by `zsv8`.
-v8 = { workspace = true, optional = true }
 # Raw syscalls for the kernel-sandboxed recorder child (rlimits, no-new-privs,
 # namespaces), matching the existing sandbox-agent raw-libc posture. OPTIONAL —
-# its only users are the V8-gated sandbox / recorder-child paths, so it is folded
-# into `zsv8` (no in-core consumers → kept out of the V8-free tree).
+# its only users are the sandbox paths, so it is folded into `sandbox` (no in-core
+# consumers → kept out of the sandbox-free tree). NOT a V8 dep.
 libc = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -173,26 +181,21 @@ name = "zeroship-migrate"
 path = "src/bin/zeroship-migrate.rs"
 required-features = ["standalone-cli"]
 
-# The JS authoring CLI remains named `zeroship-migrate-js` so Vite/plugin and
-# PATH-based call sites keep resolving the same executable.
-[[bin]]
-name = "zeroship-migrate-js"
-path = "src/bin/zeroship-migrate-js.rs"
-required-features = ["js-cli"]
-
-# The kernel-sandboxed recorder child remains named exactly as before; the
-# parent sandbox resolves this sibling binary from Cargo's target dir.
-[[bin]]
-name = "zeroship-migrate-recorder-child"
-path = "src/bin/recorder-child.rs"
-# The recorder child is entirely V8/sandbox code; it only builds with the V8 host.
-required-features = ["zsv8"]
+# NOTE (extraction Phase A, design §5.2): the two V8-host bins —
+# `zeroship-migrate-js` (authoring CLI) and `zeroship-migrate-recorder-child`
+# (kernel-sandboxed recorder) — MOVED to `crates/zeroship-migrate-runtime`, because
+# they must link the adapter (which depends back on this crate) and would otherwise
+# form a Cargo cycle. This lib crate now names NO bin that pulls the V8 host, so it
+# stays a clean runtime-free library. The Vite plugin +
+# `recorder_service::recorder_child_path()` resolve the moved binaries by name.
 
 [dev-dependencies]
-# Drift guard: `tests/core_id_parity.rs` asserts the vendored `id` / `db_url`
-# copies stay byte-identical to core's originals while both crates coexist
-# in-tree. Dev-only — the library no longer depends on core at runtime.
-zeroship-core = { workspace = true }
+# The in-Rust-V8 adapter — injected into the seam-exercising tests so the
+# authoring/record/lint + MySQL-echo suites run THROUGH `ZeroshipRuntimeHost`
+# (design §6b). A dev-dependency cycle (adapter → engine → [dev] adapter) is
+# permitted by cargo because dev-deps don't affect the normal build graph, so the
+# runtime-free normal tree (§6a) is unaffected.
+zeroship-migrate-runtime = { path = "../zeroship-migrate-runtime" }
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro
 # drives the async apply flow on the compio runtime.
 compio = { workspace = true }

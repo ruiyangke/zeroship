@@ -12,12 +12,10 @@
 
 use crate::model::profile::PolicyProfile;
 use crate::model::table_shape::{resolve_create_table_policy, TableShapeError};
+use crate::runtime_host::{AuthoringHost, GlobalsProfile, HostEvalError};
 use crate::MigrationIr;
-use zeroship_runtime::Runtime;
 
-use super::embedding::{
-    install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram,
-};
+use super::embedding::{module_graph, FrontendProgram};
 use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 
 /// An error from recording a migration module.
@@ -104,11 +102,15 @@ struct OpIrEnvelope {
 /// See [`RecordError`].
 #[doc(hidden)]
 pub fn record_migration_to_ir_unsandboxed(
+    host: &impl AuthoringHost,
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<MigrationIr, RecordError> {
-    Ok(record_migration_to_ir_with_warnings_unsandboxed(migration_source, owner_app, name)?.ir)
+    Ok(
+        record_migration_to_ir_with_warnings_unsandboxed(host, migration_source, owner_app, name)?
+            .ir,
+    )
 }
 
 /// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
@@ -124,59 +126,58 @@ pub fn record_migration_to_ir_unsandboxed(
 /// See [`RecordError`].
 #[doc(hidden)]
 pub fn record_migration_to_ir_with_warnings_unsandboxed(
+    host: &impl AuthoringHost,
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<RecordOutcome, RecordError> {
     reject_oversized_source("ts_source", migration_source)?;
 
-    let ir_value = record_migration_value_unsandboxed(migration_source, owner_app, name)?;
+    let ir_value = record_migration_value_unsandboxed(host, migration_source, owner_app, name)?;
     let ir = ir_from_value(ir_value)?;
-    let warnings = advisory_determinism_findings(migration_source);
+    let warnings = advisory_determinism_findings(host, migration_source);
     Ok(RecordOutcome { ir, warnings })
 }
 
+/// Map a seam `HostEvalError` back to the historical `RecordError` variant so the
+/// observable error is byte-identical (design §2.2): an install/load failure was
+/// `RecordError::V8`; a missing/non-string (or failed input-alloc) global was
+/// `RecordError::NoIr`.
+fn record_error_from_host_eval(e: HostEvalError) -> RecordError {
+    match e {
+        HostEvalError::Install(msg) => RecordError::V8(msg),
+        HostEvalError::MissingOutput(_) => RecordError::NoIr,
+    }
+}
+
 fn record_migration_value_unsandboxed(
+    host: &impl AuthoringHost,
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<serde_json::Value, RecordError> {
-    zeroship_runtime::init_v8();
-
     let modules = module_graph(FrontendProgram::RecordMigration {
         source: migration_source,
     });
 
-    let runtime = Runtime::builder().build();
+    // The whole isolate mechanism (init_v8 + Runtime::build + with_scope +
+    // load_modules + the raw v8:: global set/get + microtask drain) lives in the
+    // adapter's `eval_frontend`. owner_app is DELIBERATELY NOT an input global here:
+    // it is a tenant-identifying field folded into the authoritative Checksum::of_ir,
+    // so untrusted up() must have no JS-reachable handle to it — the engine stamps
+    // owner_app in Rust below (PR4a code-critic HIGH #1; symmetric with the sandboxed
+    // recorder child).
+    let mut outputs = host
+        .eval_frontend(
+            &modules,
+            GlobalsProfile::Migration,
+            &[("__zsMigrationName", name)],
+            &["__zsOpIR"],
+            None,
+        )
+        .map_err(record_error_from_host_eval)?;
 
-    let recorded: Result<String, RecordError> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
-
-        // Expose ONLY the filename-derived name to the adapter. owner_app is
-        // DELIBERATELY NOT a global: it is a tenant-identifying field folded into the
-        // authoritative Checksum::of_ir, so untrusted up() must have no JS-reachable
-        // handle to it — the engine stamps owner_app in Rust below (PR4a code-critic
-        // HIGH #1; symmetric with the sandboxed recorder child).
-        {
-            let global = scope.get_current_context().global(scope);
-            let k = v8::String::new(scope, "__zsMigrationName").ok_or(RecordError::NoIr)?;
-            let v = v8::String::new(scope, name).ok_or(RecordError::NoIr)?;
-            global.set(scope, k.into(), v.into());
-        }
-
-        zeroship_runtime::modules::load_modules(scope, &modules).map_err(RecordError::V8)?;
-        scope.perform_microtask_checkpoint();
-
-        let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, "__zsOpIR").unwrap();
-        let v = global
-            .get(scope, k.into())
-            .filter(|v| v.is_string())
-            .ok_or(RecordError::NoIr)?;
-        Ok(v.to_rust_string_lossy(scope))
-    });
-
-    let ir_json = recorded?;
+    let ir_json = outputs.remove("__zsOpIR").ok_or(RecordError::NoIr)?;
     let envelope: OpIrEnvelope =
         serde_json::from_str(&ir_json).map_err(|e| RecordError::Recording(e.to_string()))?;
 
@@ -228,11 +229,12 @@ fn ir_from_value(ir_value: serde_json::Value) -> Result<MigrationIr, RecordError
 /// See [`RecordError`].
 #[doc(hidden)]
 pub fn record_migration_to_json_unsandboxed(
+    host: &impl AuthoringHost,
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<String, RecordError> {
-    let ir = record_migration_to_ir_unsandboxed(migration_source, owner_app, name)?;
+    let ir = record_migration_to_ir_unsandboxed(host, migration_source, owner_app, name)?;
     let mut s = serde_json::to_string_pretty(&ir)
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     s.push('\n');
@@ -266,8 +268,11 @@ fn reject_oversized_source(field: &'static str, source: &str) -> Result<(), Reco
     }
 }
 
-fn advisory_determinism_findings(migration_source: &str) -> Vec<DeterminismFinding> {
-    lint_migration_determinism(migration_source).unwrap_or_default()
+fn advisory_determinism_findings(
+    host: &impl AuthoringHost,
+    migration_source: &str,
+) -> Vec<DeterminismFinding> {
+    lint_migration_determinism(host, migration_source).unwrap_or_default()
 }
 
 /// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
@@ -279,36 +284,23 @@ fn advisory_determinism_findings(migration_source: &str) -> Vec<DeterminismFindi
 /// # Errors
 /// See [`RecordError`].
 pub fn lint_migration_determinism(
+    host: &impl AuthoringHost,
     migration_source: &str,
 ) -> Result<Vec<DeterminismFinding>, RecordError> {
     reject_oversized_source("ts_source", migration_source)?;
-    zeroship_runtime::init_v8();
 
     let modules = module_graph(FrontendProgram::DeterminismLint);
 
-    let runtime = Runtime::builder().build();
-
-    let out_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
-
-        {
-            let global = scope.get_current_context().global(scope);
-            let k = v8::String::new(scope, "__zsLintSrc").ok_or(RecordError::NoIr)?;
-            let v = v8::String::new(scope, migration_source).ok_or(RecordError::NoIr)?;
-            global.set(scope, k.into(), v.into());
-        }
-
-        zeroship_runtime::modules::load_modules(scope, &modules).map_err(RecordError::V8)?;
-        scope.perform_microtask_checkpoint();
-
-        let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, "__zsLintOut").ok_or(RecordError::NoIr)?;
-        let v = global
-            .get(scope, k.into())
-            .filter(|v| v.is_string())
-            .ok_or(RecordError::NoIr)?;
-        Ok(v.to_rust_string_lossy(scope))
-    });
+    let mut outputs = host
+        .eval_frontend(
+            &modules,
+            GlobalsProfile::Migration,
+            &[("__zsLintSrc", migration_source)],
+            &["__zsLintOut"],
+            None,
+        )
+        .map_err(record_error_from_host_eval)?;
+    let out_json = outputs.remove("__zsLintOut").ok_or(RecordError::NoIr)?;
 
     #[derive(serde::Deserialize)]
     struct LintEnvelope {
@@ -319,7 +311,7 @@ pub fn lint_migration_determinism(
         findings: Vec<DeterminismFinding>,
     }
 
-    let env: LintEnvelope = serde_json::from_str(&out_json?)
+    let env: LintEnvelope = serde_json::from_str(&out_json)
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     if !env.ok {
         return Err(RecordError::Recording(

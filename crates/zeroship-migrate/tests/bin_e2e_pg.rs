@@ -139,12 +139,18 @@ fn sink_dir() -> &'static std::path::Path {
 /// `(success, stdout, stderr)`. `CARGO_BIN_EXE_zeroship-migrate` is injected by
 /// cargo for integration tests and points at the freshly-built binary.
 fn run_bin(args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
+    // Extraction Phase A: the recorder-child bin MOVED to `zeroship-migrate-runtime`,
+    // so `CARGO_BIN_EXE_zeroship-migrate-recorder-child` is not injected for THIS
+    // (engine) test crate. It builds into the SAME target dir as the standalone bin,
+    // so resolve it as a sibling of `CARGO_BIN_EXE_zeroship-migrate`.
+    let standalone = std::path::PathBuf::from(env!("CARGO_BIN_EXE_zeroship-migrate"));
+    let recorder_child = standalone
+        .parent()
+        .expect("standalone bin has a parent dir")
+        .join("zeroship-migrate-recorder-child");
+    let out = Command::new(&standalone)
         .current_dir(sink_dir())
-        .env(
-            "ZEROSHIP_RECORDER_CHILD",
-            env!("CARGO_BIN_EXE_zeroship-migrate-recorder-child"),
-        )
+        .env("ZEROSHIP_RECORDER_CHILD", &recorder_child)
         .args(args)
         .output()
         .expect("spawn the built zeroship-migrate binary");

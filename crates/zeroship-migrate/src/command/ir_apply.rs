@@ -65,9 +65,9 @@ use crate::approval::ApprovalScope;
 // The `.ts`-record apply path lives in the `zsv8`-gated `ts_record` submodule
 // (it drives the V8 authoring front-end). The V8-free IR-load / sealed-apply
 // surface below carries no `crate::frontend` edge.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 mod ts_record;
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 pub use ts_record::apply_platform_ts_postgres;
 use crate::PolicyProfile;
 use crate::model::migration::Migration;

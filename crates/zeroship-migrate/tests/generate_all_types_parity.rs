@@ -186,7 +186,7 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617160000_create_gadgets";
     std::fs::write(dir.path().join(format!("{stem}.ts")), gen.ts_body.as_bytes()).unwrap();
-    let built = build_migrations(dir.path(), APP, &via()).expect("record the emitted .ts");
+    let built = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), APP, &via()).expect("record the emitted .ts");
     let derived = direct_checksum(&gen.ir);
     assert_eq!(
         built.migrations[0].checksum, derived,

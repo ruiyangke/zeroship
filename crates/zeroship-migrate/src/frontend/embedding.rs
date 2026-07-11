@@ -1,11 +1,18 @@
-//! Shared V8 embedding for the migrate JS front-end.
+//! Shared module-graph embedding for the migrate JS front-end.
 //!
 //! Schema eval, the in-process recorder oracle, the determinism lint, and the
 //! sandboxed recorder child all load the same trusted adapter/DSL modules from
-//! this file. The entry module changes per operation, but the module universe
-//! and globals are owned here so subpath shims and host globals cannot drift.
+//! this file. The entry module changes per operation, but the module universe is
+//! owned here so subpath shims and host globals cannot drift.
+//!
+//! Extraction Phase A: the `ModuleEntry` type is now the engine-owned
+//! [`crate::runtime_host::ModuleEntry`] (identical 2 `String` fields) — the graph
+//! *content* is unchanged. `install_frontend_globals` MOVED behind the
+//! [`AuthoringHost`](crate::runtime_host::AuthoringHost) seam (its `setup_globals` +
+//! `install_*` body lives in the adapter crate's `eval_frontend`); this file keeps
+//! only the `GlobalsProfile`/`FrontendProgram` descriptors + `module_graph()`.
 
-use zeroship_runtime::ModuleEntry;
+use crate::runtime_host::{GlobalsProfile, ModuleEntry};
 
 /// The op.* recorder adapter glue.
 const OP_RECORDER_JS: &str = include_str!("op_recorder.js");
@@ -61,11 +68,11 @@ pub enum FrontendProgram<'a> {
 }
 
 /// The global installer profile a front-end operation needs.
-#[derive(Debug, Clone, Copy)]
-pub enum FrontendGlobals {
-    Migration,
-    Schema,
-}
+///
+/// Kept as an alias of the seam-owned [`GlobalsProfile`] so existing call sites
+/// naming `FrontendGlobals::{Migration,Schema}` still resolve, while
+/// `AuthoringHost::eval_frontend` names the seam type directly.
+pub type FrontendGlobals = GlobalsProfile;
 
 fn module(specifier: &str, source: &str) -> ModuleEntry {
     ModuleEntry {
@@ -110,25 +117,4 @@ pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
     modules.push(module("zeroship", ZEROSHIP_FACADE_STUB_JS));
 
     modules
-}
-
-/// Install the canonical globals for a migrate front-end operation.
-pub fn install_frontend_globals(
-    scope: &mut v8::PinScope,
-    globals: FrontendGlobals,
-) -> Result<(), String> {
-    zeroship_runtime::init::setup_globals(scope)?;
-    match globals {
-        FrontendGlobals::Migration => {
-            zeroship_runtime::init::install_text_encoding_streams(scope);
-        }
-        FrontendGlobals::Schema => {
-            zeroship_runtime::init::install_headers(scope);
-            zeroship_runtime::init::install_native_streams(scope);
-            zeroship_runtime::init::install_blob_native(scope);
-            zeroship_runtime::init::install_text_encoding_streams(scope);
-            zeroship_runtime::init::install_dom(scope);
-        }
-    }
-    Ok(())
 }

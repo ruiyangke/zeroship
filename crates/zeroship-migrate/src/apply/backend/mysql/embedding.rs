@@ -8,7 +8,7 @@
 //! dependency is severed by construction (a MySQL driver-isolate helper does
 //! not belong in the schema-authoring module).
 
-use zeroship_runtime::ModuleEntry;
+use crate::runtime_host::ModuleEntry;
 
 /// The vendored `mysql2/promise` bundle for the Trusted JS-driver isolate.
 const MYSQL2_PROMISE_BUNDLE_JS: &str = include_str!("vendor/mysql2-3.14.1.bundle.mjs");

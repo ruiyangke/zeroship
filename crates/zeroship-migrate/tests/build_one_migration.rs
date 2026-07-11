@@ -53,7 +53,7 @@ fn record_one_file_does_not_record_siblings() {
     fs::write(dir.path().join(format!("{sibling}.ts")), SIBLING_TS.as_bytes()).unwrap();
 
     let target_path = dir.path().join(format!("{target}.ts"));
-    let outcome = build_one_migration(&target_path, APP, &via()).expect("build one");
+    let outcome = build_one_migration(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &target_path, APP, &via()).expect("build one");
     assert_eq!(outcome.migrations.len(), 1, "exactly one migration built");
     assert_eq!(outcome.migrations[0].stem, target);
 
@@ -76,11 +76,11 @@ fn record_one_file_is_deterministic_across_transient_runs() {
     let path = dir.path().join(format!("{stem}.ts"));
     fs::write(&path, TS.as_bytes()).unwrap();
 
-    let first = build_one_migration(&path, APP, &via()).expect("first");
+    let first = build_one_migration(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &path, APP, &via()).expect("first");
     assert_eq!(first.migrations[0].record_path, zeroship_migrate::frontend::RecordPath::Local);
     let bytes = first.migrations[0].committed_bytes.clone();
 
-    let second = build_one_migration(&path, APP, &via()).expect("second");
+    let second = build_one_migration(&zeroship_migrate_runtime::ZeroshipRuntimeHost, &path, APP, &via()).expect("second");
     assert_eq!(
         second.migrations[0].record_path,
         zeroship_migrate::frontend::RecordPath::Local
@@ -94,7 +94,7 @@ fn record_one_file_is_deterministic_across_transient_runs() {
 
 #[test]
 fn record_non_ts_path_is_invalid_name() {
-    let err = build_one_migration(std::path::Path::new("/tmp/nota.json"), APP, &via())
+    let err = build_one_migration(&zeroship_migrate_runtime::ZeroshipRuntimeHost, std::path::Path::new("/tmp/nota.json"), APP, &via())
         .expect_err("a non-.ts path is rejected");
     assert!(matches!(err, BuildError::InvalidName { .. }), "got {err:?}");
 }

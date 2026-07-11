@@ -114,7 +114,7 @@ fn hosted_unreachable_falls_back_to_local_not_a_build_failure() {
         client: &client,
         local_fallback_budget: ResourceBudget::default(),
     };
-    let outcome = build_migrations(dir.path(), OWNER, &via)
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &via)
         .expect("recorder-unreachable must FALL BACK to local, not fail the build");
     assert_eq!(outcome.migrations.len(), 1);
     let m = &outcome.migrations[0];
@@ -135,7 +135,7 @@ fn confined_build_records_resolved_system_shape_before_checksum() {
     let stem = "20240617120000_widgets";
     write_mig(dir.path(), stem, MIG_TS);
 
-    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local()).expect("build");
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local()).expect("build");
     let op = create_op(&outcome.migrations[0].committed_bytes);
     let columns = op["columns"].as_array().expect("columns");
     let names = columns
@@ -220,7 +220,7 @@ fn hosted_non_retryable_reject_is_a_build_error_no_silent_fallback() {
         client: &client,
         local_fallback_budget: ResourceBudget::default(),
     };
-    let err = build_migrations(dir.path(), OWNER, &via)
+    let err = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &via)
         .expect_err("a non-retryable authoring reject must surface as a build error");
     let msg = format!("{err}");
     assert!(
@@ -243,7 +243,7 @@ fn local_build_rejects_oversized_source_before_recording() {
     write_mig(dir.path(), stem, &huge);
 
     let started = std::time::Instant::now();
-    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+    let err = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local())
         .expect_err("oversized local source must be rejected before recording");
     let elapsed = started.elapsed();
 
@@ -280,7 +280,7 @@ fn build_allows_date_now_call_with_soft_warning() {
     "#;
     write_mig(dir.path(), stem, src);
 
-    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local())
         .expect("Date.now() call evaluates and records");
     assert_eq!(outcome.migrations.len(), 1);
     let m = &outcome.migrations[0];
@@ -311,7 +311,7 @@ fn date_now_inside_comment_or_string_is_not_a_false_reject() {
     "#;
     write_mig(dir.path(), stem, clean);
 
-    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local())
         .expect("comment/string mentions of nondeterministic APIs record normally");
     assert_eq!(outcome.migrations.len(), 1);
     assert!(
@@ -335,7 +335,7 @@ fn math_random_calls_evaluate_and_do_not_hard_fail() {
     "#;
     write_mig(dir.path(), stem, src);
 
-    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local())
         .expect("Math.random() calls evaluate and record");
     assert_eq!(outcome.migrations.len(), 1);
     assert!(
@@ -365,7 +365,7 @@ fn date_now_arithmetic_call_evaluates_and_does_not_hard_fail() {
     "#;
     write_mig(dir.path(), stem, src);
 
-    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, dir.path(), OWNER, &RecordVia::local())
         .expect("Date.now() arithmetic call evaluates and records");
     assert_eq!(outcome.migrations.len(), 1);
     assert!(!dir.path().join(format!("{stem}.ir.json")).exists());
@@ -379,7 +379,7 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
     let local_dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_widgets";
     write_mig(local_dir.path(), stem, MIG_TS);
-    let local = build_migrations(
+    let local = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, 
         local_dir.path(),
         OWNER,
         &RecordVia::Local {
@@ -423,7 +423,7 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
     let hosted_dir = tempfile::tempdir().unwrap();
     write_mig(hosted_dir.path(), stem, MIG_TS);
     let client = LocalChildHostedClient;
-    let hosted = build_migrations(
+    let hosted = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, 
         hosted_dir.path(),
         OWNER,
         &RecordVia::Hosted {

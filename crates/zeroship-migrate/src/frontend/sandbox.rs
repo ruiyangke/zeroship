@@ -18,7 +18,7 @@
 //! would stay UNFILTERED at the kernel level — a resolver-bypassing escape scheduled
 //! onto one could `socket()`/`fork()`/write freely. We close this two ways,
 //! defense-in-depth: the recorder child initializes V8 with a SINGLE-THREADED platform
-//! ([`init_recorder_v8`] → `zeroship_runtime::init_v8_single_threaded`) so NO background
+//! ([`init_recorder_v8`] → `RecorderPlatform::init_single_threaded`) so NO background
 //! worker thread exists, AND [`apply_seccomp`] installs the BPF filter via
 //! `apply_filter_all_threads` (TSYNC) so it synchronizes across every thread that does
 //! exist. landlock has no TSYNC equivalent, so the single-threaded platform is what
@@ -67,7 +67,7 @@ use std::path::PathBuf;
 /// Initialize V8 for the recorder child with a **single-threaded** platform — the
 /// keystone of the CRITICAL thread-scope fix (PR4a code-critic #1).
 ///
-/// The shared [`zeroship_runtime::init_v8`] installs a *multi-threaded* default
+/// The shared multi-threaded `init_v8` (the `AuthoringHost` in-process path) installs a *multi-threaded* default
 /// platform (`new_default_platform(0, …)`), which spawns a GC/compiler/platform
 /// worker-thread pool the instant it initializes. seccomp's `apply_filter` (flags=0)
 /// is calling-thread-only and landlock's `restrict_self` likewise restricts only the
@@ -85,11 +85,15 @@ use std::path::PathBuf;
 ///      so the BPF filter synchronizes across every thread that exists at install
 ///      time regardless.
 ///
-/// Delegates to [`zeroship_runtime::init_v8_single_threaded`], which installs V8's
-/// single-threaded platform + flags (one-time, process-global). Used by the recorder
-/// child INSTEAD of the shared multi-threaded `init_v8`.
-pub fn init_recorder_v8() {
-    zeroship_runtime::init_v8_single_threaded();
+/// Delegates to [`RecorderPlatform::init_single_threaded`](crate::runtime_host::RecorderPlatform::init_single_threaded),
+/// which installs V8's single-threaded platform + flags (one-time, process-global).
+/// Used by the recorder child INSTEAD of the shared multi-threaded `init_v8`.
+///
+/// Extraction Phase A routes the platform init through the `RecorderPlatform` seam
+/// (the in-Rust-V8 impl lives in `zeroship-migrate-runtime`); the engine names only
+/// the trait.
+pub fn init_recorder_v8(platform: &impl crate::runtime_host::RecorderPlatform) {
+    platform.init_single_threaded();
 }
 
 /// FAIL-CLOSED assertion that the recorder process is genuinely single-threaded BEFORE
@@ -117,9 +121,13 @@ pub fn init_recorder_v8() {
 /// `ZS_RECORDER_FORCE_MULTITHREAD` is a TEST-ONLY seam that spawns a parked thread
 /// before this check so the regression test can prove the assertion FIRES (we cannot
 /// un-commit the single-threaded platform once a prior test installed it process-wide).
-pub fn assert_recorder_single_threaded() -> Result<(), String> {
+pub fn assert_recorder_single_threaded(
+    platform: &impl crate::runtime_host::RecorderPlatform,
+) -> Result<(), String> {
     // (1) The committed platform flavor must be single-threaded (2), not multi (1).
-    let flavor = zeroship_runtime::v8_platform_flavor();
+    // The fail-closed DECISION stays engine-side; the adapter only supplies the raw
+    // u8 read (design §2.2).
+    let flavor = platform.platform_flavor();
     if flavor == 1 {
         return Err(format!(
             "recorder refuses to run: the MULTI-THREADED V8 platform was installed \

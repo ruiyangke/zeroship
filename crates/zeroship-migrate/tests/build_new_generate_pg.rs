@@ -105,7 +105,7 @@ export function up() {
     fs::write(mig_dir.path().join(format!("{stem}.ts")), ts.as_bytes()).unwrap();
 
     // build via the LOCAL sandboxed child → transient canonical IR.
-    let outcome = build_migrations(
+    let outcome = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, 
         mig_dir.path(),
         APP,
         &RecordVia::Local {
@@ -222,7 +222,7 @@ async fn generate_redifs_to_zero_and_parity_and_todo_marker() {
     let mig_dir = tempfile::tempdir().unwrap();
     let stem = "20240617150000_create_widgets";
     fs::write(mig_dir.path().join(format!("{stem}.ts")), gen.ts_body.as_bytes()).unwrap();
-    let built = build_migrations(
+    let built = build_migrations(&zeroship_migrate_runtime::ZeroshipRuntimeHost, 
         mig_dir.path(),
         APP,
         &RecordVia::Local {

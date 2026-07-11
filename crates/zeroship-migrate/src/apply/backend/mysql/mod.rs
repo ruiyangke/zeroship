@@ -43,14 +43,22 @@ pub struct MysqlSessionSnapshot {
     pub sql_mode: String,
 }
 
-pub struct MysqlBackend {
-    conn: RefCell<JsDriverConn>,
+/// The MySQL [`MigrationBackend`], generic over the V8-host seam
+/// [`JsDriverHost`](crate::runtime_host::JsDriverHost).
+///
+/// Extraction Phase A made this host-parametric: it holds a `JsDriverConn<H>` whose
+/// `H::Session` carries the isolate. The engine exports the generic
+/// `MysqlBackend<H>`; the monorepo adapter re-exports a defaulted alias
+/// `MysqlBackend = MysqlBackend<ZeroshipRuntimeHost>` so callers keep writing the
+/// bare name (design §3.2.1). It stays a concrete, non-`dyn` type.
+pub struct MysqlBackend<H: crate::runtime_host::JsDriverHost> {
+    conn: RefCell<JsDriverConn<H>>,
     guarded_fragments: RefCell<HashMap<String, Vec<MysqlGuardedFragment>>>,
     #[cfg(test)]
     after_fragment_hook: RefCell<Option<Rc<dyn Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction>>>,
 }
 
-impl std::fmt::Debug for MysqlBackend {
+impl<H: crate::runtime_host::JsDriverHost> std::fmt::Debug for MysqlBackend<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MysqlBackend")
             .field("conn", &self.conn)
@@ -113,8 +121,8 @@ pub enum MysqlMigratorAccountError {
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
-impl MysqlBackend {
-    pub fn new(conn: JsDriverConn) -> Self {
+impl<H: crate::runtime_host::JsDriverHost> MysqlBackend<H> {
+    pub fn new(conn: JsDriverConn<H>) -> Self {
         Self {
             conn: RefCell::new(conn),
             guarded_fragments: RefCell::new(HashMap::new()),
@@ -123,26 +131,30 @@ impl MysqlBackend {
         }
     }
 
-    pub fn echo() -> Result<Self, JsDriverError> {
-        Ok(Self::new(JsDriverConn::open_echo()?))
+    pub fn echo_with(host: H) -> Result<Self, JsDriverError> {
+        Ok(Self::new(JsDriverConn::open_echo_with(host)?))
     }
 
-    pub fn open_mysql_dsn_json(
+    pub fn open_mysql_dsn_json_with(
+        host: H,
         dsn_json: String,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
-        Ok(Self::new(JsDriverConn::open_mysql_dsn_json(
+        Ok(Self::new(JsDriverConn::open_mysql_dsn_json_with(
+            host,
             dsn_json,
             command_timeout,
         )?))
     }
 
     pub fn open_mysql_dsn_json_with_policy(
+        host: H,
         dsn_json: String,
-        net_policy: zeroship_runtime::NetPolicy,
+        net_policy: crate::runtime_host::NetPolicy,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
         Ok(Self::new(JsDriverConn::open_mysql_dsn_json_with_policy(
+            host,
             dsn_json,
             net_policy,
             command_timeout,
@@ -211,7 +223,7 @@ enum MysqlApplyDecision {
     SatisfiedNoop,
 }
 
-impl MysqlBackend {
+impl<H: crate::runtime_host::JsDriverHost> MysqlBackend<H> {
     fn mysql_guarded_fragments(
         &self,
         m: &Migration,
@@ -385,15 +397,15 @@ fn mysql_generated_password() -> String {
     format!("zs_{}", uuid::Uuid::new_v4().simple())
 }
 
-pub async fn provision_mysql_migrator_account(
-    admin: &MysqlBackend,
+pub async fn provision_mysql_migrator_account<H: crate::runtime_host::JsDriverHost>(
+    admin: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
     provision_mysql_migrator_account_with_password(admin, cfg, mysql_generated_password()).await
 }
 
-pub async fn provision_mysql_migrator_account_with_password(
-    admin: &MysqlBackend,
+pub async fn provision_mysql_migrator_account_with_password<H: crate::runtime_host::JsDriverHost>(
+    admin: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     password: impl Into<String>,
 ) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
@@ -447,8 +459,8 @@ pub async fn provision_mysql_migrator_account_with_password(
     })
 }
 
-pub async fn deprovision_mysql_migrator_account(
-    admin: &MysqlBackend,
+pub async fn deprovision_mysql_migrator_account<H: crate::runtime_host::JsDriverHost>(
+    admin: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<(), MysqlMigratorAccountError> {
     let user = mysql_migrator_account_user(&cfg.project_id);
@@ -461,7 +473,7 @@ pub async fn deprovision_mysql_migrator_account(
     Ok(())
 }
 
-impl MigrationBackend for MysqlBackend {
+impl<H: crate::runtime_host::JsDriverHost> MigrationBackend for MysqlBackend<H> {
     type SessionSnapshot = MysqlSessionSnapshot;
 
     fn dialect(&self) -> SqlDialect {
@@ -884,8 +896,8 @@ fn mysql_meta_table(cfg: &ExecutorConfig, table: &str) -> Result<String, Journal
     ))
 }
 
-async fn ensure_journal_mysql(
-    backend: &MysqlBackend,
+async fn ensure_journal_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
     let meta = mysql_quote_ident(&cfg.pg.meta_schema)?;
@@ -955,8 +967,8 @@ async fn ensure_journal_mysql(
     Ok(())
 }
 
-async fn mysql_schema_exists(
-    backend: &MysqlBackend,
+async fn mysql_schema_exists<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     schema: &str,
 ) -> Result<bool, JournalError> {
     let rows = backend
@@ -969,8 +981,8 @@ async fn mysql_schema_exists(
     Ok(!rows.rows.is_empty())
 }
 
-async fn mysql_table_exists(
-    backend: &MysqlBackend,
+async fn mysql_table_exists<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     schema: &str,
     table: &str,
 ) -> Result<bool, JournalError> {
@@ -988,8 +1000,8 @@ async fn mysql_table_exists(
     Ok(!rows.rows.is_empty())
 }
 
-async fn record_started_mysql(
-    backend: &MysqlBackend,
+async fn record_started_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -1015,8 +1027,8 @@ async fn record_started_mysql(
         .map_err(journal_backend)
 }
 
-async fn record_completed_mysql(
-    backend: &MysqlBackend,
+async fn record_completed_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     rec: journal::CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
@@ -1050,8 +1062,8 @@ async fn record_completed_mysql(
         .map_err(journal_backend)
 }
 
-async fn run_dml_transactional_mysql(
-    backend: &MysqlBackend,
+async fn run_dml_transactional_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -1109,8 +1121,8 @@ async fn run_dml_transactional_mysql(
     }
 }
 
-async fn record_rolled_back_mysql(
-    backend: &MysqlBackend,
+async fn record_rolled_back_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     version: &str,
     name: &str,
@@ -1138,8 +1150,8 @@ async fn record_rolled_back_mysql(
         .map_err(journal_backend)
 }
 
-async fn insert_supersedes_edges_mysql(
-    backend: &MysqlBackend,
+async fn insert_supersedes_edges_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
     squash_version: &str,
     supersedes: &[&str],
@@ -1163,8 +1175,8 @@ async fn insert_supersedes_edges_mysql(
     Ok(())
 }
 
-async fn applied_mysql(
-    backend: &MysqlBackend,
+async fn applied_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
     let migrations = mysql_meta_table(cfg, "schema_migrations")?;
@@ -1224,8 +1236,8 @@ async fn applied_mysql(
     Ok(out)
 }
 
-async fn superseded_versions_mysql(
-    backend: &MysqlBackend,
+async fn superseded_versions_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
     let migrations = mysql_meta_table(cfg, "schema_migrations")?;
@@ -1255,8 +1267,8 @@ async fn superseded_versions_mysql(
         .collect()
 }
 
-async fn latest_completed_checksums_mysql(
-    backend: &MysqlBackend,
+async fn latest_completed_checksums_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<HashMap<String, String>, JournalError> {
     let migrations = mysql_meta_table(cfg, "schema_migrations")?;
@@ -1287,15 +1299,15 @@ async fn latest_completed_checksums_mysql(
     Ok(out)
 }
 
-async fn snapshot_schema_mysql(
-    backend: &MysqlBackend,
+async fn snapshot_schema_mysql<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     cfg: &ExecutorConfig,
 ) -> Result<SchemaSnapshot, DriftError> {
     snapshot_schema_mysql_for_schema(backend, &cfg.project_schema).await
 }
 
-async fn snapshot_schema_mysql_for_schema(
-    backend: &MysqlBackend,
+async fn snapshot_schema_mysql_for_schema<H: crate::runtime_host::JsDriverHost>(
+    backend: &MysqlBackend<H>,
     schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     let schema_bind = [BindValue::Text(schema.to_string())];
@@ -1521,21 +1533,12 @@ fn drift_backend(error: JsDriverError) -> DriftError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mysql_backend_compiles_against_unchanged_trait_and_uses_echo_transport() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
-            let backend = MysqlBackend::echo().expect("echo backend");
-            assert_eq!(backend.dialect(), SqlDialect::Mysql);
-            assert!(!backend.ddl_is_transactional());
-
-            backend.exec("select echo lock-free").await.expect("echo exec");
-            let rows = backend
-                .query_json("select echo", &[BindValue::Int(7)])
-                .await
-                .expect("echo query");
-            assert_eq!(rows.rows[0].get("command_count"), Some(&serde_json::json!(2)));
-        });
-    }
+    // NOTE (extraction Phase A): the echo-transport tests
+    // (`mysql_backend_compiles_against_unchanged_trait_and_uses_echo_transport`,
+    // `mysql_reset_role_best_effort_is_driver_noop`) MOVED to
+    // `crates/zeroship-migrate-runtime` — they need the concrete
+    // `ZeroshipRuntimeHost` (the in-Rust-V8 `JsDriverHost` impl) to spin the echo
+    // isolate. This engine module keeps only the runtime-free unit tests below.
 
     #[test]
     fn mysql_lock_name_hashes_long_project_id_to_mysql_limit() {
@@ -1587,28 +1590,6 @@ mod tests {
             mysql_migrator_account_user("project-b"),
             "different project ids should hash to different account names"
         );
-    }
-
-    #[test]
-    fn mysql_reset_role_best_effort_is_driver_noop() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
-            let backend = MysqlBackend::echo().expect("echo backend");
-            backend.exec("before reset").await.expect("echo exec");
-            backend.reset_role_best_effort().await;
-            let rows = backend
-                .query_json("after reset", &[])
-                .await
-                .expect("echo query");
-            assert_eq!(
-                rows.rows[0].get("command_count"),
-                Some(&serde_json::json!(2)),
-                "reset_role_best_effort must not issue SET ROLE DEFAULT on MySQL"
-            );
-            assert_eq!(
-                rows.rows[0].get("last_sql"),
-                Some(&serde_json::json!("after reset"))
-            );
-        });
     }
 
     #[test]

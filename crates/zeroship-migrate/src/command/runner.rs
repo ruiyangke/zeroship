@@ -35,11 +35,11 @@ use crate::apply::executor::{
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
 // `PolicyProfile` is consumed only by the zsv8-gated `build_policy_profile`.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 use crate::model::profile::PolicyProfile;
 use crate::plan::loader::{load_dir, LoaderError};
 // `PLATFORM_OWNER_APP` feeds only the zsv8-gated platform-TS-apply path.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 use crate::plan::loader::PLATFORM_OWNER_APP;
 #[cfg(feature = "native-pg")]
 use crate::ops::status::status;
@@ -335,13 +335,13 @@ pub enum RunError {
 /// (`--no-default-features`) build the MySQL backend is not compiled at all, so
 /// the arm instead names the *build-time* absence
 /// ([`RunError::MysqlRequiresZsv8`]). The distinction is intentional.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 #[inline]
 fn mysql_live_unsupported() -> RunError {
     RunError::MysqlLiveExecUnimplemented
 }
 
-#[cfg(not(feature = "zsv8"))]
+#[cfg(not(feature = "v8-host"))]
 #[inline]
 fn mysql_live_unsupported() -> RunError {
     RunError::MysqlRequiresZsv8
@@ -789,7 +789,7 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 
 /// The resolved migration policy profile paired with the executor/guard config.
 /// Only the zsv8-gated platform-TS-apply path consumes it, so it is gated too.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 fn build_policy_profile(cfg: &RunConfig) -> PolicyProfile {
     match cfg.profile {
         RunProfile::Platform => PolicyProfile::platform(),
@@ -860,9 +860,9 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     if cfg.profile == RunProfile::Platform {
         match platform_corpus_format(&cfg.dir)? {
-            #[cfg(feature = "zsv8")]
+            #[cfg(feature = "v8-host")]
             MigrationCorpusFormat::Ts => return run_migrate_pg_platform_ts(cfg).await,
-            #[cfg(not(feature = "zsv8"))]
+            #[cfg(not(feature = "v8-host"))]
             MigrationCorpusFormat::Ts => return Err(RunError::TsRecordRequiresZsv8),
             MigrationCorpusFormat::Sql => {}
         }
@@ -892,7 +892,7 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
 /// Drives the V8 authoring front-end (records `.ts` → transient IR), so it is
 /// compiled only under `zsv8`; the V8-free build routes the `Ts` arm to
 /// [`RunError::TsRecordRequiresZsv8`] instead.
-#[cfg(feature = "zsv8")]
+#[cfg(feature = "v8-host")]
 async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -2485,12 +2485,12 @@ mod tests {
             .expect_err("live MySQL migrate must be refused");
         // Both feature states fail closed before touching the migration dir; only
         // the variant differs (CLI-path policy vs. V8-free build-out refusal).
-        #[cfg(feature = "zsv8")]
+        #[cfg(feature = "v8-host")]
         assert!(
             matches!(err, RunError::MysqlLiveExecUnimplemented),
             "expected MySQL fail-closed error, got {err:?}"
         );
-        #[cfg(not(feature = "zsv8"))]
+        #[cfg(not(feature = "v8-host"))]
         assert!(
             matches!(err, RunError::MysqlRequiresZsv8),
             "expected MySQL fail-closed error, got {err:?}"

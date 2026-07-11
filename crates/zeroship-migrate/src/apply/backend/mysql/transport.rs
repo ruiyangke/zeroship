@@ -3,11 +3,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zeroship_runtime::channel::{result_slot, ResultReceiver};
-use zeroship_runtime::{EnvSnapshot, HostPort, NetPolicy, Runtime};
 
 use crate::apply::backend::mysql::embedding::js_driver_module_graph;
 use crate::render::step::BindValue;
+use crate::runtime_host::{HostPort, JsDriverHost, JsDriverTimeout, NetPolicy};
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const TRUSTED_DRIVER_MAX_SOCKETS: u32 = 4;
@@ -246,15 +245,23 @@ const fn default_mysql_port() -> u16 {
     3306
 }
 
-pub struct JsDriverConn {
-    runtime: Option<Runtime>,
+/// A JS SQL-driver connection, generic over the V8-host seam [`JsDriverHost`].
+///
+/// The engine owns the `next_id`/`in_flight`/`poisoned` state machine, the
+/// `DriverCommand`/`DriverReply` serde, and the TLS-pin/net-policy security logic;
+/// the isolate itself (open/command/close, the `result_senders`/`command_queue`
+/// reach-in, the enqueue/notify/recv) is fully absorbed by `H::Session` behind the
+/// three trait methods (design §2.3).
+pub struct JsDriverConn<H: JsDriverHost> {
+    host: H,
+    session: Option<H::Session>,
     next_id: u64,
     in_flight: bool,
     command_timeout: Duration,
     poisoned: Option<String>,
 }
 
-impl fmt::Debug for JsDriverConn {
+impl<H: JsDriverHost> fmt::Debug for JsDriverConn<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JsDriverConn")
             .field("next_id", &self.next_id)
@@ -265,13 +272,17 @@ impl fmt::Debug for JsDriverConn {
     }
 }
 
-impl JsDriverConn {
-    pub fn open_echo() -> Result<Self, JsDriverError> {
-        Self::open_echo_with_timeout(DEFAULT_COMMAND_TIMEOUT)
+impl<H: JsDriverHost> JsDriverConn<H> {
+    pub fn open_echo_with(host: H) -> Result<Self, JsDriverError> {
+        Self::open_echo_with_timeout_and(host, DEFAULT_COMMAND_TIMEOUT)
     }
 
-    pub fn open_echo_with_timeout(command_timeout: Duration) -> Result<Self, JsDriverError> {
+    pub fn open_echo_with_timeout_and(
+        host: H,
+        command_timeout: Duration,
+    ) -> Result<Self, JsDriverError> {
         Self::open_with_entry(
+            host,
             serde_json::json!({ "driver": "echo" }).to_string(),
             ECHO_DRIVER_ENTRY,
             NetPolicy::trusted(TRUSTED_DRIVER_MAX_SOCKETS, TRUSTED_DRIVER_EGRESS_CEILING),
@@ -279,42 +290,40 @@ impl JsDriverConn {
         )
     }
 
-    pub fn open_mysql_dsn_json(
+    pub fn open_mysql_dsn_json_with(
+        host: H,
         dsn_json: String,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
         let policy = mysql_dsn_net_policy(&dsn_json)?;
-        Self::open_mysql_dsn_json_with_policy(dsn_json, policy, command_timeout)
+        Self::open_mysql_dsn_json_with_policy(host, dsn_json, policy, command_timeout)
     }
 
-    pub fn open_mysql_dsn_json_allowlisted(
+    pub fn open_mysql_dsn_json_allowlisted_with(
+        host: H,
         dsn_json: String,
-        host: &str,
+        allow_host: &str,
         port: u16,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
         let policy = NetPolicy::allowlist(
-            vec![HostPort::new(host, port)],
+            vec![HostPort::new(allow_host, port)],
             TRUSTED_DRIVER_MAX_SOCKETS,
             TRUSTED_DRIVER_EGRESS_CEILING,
         )
         .map_err(|e| JsDriverError::transport(format!("invalid MySQL net policy: {e}")))?;
-        Self::open_mysql_dsn_json_with_policy(dsn_json, policy, command_timeout)
+        Self::open_mysql_dsn_json_with_policy(host, dsn_json, policy, command_timeout)
     }
 
     pub fn open_mysql_dsn_json_with_policy(
+        host: H,
         dsn_json: String,
         net_policy: NetPolicy,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
         validate_mysql_tls_pin(&dsn_json)?;
         let entry_source = mysql_driver_entry();
-        Self::open_with_entry(
-            dsn_json,
-            &entry_source,
-            net_policy,
-            command_timeout,
-        )
+        Self::open_with_entry(host, dsn_json, &entry_source, net_policy, command_timeout)
     }
 
     pub async fn exec(&mut self, sql: &str) -> Result<(), JsDriverError> {
@@ -410,18 +419,32 @@ impl JsDriverConn {
         })
         .map_err(|e| JsDriverError::marshal(format!("failed to encode command: {e}")))?;
 
-        let rx = match self.enqueue(id, payload) {
-            Ok(rx) => rx,
-            Err(err) => {
-                self.poison_transport("failed to enqueue JS driver command");
-                return Err(err);
+        // The host absorbs the whole enqueue → notify → recv loop (and, on its own
+        // timeout, drops the isolate). The `id` is threaded EXPLICITLY so the adapter
+        // keys `result_senders.insert(id, tx)` with exactly the id baked into the
+        // payload — the payload stays genuinely opaque (design §2.3, BLOCKER).
+        let session = match self.session.as_mut() {
+            Some(s) => s,
+            None => {
+                self.poison_transport("driver runtime has been torn down");
+                return Err(JsDriverError::poisoned(
+                    self.poisoned
+                        .clone()
+                        .unwrap_or_else(|| "driver runtime has been torn down".to_string()),
+                ));
             }
         };
-        let result_json = match compio::time::timeout(self.command_timeout, rx.recv()).await {
+        let result_json = match self.host.js_driver_command(session, id, payload).await {
             Ok(json) => json,
-            Err(_) => {
+            Err(JsDriverTimeout { .. }) => {
+                // The adapter already dropped the isolate on its internal timeout; the
+                // engine keeps its `poisoned` flag + reconstructs the observable
+                // `TimedOut { command_id, timeout }` from its OWN id + timeout (the id
+                // never left the engine — MAJOR #2).
                 let timeout = self.command_timeout;
-                self.poison_timeout(id, timeout);
+                self.mark_poisoned_after_teardown(format!(
+                    "timed out waiting for JS driver command {id} after {timeout:?}"
+                ));
                 return Err(JsDriverError::TimedOut {
                     command_id: id,
                     timeout,
@@ -443,49 +466,32 @@ impl JsDriverConn {
         })
     }
 
-    fn enqueue(&self, id: u64, payload: String) -> Result<ResultReceiver<String>, JsDriverError> {
-        let (tx, rx) = result_slot();
-        {
-            let runtime = self.runtime.as_ref().ok_or_else(|| {
-                JsDriverError::poisoned(
-                    self.poisoned
-                        .clone()
-                        .unwrap_or_else(|| "driver runtime has been torn down".to_string()),
-                )
-            })?;
-            let state = runtime.state();
-            let mut state = state.borrow_mut();
-            let driver = state.js_driver.as_mut().ok_or_else(|| {
-                JsDriverError::transport("runtime was not seeded with JS driver state")
-            })?;
-            if driver.result_senders.insert(id, tx).is_some() {
-                return Err(JsDriverError::transport(format!(
-                    "duplicate JS driver command id {id}"
-                )));
-            }
-            driver.command_queue.push_back(payload);
-        }
-        if let Some(runtime) = &self.runtime {
-            runtime.notify_pump();
-        }
-        Ok(rx)
-    }
-
-    fn poison_timeout(&mut self, id: u64, timeout: Duration) {
-        self.poison_and_teardown(format!(
-            "timed out waiting for JS driver command {id} after {timeout:?}"
-        ));
-    }
-
     fn poison_transport(&mut self, context: &str) {
         self.poison_and_teardown(context.to_string());
     }
 
+    /// Full poison: set the `poisoned` flag AND drop the host-owned isolate (the
+    /// engine-side half + the host-side teardown). Used by the transport-error /
+    /// test-close paths where the isolate is still live.
     fn poison_and_teardown(&mut self, message: String) {
         if self.poisoned.is_none() {
             self.poisoned = Some(message);
         }
-        drop(self.runtime.take());
+        if let Some(mut session) = self.session.take() {
+            self.host.close_js_driver(&mut session);
+        }
+    }
+
+    /// Poison-flag-only: the adapter ALREADY dropped the isolate on its internal
+    /// command timeout (`js_driver_command` → `close_js_driver`), so we only set the
+    /// engine-owned `poisoned` flag + forget the (already-torn-down) session handle.
+    fn mark_poisoned_after_teardown(&mut self, message: String) {
+        if self.poisoned.is_none() {
+            self.poisoned = Some(message);
+        }
+        // The adapter dropped the isolate; forget our handle so later commands see a
+        // poisoned/torn-down connection.
+        self.session = None;
     }
 
     #[cfg(test)]
@@ -500,28 +506,36 @@ impl JsDriverConn {
     }
 
     fn open_with_entry(
+        host: H,
         dsn_json: String,
         entry_source: &str,
         net_policy: NetPolicy,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
-        let runtime = Runtime::builder()
-            .modules(js_driver_module_graph(entry_source))
-            .net_policy(net_policy)
-            .js_driver_dsn_json(dsn_json)
-            .build();
-        runtime.start_pump();
-        runtime
-            .initialize(&EnvSnapshot::empty())
+        let session = host
+            .open_js_driver(
+                &js_driver_module_graph(entry_source),
+                net_policy,
+                dsn_json,
+                command_timeout,
+            )
             .map_err(|e| JsDriverError::transport(format!("driver module init failed: {e}")))?;
-        runtime.notify_pump();
         Ok(Self {
-            runtime: Some(runtime),
+            host,
+            session: Some(session),
             next_id: 1,
             in_flight: false,
             command_timeout,
             poisoned: None,
         })
+    }
+
+    /// Whether the driver isolate is still live (test introspection — the peer of
+    /// the old `runtime.is_none()` check). `#[doc(hidden)]` + `pub` (not `#[cfg(test)]`)
+    /// so the relocated adapter transport regression test can observe the teardown.
+    #[doc(hidden)]
+    pub fn session_is_live(&self) -> bool {
+        self.session.is_some()
     }
 }
 
@@ -722,66 +736,13 @@ mod tests {
         .expect("non-empty PEM CA should satisfy the migrate TLS pin policy");
     }
 
-    #[test]
-    fn echo_driver_pump_reuses_session_state_across_separate_awaits() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut conn = JsDriverConn::open_echo().expect("echo driver opens");
-
-            conn.exec("first").await.expect("first exec");
-            compio::time::sleep(Duration::from_millis(1)).await;
-
-            conn.exec("second").await.expect("second exec");
-            compio::time::sleep(Duration::from_millis(1)).await;
-
-            let rows = conn
-                .query_json("third", &[BindValue::Text("bound".to_string())])
-                .await
-                .expect("query_json");
-            assert_eq!(rows.rows.len(), 1);
-            let row = &rows.rows[0];
-            assert_eq!(row.get("command_count"), Some(&Value::from(3)));
-            assert_eq!(row.get("last_sql"), Some(&Value::from("third")));
-            assert_eq!(row.get("last_kind"), Some(&Value::from("query_json")));
-            assert_eq!(row.get("bind_count"), Some(&Value::from(1)));
-            assert_eq!(row.get("driver"), Some(&Value::from("echo")));
-        });
-    }
-
-    #[test]
-    fn timed_out_command_poisons_conn_and_blocks_later_commands() {
-        compio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut conn =
-                JsDriverConn::open_echo_with_timeout(Duration::from_millis(5))
-                    .expect("echo driver opens");
-            let probe = conn
-                .runtime
-                .as_ref()
-                .expect("driver runtime exists before timeout")
-                .clone()
-                .into_inner_probe_for_test();
-
-            let first = conn.exec("__zs_echo_delay_after_timeout__").await;
-            assert!(matches!(
-                first,
-                Err(JsDriverError::TimedOut {
-                    command_id: 1,
-                    timeout,
-                }) if timeout == Duration::from_millis(5)
-            ));
-            assert!(
-                conn.runtime.is_none(),
-                "timed-out connection should eagerly drop its runtime"
-            );
-            assert_eq!(
-                probe.strong_count(),
-                0,
-                "timed-out connection should tear down the runtime inner"
-            );
-
-            compio::time::sleep(Duration::from_millis(40)).await;
-
-            let later = conn.exec("after timeout").await;
-            assert!(matches!(later, Err(JsDriverError::Poisoned { .. })));
-        });
-    }
+    // NOTE (extraction Phase A): the two tests that drove a REAL isolate —
+    // `echo_driver_pump_reuses_session_state_across_separate_awaits` and
+    // `timed_out_command_poisons_conn_and_blocks_later_commands` (which also used
+    // `into_inner_probe_for_test`) — MOVED to `crates/zeroship-migrate-runtime`'s
+    // test module, where the concrete `ZeroshipRuntimeHost` (the in-Rust-V8
+    // `JsDriverHost` impl) is available. The engine `transport.rs` is now
+    // runtime-free, so it can only unit-test the pure DSN/TLS/error surface here;
+    // the isolate-driven pump + timeout-poison behaviour is the adapter's regression
+    // bar (design §2.3, §6b).
 }

@@ -659,10 +659,11 @@ fn read_ts_source_bounded(path: &Path) -> Result<String, BuildError> {
 }
 
 fn warn_on_advisory_determinism_lint(
+    host: &impl crate::runtime_host::AuthoringHost,
     stem: &str,
     ts_source: &str,
 ) -> Vec<super::record::DeterminismFinding> {
-    match super::record::lint_migration_determinism(ts_source) {
+    match super::record::lint_migration_determinism(host, ts_source) {
         Ok(findings) => {
             for finding in &findings {
                 eprintln!(
@@ -696,12 +697,13 @@ fn warn_on_confined_rejected_raw_sql(stem: &str, ir: &MigrationIr) {
 /// # Errors
 /// See [`BuildError`].
 pub fn build_migrations(
+    host: &impl crate::runtime_host::AuthoringHost,
     dir: &Path,
     owner_app: &str,
     via: &RecordVia<'_>,
 ) -> Result<BuildOutcome, BuildError> {
     let discovered = discover_migrations(dir)?;
-    build_discovered(&discovered, owner_app, via, &PolicyProfile::confined())
+    build_discovered(host, &discovered, owner_app, via, &PolicyProfile::confined())
 }
 
 /// Build EXACTLY ONE migration `.ts` by path (the CLI `record <file.ts>` surface):
@@ -718,6 +720,7 @@ pub fn build_migrations(
 /// [`BuildError::NotFound`] if no such `.ts` is discovered in its dir; otherwise the
 /// same record / io / checksum errors as [`build_migrations`].
 pub fn build_one_migration(
+    host: &impl crate::runtime_host::AuthoringHost,
     file: &Path,
     owner_app: &str,
     via: &RecordVia<'_>,
@@ -742,13 +745,14 @@ pub fn build_one_migration(
     if only.is_empty() {
         return Err(BuildError::NotFound { stem });
     }
-    build_discovered(&only, owner_app, via, &PolicyProfile::confined())
+    build_discovered(host, &only, owner_app, via, &PolicyProfile::confined())
 }
 
 /// The shared per-migration build loop behind [`build_migrations`] (whole dir) and
 /// [`build_one_migration`] (a single discovered file). Each selected `.ts` is
 /// recorded fresh through the sandbox and surfaced in memory only.
 fn build_discovered(
+    host: &impl crate::runtime_host::AuthoringHost,
     discovered: &[DiscoveredMigration],
     owner_app: &str,
     via: &RecordVia<'_>,
@@ -761,7 +765,7 @@ fn build_discovered(
         let (committed_bytes, ir, record_path, ts_source) =
             record_one(m, owner_app, via, profile)?;
         let checksum = typed_checksum(&ir, &m.stem)?;
-        let warnings = warn_on_advisory_determinism_lint(&m.stem, &ts_source);
+        let warnings = warn_on_advisory_determinism_lint(host, &m.stem, &ts_source);
         warn_on_confined_rejected_raw_sql(&m.stem, &ir);
 
         let filename = format!("{}.ir.json", m.stem);
