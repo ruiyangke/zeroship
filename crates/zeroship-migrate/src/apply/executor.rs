@@ -41,10 +41,13 @@ use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
-#[cfg(feature = "native-pg")]
+// The `PgSession` seam + the generic `PostgresBackend`/`PgSessionSnapshot` compile
+// on the whole PG seam (`native-pg` OR `host-pg`) — the generic executor entries
+// below are driver-neutral.
+#[cfg(pg_seam)]
 use crate::apply::backend::postgres::PgSession;
 use crate::apply::backend::MigrationBackend;
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 use crate::apply::backend::{PgSessionSnapshot, PostgresBackend};
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
@@ -59,7 +62,7 @@ use crate::model::migration::{Migration, MigrationId};
 /// loose free functions. They stay defined inline in this module (so their rich
 /// doc-comments and the surrounding apply/rollback context are unchanged); this
 /// `pub(crate) mod pg` is a thin façade, not a relocation.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) mod pg {
     pub(crate) use super::{
         acquire_project_lock, apply_non_transactional, apply_transactional,
@@ -160,7 +163,7 @@ impl Error for BackendError {
     }
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 impl From<crate::apply::backend::postgres::seam::SeamError> for BackendError {
     fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::new(error)
@@ -454,7 +457,7 @@ pub enum ApplyError {
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 impl From<crate::apply::backend::postgres::seam::SeamError> for ApplyError {
     fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
@@ -477,7 +480,7 @@ impl From<crate::apply::backend::postgres::seam::SeamError> for ApplyError {
 /// since each apply still operates strictly within its own meta + project
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn acquire_project_lock<D: PgSession>(
     conn: &D,
     project_id: &str,
@@ -490,7 +493,7 @@ pub(crate) async fn acquire_project_lock<D: PgSession>(
     Ok(())
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn release_project_lock<D: PgSession>(
     conn: &D,
     project_id: &str,
@@ -506,7 +509,7 @@ pub(crate) async fn release_project_lock<D: PgSession>(
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn snapshot_session<D: PgSession>(
     conn: &D,
 ) -> Result<PgSessionSnapshot, ApplyError> {
@@ -529,7 +532,7 @@ pub(crate) async fn snapshot_session<D: PgSession>(
 /// value, false)` so the *value* is a bound literal, not interpolated SQL
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn restore_session<D: PgSession>(
     conn: &D,
     snap: &PgSessionSnapshot,
@@ -630,7 +633,7 @@ fn set_local_role_sql(
 /// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn configure_session_non_txn<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -792,9 +795,9 @@ fn non_transactional_down_reason(down: &str) -> Option<String> {
 /// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
-#[cfg(feature = "native-pg")]
-pub async fn apply(
-    conn: &Client,
+#[cfg(pg_seam)]
+pub async fn apply<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     approval: Approval,
@@ -819,9 +822,9 @@ pub async fn apply(
 ///
 /// # Errors
 /// Same as [`apply`].
-#[cfg(feature = "native-pg")]
-pub async fn apply_with_lock(
-    conn: &Client,
+#[cfg(pg_seam)]
+pub async fn apply_with_lock<D: PgSession>(
+    conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     approval: Approval,
@@ -829,19 +832,26 @@ pub async fn apply_with_lock(
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
     // Drive the whole apply through the dialect seam. P1: Postgres is the only
-    // backend; constructing it here keeps `apply`/`apply_with_lock`'s public
-    // `&Client` signature intact while the apply body below is generic over
-    // `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`). The
-    // defense-in-depth approval gate now lives in `apply_with_lock_backend` so it
-    // runs IDENTICALLY for both the PG entry here and the generic engine path (P6a) —
-    // a single source of the executor-layer gate.
+    // backend; the public entry is now generic over the `PgSession` seam (`&D`)
+    // so a host (napi) driver can drive it, while the apply body below is generic
+    // over `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`).
+    // The defense-in-depth approval gate lives in `apply_with_lock_backend` so it
+    // runs IDENTICALLY for both this entry and the generic engine path (P6a) — a
+    // single source of the executor-layer gate.
     //
-    // PR9b: this PG entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
+    // `new_generic` (not `new`) is used here: the apply path never reads the
+    // backend's `online`/`shadow` harnesses (those are exercised only via the
+    // separate `run_expand`/`dry_run` entries), so on the native path the
+    // constructed backend is behaviorally identical to the pre-seam `new(conn)` —
+    // only the two unused `Option` fields differ (both stay `None`). This is what
+    // makes the `&Client → &D` generalization behavior-preserving for native-pg.
+    //
+    // PR9b: this entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
     // callers (the expand-contract EXPAND apply, the flat `engine.apply` path) carry
     // their own scope check at the engine layer when one is in play. A direct caller
     // of `apply_with_lock` is the trusted single-actor `.sql` surface (no co-bundling
     // of distinct reviewed version-ids), so `All` preserves byte-identical behavior.
-    let backend = PostgresBackend::new(conn);
+    let backend = PostgresBackend::new_generic(conn);
     apply_with_lock_backend(
         &backend,
         cfg,
@@ -2044,7 +2054,7 @@ fn order_rollback<'a>(
 /// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn apply_transactional<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -2248,7 +2258,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
 /// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
 /// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
 /// failure.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_dml_transactional<D: PgSession>(
     conn: &D,
@@ -2393,7 +2403,7 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
 /// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
 /// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn insert_supersedes_edges<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -2420,7 +2430,7 @@ async fn insert_supersedes_edges<D: PgSession>(
 /// marker, plus the idempotent recovery path.
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn apply_non_transactional<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -2649,7 +2659,7 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
 /// migrator has no grant for. The admin owns the meta schema and is privileged
 /// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
 /// without needing the migrator role.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn recover_non_transactional<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -3001,7 +3011,7 @@ pub enum RollbackError {
     },
 }
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 impl From<crate::apply::backend::postgres::seam::SeamError> for RollbackError {
     fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
         Self::Db(error.into())
@@ -3444,7 +3454,7 @@ async fn rollback_locked<B: MigrationBackend>(
 /// crash leaves either both (rolled back + recorded) or neither. The `down` runs
 /// under the migrator role; the journal append runs as admin (the migrator has no
 /// meta grant — C1), exactly mirroring [`apply_transactional`].
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn rollback_one_transactional<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,

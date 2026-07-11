@@ -62,7 +62,7 @@
 //! `information_schema` / `&Client` appears in the generic executor body — it is
 //! all contained here, the PG leaf.
 
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 use crate::apply::backend::postgres::PgSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
@@ -103,7 +103,7 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
-    #[cfg(feature = "native-pg")]
+    #[cfg(pg_seam)]
     Db(#[from] crate::apply::backend::postgres::seam::SeamError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
@@ -176,7 +176,7 @@ fn quote_ident(ident: &str) -> String {
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
 ///   boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] — a query failed.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub async fn evaluate<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -237,7 +237,7 @@ pub async fn evaluate<D: PgSession>(
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
 /// check failed and at least one `Skip` check is unmet.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 pub(crate) async fn evaluate_all<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -277,7 +277,7 @@ pub(crate) async fn evaluate_all<D: PgSession>(
 
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the
 /// project schema. Schema + table are BOUND ($1/$2), never interpolated.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn table_exists<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -297,7 +297,7 @@ async fn table_exists<D: PgSession>(
 
 /// `information_schema.columns` lookup: a column named `column` on the
 /// project-schema table `table`. All three are BOUND, never interpolated.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn column_exists<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -324,7 +324,7 @@ async fn column_exists<D: PgSession>(
 /// [`validate_ident`] (the schema is the engine-owned `cfg.project_schema`, the
 /// table has passed `validate_ident`). This mirrors `backfill::build_batch_sql`,
 /// which quotes the same validated identifiers into relation position.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn row_count<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -464,7 +464,7 @@ fn last_string_part(parts: &[Value]) -> Option<String> {
 
 /// Evaluate an untrusted `SqlBoolean` precondition: guard → shape gate → run
 /// under the migrator role in a READ ONLY transaction → read one boolean.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn evaluate_sql_boolean<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -516,7 +516,7 @@ async fn evaluate_sql_boolean<D: PgSession>(
 /// The body of [`evaluate_sql_boolean`] run INSIDE the `BEGIN READ ONLY`
 /// transaction: pin the project `search_path`, drop to the migrator role (both
 /// `SET LOCAL`, transaction-scoped), then run the `SELECT` and read one boolean.
-#[cfg(feature = "native-pg")]
+#[cfg(pg_seam)]
 async fn run_sql_boolean_in_txn<D: PgSession>(
     conn: &D,
     cfg: &ExecutorConfig,
