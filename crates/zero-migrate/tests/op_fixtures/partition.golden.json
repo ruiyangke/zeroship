@@ -1,0 +1,156 @@
+{
+  "ir_version": 6,
+  "name": "partition",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "events",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "ts",
+          "type": "timestamp"
+        },
+        {
+          "name": "tenant_id",
+          "type": "text"
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ],
+      "partitionBy": {
+        "kind": "range",
+        "columns": [
+          "ts"
+        ],
+        "collapse": false
+      }
+    },
+    {
+      "op": "createPartition",
+      "name": "events_2026_05",
+      "of": "events",
+      "bounds": {
+        "kind": "range",
+        "from": [
+          {
+            "kind": "string",
+            "value": "2026-05-01T00:00:00Z"
+          }
+        ],
+        "to": [
+          {
+            "kind": "string",
+            "value": "2026-06-01T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "op": "createPartition",
+      "name": "events_default",
+      "of": "events",
+      "bounds": {
+        "kind": "default"
+      }
+    },
+    {
+      "op": "detachPartition",
+      "parent": "events",
+      "name": "events_2026_05",
+      "concurrently": true
+    },
+    {
+      "op": "dropPartition",
+      "parent": "events",
+      "name": "events_2026_05",
+      "cascade": true
+    },
+    {
+      "op": "createIndex",
+      "table": "events",
+      "columns": [
+        {
+          "kind": "column",
+          "name": "ts"
+        }
+      ],
+      "name": "events_ts_brin_idx",
+      "using": "brin",
+      "include": [
+        "tenant_id"
+      ],
+      "with": {
+        "pagesPerRange": 32
+      },
+      "only": true
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

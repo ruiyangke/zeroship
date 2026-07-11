@@ -1,0 +1,54 @@
+[package]
+name = "zero-migrate-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared schema-authority core — DDL builders, diff classifier, live introspection, sentinel codec, and schema-shape descriptors. Reused by the migration engine (write/diff/generate) and the data plane (read/introspect). Leaf crate: NO v8, NO runtime, NO crypto."
+
+[features]
+# Live-catalog INTROSPECTION (read side). Gates the compio-native PG driver
+# and the introspection-EXECUTION helpers (`diff::read_live_schema`,
+# `diff::estimate_row_count`, the `SchemaError` wrapper over
+# `compio_postgres::Error`, and the `tracing::warn!` on a recoverable
+# malformed-mask-sentinel). The DEFAULT profile is the write/diff/describe
+# layer only (DDL builders in `query`, the diff classifier + metadata TYPES
+# in `diff`, `mask_codec`, `descriptors`, `fts_sqlite`) — it names NO
+# `compio_postgres` type and pulls no PG driver.
+#
+# The migration engine consumes ONLY the default (write/diff) profile: it
+# does its OWN introspection over the driver-neutral `PgSession` seam
+# (`zeroship-migrate/src/apply/backend/postgres/drift.rs`) and never calls
+# `read_live_schema`. plugin-db's data plane enables `introspect` because it
+# reads live column behaviour at runtime.
+introspect = ["dep:compio-postgres", "dep:tracing"]
+
+[dependencies]
+# Schema-shape values (`Value`) flow through every DDL builder + the diff
+# classifier; the introspection rows are decoded into JSON-ish descriptors.
+serde_json = { workspace = true }
+# `read_live_schema` / `estimate_row_count` introspect the live catalog over
+# the bespoke compio-native PG driver — ZERO tokio, per the platform invariant.
+# The crate carries no crypto/v8/runtime: the data-plane transforms (AEAD,
+# mask) stay in plugin-db and call this crate for the schema/DDL/codec they need.
+# OPTIONAL: gated behind `introspect` so the write/diff-only profile (the
+# migration engine's consumer path) drops the PG driver — and, transitively,
+# the `zeroship-core`/`zeroship-bundle`/tokio chain — from the graph entirely.
+compio-postgres = { workspace = true, optional = true }
+# Observability facade ONLY — the live-introspection path emits a
+# `tracing::warn!` on a recoverable malformed-mask-sentinel (preserved
+# byte-for-byte from plugin-db's `diff::read_live_schema`). `tracing` is a
+# pure logging facade: no v8, no runtime, no crypto, no metering — it does
+# not touch the trust domain the leaf-purity constraint protects. OPTIONAL:
+# it is used ONLY inside `read_live_schema`, so it rides the `introspect`
+# feature with the driver.
+tracing = { workspace = true, optional = true }
+# `sha2` produces the deterministic 8-char base32 fingerprint the DDL
+# builder appends when a generated index name exceeds the 60-byte
+# NAMEDATALEN headroom (`query::index_name`). This is a NAME-hashing use
+# (stable + roughly-uniform), NOT key/AEAD crypto — it touches no key
+# material and does not implicate the trust domain the leaf-purity
+# constraint protects. The migration engine already depends on `sha2`.
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

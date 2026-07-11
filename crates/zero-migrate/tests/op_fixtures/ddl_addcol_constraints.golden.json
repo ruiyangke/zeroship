@@ -1,0 +1,30 @@
+{
+  "ir_version": 6,
+  "name": "ddl_addcol_constraints",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "addColumn",
+      "table": "accounts",
+      "column": "email",
+      "type": "text",
+      "nullable": false
+    },
+    {
+      "op": "addConstraint",
+      "table": "accounts",
+      "constraint": {
+        "kind": {
+          "kind": "unique",
+          "columns": [
+            "email"
+          ]
+        }
+      }
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

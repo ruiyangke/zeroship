@@ -1,0 +1,46 @@
+
+[system_shape]
+columns = [
+  { name = "id", type = "text", nullable = false },
+  { name = "created_at", type = "timestamp with time zone", nullable = false },
+  { name = "updated_at", type = "timestamp with time zone", nullable = false },
+  { name = "created_by", type = "text", nullable = true },
+  { name = "updated_by", type = "text", nullable = true },
+  { name = "version", type = "integer", nullable = false },
+  { name = "deleted_at", type = "timestamp with time zone", nullable = true },
+]
+indexes = [
+  { columns = ["deleted_at"] },
+  { columns = ["updated_at"] },
+  { columns = ["created_by"] },
+]
+primary_key = ["id"]
+author_primary_key = "forbid"
+
+[capabilities]
+extension = false
+schema = false
+role = { allow = false, attrs = [] }
+grant = false
+rls = false
+partition = false
+policy = false
+function = false
+raw_sql = false
+raw_view_body = false
+materialized_view = false
+cross_schema = false
+extensions = []
+schemas = []
+
+[operational]
+index_creation = "allow_blocking"
+lock_timeout_ms = 3000
+statement_timeout_ms = 60000
+table_rewrite = "allow"
+
+[data_security]
+require_rls = false
+no_hard_delete = false
+sensitive_columns = []
+destructive_ops = "allow"

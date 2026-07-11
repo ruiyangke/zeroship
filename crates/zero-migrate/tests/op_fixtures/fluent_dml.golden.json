@@ -1,0 +1,396 @@
+{
+  "ir_version": 6,
+  "name": "fluent_dml",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "insert",
+      "table": "status_codes",
+      "columns": [
+        "code",
+        "label"
+      ],
+      "rows": [
+        [
+          200,
+          "ok"
+        ],
+        [
+          404,
+          "not found"
+        ]
+      ]
+    },
+    {
+      "op": "update",
+      "table": "status_codes",
+      "set": {
+        "canon": {
+          "node": "fnCall",
+          "fn": "nullif",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            },
+            {
+              "node": "literal",
+              "value": ""
+            }
+          ]
+        },
+        "code_txt": {
+          "node": "cast",
+          "operand": {
+            "node": "colRef",
+            "name": "code"
+          },
+          "target": "text"
+        },
+        "joined": {
+          "node": "binOp",
+          "op": "concat",
+          "lhs": {
+            "node": "binOp",
+            "op": "concat",
+            "lhs": {
+              "node": "colRef",
+              "name": "label"
+            },
+            "rhs": {
+              "node": "literal",
+              "value": " "
+            }
+          },
+          "rhs": {
+            "node": "cast",
+            "operand": {
+              "node": "colRef",
+              "name": "code"
+            },
+            "target": "text"
+          }
+        },
+        "label": {
+          "node": "fnCall",
+          "fn": "coalesce",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            },
+            {
+              "node": "literal",
+              "value": "unknown"
+            }
+          ]
+        },
+        "len": {
+          "node": "fnCall",
+          "fn": "length",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            }
+          ]
+        },
+        "mag": {
+          "node": "fnCall",
+          "fn": "abs",
+          "args": [
+            {
+              "node": "binOp",
+              "op": "sub",
+              "lhs": {
+                "node": "colRef",
+                "name": "code"
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 500
+              }
+            }
+          ]
+        },
+        "norm": {
+          "node": "fnCall",
+          "fn": "lower",
+          "args": [
+            {
+              "node": "fnCall",
+              "fn": "trim",
+              "args": [
+                {
+                  "node": "colRef",
+                  "name": "label"
+                }
+              ]
+            }
+          ]
+        },
+        "score": {
+          "node": "binOp",
+          "op": "div",
+          "lhs": {
+            "node": "binOp",
+            "op": "sub",
+            "lhs": {
+              "node": "binOp",
+              "op": "mul",
+              "lhs": {
+                "node": "binOp",
+                "op": "add",
+                "lhs": {
+                  "node": "colRef",
+                  "name": "code"
+                },
+                "rhs": {
+                  "node": "literal",
+                  "value": 1
+                }
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 2
+              }
+            },
+            "rhs": {
+              "node": "literal",
+              "value": 3
+            }
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 1
+          }
+        },
+        "shout": {
+          "node": "fnCall",
+          "fn": "upper",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            }
+          ]
+        }
+      },
+      "where": {
+        "node": "binOp",
+        "op": "and",
+        "lhs": {
+          "node": "binOp",
+          "op": "gt",
+          "lhs": {
+            "node": "colRef",
+            "name": "code"
+          },
+          "rhs": {
+            "node": "literal",
+            "value": 0
+          }
+        },
+        "rhs": {
+          "node": "unaryOp",
+          "op": "isNotNull",
+          "operand": {
+            "node": "colRef",
+            "name": "label"
+          }
+        }
+      }
+    },
+    {
+      "op": "delete",
+      "table": "status_codes",
+      "where": {
+        "node": "binOp",
+        "op": "and",
+        "lhs": {
+          "node": "binOp",
+          "op": "or",
+          "lhs": {
+            "node": "binOp",
+            "op": "or",
+            "lhs": {
+              "node": "binOp",
+              "op": "or",
+              "lhs": {
+                "node": "binOp",
+                "op": "or",
+                "lhs": {
+                  "node": "binOp",
+                  "op": "ne",
+                  "lhs": {
+                    "node": "colRef",
+                    "name": "code"
+                  },
+                  "rhs": {
+                    "node": "literal",
+                    "value": 0
+                  }
+                },
+                "rhs": {
+                  "node": "binOp",
+                  "op": "le",
+                  "lhs": {
+                    "node": "colRef",
+                    "name": "code"
+                  },
+                  "rhs": {
+                    "node": "literal",
+                    "value": 0
+                  }
+                }
+              },
+              "rhs": {
+                "node": "binOp",
+                "op": "ge",
+                "lhs": {
+                  "node": "colRef",
+                  "name": "code"
+                },
+                "rhs": {
+                  "node": "literal",
+                  "value": 999
+                }
+              }
+            },
+            "rhs": {
+              "node": "unaryOp",
+              "op": "isNull",
+              "operand": {
+                "node": "colRef",
+                "name": "label"
+              }
+            }
+          },
+          "rhs": {
+            "node": "unaryOp",
+            "op": "isFalse",
+            "operand": {
+              "node": "colRef",
+              "name": "active"
+            }
+          }
+        },
+        "rhs": {
+          "node": "unaryOp",
+          "op": "isTrue",
+          "operand": {
+            "node": "case",
+            "branches": [
+              {
+                "when": {
+                  "node": "binOp",
+                  "op": "lt",
+                  "lhs": {
+                    "node": "colRef",
+                    "name": "code"
+                  },
+                  "rhs": {
+                    "node": "literal",
+                    "value": 100
+                  }
+                },
+                "then": {
+                  "node": "unaryOp",
+                  "op": "isNull",
+                  "operand": {
+                    "node": "colRef",
+                    "name": "code"
+                  }
+                }
+              }
+            ],
+            "else": {
+              "node": "unaryOp",
+              "op": "isNull",
+              "operand": {
+                "node": "colRef",
+                "name": "label"
+              }
+            }
+          }
+        }
+      },
+      "limit": 100
+    },
+    {
+      "op": "backfill",
+      "table": "status_codes",
+      "cursorColumn": "code",
+      "batchSize": 500,
+      "set": {
+        "first": {
+          "node": "fnSynth",
+          "fn": "splitPart",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            },
+            {
+              "node": "literal",
+              "value": " "
+            },
+            {
+              "node": "literal",
+              "value": 1
+            }
+          ]
+        },
+        "full": {
+          "node": "fnSynth",
+          "fn": "concatWs",
+          "args": [
+            {
+              "node": "literal",
+              "value": " "
+            },
+            {
+              "node": "colRef",
+              "name": "label"
+            },
+            {
+              "node": "cast",
+              "operand": {
+                "node": "colRef",
+                "name": "code"
+              },
+              "target": "text"
+            }
+          ]
+        },
+        "token": {
+          "node": "fnSynth",
+          "fn": "genRandomUuid",
+          "args": []
+        },
+        "touched": {
+          "node": "fnSynth",
+          "fn": "now",
+          "args": []
+        }
+      },
+      "filter": {
+        "node": "binOp",
+        "op": "gt",
+        "lhs": {
+          "node": "colRef",
+          "name": "code"
+        },
+        "rhs": {
+          "node": "literal",
+          "value": 0
+        }
+      },
+      "name": "fluent_backfill"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

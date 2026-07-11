@@ -1,0 +1,30 @@
+-- ============================================================
+-- plan "representative"  (dialect: sqlite)
+-- ============================================================
+
+CREATE TABLE "codes" ("code" INTEGER NOT NULL, "created_at" TEXT NOT NULL, "created_by" TEXT, "deleted_at" TEXT, "id" TEXT PRIMARY KEY NOT NULL, "label" TEXT, "updated_at" TEXT NOT NULL, "updated_by" TEXT, "version" INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS "codes_created_by_idx" ON "codes" ("created_by");
+CREATE INDEX IF NOT EXISTS "codes_deleted_at_idx" ON "codes" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "codes_updated_at_idx" ON "codes" ("updated_at");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "codes_code_key" ON "codes" ("code");
+
+ALTER TABLE "codes" ADD COLUMN "note" text;
+
+-- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): catalog-probed at apply (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply runs when the probe says run
+
+ALTER TABLE "codes" ADD COLUMN "flag" boolean;
+
+CREATE INDEX IF NOT EXISTS "codes_label_idx" ON "codes" ("label");
+
+-- insert DML; binds: 6 typed value(s) (bound natively, never interpolated)
+
+INSERT INTO "codes" ("id", "created_at", "updated_at", "version", "code", "label") VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+
+-- update DML; binds: 2 typed value(s) (bound natively, never interpolated)
+
+UPDATE "codes" SET "label" = ?1 WHERE ("code" > ?2);
+
+-- [runtime-resolved] renameColumn "codes"."label" → "codes"."display_name": online rename — needs the live column structure to lower (expand-contract dual-write / SQLite rebuild); the backfill is windowed by PK and the cutover is partitioned across deploys — exact statement stream depends on live state
+
+-- preview: 7 statement(s) rendered, 2 runtime-resolved

@@ -1,0 +1,71 @@
+{
+  "ir_version": 6,
+  "name": "ddl_alter",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "setColumnType",
+      "table": "orders",
+      "column": "total",
+      "toType": "bigInt"
+    },
+    {
+      "op": "setColumnNotNull",
+      "table": "orders",
+      "column": "note"
+    },
+    {
+      "op": "dropColumnNotNull",
+      "table": "orders",
+      "column": "note"
+    },
+    {
+      "op": "setColumnDefault",
+      "table": "orders",
+      "column": "note",
+      "value": {
+        "literal": {
+          "value": "memo"
+        }
+      }
+    },
+    {
+      "op": "dropColumnDefault",
+      "table": "orders",
+      "column": "note"
+    },
+    {
+      "op": "renameColumn",
+      "table": "orders",
+      "from": "note",
+      "to": "memo",
+      "type": "text"
+    },
+    {
+      "op": "addConstraint",
+      "table": "orders",
+      "constraint": {
+        "name": "orders_customer_fk",
+        "kind": {
+          "kind": "fk",
+          "columns": [
+            "customerId"
+          ],
+          "referencesTable": "customers",
+          "referencesColumns": [
+            "id"
+          ]
+        }
+      }
+    },
+    {
+      "op": "dropConstraint",
+      "table": "orders",
+      "name": "orders_legacy_chk"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

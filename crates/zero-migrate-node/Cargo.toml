@@ -1,0 +1,68 @@
+# This crate is EXCLUDED from the root workspace (root Cargo.toml `exclude`) so a
+# plain `cargo build` never pulls the napi toolchain. An empty `[workspace]` table
+# makes it its OWN standalone workspace, so `cargo`/`napi build` resolve it with its
+# own napi/futures deps without touching the root lockfile.
+[workspace]
+
+[package]
+name = "zero-migrate-node"
+version = "0.1.0"
+edition = "2021"
+description = "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the driver-neutral PgSession seam, zero tokio, zero io_uring, cross-platform .node"
+publish = false
+
+# A `cdylib` is terminal (no Rust crate can depend on it) → this is necessarily a
+# leaf, so the graph stays acyclic (`zero-migrate-node → zero-migrate` is
+# the only edge). `@napi-rs/cli` compiles it to `index.node` + `index.d.ts`.
+# `cdylib` is the shipped `.node`; `rlib` is added so the crate's own Rust
+# integration tests (`tests/`) can link the library (a bare `cdylib` cannot be
+# depended on by a test binary). The `rlib` is a build-time convenience only — the
+# published artifact is the `cdylib` `.node`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The napi entrypoints are ONLY reachable when compiled by `napi build` (which
+# defines `napi_build_metadata` / links against the Node ABI). A bare
+# `cargo test` of this crate builds the pure-Rust core + the marshal/session
+# bridge + the mock-apply integration test WITHOUT touching the Node ABI, so the
+# integration suite runs offline without a Node host. `napi` gates the actual
+# N-API entrypoints (`#[napi]` fns, ThreadsafeFunction, JsDeferred).
+default = ["napi"]
+napi = ["dep:napi", "dep:napi-derive"]
+
+[dependencies]
+# The core engine, host-callback path ONLY: NO compio (→ no io_uring → the .node
+# is cross-platform), NO V8/zsv8. SQLite stays native (rusqlite bundled) inside
+# the core; the host supplies PG/MySQL over the seam.
+zero-migrate = { path = "../zero-migrate", default-features = false, features = ["host-pg"] }
+
+# N-API 3, TOKIO-FREE by construction: default-features = false drops the
+# ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the
+# ThreadsafeFunction; `napi5` supplies `Env::create_function_from_closure`
+# (the per-call `done` JS closure capturing the oneshot Sender, §B.3) + Deferred.
+# Node/Bun both implement N-API ≥5. NO "async", NO "tokio_rt" — the `cargo tree`
+# gate asserts zero tokio in the leaf.
+napi = { version = "3", default-features = false, features = ["napi4", "napi5"], optional = true }
+napi-derive = { version = "3", optional = true }
+
+# The tokio-free executor: `futures::executor::block_on` on a spawned std::thread
+# per apply call, parked on a `oneshot::Receiver` fired cross-thread by the host
+# `done` callback (§B.3 / §C.4). futures-channel = oneshot; futures-executor =
+# block_on.
+futures = "0.3"
+
+# JSON marshaling for plan/generate/load-verify results returned as strings across
+# the napi boundary (DB-free, sync entrypoints — §C.5).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+# `napi_build::setup()` only emits cdylib link args (allow-undefined for the Node
+# ABI symbols, resolved at `.node` load time) — it needs NO Node headers at build
+# time, so it is safe to run for both `napi build` and a plain `cargo test`.
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

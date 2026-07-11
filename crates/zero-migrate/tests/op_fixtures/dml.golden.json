@@ -1,0 +1,115 @@
+{
+  "ir_version": 6,
+  "name": "dml",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "insert",
+      "table": "status_codes",
+      "columns": [
+        "code",
+        "label"
+      ],
+      "rows": [
+        [
+          200,
+          "ok"
+        ],
+        [
+          404,
+          "not found"
+        ]
+      ]
+    },
+    {
+      "op": "update",
+      "table": "status_codes",
+      "set": {
+        "label": {
+          "node": "fnCall",
+          "fn": "coalesce",
+          "args": [
+            {
+              "node": "colRef",
+              "name": "label"
+            },
+            {
+              "node": "literal",
+              "value": "unknown"
+            }
+          ]
+        },
+        "marker": "fixed"
+      },
+      "where": {
+        "node": "binOp",
+        "op": "gt",
+        "lhs": {
+          "node": "colRef",
+          "name": "code"
+        },
+        "rhs": {
+          "node": "literal",
+          "value": 0
+        }
+      }
+    },
+    {
+      "op": "delete",
+      "table": "status_codes",
+      "where": {
+        "node": "unaryOp",
+        "op": "isNull",
+        "operand": {
+          "node": "colRef",
+          "name": "code"
+        }
+      },
+      "limit": 100
+    },
+    {
+      "op": "backfill",
+      "table": "status_codes",
+      "cursorColumn": "code",
+      "batchSize": 500,
+      "set": {
+        "label": {
+          "node": "fnSynth",
+          "fn": "concatWs",
+          "args": [
+            {
+              "node": "literal",
+              "value": " "
+            },
+            {
+              "node": "colRef",
+              "name": "code"
+            },
+            {
+              "node": "colRef",
+              "name": "label"
+            }
+          ]
+        },
+        "marker": "backfilled"
+      },
+      "filter": {
+        "node": "binOp",
+        "op": "gt",
+        "lhs": {
+          "node": "colRef",
+          "name": "code"
+        },
+        "rhs": {
+          "node": "literal",
+          "value": 0
+        }
+      },
+      "name": "backfill_labels"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

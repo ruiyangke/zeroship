@@ -1,0 +1,35 @@
+{
+  "ir_version": 6,
+  "name": "edge_scalars",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "insert",
+      "table": "edge",
+      "columns": [
+        "big",
+        "frac",
+        "uni",
+        "flag",
+        "missing"
+      ],
+      "rows": [
+        [
+          {
+            "decimal": "9007199254740993"
+          },
+          {
+            "decimal": "1.5"
+          },
+          "héllo\t\"world\" 𝟙",
+          true,
+          null
+        ]
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

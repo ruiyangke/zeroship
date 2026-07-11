@@ -1,0 +1,439 @@
+{
+  "ir_version": 6,
+  "name": "fluent_ddl",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "accounts",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "balance",
+          "type": {
+            "decimal": {
+              "precision": 12,
+              "scale": 2
+            }
+          },
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": {
+                "decimal": "0.00"
+              }
+            }
+          }
+        },
+        {
+          "name": "authored_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": {
+            "expr": {
+              "node": "fnSynth",
+              "fn": "now",
+              "args": []
+            }
+          }
+        },
+        {
+          "name": "external_id",
+          "type": "uuid"
+        },
+        {
+          "name": "avatar",
+          "type": "bytes"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": true
+            }
+          }
+        },
+        {
+          "name": "profile",
+          "type": "json"
+        },
+        {
+          "name": "owner",
+          "type": {
+            "ref": {
+              "references": "users"
+            }
+          }
+        },
+        {
+          "name": "embedding",
+          "type": {
+            "vector": {
+              "vector": 1536
+            }
+          }
+        },
+        {
+          "name": "location",
+          "type": "geoPoint"
+        },
+        {
+          "name": "label",
+          "type": "text"
+        },
+        {
+          "name": "hits",
+          "type": "int",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": 0
+            }
+          }
+        },
+        {
+          "name": "big_hits",
+          "type": "bigInt"
+        },
+        {
+          "name": "ratio",
+          "type": "double"
+        },
+        {
+          "name": "secret",
+          "type": {
+            "encrypted": {
+              "of": "text"
+            }
+          }
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "op": "createTable",
+      "name": "memberships",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "account_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "team",
+          "type": "text",
+          "nullable": false
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [
+        {
+          "name": "memberships_team_uq",
+          "kind": {
+            "kind": "unique",
+            "columns": [
+              "team"
+            ]
+          }
+        },
+        {
+          "name": "memberships_team_chk",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "unaryOp",
+              "op": "isNotNull",
+              "operand": {
+                "node": "colRef",
+                "name": "team"
+              }
+            }
+          }
+        },
+        {
+          "name": "memberships_account_fk",
+          "kind": {
+            "kind": "fk",
+            "columns": [
+              "account_id"
+            ],
+            "referencesTable": "accounts",
+            "referencesColumns": [
+              "id"
+            ]
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "name": "memberships_account_idx",
+          "columns": [
+            {
+              "kind": "column",
+              "name": "account_id"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "op": "addColumn",
+      "table": "accounts",
+      "column": "status",
+      "type": "text",
+      "nullable": false,
+      "default": {
+        "literal": {
+          "value": "new"
+        }
+      }
+    },
+    {
+      "op": "addConstraint",
+      "table": "memberships",
+      "constraint": {
+        "name": "memberships_team_fk",
+        "kind": {
+          "kind": "fk",
+          "columns": [
+            "team"
+          ],
+          "referencesTable": "teams",
+          "referencesColumns": [
+            "name"
+          ]
+        }
+      }
+    },
+    {
+      "op": "addConstraint",
+      "table": "accounts",
+      "constraint": {
+        "name": "accounts_external_uq",
+        "kind": {
+          "kind": "unique",
+          "columns": [
+            "external_id"
+          ]
+        }
+      }
+    },
+    {
+      "op": "addConstraint",
+      "table": "accounts",
+      "constraint": {
+        "name": "accounts_balance_chk",
+        "kind": {
+          "kind": "check",
+          "expr": {
+            "node": "binOp",
+            "op": "ge",
+            "lhs": {
+              "node": "colRef",
+              "name": "balance"
+            },
+            "rhs": {
+              "node": "literal",
+              "value": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "dropConstraint",
+      "table": "accounts",
+      "name": "accounts_legacy_chk"
+    },
+    {
+      "op": "setColumnType",
+      "table": "accounts",
+      "column": "balance",
+      "toType": {
+        "decimal": {
+          "precision": 14,
+          "scale": 2
+        }
+      }
+    },
+    {
+      "op": "setColumnNotNull",
+      "table": "accounts",
+      "column": "profile"
+    },
+    {
+      "op": "renameColumn",
+      "table": "accounts",
+      "from": "label",
+      "to": "display_label",
+      "type": "text"
+    },
+    {
+      "op": "createIndex",
+      "table": "accounts",
+      "columns": [
+        {
+          "kind": "column",
+          "name": "email"
+        }
+      ],
+      "name": "accounts_active_email_idx",
+      "unique": true,
+      "where": {
+        "node": "unaryOp",
+        "op": "isTrue",
+        "operand": {
+          "node": "colRef",
+          "name": "active"
+        }
+      }
+    },
+    {
+      "op": "addColumn",
+      "table": "accounts",
+      "column": "nickname",
+      "type": "text"
+    },
+    {
+      "op": "setColumnNotNull",
+      "table": "accounts",
+      "column": "nickname"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}
