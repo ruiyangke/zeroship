@@ -2173,19 +2173,36 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
         claimed >= 1,
         "cancel pickup should dispatch at least the child run reference without replaying child code"
     );
-    let child_terminal = fx
-        .pg
-        .query_one(
-            "SELECT state, cancel_requested, claimed_by, dispatch_nonce \
-               FROM zeroship.workflow_runs WHERE id = $1",
-            &[&child],
-        )
-        .await
-        .expect("child terminal");
-    assert_eq!(child_terminal.get::<_, String>("state"), "cancelled");
-    assert!(!child_terminal.get::<_, bool>("cancel_requested"));
-    assert_eq!(child_terminal.get::<_, Option<String>>("claimed_by"), None);
-    assert_eq!(child_terminal.get::<_, Option<String>>("dispatch_nonce"), None);
+    let mut latest_child_state = None;
+    for _ in 0..100 {
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT state, cancel_requested, claimed_by, dispatch_nonce \
+                   FROM zeroship.workflow_runs WHERE id = $1",
+                &[&child],
+            )
+            .await
+            .expect("child terminal");
+        let state: String = row.get("state");
+        let cancel_requested: bool = row.get("cancel_requested");
+        let claimed_by: Option<String> = row.get("claimed_by");
+        let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
+        latest_child_state = Some((state, cancel_requested, claimed_by, dispatch_nonce));
+        if latest_child_state
+            .as_ref()
+            .is_some_and(|(state, _, _, _)| state == "cancelled")
+        {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (state, cancel_requested, claimed_by, dispatch_nonce) =
+        latest_child_state.expect("child terminal state polled");
+    assert_eq!(state, "cancelled");
+    assert!(!cancel_requested);
+    assert_eq!(claimed_by, None);
+    assert_eq!(dispatch_nonce, None);
 }
 
 #[compio::test]

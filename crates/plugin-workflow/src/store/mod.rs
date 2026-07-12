@@ -5,22 +5,31 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::engine::{StepCheckpoint, WorkflowEngineConfig, WorkflowOutputRef};
+use crate::engine::{RunUpdate, StepCheckpoint, WorkflowEngineConfig, WorkflowOutputRef};
 use crate::errors::WorkflowError;
 
 #[derive(Debug, Clone)]
 pub struct RunLockRow {
+    pub id: String,
     pub app_id: Uuid,
     pub workflow_name: String,
     pub deploy_id: String,
     pub claimed_by: Option<String>,
     pub state: String,
     pub dispatch_nonce: Option<String>,
+    pub lease_expires: Option<DateTime<Utc>>,
     pub cancel_requested: bool,
     pub stuck_strikes: i16,
+    pub waiting_step_key: Option<String>,
     pub tree_depth: i16,
     pub compensation_target: Option<String>,
     pub current_error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ApplyLockPlan {
+    pub run_ids: Vec<String>,
+    pub continued_as_new_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +118,18 @@ pub trait WorkflowTx {
     where
         Self: Sized;
 
-    async fn lock_run_for_apply(
+    async fn plan_apply_locks(
         &mut self,
+        config: &WorkflowEngineConfig,
         run_id: &str,
-    ) -> Result<Option<RunLockRow>, WorkflowError>;
+        checkpoints: &mut [StepCheckpoint],
+        run_update: &RunUpdate,
+    ) -> Result<ApplyLockPlan, WorkflowError>;
+
+    async fn lock_runs_for_apply(
+        &mut self,
+        run_ids: &[String],
+    ) -> Result<Vec<RunLockRow>, WorkflowError>;
 
     async fn apply_compensation_outcome(
         &mut self,
@@ -159,6 +176,7 @@ pub trait WorkflowTx {
         &mut self,
         config: &WorkflowEngineConfig,
         current_run_id: &str,
+        successor_run_id: &str,
         app_id: &Uuid,
         workflow_name: &str,
         seed_input: Option<&Value>,
