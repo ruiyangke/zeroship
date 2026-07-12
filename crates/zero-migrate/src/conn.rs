@@ -329,14 +329,14 @@ impl ExecutorConfig {
     ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
     ///   unqualified `up` name can never resolve to the journal — C1).
     /// - **Platform** ⇒ the full configured schema allowlist (e.g.
-    ///   `"zeroship", "public"`). The platform changelog relies on
-    ///   this: V0001's `CREATE EXTENSION citext` is deliberately unqualified and
+    ///   `"zeroship", "public"`). A multi-schema changelog relies on
+    ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
     ///   must resolve a creation target (`public`) — and at that point the
-    ///   `zeroship` schema does not yet exist, so a `zeroship`-only path would
+    ///   project schema does not yet exist, so a project-schema-only path would
     ///   error `3F000 no schema has been selected to create in`. Cross-schema
-    ///   resolution between `zeroship`/`public` also needs them all
-    ///   on the path. This mirrors the Liquibase deployment, where the `postgres`
-    ///   principal runs with `search_path = zeroship, public`.
+    ///   resolution between the project schema and `public` also needs them all
+    ///   on the path, matching a deployment where the `postgres`
+    ///   principal runs with `search_path = <project>, public`.
     /// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no
     ///   confinement — pinning the project schema is merely the default
     ///   resolution target; an explicitly-qualified reference to any other schema

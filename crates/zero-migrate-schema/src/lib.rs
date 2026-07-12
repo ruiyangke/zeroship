@@ -1,10 +1,10 @@
-//! # zeroship-schema — the shared schema-authority core
+//! # zero-migrate-schema — the shared schema-authority core
 //!
 //! ONE schema implementation, reused by two consumers:
 //!
-//! - the **migration engine** (`zeroship-migrate`) — write / diff / generate
+//! - the **migration engine** (`zero-migrate`) — write / diff / generate
 //!   (adopted in P2; this crate is engine-free in P1);
-//! - **plugin-db's data plane** — read / introspect, which needs the same
+//! - **a data plane** — read / introspect, which needs the same
 //!   sentinel codec + metadata types to learn column behaviour at runtime.
 //!
 //! That shared need is *why* this is a leaf crate rather than two files
@@ -44,17 +44,17 @@
 //!
 //! Deps: `serde_json` + `sha2` (always-on) + — behind the `introspect`
 //! feature only — `compio-postgres` + the `tracing` observability facade.
-//! The DEFAULT (write/diff/describe) profile pulls NO PG driver and NO
-//! `zeroship-core`/`zeroship-bundle`/tokio chain: the migration engine
+//! The DEFAULT (write/diff/describe) profile pulls NO PG driver and no
+//! tokio chain: the migration engine
 //! consumes exactly that profile (it does its own introspection over the
-//! `PgSession` seam and never calls `read_live_schema`). plugin-db enables
-//! `introspect` because its data plane reads live column behaviour at runtime.
-//! **No v8, no `zeroship-runtime`, no crypto (aes/hkdf/hmac), no
-//! `zeroship-metering`.** The trust domain is preserved: nothing in this crate
+//! `PgSession` seam and never calls `read_live_schema`). A data-plane consumer
+//! enables `introspect` because it reads live column behaviour at runtime.
+//! **No v8, no runtime coupling, no crypto (aes/hkdf/hmac), no
+//! metering.** The trust domain is preserved: nothing in this crate
 //! can touch a key, an isolate, or a usage counter.
 
 // **Schema-authority P1 — inherited lint posture.** `query.rs` and `diff.rs`
-// were relocated *verbatim* out of `zeroship-plugin-db` (a pure refactor: the
+// were relocated *verbatim* out of the original data-plane crate (a pure refactor: the
 // logic is byte-for-byte unchanged). plugin-db was authored under a regime
 // where these specific `clippy::all` style lints were not enforced, so the
 // moved code trips them here. Suppressing them at the crate level keeps this

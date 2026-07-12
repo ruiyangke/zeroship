@@ -289,7 +289,7 @@ pub fn apply(
 /// host driver. The envelope must NOT carry `owner_app`; it is stamped from the
 /// `owner_app` arg (provenance, §D.1).
 ///
-/// This is the entry the `@zeroship/migrate/host` facade's `apply` calls: the host
+/// This is the entry the `zero-migrate/host` facade's `apply` calls: the host
 /// recorder produces the envelope purely in JS, this addon owns the checksum.
 /// Returns a `Promise<string>` resolving to a JSON `ApplyOutcome`.
 #[napi(ts_return_type = "Promise<string>")]

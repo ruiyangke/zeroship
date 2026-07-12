@@ -1138,7 +1138,7 @@ impl From<SealedPosture> for SealPayloadPosture {
     }
 }
 
-/// Authenticated, resolved profile for zeroship-operated infrastructure.
+/// Authenticated, resolved profile for platform-operated infrastructure.
 ///
 /// The constructor is crate-private and requires [`SealApplier`]. External
 /// crates can hold and pass this opaque value, but cannot fabricate one,

@@ -12,7 +12,7 @@
 //!   same resource budget, wall watchdog, and kernel layers as migration
 //!   recording: no ambient Node, no fs, no network.
 //! - **No cycle.** the V8 host runtime depends on neither `zero-migrate`
-//!   nor `zeroship-schema`; this crate sits ABOVE all three. V8 enters the
+//!   nor `zero-migrate-schema`; this crate sits ABOVE all three. V8 enters the
 //!   migrate family ONLY here — the lean `zero-migrate` core stays
 //!   V8-free (verified by `cargo tree`).
 //! - **Pure lowering.** We do NOT run the app's `installSchema` (which is
@@ -24,7 +24,7 @@
 //! ## Input contract
 //!
 //! The input is a **self-contained `schema.js`** — bundled JS where the
-//! `@zeroship/db` `t.*` DSL is resolvable (we provide it in the module
+//! built-in `t.*` type-builder DSL is resolvable (we provide it in the module
 //! graph). A raw `schema.ts` (TypeScript source importing npm packages) is
 //! NOT a valid input here: TS transpile + npm resolution live in the JS
 //! build pipeline (esbuild/Vite), not in the Rust runtime — the runtime's
@@ -85,9 +85,9 @@ struct IrEnvelope {
 ///
 /// `owner_app` stamps the declaring app on every emitted
 /// [`CollectionDescriptor::owner_app`] (the project-umbrella ownership
-/// subject). `schema_source` is the bundled JS — it may
-/// `import { t, schema } from "@zeroship/db"` (resolved to the embedded
-/// DSL) and expose a schema map for the authoring front-end to lower.
+/// subject). `schema_source` is the bundled JS — it may import the built-in
+/// `t` / `schema` type-builder DSL (resolved to the embedded
+/// module) and expose a schema map for the authoring front-end to lower.
 ///
 /// # Errors
 /// See [`EvalError`].

@@ -3,10 +3,10 @@
 //!
 //! Two consumers, one shape (the "byte-identical FTS5 structure" contract):
 //!
-//! - **plugin-db runtime** (`backend/sqlite/fts.rs::ensure_fts_index`) — creates
+//! - **the data-plane runtime** (`backend/sqlite/fts.rs::ensure_fts_index`) — creates
 //!   the FTS index lazily on the data plane, schema-QUALIFIED into the app's
 //!   ATTACHed database (`"<app>"."<coll>__fts"`).
-//! - **zeroship-migrate engine** (`declarative.rs` SQLite emitter) — emits the
+//! - **the zero-migrate engine** (`declarative.rs` SQLite emitter) — emits the
 //!   SAME FTS index as a migration `up`/`down`, UNqualified because the engine
 //!   opens the per-app file directly as `main`.
 //!

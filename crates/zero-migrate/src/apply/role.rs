@@ -61,11 +61,11 @@
 //!   the migrator cannot stage objects there (no `CREATE`) nor reach existing
 //!   tables (no per-object grant), but `USAGE` lets it *resolve* the shared
 //!   extension types. USAGE is resolution-only — it relaxes nothing about
-//!   cross-schema **write** confinement. (Matches plugin-db's runtime, which
+//!   cross-schema **write** confinement. (Matches a data-plane runtime, which
 //!   references the same unqualified `vector`/`geography` types with `public`
 //!   reachable on its connection path.)
-//! - **No grant whatsoever** on `control` / `auth` / `billing` / `zeroship` /
-//!   any other project schema. Deny-by-absence: a role only has what it is
+//! - **No grant whatsoever** on any other project schema — any schema outside
+//!   the migrator's own. Deny-by-absence: a role only has what it is
 //!   granted, so an unmentioned schema is unreachable. This is the line-2
 //!   backstop.
 //!

@@ -12,7 +12,7 @@
 //! implemented (see the `Dump`/`load` note below).
 //!
 //! Trust posture: the public tool defaults to `--profile trusted` (the operator
-//! owns the DB — no zeroship deny-list, no schema allowlist). `--profile platform`
+//! owns the DB — no deny-list, no schema allowlist). `--profile platform`
 //! / `--profile confined` remain EXPLICIT opt-ins. The CLI's `--profile trusted`
 //! flag is the ONLY surface that reaches `RunProfile::Trusted`; the control plane
 //! uses `submit_migration` (Confined) and never reaches this binary.
@@ -89,7 +89,7 @@ struct Cli {
 
     /// Trust profile. `trusted` (DEFAULT — the public posture: the operator owns
     /// the DB, so the deny-list is OFF and there is no schema confinement);
-    /// `platform` widens the guard for the zeroship platform schemas (the
+    /// `platform` widens the guard for the platform's own schemas (the
     /// internal compose/ops posture — must be passed EXPLICITLY); `confined` is
     /// the full creator deny-list, single-schema. Precedence: this flag >
     /// `ZEROSHIP_MIGRATE_PROFILE` env > `profile` in the config > default `trusted`.
@@ -164,7 +164,7 @@ enum ProfileArg {
     /// The public dbmate-like posture (the binary default): deny-list OFF, no
     /// schema confinement. The operator owns the DB.
     Trusted,
-    /// The widened zeroship platform guard (explicit; the compose/ops posture).
+    /// The widened platform guard (explicit; the compose/ops posture).
     Platform,
     /// The full creator deny-list, single-schema.
     Confined,
@@ -240,8 +240,8 @@ enum Command {
     /// NOTE (PR7 raw-SQL demotion): this raw-`.sql` authoring path is **RETAINED for
     /// the dbmate-style operator CLI and legacy SQL corpora** — it is NOT the
     /// recommended creator authoring path. Creators author portable, bi-dialect
-    /// (PG + SQLite) migrations as op.* `@zeroship/migrate` `.ts` modules (compiled to
-    /// `.ir.json`) via `zero-migrate-js new`/`generate` — the DSL expresses the
+    /// (PG + SQLite) migrations as op.* `zero-migrate` `.ts` modules (compiled to
+    /// `.ir.json`) via `zero-migrate new`/`generate` — the DSL expresses the
     /// full DDL + DML + online surface and never drops to raw SQL (`docs/proposals/
     /// 2026-06-23-js-op-dsl-migration-design-normative.md` §PR7). Use this raw-`.sql`
     /// `new` only for the operator/platform path.
@@ -438,7 +438,7 @@ fn run_config(cli: &Cli, layer: &FileEnvLayer) -> Result<RunConfig, String> {
     let profile: RunProfile = effective_profile(cli, layer)?;
 
     // Schema allowlist + primary schema depend on the profile:
-    // - Platform: the zeroship allowlist (or the explicit --schema list).
+    // - Platform: the platform allowlist (or the explicit --schema list).
     // - Trusted / Confined (generic): a single schema (default `public`).
     let (schemas, project_schema) = match profile {
         RunProfile::Platform => {

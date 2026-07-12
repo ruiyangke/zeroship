@@ -3964,7 +3964,7 @@
           "const": "replace"
         },
         {
-          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (`0025`'s\n`current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
+          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation\npolicy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
           "type": "string",
           "const": "currentSetting"
         },
@@ -4029,7 +4029,7 @@
           "const": "bytes"
         },
         {
-          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
+          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — a tenant-isolation\npolicy casts `current_setting('app.tenant_id', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
           "type": "string",
           "const": "uuid"
         }
@@ -5156,7 +5156,7 @@
           "type": "boolean"
         },
         "strictness": {
-          "description": "`schema(...).strictness(...)`; default matches `@zeroship/db`.",
+          "description": "`schema(...).strictness(...)`; default matches the built-in type builder.",
           "$ref": "#/$defs/TableStrictness",
           "default": "strict"
         }
@@ -5168,7 +5168,7 @@
       ]
     },
     "TableStrictness": {
-      "description": "Per-collection deploy-time data-validation strictness, mirroring the\n`@zeroship/db` `schema(...).strictness(...)` builder.",
+      "description": "Per-collection deploy-time data-validation strictness, mirroring the\nbuilt-in `schema(...).strictness(...)` builder.",
       "oneOf": [
         {
           "description": "Refuse deploy-time validation violations.",
@@ -6039,7 +6039,7 @@
       ]
     },
     "Privilege": {
-      "description": "**VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
+      "description": "**VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
       "oneOf": [
         {
           "description": "`ALL PRIVILEGES`.",

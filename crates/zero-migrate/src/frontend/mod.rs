@@ -5,10 +5,10 @@
 //! adopts the same shape with the **descriptor IR**
 //! ([`crate::render::declarative::CollectionDescriptor`]) as the internal
 //! representation. This module is the **JS/TS front-end**: it evaluates a
-//! creator `schema.js` (the `@zeroship/db` `t.*` DSL) inside the sandboxed
+//! creator `schema.js` (the built-in `t.*` type-builder DSL) inside the sandboxed
 //! recorder child and lowers it to that IR, then drives the engine's
 //! declarative differ to emit a versioned migration file. It is the
-//! analog of Atlas's ORM/HCL providers — the zeroship "the tool natively
+//! analog of Atlas's ORM/HCL providers — the "the tool natively
 //! speaks the app's schema" superpower.
 //!
 //! ## Crate shape

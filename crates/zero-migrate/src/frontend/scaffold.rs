@@ -142,7 +142,7 @@ pub fn scaffold_new_ts(name: &str) -> Result<String, ScaffoldError> {
 import {{ table, t, now, genRandomUuid }} from "@zeroship/migrate";
 
 export function up() {{
-  // Replace this create() with your schema change. The platform injects the
+  // Replace this create() with your schema change. The engine injects the
   // system id/created_at/updated_at columns for you, so the example needs none.
   table("{name}").create({{
     columns: {{
@@ -357,7 +357,7 @@ fn append_table_index_constraint_ops(
 /// One synthesized op with its open-obligation marker (if any).
 struct SynthOp {
     op: Op,
-    /// A machine-readable `// @zeroship-todo backfill: …` marker (§8.8/§7.1) when
+    /// A machine-readable `// @migrate-todo backfill: …` marker (§8.8/§7.1) when
     /// this op is a data-open-obligation (a NON-NULL column add with no default).
     todo: Option<String>,
 }
@@ -443,7 +443,7 @@ fn synth_delta_ops(
                     // Open obligation: a NON-NULL add with no default needs a backfill.
                     let todo = if !col.nullable && default.is_none() {
                         Some(format!(
-                            "// @zeroship-todo backfill: {table}.{} — NON-NULL column added with no default; backfill existing rows before enforcing NOT NULL",
+                            "// @migrate-todo backfill: {table}.{} — NON-NULL column added with no default; backfill existing rows before enforcing NOT NULL",
                             col.name
                         ))
                     } else {
@@ -527,7 +527,7 @@ pub struct GeneratedMigration {
     /// The human-readable op.* `.ts` body (named imports, `export default {up,down}`)
     /// whose recorded ops round-trip to `ir`'s checksum (autogenerate parity).
     pub ts_body: String,
-    /// The machine-readable `// @zeroship-todo backfill: …` markers (§8.8/§7.1).
+    /// The machine-readable `// @migrate-todo backfill: …` markers (§8.8/§7.1).
     pub todos: Vec<String>,
     /// `true` when the delta is empty (no-op).
     pub is_empty: bool,

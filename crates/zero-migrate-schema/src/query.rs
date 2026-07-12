@@ -874,9 +874,9 @@ pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 /// **P7** — validate a creator-declared typed-id prefix (`t.id("blog")`).
 ///
 /// Defense-in-depth mirror of the SDK-side check in
-/// `sdks/db/src/types.ts`: the SDK throws at `pnpm dev` build time, but
+/// the db SDK types: the SDK throws at `pnpm dev` build time, but
 /// a hand-built wire payload (a raw `default = { fetch }` deploy calling
-/// `zeroship.db.registerModel` directly) skips the SDK entirely, so the
+/// the `db.registerModel` op directly) skips the SDK entirely, so the
 /// runtime re-validates at register-model.
 ///
 /// Rules:
@@ -1047,7 +1047,7 @@ pub enum FkEmission<'a> {
 ///   is `"<app_id>"."<table>"` (table) and `"<app_id>"."<index>" ON "<table>"`
 ///   (index). This is the historical behaviour and the default for the
 ///   stable [`build_create_table_with_fks_for_dialect`] entry point.
-/// - [`SqliteEmitScope::MainUnqualified`] — the **zeroship-migrate engine**'s
+/// - [`SqliteEmitScope::MainUnqualified`] — the **zero-migrate engine**'s
 ///   `SqliteBackend` ATTACHes the one app file as `main` (`main` IS the app
 ///   file), and its hardened authorizer DENIES any other alias. An unqualified
 ///   `CREATE TABLE users(...)` therefore lands in (and persists to) the app
@@ -1058,10 +1058,10 @@ pub enum FkEmission<'a> {
 /// The Postgres arm ignores this enum entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqliteEmitScope {
-    /// SQLite DDL is `"<app_id>"`-qualified (the plugin-db ATTACH-alias model).
+    /// SQLite DDL is `"<app_id>"`-qualified (the data-plane ATTACH-alias model).
     /// The default for the stable dialected entry point.
     AttachAlias,
-    /// SQLite DDL is UNqualified — `main` IS the app file (the zeroship-migrate
+    /// SQLite DDL is UNqualified — `main` IS the app file (the zero-migrate
     /// `SqliteBackend` model). The schema qualifier is dropped on the table
     /// name and the index name.
     MainUnqualified,
@@ -1113,8 +1113,8 @@ pub fn build_create_table_with_fks_for_dialect(
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
-    // The stable entry point keeps the historical plugin-db namespacing: SQLite
-    // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zeroship-migrate
+    // The stable entry point keeps the historical data-plane namespacing: SQLite
+    // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zero-migrate
     // engine calls the `_scoped` form with `MainUnqualified` instead.
     build_create_table_with_fks_for_dialect_scoped(
         app_id,
@@ -1711,8 +1711,8 @@ pub fn build_add_column(
 }
 
 // ---------------------------------------------------------------------------
-// Index builders for registerModel — A1 of the @zeroship/db proposal
-// (docs/proposals/zeroship-db.md). Materialises `t.string().index()` /
+// Index builders for registerModel — A1 of the db proposal
+// (docs/proposals/db.md). Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.
 // ---------------------------------------------------------------------------
@@ -2853,7 +2853,7 @@ fn def_to_constraints_for_dialect(
     }
 
     // NOTE: `unique` is intentionally NOT emitted as a column-level constraint
-    // here. The proposal (zeroship-db.md A1) mandates that every uniqueness
+    // here. The proposal (db.md A1) mandates that every uniqueness
     // marker becomes a `CREATE UNIQUE INDEX CONCURRENTLY` so the build never
     // blocks writes. The inline `UNIQUE` keyword would build the index under
     // ACCESS EXCLUSIVE lock and would also produce a Postgres-auto-named index
@@ -8098,7 +8098,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // A1 — Materialised indexes (zeroship-db proposal §A1).
+    // A1 — Materialised indexes (db proposal §A1).
     //
     // Before A1, `t.string().index()` and `t.string().unique()` set
     // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced
@@ -9453,9 +9453,9 @@ mod tests {
 
     // NOTE: `system_field_reservation_error_carries_correct_code` — which
     // asserted the `From<QueryError> for DbError` lift carries
-    // `code = "reserved_system_field_name"` — was relocated to plugin-db's
+    // `code = "reserved_system_field_name"` — was relocated to the data plane's
     // `error.rs` test module as part of the schema-authority extraction.
-    // `DbError` lives in plugin-db (it is built on `zeroship_runtime::OpError`)
+    // `DbError` lives in the data plane (it is built on a runtime `OpError`)
     // and cannot be named from this leaf crate. The validator
     // (`validate_field_name_for_declaration`) and the `QueryError`
     // variant it produces are tested here; the *mapping* to `DbError` is

@@ -1,6 +1,6 @@
 //! The VENDOR capability-composition policy (vendor spec §3).
 //!
-//! The privileged `@zeroship/migrate` primitives (roles, grants, RLS/policies,
+//! The privileged `zero-migrate` primitives (roles, grants, RLS/policies,
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
 //! capability flags** + a schema allowlist. A vendor op declares the closed set of

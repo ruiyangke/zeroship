@@ -604,7 +604,7 @@ impl RecorderService {
     /// The §8.9.2 `record` operation: authorize (PAT → owns app_id), acquire a
     /// concurrency slot, then spawn a FRESH sandboxed child for this one recording.
     ///
-    /// `token` is the PAT/`ZEROSHIP_TOKEN`; `app_id` is the claimed owner app
+    /// `token` is the PAT/access token; `app_id` is the claimed owner app
     /// (cross-checked server-side). HOSTED posture is enforced here (the kernel
     /// sandbox is mandatory for the multi-tenant path).
     pub fn record(

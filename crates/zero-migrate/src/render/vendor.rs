@@ -1,4 +1,4 @@
-//! The VENDOR (`@zeroship/migrate`) Postgres render seam (vendor spec §4.4).
+//! The VENDOR (`zero-migrate`) Postgres render seam (vendor spec §4.4).
 //!
 //! Renders the privileged vendor [`Op`](crate::model::ir::Op) variants to **structured**
 //! Postgres DDL: identifiers double-quoted via the crate's single quoting seam

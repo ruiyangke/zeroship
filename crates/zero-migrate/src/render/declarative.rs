@@ -1,8 +1,8 @@
 //! Declarative schema-as-code: desired-schema → generated migrations
 //! (v3 Plan A, phases P0–P2).
 //!
-//! The platform's authoring layer holds a creator's **declared schema** — the
-//! per-collection descriptor JSON the `@zeroship/db` SDK emits via `registerModel`
+//! The authoring layer holds a creator's **declared schema** — the
+//! per-collection descriptor JSON the db SDK emits via `registerModel`
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
 //! ([`desired_snapshot`], P0) and then **diffs** it against the live snapshot to
@@ -654,7 +654,7 @@ pub struct FieldDescriptor {
 
     // -----------------------------------------------------------------------
     // Schema-authority P2 — the FULL-capability facets, reached by adopting the
-    // shared `zeroship-schema` DDL/type kernel. Before P2 the engine's v1-subset
+    // shared `zero-migrate-schema` DDL/type kernel. Before P2 the engine's v1-subset
     // differ REJECTED these as `UnsupportedType`; now the column TYPE + DDL
     // (vector index, encrypted BYTEA + sentinel, mask sibling, geoPoint geography
     // + GiST) are resolved through `zero_migrate_schema::query`. Each facet mirrors
@@ -814,7 +814,7 @@ struct ResolvedRename {
 // DSL-type → information_schema.data_type mapping.
 //
 // Schema-authority P2: the engine's own v1-SUBSET type table was DELETED and the
-// column-type resolution now DELEGATES to the shared `zeroship-schema` kernel
+// column-type resolution now DELEGATES to the shared `zero-migrate-schema` kernel
 // (`query::def_to_column_type_for_dialect`). That is what gives the differ FULL
 // capability — `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
 // (encrypted) / `literal`-primitive are now first-class, where the v1 subset
@@ -860,7 +860,7 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
 }
 
 /// Build the SDK `FieldDef` JSON (`{ type, encrypted?, vectorDims?, vectorMetric?,
-/// mask?, literalValue? }`) the shared `zeroship-schema` kernel consumes, from the
+/// mask?, literalValue? }`) the shared `zero-migrate-schema` kernel consumes, from the
 /// engine's [`FieldDescriptor`]. This is the bridge that lets the engine reuse the
 /// shared DDL/type map (full capability) without adopting the SDK's untyped JSON
 /// as its public authoring surface: the engine keeps its typed descriptor, the
@@ -2103,7 +2103,7 @@ fn build_table_snapshot_impl(
         // pgvector ANN index (`USING ivfflat` with the metric-appropriate
         // opclass). The live snapshot carries it as `access_method =
         // 'ivfflat'`, so the desired snapshot must model it identically or it
-        // phantom-drops; routed through the shared `zeroship-schema` kernel so
+        // phantom-drops; routed through the shared `zero-migrate-schema` kernel so
         // the opclass + name match plugin-db's runtime form byte-for-byte.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
@@ -2407,8 +2407,8 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
 // invisible). Modeling them in the DESIRED snapshot both stops the drop AND
 // makes the engine the authority that EMITS them (the schema-authority cutover
 // intent). The PG access-method names (`ivfflat`, `gin`) and the deterministic
-// index/column names match the shared `zeroship-schema` kernel + plugin-db's
-// runtime contract byte-for-byte, so an engine-created object round-trips clean.
+// index/column names match the shared `zero-migrate-schema` kernel + the data
+// plane's runtime contract byte-for-byte, so an engine-created object round-trips clean.
 // ---------------------------------------------------------------------------
 
 /// The pgvector opclass for a metric token (mirrors plugin-db's

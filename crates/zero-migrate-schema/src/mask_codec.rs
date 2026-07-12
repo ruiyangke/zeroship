@@ -2,12 +2,12 @@
 //! (which *writes* the sentinel into DDL) and the data plane (which
 //! *reads* it back at runtime to drive the mask read-pass).
 //!
-//! Relocated out of `zeroship_plugin_db::crud::mask_backfill` per the
+//! Relocated out of the original data-plane `crud::mask_backfill` module per the
 //! schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-model-design.md`
 //! §5): the *codec* (build/parse the `__zsmask:` sentinel string) is a
 //! schema-shape concern and lives here; the backfill *runner*
 //! (`run_mask_backfill` / `run_mask_rewrite`, which execute UPDATE
-//! backfills) stays in plugin-db's data plane.
+//! backfills) stays in the data plane.
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
 //! [`crate::diff`] (the schema metadata types). plugin-db re-exports both

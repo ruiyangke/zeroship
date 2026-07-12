@@ -10,7 +10,7 @@
 //! ## Contract (design §8.9.2)
 //!
 //! `POST /v1/recorder/record`
-//!   Authorization: Bearer <PAT | ZEROSHIP_TOKEN>
+//!   Authorization: Bearer <PAT | access token>
 //!   Body: { ts_source, app_id, schema_types_blob? }
 //!   200 -> { ir_json, ts_provenance_blob, checksum }
 //!   4xx/5xx -> the §8.8 structured error { code, message, ... }
@@ -124,7 +124,7 @@ pub enum RecordHttpOutcome {
 
 /// Handle a `POST /v1/recorder/record` (design §8.9.2), transport-agnostically.
 ///
-/// `bearer` is the PAT/`ZEROSHIP_TOKEN` from the `Authorization: Bearer …` header
+/// `bearer` is the PAT/access token from the `Authorization: Bearer …` header
 /// (or `None` if absent — a 401-class refusal). `svc` carries the authorizer +
 /// sandbox + limits. On success the response carries the `.ir.json`, the `.ts`
 /// provenance blob, and the typed-value checksum.

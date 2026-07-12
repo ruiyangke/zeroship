@@ -301,7 +301,7 @@ pub fn suggest_migration_name(name: &str) -> String {
 //
 // - Filename grammar: `<version>_<description>.sql` where `<version>` is a
 //   14-digit `YYYYMMDDHHMMSS` timestamp. (dbmate accepts other digit widths in
-//   the wild; zeroship STANDARDIZES on the 14-digit stamp the `new` helper mints,
+//   the wild; zero-migrate STANDARDIZES on the 14-digit stamp the `new` helper mints,
 //   so the loader recognizes exactly 14 digits as the dbmate shape — every other
 //   leading-digit width is not a dbmate file. This keeps auto-detect crisp and the
 //   `V<NNNN>__` Flyway shape unambiguous.)

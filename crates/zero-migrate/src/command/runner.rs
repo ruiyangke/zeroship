@@ -50,10 +50,10 @@ use crate::Approval;
 ///
 /// `Trusted` is the public CLI's DEFAULT (`--profile trusted`, the binary default):
 /// the operator owns the DB, so the deny-list is OFF and there is no schema
-/// confinement. `Platform` (the widened guard for the zeroship platform schemas)
+/// confinement. `Platform` (the widened guard for a hosting platform's own schemas)
 /// and `Confined` (the full creator deny-list, single-schema) are EXPLICIT opt-ins
-/// the CLI selects only when `--profile platform`/`confined` is passed — the
-/// control plane uses `submit_migration` (Confined) and never reaches this binary.
+/// the CLI selects only when `--profile platform`/`confined` is passed — an
+/// embedding host uses `submit_migration` (Confined) and never reaches this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunProfile {
     /// Trusted operator SQL for the platform schemas — the widened guard (§4).
@@ -2000,7 +2000,7 @@ async fn run_load_pg_locked(
 
     // 1. Restore the dump DDL inside ONE explicit transaction (H1) so a failure
     //    mid-dump rolls back to the pre-load state rather than leaving a half-
-    //    restored DB. A `pg_dump --schema-only` of zeroship schemas is txn-safe (no
+    //    restored DB. A `pg_dump --schema-only` of the project schemas is txn-safe (no
     //    CREATE DATABASE / CREATE INDEX CONCURRENTLY / etc. in a schema-only dump).
     //    The dump RECREATES the journal objects too (they live in the dumped
     //    schema), so we must NOT pre-create them. `strip_psql_meta_commands` drops

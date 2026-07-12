@@ -27,8 +27,8 @@
 //! - **`generate_migration` (THIS module)** — the PLATFORM schema-authority path.
 //!   Renders a deployable `.sql` (dbmate) migration via the declarative differ,
 //!   covering the FULL goodie surface (`vector(N)` ANN indexes, PostGIS GiST
-//!   spatial indexes, FOREIGN KEY / CHECK constraints, FTS). The control-plane
-//!   deploy seam (`zeroship_control::deploy_migrate::apply_bundle_migrations`)
+//!   spatial indexes, FOREIGN KEY / CHECK constraints, FTS). An embedding host's
+//!   deploy seam (`apply_bundle_migrations`)
 //!   consumes these `.sql` files, and the schema-authority capstone e2e exercises
 //!   the whole `schema.js → generate → pack → deploy-apply → data-plane` pipeline
 //!   through it. It is the only generate path that emits a goodie/constraint-bearing

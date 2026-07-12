@@ -131,8 +131,8 @@ pub enum ScalarFn {
     /// on PG, SQLite, and MySQL with identical spelling and semantics.
     Replace,
     /// **VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).
-    /// A PG GUC read needed by the RLS policy predicates (`0025`'s
-    /// `current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it
+    /// A PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation
+    /// policy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it
     /// is PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A
     /// closed-AST `FnCall` node — NOT a raw escape.
     CurrentSetting,
@@ -176,8 +176,8 @@ pub enum CastTarget {
     /// `bytes` (`BYTEA` on PG)
     Bytes,
     /// `uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).
-    /// Needed for the VENDOR policy predicates — the 0025 tenant-isolation
-    /// policy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a
+    /// Needed for the VENDOR policy predicates — a tenant-isolation
+    /// policy casts `current_setting('app.tenant_id', true)::uuid`, so a
     /// faithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,
     /// not a `::text` substitute (vendor spec §2.10 / §5.3).
     Uuid,

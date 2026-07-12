@@ -1,4 +1,4 @@
-//! `zero-migrate` — zeroship's versioned DB migration engine for **creator
+//! `zero-migrate` — a versioned DB migration engine for **creator
 //! project databases** (design `docs/proposals/2026-06-16-db-migration-engine-design.md`).
 //!
 //! The crate also carries the JS-first authoring front-end under [`frontend`]:
@@ -254,8 +254,8 @@ pub use model::profile::{
     CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
 pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
-// The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
-// path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
+// The deploy-target dialect (§2.4.1) — re-exported so an embedding host's deploy
+// path can thread it into `IrAuthor::new` without depending on `zero-migrate-schema`.
 pub use zero_migrate_schema::query::SqlDialect;
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{

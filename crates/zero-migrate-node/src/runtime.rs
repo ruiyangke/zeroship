@@ -39,7 +39,7 @@ where
     C: FnOnce(T) + Send + 'static,
 {
     thread::Builder::new()
-        .name("zeroship-migrate-engine".into())
+        .name("zero-migrate-engine".into())
         .spawn(move || {
             // The ONE future, driven with NO reactor. Every suspension inside it is
             // a channel receiver woken out-of-thread by the host `done` callback
@@ -48,7 +48,7 @@ where
             let out = futures::executor::block_on(make_future());
             on_done(out);
         })
-        .expect("spawn zeroship-migrate engine worker thread");
+        .expect("spawn zero-migrate engine worker thread");
 }
 
 #[cfg(test)]

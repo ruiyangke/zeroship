@@ -9,8 +9,8 @@
 // `DeclarativeAuthor::diff`). It then stashes the serialized IR on
 // `globalThis.__zsSchemaIR` for the Rust host to read back.
 //
-// Why an explicit adapter (not `installSchema`): `@zeroship/bootstrap`'s
-// `installSchema` is welded to the native `env.db` platform handle (it
+// Why an explicit adapter (not `installSchema`): a host's
+// `installSchema` is welded to the native `env.db` handle (it
 // calls `registerModel` on a live DbPlugin). At CLI/generate time there is
 // no db plugin and no app boot — we want a PURE lowering. So this adapter
 // reuses only the parts that are pure: `TypeBuilder.toFieldDef()` (the
@@ -66,7 +66,7 @@ function fieldDefToDescriptor(name, def) {
   if (def.idPrefix !== undefined) out.idPrefix = def.idPrefix;
 
   // P2 full-capability facets — carried VERBATIM so the engine's shared
-  // `zeroship-schema` kernel maps them identically to plugin-db.
+  // `zero-migrate-schema` kernel maps them identically to the data plane.
   if (def.vectorDims !== undefined) out.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) out.vectorMetric = def.vectorMetric;
   if (def.caseSensitive !== undefined) out.caseSensitive = def.caseSensitive;

@@ -5,9 +5,9 @@
 # DISPOSITION on each of the three dialects (postgres / sqlite / mysql). The
 # generator (`sdks/migrate/scripts/gen-dialect-table.mjs`) reads this file and
 # emits BOTH:
-#   - crates/zeroship-migrate/src/model/dialect_table.rs (const lookup table)
+#   - crates/zero-migrate/src/model/dialect_table.rs (const lookup table)
 #   - sdks/migrate/src/generated/dialect-table.ts        (the TS mirror)
-# Regenerate with: `pnpm --filter @zeroship/migrate gen:dialect-table`, then
+# Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
 # commit both generated artifacts.
 #
 # DISPOSITION vocabulary (per (row, dialect)):
@@ -19,7 +19,7 @@
 #   unsupported          refused on this dialect
 #
 # FAITHFULNESS (the whole point of S0.1): this file is HAND-AUTHORED to MIRROR the
-# live `crates/zeroship-migrate/src/model/support.rs` `Support::decision()` +
+# live `crates/zero-migrate/src/model/support.rs` `Support::decision()` +
 # `Support::tier` behaviour, mapped decision→disposition as:
 #   Supported + Core   -> portable
 #   Supported + Vendor -> vendor

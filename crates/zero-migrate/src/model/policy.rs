@@ -29,7 +29,7 @@
 pub enum TrustProfile {
     /// Untrusted creator/AI SQL. The full deny-list (today's behaviour).
     Confined,
-    /// Trusted operator SQL for the zeroship platform schemas — the WIDENED
+    /// Trusted operator SQL for the platform's own schemas — the WIDENED
     /// deny-list (role/grant/policy/schema management admitted against a fixed
     /// schema allowlist). Constructed ONLY by `GuardConfig::platform` /
     /// `ExecutorConfig::platform`, which require an [`OperatorCapability`] token.
@@ -66,7 +66,7 @@ pub enum SchemaScope {
     /// Confined: exactly one permitted schema (the project schema). Any other
     /// explicitly-qualified schema is a cross-tenant violation.
     Single(String),
-    /// Platform: a set of permitted schemas (e.g. `zeroship` / `public`). A
+    /// Platform: a set of permitted schemas (e.g. a project schema / `public`). A
     /// reference is foreign iff its schema is NOT in this list.
     Allowlist(Vec<String>),
     /// Explicit Trusted/operator posture: no validate-time cross-schema

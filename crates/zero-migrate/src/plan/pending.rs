@@ -1,8 +1,8 @@
 //! Structured §8.8 machine-readable payloads for the cross-deploy
 //! pending-contract interlock (§2.0.3 / §2.0.4).
 //!
-//! zeroship's pitch is "AI builds it, the platform handles everything," so every
-//! stuck state in the online-rename lifecycle emits a STRUCTURED envelope the AI
+//! The design goal is fully-automatable migrations, so every
+//! stuck state in the online-rename lifecycle emits a STRUCTURED envelope an AI
 //! orchestrator can act on — not only a prose string (§8.8). The human-readable
 //! message is the **projection** of the structured payload (the `Display` impls
 //! here), and each payload carries enough to EXECUTE the remedy (an

@@ -1,10 +1,10 @@
 //! Schema-shape descriptor enums shared between the DDL/diff layer and
-//! plugin-db's data plane.
+//! the data plane.
 //!
-//! These were relocated verbatim out of `zeroship_plugin_db::backend`
-//! (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
+//! These were relocated verbatim out of the original data-plane `backend`
+//! module (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
 //! pure *shape* descriptors — no DB round-trip, no crypto, no runtime —
-//! and the DDL builders in [`crate::query`] consume them. plugin-db's
+//! and the DDL builders in [`crate::query`] consume them. The data plane's
 //! `backend` module re-exports them so existing `crate::backend::…`
 //! references keep resolving (the data-plane crypto/spatial impls that
 //! name them are unchanged).

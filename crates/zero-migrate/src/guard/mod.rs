@@ -54,7 +54,7 @@ pub mod data_security_rule {
 }
 
 /// The in-crate enforcement primitive for the OPERATOR-gated profiles —
-/// `Platform` (the zeroship internal posture) AND `Trusted` (the public
+/// `Platform` (the platform-internal posture) AND `Trusted` (the public
 /// dbmate-like posture) — (design §4.1, HIGH-1). A zero-sized capability token
 /// owned by [`crate::model::capability`].
 ///

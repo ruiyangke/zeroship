@@ -1,5 +1,5 @@
-//! Schema diff engine — A2 of the @zeroship/db proposal
-//! (docs/proposals/zeroship-db.md, section A2).
+//! Schema diff engine — A2 of the db proposal
+//! (docs/proposals/db.md, section A2).
 //!
 //! Compares a desired (declared) schema against the live `pg_catalog`
 //! state and classifies each change into **additive** (auto-apply),
@@ -36,9 +36,9 @@ use crate::error::SchemaError;
 /// phrase so operators see *what* the introspection layer was doing
 /// when the SQL failed.
 ///
-/// This leaf crate cannot name plugin-db's `DbError` (built on
-/// `zeroship_runtime::OpError`), so introspection returns [`SchemaError`]
-/// carrying the context + raw driver error. plugin-db's
+/// This leaf crate cannot name a data plane's `DbError` (built on
+/// a runtime `OpError`), so introspection returns [`SchemaError`]
+/// carrying the context + raw driver error. The data plane's
 /// `From<SchemaError> for DbError` re-creates the exact
 /// `coded_sql("diff: <context>", e)` shape — re-attaching the `"diff: "`
 /// prefix and preserving the SQLSTATE-derived `.code` from the carried
@@ -76,7 +76,7 @@ pub enum ChangeClass {
 pub struct DiffOp {
     /// The user-visible collection (table) name this change affects.
     pub collection: String,
-    /// The change kind — written to `__zeroship_migrations.change_kind`.
+    /// The change kind — written to the migration journal's `change_kind`.
     pub change_kind: ChangeKind,
     /// Classification, drives apply / refuse / backfill routing.
     pub class: ChangeClass,
@@ -261,7 +261,7 @@ pub struct ColumnInfo {
     /// **P5 PR 1** — column-encryption metadata when the SDK
     /// declared the column with `t.encrypted(...)`. `None` for every
     /// existing column (the default at HEAD); PR 2 populates the PG
-    /// side from `__zeroship_meta.encrypted_columns`; PR 3 populates
+    /// side from the `<meta>.encrypted_columns` metadata table; PR 3 populates
     /// the SQLite side via regex on `sqlite_master.sql` for the
     /// sentinel CHECK comment. Stays `None` in the default-feature
     /// build because no consumer wires the field yet.
@@ -324,7 +324,7 @@ impl Default for ColumnInfo {
 /// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
 ///
 /// Populated by schema introspection:
-/// - **PG** (PR 2): from `__zeroship_meta.encrypted_columns` rows the
+/// - **PG** (PR 2): from `<meta>.encrypted_columns` rows the
 ///   `register_model` DDL emitter writes alongside the table create.
 /// - **SQLite** (PR 3): from a sentinel CHECK comment
 ///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
@@ -338,7 +338,7 @@ pub struct EncryptionMeta {
     /// leak). See `crate::descriptors::EncryptionMode`.
     pub mode: crate::descriptors::EncryptionMode,
     /// Key id selecting the per-platform root from
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` / `__zeroship_admin.column_keys`.
+    /// a per-key env var (`COLUMN_KEY_<KEYID>`) / a `<admin>.column_keys` table.
     /// Defaults to `"default"` when the SDK caller omits the field.
     pub key_id: String,
     /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
@@ -373,7 +373,7 @@ pub enum WrappedType {
 /// `MaskedValue<T>`.
 ///
 /// Population path (PR 2 onwards):
-/// - **PG**: from `__zeroship_meta.mask_columns` rows the DDL
+/// - **PG**: from `<meta>.mask_columns` rows the DDL
 ///   emitter writes alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zsmask:{kind}:{classification} */` parsed out of

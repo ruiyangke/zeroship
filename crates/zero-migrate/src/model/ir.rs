@@ -91,7 +91,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 pub const CURRENT_IR_VERSION: u32 = 6;
 
 /// Per-collection deploy-time data-validation strictness, mirroring the
-/// `@zeroship/db` `schema(...).strictness(...)` builder.
+/// built-in `schema(...).strictness(...)` builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TableStrictness {
@@ -117,7 +117,7 @@ pub struct TableRuntimeOptions {
     pub soft_delete: bool,
     /// `schema(...).withVersioning()`.
     pub versioning: bool,
-    /// `schema(...).strictness(...)`; default matches `@zeroship/db`.
+    /// `schema(...).strictness(...)`; default matches the built-in type builder.
     #[serde(default)]
     pub strictness: TableStrictness,
 }
@@ -1766,7 +1766,7 @@ pub enum ExistenceGuard {
     IfExists,
 }
 
-/// **VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for
+/// **VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for
 /// `Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an
 /// out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
 /// injection-shaped privilege string into the GRANT render seam (the
@@ -3133,7 +3133,7 @@ pub enum Op {
     },
 
     // ──────────────────────────────────────────────────────────────────────
-    // VENDOR (`@zeroship/migrate/pg`) — Postgres-ONLY privileged primitives
+    // VENDOR (`zero-migrate/pg`) — Postgres-ONLY privileged primitives
     // (vendor spec §4.1). Each is REFUSED fail-closed under a Confined capability
     // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
     // rendered SQL hits the Confined deny-list). All are `dialect_scope = PgOnly`:
@@ -3406,7 +3406,7 @@ pub enum Op {
 }
 
 impl Op {
-    /// Is this a VENDOR (`@zeroship/migrate/pg`) Postgres-only privileged op
+    /// Is this a VENDOR (`zero-migrate/pg`) Postgres-only privileged op
     /// (vendor spec §4.1)? The validator's capability gate + the SQLite
     /// `PgOnly`-refusal key on this. EXHAUSTIVE over the closed [`Op`] set so a new
     /// variant must consciously declare its vendor-ness (a missing arm is a compile

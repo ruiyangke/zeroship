@@ -1,4 +1,4 @@
-//! `zeroship-migrate-node` — the Node/Bun N-API addon for `zeroship-migrate`
+//! `zero-migrate-node` — the Node/Bun N-API addon for `zero-migrate`
 //! (design §C).
 //!
 //! It exposes the migrate engine's core surface over N-API with a **zero-tokio,

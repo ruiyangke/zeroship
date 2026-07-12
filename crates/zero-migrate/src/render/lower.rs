@@ -607,14 +607,14 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
-    /// **VENDOR** — a vendor (`@zeroship/migrate`) op was lowered against a
+    /// **VENDOR** — a vendor (`zero-migrate`) op was lowered against a
     /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
     /// functions/extensions/schemas/`pgRaw`) is `dialect_scope = PgOnly` and has no
     /// SQLite analogue (vendor spec §4.3) — refused fail-closed at lower (the
     /// validate gate already refuses it at load on a SQLite target). Carries the op
     /// kind tag.
     #[error(
-        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the @zeroship/migrate \
+        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the zero-migrate \
          vendor primitives have no SQLite analogue (PgOnly); a SQLite deploy of them is \
          refused fail-closed"
     )]
@@ -1932,7 +1932,7 @@ impl IrAuthor {
                 {
                     if let Some((mig, statements)) = migs.first_mut() {
                         let note =
-                            "/* zeroship: partitionBy collapsed to a plain table on this dialect */\n";
+                            "/* zero-migrate: partitionBy collapsed to a plain table on this dialect */\n";
                         if let Some(first) = statements.first_mut() {
                             first.insert_str(0, note);
                         }
@@ -2581,7 +2581,7 @@ impl IrAuthor {
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
                 self.lower_trigger_op(op, &eff_schema, &decl)?
             }
-            // VENDOR (`@zeroship/migrate`) — render the privileged primitive to
+            // VENDOR (`zero-migrate`) — render the privileged primitive to
             // its Postgres DDL (vendor spec §4.4). Every vendor op is `PgOnly`: a
             // SQLite target is refused fail-closed here (the validate gate already
             // refuses it at load on SQLite, §4.3 — this is defense in depth). The
@@ -2695,12 +2695,12 @@ impl IrAuthor {
             // a row-dependent JSON parse below instead, because a constant invalid
             // JSON expression can be folded by the optimizer before WHERE filters.
             SqlDialect::Sqlite => format!(
-                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                "/* zero-migrate: partition collapse populated-default mirror guard */\n\
                  INSERT INTO {table_sql} ({key_sql}) \
                  SELECT NULL FROM {table_sql} WHERE {predicate} LIMIT 1"
             ),
             SqlDialect::Mysql => format!(
-                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                "/* zero-migrate: partition collapse populated-default mirror guard */\n\
                  SELECT JSON_EXTRACT(CONCAT('!', {key_sql}), '$') \
                    FROM {table_sql} WHERE {predicate} LIMIT 1"
             ),
@@ -2741,7 +2741,7 @@ impl IrAuthor {
         };
         let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
         Ok(format!(
-            "/* zeroship: partition child drop collapsed to DELETE FROM parent */\n\
+            "/* zero-migrate: partition child drop collapsed to DELETE FROM parent */\n\
              DELETE FROM {table_sql} WHERE {predicate}"
         ))
     }
@@ -5195,7 +5195,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::AlterSequence { .. } => "alterSequence",
         Op::DropSequence { .. } => "dropSequence",
         Op::Comment { .. } => "comment",
-        // VENDOR (`@zeroship/migrate`).
+        // VENDOR (`zero-migrate`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
         Op::CreateExtension { .. } => "createExtension",

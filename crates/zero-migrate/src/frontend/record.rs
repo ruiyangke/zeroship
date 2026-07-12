@@ -1,7 +1,7 @@
 //! V8-backed `op.*` migration recording into typed migration IR.
 //!
 //! This module evaluates a creator migration module (which calls the
-//! `@zeroship/migrate` `op.*` DSL inside `up()`) in the V8 host runtime's V8 sandbox
+//! `zero-migrate` `op.*` DSL inside `up()`) in the V8 host runtime's V8 sandbox
 //! and records the emitted op list into a [`MigrationIr`]. Creator builds keep
 //! that IR in memory; callers that need bytes canonicalize the value directly.
 //!
@@ -276,7 +276,7 @@ fn advisory_determinism_findings(
 }
 
 /// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
-/// `@zeroship/migrate` `lintDeterminism` (NOT a Rust re-implementation) — the
+/// `zero-migrate` `lintDeterminism` (NOT a Rust re-implementation) — the
 /// faithful path the build/CLI uses to flag a non-deterministic accessor
 /// (`Date.now()` / `Math.random()` / `crypto.randomUUID()` / `new Date()`) in an
 /// op argument before commit.

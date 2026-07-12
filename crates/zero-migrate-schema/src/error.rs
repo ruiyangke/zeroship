@@ -1,15 +1,14 @@
 //! Leaf-crate error types for the schema layer.
 //!
-//! `zeroship-schema` is a leaf crate (deps: `serde_json` + `sha2`, plus
+//! `zero-migrate-schema` is a leaf crate (deps: `serde_json` + `sha2`, plus
 //! `compio-postgres` behind the `introspect` feature). It therefore CANNOT
-//! depend on plugin-db's
-//! [`DbError`](../../zeroship_plugin_db/error/enum.DbError.html), which is
-//! built on `zeroship_runtime::state::OpError` (and would drag v8/runtime
+//! depend on a data plane's `DbError`, which is
+//! built on a runtime `OpError` (and would drag v8/runtime
 //! into the leaf). Instead the two fallible surfaces this crate exposes —
 //! live introspection and the mask-sentinel codec — return small,
-//! self-contained error types. plugin-db maps them back into `DbError` at
-//! the call boundary via `From` impls, so the wire shape and SQLSTATE-derived
-//! `.code` the SDK sees stay byte-identical to before the extraction.
+//! self-contained error types. A data-plane consumer maps them back into its
+//! own error at the call boundary via `From` impls, so the wire shape and
+//! SQLSTATE-derived `.code` the SDK sees stay byte-identical to before the extraction.
 
 /// Error from the live-schema introspection helpers
 /// ([`crate::diff::read_live_schema`], [`crate::diff::estimate_row_count`]).

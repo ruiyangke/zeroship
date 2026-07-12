@@ -2303,7 +2303,7 @@ fn recover_fk_policy(
 ///
 /// Replay `ops` into the coherent folded state (fail-closed via [`fold_ops`]),
 /// then reconstruct, per table, the wire-`FieldDef` map (`{ <col>: { type, … } }`)
-/// the `@zeroship/db` type inference consumes — recovering each facet from the
+/// the built-in db type inference consumes — recovering each facet from the
 /// applied shape:
 ///
 /// - **type / vector dims / encrypted(default) / ref / id_prefix / vector_metric**
