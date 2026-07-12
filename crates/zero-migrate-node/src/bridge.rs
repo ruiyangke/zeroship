@@ -354,8 +354,8 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 /// drive `executor::apply` over the host driver. The envelope must NOT carry
 /// `owner_app`; it is stamped from `req.owner_app` (provenance, §D.1).
 ///
-/// This is the entry the `zero-migrate/host` facade's `apply` calls: the host
-/// recorder produces the envelope purely in JS, this addon owns the checksum.
+/// This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
+/// recorder produces the envelope, this addon owns the checksum.
 /// Resolves to a typed [`ApplyReply`].
 #[napi(ts_return_type = "Promise<ApplyReply>")]
 pub fn apply_ir(
