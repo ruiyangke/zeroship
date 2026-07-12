@@ -151,11 +151,11 @@ impl From<crate::driver::DbError> for BackendError {
     }
 }
 
-// Concrete-`Client` paths OFF the `SqlSession` seam (the `command/runner`
-// standalone trailer/status reads, which call the inherent `compio_postgres`
-// verbs directly) still surface a `compio_postgres::Error`. `BackendError` boxes
-// either shape, so both `From` impls coexist — the seam path funnels `DbError`,
-// the off-seam concrete path keeps its raw driver error.
+// All network (PG/MySQL) DB errors now funnel through the dialect-neutral
+// `driver::DbError` seam: the only off-seam concrete-`Client` reader was the
+// retired Rust CLI's standalone trailer/status path (redesign step 5c), so
+// `BackendError` boxes the single `DbError` shape above. It still `downcast_ref`s
+// to a concrete backend error type when a test needs SQLSTATE details.
 
 /// Error from [`apply`].
 #[derive(Debug, thiserror::Error)]

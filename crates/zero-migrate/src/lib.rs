@@ -72,7 +72,6 @@
 pub use zero_migrate_guard::{analysis, guard};
 pub mod apply;
 pub mod approval;
-pub mod command;
 pub mod conn;
 pub mod db_url;
 pub mod engine;
@@ -278,7 +277,7 @@ pub use model::load::{
 // bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
-pub use command::ir_apply::{
+pub use apply::ir_apply::{
     apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, discover_ir_files,
     IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
     SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,

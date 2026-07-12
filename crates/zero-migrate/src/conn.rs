@@ -237,7 +237,7 @@ impl ExecutorConfig {
                 self.platform_schemas.clone(),
                 self.platform_exts.clone(),
             ),
-            #[cfg(any(test, feature = "standalone-cli"))]
+            #[cfg(test)]
             (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
                 crate::guard::GuardConfig::trusted(cap)
             }
@@ -249,14 +249,16 @@ impl ExecutorConfig {
 
     /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, mintable
-    /// only inside `command::runner`, so neither the control plane
+    /// only through named in-crate seams, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
     /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
     /// the `CREATE EXTENSION` allowlist.
     ///
-    /// The real caller is the operator-side `command::runner` (the CLI,
-    /// Phase 3); the token is the in-crate enforcement primitive.
+    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI was retired into
+    /// the `zero-migrate-engine` TS CLI (redesign step 5c), and production Platform
+    /// applies flow through the napi host path. The token stays the in-crate
+    /// enforcement primitive.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn platform(
@@ -277,21 +279,22 @@ impl ExecutorConfig {
     /// Build a **Trusted** executor config — the public dbmate-like posture
     /// (Track A). REQUIRES an
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, EXACTLY
-    /// like [`ExecutorConfig::platform`], mintable only inside
-    /// `command::runner`. So neither the control plane (external; cannot
+    /// like [`ExecutorConfig::platform`], mintable only through named in-crate
+    /// seams. So neither the control plane (external; cannot
     /// name `Trusted` nor mint the token) nor any in-crate creator-path module
     /// (`submit`/`engine`; cannot mint the token) can flip the executor into
-    /// Trusted — only the operator-side runner can.
+    /// Trusted.
     ///
     /// Trusted runs as the **connecting role** (`migrator_role = None`, like
     /// Platform's admin), with **no schema confinement** and **no deny-list**
     /// (the executor's [`guard_config`](Self::guard_config) returns the Trusted
     /// guard, whose `check()` skips the deny-list/cross-schema/body walks). The
-    /// destructive flags are still derived, so the CLI's `--yes` gate still
-    /// applies.
+    /// destructive flags are still derived, so a caller's `--yes`-style approval
+    /// gate still applies.
     ///
-    /// The real caller is the operator-side `command::runner` (the public
-    /// CLI, Phase A2); the token is the in-crate enforcement primitive.
+    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
+    /// sole Trusted producer was retired into the `zero-migrate-engine` TS CLI
+    /// (redesign step 5c). The token stays the in-crate enforcement primitive.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn trusted(

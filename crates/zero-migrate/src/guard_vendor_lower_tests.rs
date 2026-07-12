@@ -747,8 +747,8 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 // ---- T11: capability minting uses named seams --------------------------
 
 /// The capability type is constructible from the in-crate test seam. The
-/// production mints are named seams (`command::runner` for CLI configs and
-/// `model::capability::mint_shadow_operator_capability` for shadow dry-runs);
+/// production mint is the named shadow seam
+/// (`model::capability::mint_shadow_operator_capability` for shadow dry-runs);
 /// `for_test` is `#[cfg(test)]`-gated.
 #[test]
 fn t11_platform_capability_mints_only_via_runner_seam() {

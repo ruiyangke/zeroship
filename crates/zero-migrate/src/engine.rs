@@ -963,7 +963,7 @@ impl MigrationEngine {
         // whose Ddl steps actually RUN the real C1 (drop trigger+fn) + C2 (drop column)
         // un-gates the table. The author's `up` text is byte-stable and independent of
         // `owner_app` (it names table/trigger/column only), so an exact string compare
-        // is sound (it mirrors `command::runner`'s deterministic re-author).
+        // is sound (it mirrors the deterministic contract re-author).
         let ddl_up_by_version: std::collections::BTreeMap<&str, &str> = steps
             .iter()
             .filter_map(|s| match s {
@@ -1899,7 +1899,7 @@ pub fn recognizes_contract_apply(
         return false;
     }
     // Re-author deterministically from the obligation's stored identity facts (the
-    // SAME re-author `command::runner` does at `resolve-pending`). The
+    // SAME re-author the cross-deploy `resolve-pending` contract discharge does). The
     // `owner_app` does not affect the contract `up` text, so any stable value is
     // fine for the comparison.
     let author = crate::render::expand_contract::ExpandContractAuthor::new(

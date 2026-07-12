@@ -255,7 +255,7 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// `quote_ident` / `render::lower` / `apply::backend::sqlite`) or via the fail-closed engine
 /// wrapper [`quote_ident_checked`] (every **engine-supplied** identifier render
 /// seam — project schema, migrator role, meta schema, recovery index name — in
-/// `conn` / `executor` / `precondition` / `baseline` / `command::runner` /
+/// `conn` / `executor` / `precondition` / `baseline` /
 /// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
 /// seam byte-identical and makes the "no remaining bare escape seam" claim
 /// *structurally* true — enforced by [`no_bare_escape_seam_outside_dml`] below.
@@ -1573,7 +1573,7 @@ mod tests {
     /// engine-identifier surfaces).
     ///
     /// RED before this fix: 15+ render sites across `executor` / `precondition` /
-    /// `baseline` / `command::runner` / `expand_contract` / `shadow` /
+    /// `baseline` / `expand_contract` / `shadow` /
     /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` carried their own
     /// inline `replace('"', "\"\"")`, so this scan would have found bare seams
     /// outside `dml.rs` and FAILED. After the fix only `dml.rs` (the helper + this
@@ -1642,7 +1642,7 @@ mod tests {
     ///
     /// RED before PR13: `precondition.rs` (project_schema + role), `executor.rs`
     /// (role + meta_schema ×4 + project_schema + recovery index),
-    /// `baseline.rs` (meta_schema), `command::runner.rs` (meta_schema), and
+    /// `baseline.rs` (meta_schema), and
     /// `db.rs::search_path_clause` (project/platform/extension schemas) all fed an
     /// engine identifier to `escape_quote_ident`, so this scan would have FAILED.
     ///
