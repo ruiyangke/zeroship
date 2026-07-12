@@ -23,7 +23,7 @@
 /// [`GuardConfig`]: crate::guard::GuardConfig
 /// [`GuardConfig::platform`]: crate::guard::GuardConfig::platform
 /// [`GuardConfig::trusted`]: crate::guard::GuardConfig::trusted
-/// [`OperatorCapability`]: crate::model::capability::OperatorCapability
+/// [`OperatorCapability`]: crate::capability::OperatorCapability
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {
@@ -34,7 +34,7 @@ pub enum TrustProfile {
     /// schema allowlist). Constructed ONLY by `GuardConfig::platform` /
     /// `ExecutorConfig::platform`, which require an [`OperatorCapability`] token.
     ///
-    /// [`OperatorCapability`]: crate::model::capability::OperatorCapability
+    /// [`OperatorCapability`]: crate::capability::OperatorCapability
     Platform,
     /// **No untrusted boundary at all** — the public dbmate-like CLI posture
     /// where the operator owns the database. The deny-list / cross-schema /
@@ -47,7 +47,7 @@ pub enum TrustProfile {
     /// `ExecutorConfig::trusted`, which require an [`OperatorCapability`] token —
     /// `submit_migration` and any external crate can NEVER reach it.
     ///
-    /// [`OperatorCapability`]: crate::model::capability::OperatorCapability
+    /// [`OperatorCapability`]: crate::capability::OperatorCapability
     /// [`flags_for`]: crate::guard::flags_for
     Trusted,
 }
@@ -95,5 +95,46 @@ impl SchemaScope {
             Self::Allowlist(v) => v.iter().any(|s| s.eq_ignore_ascii_case(schema)),
             Self::Unconfined => true,
         }
+    }
+}
+
+/// Destructive operation posture. Ordered from more restrictive to less
+/// restrictive. `RequireApproval` is retained as a server composition value, but
+/// sealed engine configs accept only the enforceable `forbid`/`warn`/`allow`
+/// states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DestructiveOps {
+    /// Forbid destructive operations.
+    Forbid,
+    /// Allow destructive operations and surface a structured warning.
+    Warn,
+    /// Require server approval before projecting to forbid/allow.
+    RequireApproval,
+    /// Allow today's approval-gated behavior.
+    #[default]
+    Allow,
+}
+
+impl DestructiveOps {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::RequireApproval => 0,
+            Self::Forbid => 1,
+            Self::Warn => 2,
+            Self::Allow => 3,
+        }
+    }
+
+    /// The tighter (more restrictive) of two postures (operator-ceiling meet).
+    #[must_use]
+    pub const fn tightest(self, other: Self) -> Self {
+        if self.rank() <= other.rank() { self } else { other }
+    }
+
+    /// True if `self` is looser (less restrictive) than the `ceiling`.
+    #[must_use]
+    pub const fn is_looser_than(self, ceiling: Self) -> bool {
+        self.rank() > ceiling.rank()
     }
 }

@@ -7,7 +7,7 @@ use serde_json::Value;
 /// expression arguments, and other wrappers. Walking the serialized tree visits
 /// all of those uniformly, which is the same defense the precondition shape
 /// gate uses for data-modifying CTEs.
-pub(crate) fn first_matching_node<T, F>(v: &Value, matches: &F) -> Option<T>
+pub fn first_matching_node<T, F>(v: &Value, matches: &F) -> Option<T>
 where
     F: Fn(&str, &Value) -> Option<T>,
 {
@@ -32,7 +32,7 @@ where
 /// parse tree, or `None`. DML nodes serialize as the `PascalCase` variant keys
 /// `InsertStmt`/`UpdateStmt`/`DeleteStmt`/`MergeStmt` (e.g. a `DeleteStmt` nested
 /// in a CTE's `with_clause`).
-pub(crate) fn first_dml_node(v: &Value) -> Option<&'static str> {
+pub fn first_dml_node(v: &Value) -> Option<&'static str> {
     first_matching_node(v, &|key, _| match key {
         "InsertStmt" => Some("InsertStmt"),
         "UpdateStmt" => Some("UpdateStmt"),

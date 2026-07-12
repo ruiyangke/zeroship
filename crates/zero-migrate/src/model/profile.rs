@@ -891,42 +891,11 @@ impl DataSecurityConfig {
     }
 }
 
-/// Destructive operation posture. Ordered from more restrictive to less
-/// restrictive. `RequireApproval` is retained as a server composition value, but
-/// sealed engine configs accept only the enforceable `forbid`/`warn`/`allow`
-/// states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DestructiveOps {
-    /// Forbid destructive operations.
-    Forbid,
-    /// Allow destructive operations and surface a structured warning.
-    Warn,
-    /// Require server approval before projecting to forbid/allow.
-    RequireApproval,
-    /// Allow today's approval-gated behavior.
-    #[default]
-    Allow,
-}
-
-impl DestructiveOps {
-    const fn rank(self) -> u8 {
-        match self {
-            Self::RequireApproval => 0,
-            Self::Forbid => 1,
-            Self::Warn => 2,
-            Self::Allow => 3,
-        }
-    }
-
-    const fn tightest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
-    }
-
-    const fn is_looser_than(self, ceiling: Self) -> bool {
-        self.rank() > ceiling.rank()
-    }
-}
+// `DestructiveOps` moved to the `zero-migrate-ir` leaf (`zero_migrate_ir::policy`)
+// so the guard crate can name it without depending on the engine. Re-exported
+// under `crate::model::profile::DestructiveOps` (below) for the engine's existing
+// references.
+pub use zero_migrate_ir::policy::DestructiveOps;
 
 /// Polarity category for profile knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

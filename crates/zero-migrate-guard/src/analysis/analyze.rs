@@ -12,7 +12,7 @@
 //! The security boundary is [`crate::guard`] (the parse-time deny-list +
 //! cross-schema confinement) plus the least-privilege `migrator` role. The
 //! destructive-data-loss gate is the engine's approval gate
-//! ([`crate::engine::MigrationEngine::apply`]). **Nothing here denies, blocks,
+//! (the engine `MigrationEngine::apply`). **Nothing here denies, blocks,
 //! or gates anything.** An analyzer that fails to fire (a false negative) is a
 //! quality regression, NOT a security hole — the guard and the role still reject
 //! the dangerous *security* surface, and the approval gate still confirms data
@@ -33,7 +33,7 @@
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, AlterTableType, ConstrType, ObjectType};
 
-use crate::model::migration::Migration;
+use zero_migrate_ir::migration::Migration;
 
 /// The severity of an [`Advisory`]. Advisory-only — neither level denies or
 /// gates; both are informational signals about an operational footgun.
@@ -197,7 +197,7 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
 ///
 /// This is the **plan-aware** seam (review finding #8): the per-statement
 /// [`analyze`] only sees one statement and so suppresses `FK_WITHOUT_INDEX` only
-/// for an index in the SAME statement. A [`crate::render::declarative::DeclarativePlan`]
+/// for an index in the SAME statement. A the engine `DeclarativePlan`
 /// aggregates this across *every* migration (plus the desired snapshot) so an FK
 /// whose covering index is created in a SEPARATE migration of the same plan is no
 /// longer flagged. [`analyze`] itself is unchanged — it has no plan view.

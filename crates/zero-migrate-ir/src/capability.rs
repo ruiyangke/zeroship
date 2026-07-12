@@ -4,16 +4,16 @@
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
 //! capability flags** + a schema allowlist. A vendor op declares the closed set of
-//! [`VendorCapability`] values it needs ([`crate::model::ir::Op::vendor_capabilities`]); the active
+//! [`VendorCapability`] values it needs ([`crate::ir::Op::vendor_capabilities`]); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
-//! fail-closed at validate ([`crate::model::validate`]) AND again at lower (the rendered
+//! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
 //! SQL hits the Confined deny-list, §3.2 gate 2).
 //!
 //! # Why flags, not a profile name
 //!
 //! The operator asked for a capability-COMPOSITION model so the gate is
 //! orthogonal to the trust-profile machinery: the existing
-//! [`crate::model::policy::TrustProfile`] (`Confined`/`Platform`/`Trusted`) MAPS onto
+//! [`crate::policy::TrustProfile`] (`Confined`/`Platform`/`Trusted`) MAPS onto
 //! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`] / [`local`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
@@ -22,46 +22,60 @@
 //! [`operator`]: VendorCapabilities::operator
 //! [`local`]: VendorCapabilities::local
 
-use crate::model::policy::{SchemaScope, TrustProfile};
+use crate::policy::{SchemaScope, TrustProfile};
 
 /// A zero-sized operator capability token.
 ///
-/// The token type lives with the capability model so lower guard/config code can
-/// name it without depending on the operator runner. Production code mints it
-/// through the named seams in this module; command/runner is the only real caller
-/// for operator CLI configs, and the shadow harness uses
-/// [`mint_shadow_operator_capability`] to mirror an already-operator-approved
-/// source config.
+/// The token type lives with the capability model (in the `zero-migrate-ir` leaf)
+/// so the guard config and the engine executor config can both name it without
+/// depending on each other or on the operator runner. The token has a PRIVATE
+/// `()` field, so an external crate can name the type but cannot construct one:
+/// the real external seal is that the privileged constructors that CONSUME it
+/// ([`crate::policy`]'s `GuardConfig::platform`/`trusted` in the guard crate and
+/// `ExecutorConfig::platform`/`trusted` in the engine) are `pub(crate)` to their
+/// own crates. Production code mints it through the named engine runner seam
+/// ([`OperatorCapability::new`]); tests mint it via the `test-support`-gated
+/// [`OperatorCapability::for_test`].
 #[derive(Debug, Clone)]
-pub(crate) struct OperatorCapability(());
+pub struct OperatorCapability(());
 
 /// Stage-M2 name for the zero-sized token that gates sealed shared-infra apply.
 ///
-/// This is an alias, not a second forgeable token: it remains `pub(crate)`, and
-/// external crates still cannot name or construct it.
-pub(crate) type SealApplier = OperatorCapability;
+/// This is an alias, not a second forgeable token: it still has a private field,
+/// so external crates cannot construct it.
+pub type SealApplier = OperatorCapability;
 
 impl OperatorCapability {
-    /// Crate-private mint. Callers should use the named runner/shadow seams rather
-    /// than minting ad hoc tokens.
-    pub(crate) const fn new() -> Self {
+    /// The production mint. Reachable across the crate graph (the engine runner
+    /// is the single production caller); external crates cannot call it usefully
+    /// because there is no `pub` API that accepts the token except the
+    /// `pub(crate)` privileged constructors in the guard/engine crates.
+    #[must_use]
+    pub const fn new() -> Self {
         Self(())
     }
 
-    /// **Test-only `pub(crate)` seam.** Lets in-crate tests exercise the
-    /// operator-gated profiles without exposing a production mint to external
-    /// crates.
-    #[cfg(test)]
+    /// **Test-support seam.** Lets the guard-crate and engine-crate test suites
+    /// exercise the operator-gated profiles. Gated behind the `test-support`
+    /// feature (enabled only by the guard/engine `[dev-dependencies]`), so it
+    /// never reaches a production build.
+    #[cfg(feature = "test-support")]
     #[must_use]
-    pub(crate) const fn for_test() -> Self {
+    pub const fn for_test() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for OperatorCapability {
+    fn default() -> Self {
         Self::new()
     }
 }
 
 
 /// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
-/// §3.2). Each [`crate::model::ir::Op`] vendor variant maps to one or more of these via
-/// [`crate::model::ir::Op::vendor_capabilities`].
+/// §3.2). Each [`crate::ir::Op`] vendor variant maps to one or more of these via
+/// [`crate::ir::Op::vendor_capabilities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
     /// `CREATE/DROP EXTENSION` ([`VendorCapabilities::allow_extension`]).
@@ -251,7 +265,7 @@ impl VendorCapabilities {
     }
 
     /// Derive the capability set from the validate-layer
-    /// [`SchemaScope`](crate::model::policy::SchemaScope) the loader threads (vendor spec
+    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads (vendor spec
     /// §3.2). The scope is produced ONLY by the operator-gated `GuardConfig` ctors,
     /// so it is a faithful, non-spoofable trust signal:
     /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).

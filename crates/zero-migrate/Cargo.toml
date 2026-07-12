@@ -47,11 +47,12 @@ standalone-cli = ["dep:clap"]
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
-# security guard sees exactly what Postgres would execute. A deny-list must
-# not misparse or miss a dangerous statement; a pure-Rust parser
-# (sqlparser-rs) is incomplete for exotic PG syntax, which is a security gap.
-# pg_query carries a C build dep (libpg_query) — confirmed to build under the
-# Nix C toolchain (cc/clang present).
+# security PRECONDITION shape-gate + the idempotence/txn scans see exactly what
+# Postgres would execute. The parse-time SQL security GUARD (deny-list, classify,
+# advisories) now lives in the `zero-migrate-guard` crate (redesign step 3b); the
+# engine still parses directly here for the precondition boolean-SELECT gate, the
+# non-transactional idempotence scan (executor), and the raw-view-body validate
+# scan. pg_query carries a C build dep (libpg_query).
 pg_query = "6"
 sha2 = { workspace = true }
 hmac = { workspace = true }
@@ -90,6 +91,14 @@ zero-migrate-schema = { workspace = true }
 # (`pub use zero_migrate_ir as ir;` + flattened root re-exports) so downstream
 # `zero_migrate::{MigrationIr, Op, …}` names are unchanged.
 zero-migrate-ir = { workspace = true }
+# The SQL security layer (redesign step 3b): the `pg_query`-backed parse-time
+# deny-list, cross-schema confinement, statement classification, and operational
+# advisories (`SqlGuard`, `GuardConfig`, `analyze`, `classify`, `Advisory`,
+# `Severity`, the `flags_for`/`guard_for` free fns, `check_ir_data_security_policy`,
+# `check_raw_view_body_text`, the `tree_walk` shape helpers). The engine
+# re-exports this surface at its root so `zero_migrate::{SqlGuard, GuardConfig, …}`
+# names are unchanged.
+zero-migrate-guard = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
@@ -153,6 +162,10 @@ compio = { workspace = true }
 # (design §3 P2 gate — every confinement claim proven on a REAL temp-file
 # SQLite, never a shim). Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
+# The guard-vendor-lower behaviour-lock tests (moved in from `guard/mod.rs` at
+# step 3b) mint the operator-gated Platform/Trusted profiles via
+# `OperatorCapability::for_test`, which the ir leaf exposes behind `test-support`.
+zero-migrate-ir = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

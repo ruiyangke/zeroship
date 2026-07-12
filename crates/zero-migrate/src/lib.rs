@@ -65,7 +65,11 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-pub mod analysis;
+// The SQL security layer (`analysis` + `guard`) moved to the `zero-migrate-guard`
+// crate (redesign step 3b). Re-export its modules under their historical
+// `crate::{analysis,guard}` paths so the engine's ~dozens of
+// `crate::guard::…` / `crate::analysis::…` references keep resolving unchanged.
+pub use zero_migrate_guard::{analysis, guard};
 pub mod apply;
 pub mod approval;
 pub mod command;
@@ -74,7 +78,6 @@ pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
-pub mod guard;
 // The typed-id (base62/UUIDv7) machinery moved to the `zero-migrate-ir` leaf crate
 // (redesign step 3a); re-export it under its historical `crate::id` path.
 pub use zero_migrate_ir::id;
@@ -90,6 +93,12 @@ pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;
+
+// The guard behaviour-lock suite (moved in from `zero-migrate-guard`'s
+// `guard/mod.rs` at redesign step 3b) — an in-crate test module so it can drive
+// the guard through the engine's `render::lower` / `conn` internals.
+#[cfg(test)]
+mod guard_vendor_lower_tests;
 
 pub use analysis::{analyze, classify};
 

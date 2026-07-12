@@ -28,11 +28,13 @@
 //!   validator, so it lives engine-side; the policy-free ownership/checksum
 //!   helpers of the load gate stay here in [`load`].
 
+pub mod capability;
 pub mod expr;
 pub mod id;
 pub mod ir;
 pub mod load;
 pub mod migration;
+pub mod policy;
 pub mod precondition;
 pub mod probe;
 pub mod validate;
