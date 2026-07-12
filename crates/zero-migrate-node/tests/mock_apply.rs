@@ -1,6 +1,6 @@
 //! Behavioral integration test (design §C gate + §B.6): drive ONE real
 //! `executor::apply` through the addon's [`NapiHostSession`] over a MOCK
-//! [`VerbDispatch`] that answers with canned `SeamRow`s — NO Node host, NO DB.
+//! [`VerbDispatch`] that answers with canned `seam::Row`s — NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
 //! (`crates/zero_migrate-migrate/src/apply/backend/postgres.rs`), but exercised through

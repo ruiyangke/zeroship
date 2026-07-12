@@ -39,11 +39,11 @@ use std::time::Instant;
 use pg_query::protobuf::node::Node as NodeEnum;
 
 use crate::approval::Approval;
-// The `PgSession` seam + the generic `PostgresBackend`/`PgSessionSnapshot` compile
+// The `SqlSession` seam + the generic `PostgresBackend`/`PgSessionSnapshot` compile
 // on the whole PG seam (`native-pg` OR `host-pg`) — the generic executor entries
 // below are driver-neutral.
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::seam::SqlSession;
 use crate::apply::backend::MigrationBackend;
 #[cfg(pg_seam)]
 use crate::apply::backend::{PgSessionSnapshot, PostgresBackend};
@@ -162,16 +162,16 @@ impl Error for BackendError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::apply::backend::postgres::seam::SeamError> for BackendError {
-    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+impl From<crate::seam::DbError> for BackendError {
+    fn from(error: crate::seam::DbError) -> Self {
         Self::new(error)
     }
 }
 
-// Concrete-`Client` paths OFF the `PgSession` seam (the `command/runner`
+// Concrete-`Client` paths OFF the `SqlSession` seam (the `command/runner`
 // standalone trailer/status reads, which call the inherent `compio_postgres`
 // verbs directly) still surface a `compio_postgres::Error`. `BackendError` boxes
-// either shape, so both `From` impls coexist — the seam path funnels `SeamError`,
+// either shape, so both `From` impls coexist — the seam path funnels `DbError`,
 // the off-seam concrete path keeps its raw driver error.
 
 /// Error from [`apply`].
@@ -450,8 +450,8 @@ pub enum ApplyError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::apply::backend::postgres::seam::SeamError> for ApplyError {
-    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+impl From<crate::seam::DbError> for ApplyError {
+    fn from(error: crate::seam::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -473,11 +473,11 @@ impl From<crate::apply::backend::postgres::seam::SeamError> for ApplyError {
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
 #[cfg(pg_seam)]
-pub(crate) async fn acquire_project_lock<D: PgSession>(
+pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<(), ApplyError> {
-    conn.execute(
+    conn.exec(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
         &[project_id.into()],
     )
@@ -486,11 +486,11 @@ pub(crate) async fn acquire_project_lock<D: PgSession>(
 }
 
 #[cfg(pg_seam)]
-pub(crate) async fn release_project_lock<D: PgSession>(
+pub(crate) async fn release_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
 ) -> Result<(), ApplyError> {
-    conn.execute(
+    conn.exec(
         "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
         &[project_id.into()],
     )
@@ -502,7 +502,7 @@ pub(crate) async fn release_project_lock<D: PgSession>(
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
 #[cfg(pg_seam)]
-pub(crate) async fn snapshot_session<D: PgSession>(
+pub(crate) async fn snapshot_session<D: SqlSession>(
     conn: &D,
 ) -> Result<PgSessionSnapshot, ApplyError> {
     let row = conn
@@ -514,9 +514,9 @@ pub(crate) async fn snapshot_session<D: PgSession>(
         )
         .await?;
     Ok(PgSessionSnapshot {
-        statement_timeout: row.get("st"),
-        lock_timeout: row.get("lt"),
-        search_path: row.get("sp"),
+        statement_timeout: row.try_get("st")?,
+        lock_timeout: row.try_get("lt")?,
+        search_path: row.try_get("sp")?,
     })
 }
 
@@ -525,7 +525,7 @@ pub(crate) async fn snapshot_session<D: PgSession>(
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
 #[cfg(pg_seam)]
-pub(crate) async fn restore_session<D: PgSession>(
+pub(crate) async fn restore_session<D: SqlSession>(
     conn: &D,
     snap: &PgSessionSnapshot,
 ) -> Result<(), ApplyError> {
@@ -535,8 +535,8 @@ pub(crate) async fn restore_session<D: PgSession>(
     // least-privilege confinement never leaks onto the pooled/long-lived
     // connection after `apply` returns (H2). Harmless no-op when no SET ROLE ran
     // (txn-only applies use SET LOCAL ROLE, auto-reverted at COMMIT).
-    conn.batch_execute("RESET ROLE").await?;
-    conn.execute(
+    conn.batch("RESET ROLE").await?;
+    conn.exec(
         "SELECT set_config('statement_timeout', $1, false), \
                 set_config('lock_timeout', $2, false), \
                 set_config('search_path', $3, false)",
@@ -626,7 +626,7 @@ fn set_local_role_sql(
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
 #[cfg(pg_seam)]
-pub(crate) async fn configure_session_non_txn<D: PgSession>(
+pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -637,7 +637,7 @@ pub(crate) async fn configure_session_non_txn<D: PgSession>(
         effective_timeout_ms(cfg, m),
         effective_lock_timeout_ms(cfg, m),
     );
-    conn.batch_execute(&stmt).await?;
+    conn.batch(&stmt).await?;
     Ok(())
 }
 
@@ -763,7 +763,7 @@ const fn dml_keyword(node: &NodeEnum) -> &'static str {
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
 #[cfg(pg_seam)]
-pub async fn apply<D: PgSession>(
+pub async fn apply<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -790,7 +790,7 @@ pub async fn apply<D: PgSession>(
 /// # Errors
 /// Same as [`apply`].
 #[cfg(pg_seam)]
-pub async fn apply_with_lock<D: PgSession>(
+pub async fn apply_with_lock<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -799,7 +799,7 @@ pub async fn apply_with_lock<D: PgSession>(
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
     // Drive the whole apply through the dialect seam. P1: Postgres is the only
-    // backend; the public entry is now generic over the `PgSession` seam (`&D`)
+    // backend; the public entry is now generic over the `SqlSession` seam (`&D`)
     // so a host (napi) driver can drive it, while the apply body below is generic
     // over `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`).
     // The defense-in-depth approval gate lives in `apply_with_lock_backend` so it
@@ -1900,7 +1900,7 @@ fn check_squash_all_or_none(
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
 #[cfg(pg_seam)]
-pub(crate) async fn apply_transactional<D: PgSession>(
+pub(crate) async fn apply_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -1923,15 +1923,15 @@ pub(crate) async fn apply_transactional<D: PgSession>(
     // instead drive BEGIN/COMMIT/ROLLBACK explicitly over the shared `&Client`
     // (still one physical session, still atomic) — this avoids requiring
     // `&mut` plumbing through the whole apply loop.
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
 
     // Pin search_path + the mandatory timeouts (per-migration override applied)
     // with SET LOCAL so they are scoped to THIS transaction and vanish at
     // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
     // the admin (always permitted); the role switch is applied separately around
     // the `<up>` only.
-    if let Err(e) = conn.batch_execute(&session_sql).await {
-        let _ = conn.batch_execute("ROLLBACK").await;
+    if let Err(e) = conn.batch(&session_sql).await {
+        let _ = conn.batch("ROLLBACK").await;
         return Err(ApplyError::Db(e.into()));
     }
 
@@ -1955,7 +1955,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
         let live = match crate::apply::drift::snapshot_schema(conn, probe.schema()).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = conn.batch_execute("ROLLBACK").await;
+                let _ = conn.batch("ROLLBACK").await;
                 // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
                 return Err(match e {
                     crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
@@ -1977,7 +1977,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
                 skip_up = true;
             }
             crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
-                if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                if let Err(rb) = conn.batch("ROLLBACK").await {
                     tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift (M4)");
                 }
                 return Err(ApplyError::ExistenceGuardDrift {
@@ -2004,16 +2004,16 @@ pub(crate) async fn apply_transactional<D: PgSession>(
     // below lands so the version is recorded net-applied.
     if !skip_up {
         if let Some(set_role) = &role_sql {
-            if let Err(e) = conn.batch_execute(set_role.as_str()).await {
-                let _ = conn.batch_execute("ROLLBACK").await;
+            if let Err(e) = conn.batch(set_role.as_str()).await {
+                let _ = conn.batch("ROLLBACK").await;
                 return Err(ApplyError::Db(e.into()));
             }
         }
 
         // Run the migration's up SQL (as the migrator, if a role is configured).
-        if let Err(e) = conn.batch_execute(&m.up).await {
+        if let Err(e) = conn.batch(&m.up).await {
             // Roll back; report the failure. No journal row was written.
-            if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
                 tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error (M4)");
             }
             return Err(ApplyError::MigrationFailed {
@@ -2027,8 +2027,8 @@ pub(crate) async fn apply_transactional<D: PgSession>(
         // journal). `RESET ROLE` mid-transaction is supported and does not end the
         // txn, so atomicity of `<up>` + journal is preserved.
         if cfg.pg.migrator_role.is_some() {
-            if let Err(e) = conn.batch_execute("RESET ROLE").await {
-                let _ = conn.batch_execute("ROLLBACK").await;
+            if let Err(e) = conn.batch("RESET ROLE").await {
+                let _ = conn.batch("ROLLBACK").await;
                 return Err(ApplyError::Db(e.into()));
             }
         }
@@ -2049,7 +2049,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
     );
     let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
@@ -2067,7 +2067,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
         )
         .await
     {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error (M4)");
         }
         return Err(ApplyError::Journal(JournalError::Db(e.into())));
@@ -2078,13 +2078,13 @@ pub(crate) async fn apply_transactional<D: PgSession>(
     // net-applied state and its full edge set commit atomically. A failure here
     // rolls back the entire apply (no `completed` row, no edges).
     if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error (M4)");
         }
         return Err(ApplyError::Journal(e));
     }
 
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 
@@ -2105,7 +2105,7 @@ pub(crate) async fn apply_transactional<D: PgSession>(
 /// failure.
 #[cfg(pg_seam)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_dml_transactional<D: PgSession>(
+pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
@@ -2154,23 +2154,23 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
     );
     let role_sql = set_local_role_sql(cfg)?;
 
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
     // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
     // COMMIT/ROLLBACK).
-    if let Err(e) = conn.batch_execute(&set_local).await {
-        let _ = conn.batch_execute("ROLLBACK").await;
+    if let Err(e) = conn.batch(&set_local).await {
+        let _ = conn.batch("ROLLBACK").await;
         return Err(ApplyError::Db(e.into()));
     }
     // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
     // before the journal write so the journal stays unforgeable by the step.
     if let Some(set_role) = &role_sql {
-        if let Err(e) = conn.batch_execute(set_role.as_str()).await {
-            let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(e) = conn.batch(set_role.as_str()).await {
+            let _ = conn.batch("ROLLBACK").await;
             return Err(ApplyError::Db(e.into()));
         }
     }
-    if let Err(e) = conn.execute_text_params(template, &params).await {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+    if let Err(e) = conn.exec_text(template, &params).await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
         }
         return Err(ApplyError::MigrationFailed {
@@ -2179,8 +2179,8 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
         });
     }
     if cfg.pg.migrator_role.is_some() {
-        if let Err(e) = conn.batch_execute("RESET ROLE").await {
-            let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(e) = conn.batch("RESET ROLE").await {
+            let _ = conn.batch("ROLLBACK").await;
             return Err(ApplyError::Db(e.into()));
         }
     }
@@ -2188,7 +2188,7 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
     // BEFORE the journal row — the open txn rolls back the data write too, so the
     // step left NOTHING (resume re-applies cleanly).
     if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL) {
-        let _ = conn.batch_execute("ROLLBACK").await;
+        let _ = conn.batch("ROLLBACK").await;
         return Err(e);
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -2210,7 +2210,7 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
     });
     let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
@@ -2227,7 +2227,7 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
         )
         .await
     {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML journal-insert error");
         }
         return Err(ApplyError::Journal(JournalError::Db(e.into())));
@@ -2236,10 +2236,10 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
     // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
     // with the data write; the step still left NOTHING (resume re-applies).
     if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT) {
-        let _ = conn.batch_execute("ROLLBACK").await;
+        let _ = conn.batch("ROLLBACK").await;
         return Err(e);
     }
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 
@@ -2249,7 +2249,7 @@ pub(crate) async fn apply_dml_transactional<D: PgSession>(
 /// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
 #[cfg(pg_seam)]
-async fn insert_supersedes_edges<D: PgSession>(
+async fn insert_supersedes_edges<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     squash_version: &str,
@@ -2257,7 +2257,7 @@ async fn insert_supersedes_edges<D: PgSession>(
 ) -> Result<(), JournalError> {
     let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     for sup in supersedes {
-        conn.execute(
+        conn.exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations_supersedes
                      (squash_version, superseded_version)
@@ -2276,7 +2276,7 @@ async fn insert_supersedes_edges<D: PgSession>(
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
 #[cfg(pg_seam)]
-pub(crate) async fn apply_non_transactional<D: PgSession>(
+pub(crate) async fn apply_non_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -2327,7 +2327,7 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
                     )
                     .await?;
                 } else {
-                    conn.batch_execute("BEGIN").await?;
+                    conn.batch("BEGIN").await?;
                     let finalize = async {
                         journal::record_completed(
                             conn,
@@ -2346,12 +2346,12 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
                     }
                     .await;
                     if let Err(e) = finalize {
-                        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+                        if let Err(rb) = conn.batch("ROLLBACK").await {
                             tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a guarded non-txn satisfied-noop finalize error");
                         }
                         return Err(ApplyError::Journal(e));
                     }
-                    conn.batch_execute("COMMIT").await?;
+                    conn.batch("COMMIT").await?;
                 }
                 return Ok(false);
             }
@@ -2404,14 +2404,14 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
     // `apply`'s `restore_session` is an unconditional backstop (L1).
     if let Some(role) = &cfg.pg.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
-        conn.batch_execute(&format!("SET ROLE {role_q}"))
+        conn.batch(&format!("SET ROLE {role_q}"))
             .await?;
     }
-    let up_result = conn.batch_execute(&m.up).await;
+    let up_result = conn.batch(&m.up).await;
     if cfg.pg.migrator_role.is_some() {
         // RESET ROLE regardless of the up's success, so the journal writes below
         // run as admin and no role leaks onto the session.
-        if let Err(e) = conn.batch_execute("RESET ROLE").await {
+        if let Err(e) = conn.batch("RESET ROLE").await {
             // If RESET ROLE itself fails, surface it (apply's restore_session is
             // the L1 backstop). Prefer surfacing the up's error if it failed.
             if up_result.is_ok() {
@@ -2448,7 +2448,7 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
         )
         .await?;
     } else {
-        conn.batch_execute("BEGIN").await?;
+        conn.batch("BEGIN").await?;
         let finalize = async {
             // A fresh-path squash is stamped `kind='squash'` so its edges are honored
             // by `superseded_versions` (#4 filters on `kind='squash'`).
@@ -2469,12 +2469,12 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
         }
         .await;
         if let Err(e) = finalize {
-            if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
                 tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a non-txn squash finalize error");
             }
             return Err(ApplyError::Journal(e));
         }
-        conn.batch_execute("COMMIT").await?;
+        conn.batch("COMMIT").await?;
     }
 
     Ok(had_inflight)
@@ -2505,7 +2505,7 @@ pub(crate) async fn apply_non_transactional<D: PgSession>(
 /// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
 /// without needing the migrator role.
 #[cfg(pg_seam)]
-async fn recover_non_transactional<D: PgSession>(
+async fn recover_non_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -2540,14 +2540,14 @@ async fn recover_non_transactional<D: PgSession>(
                 &[(&cfg.project_schema).into(), (&idx).into()],
             )
             .await?
-            .get("invalid");
+            .try_get("invalid")?;
         if is_invalid {
             let stmt = format!(
                 "DROP INDEX IF EXISTS {}.{}",
                 crate::render::dml::quote_ident_checked(&cfg.project_schema)?,
                 crate::render::dml::quote_ident_checked(&idx)?,
             );
-            conn.batch_execute(&stmt).await?;
+            conn.batch(&stmt).await?;
         }
     }
 
@@ -2849,8 +2849,8 @@ pub enum RollbackError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::apply::backend::postgres::seam::SeamError> for RollbackError {
-    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+impl From<crate::seam::DbError> for RollbackError {
+    fn from(error: crate::seam::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -2870,7 +2870,7 @@ impl From<crate::apply::backend::postgres::seam::SeamError> for RollbackError {
 /// under the migrator role; the journal append runs as admin (the migrator has no
 /// meta grant — C1), exactly mirroring [`apply_transactional`].
 #[cfg(pg_seam)]
-pub(crate) async fn rollback_one_transactional<D: PgSession>(
+pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -2888,24 +2888,24 @@ pub(crate) async fn rollback_one_transactional<D: PgSession>(
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
 
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
 
     // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
-    if let Err(e) = conn.batch_execute(&session_sql).await {
-        let _ = conn.batch_execute("ROLLBACK").await;
+    if let Err(e) = conn.batch(&session_sql).await {
+        let _ = conn.batch("ROLLBACK").await;
         return Err(RollbackError::Db(e.into()));
     }
     // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
     // ROLE before the journal append so the admin writes the rolled_back event.
     if let Some(set_role) = &role_sql {
-        if let Err(e) = conn.batch_execute(set_role.as_str()).await {
-            let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(e) = conn.batch(set_role.as_str()).await {
+            let _ = conn.batch("ROLLBACK").await;
             return Err(RollbackError::Db(e.into()));
         }
     }
     // Run the `<down>` as the migrator.
-    if let Err(e) = conn.batch_execute(down).await {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+    if let Err(e) = conn.batch(down).await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a down error");
         }
         return Err(RollbackError::DownFailed {
@@ -2916,8 +2916,8 @@ pub(crate) async fn rollback_one_transactional<D: PgSession>(
     // RESET ROLE back to admin — still inside the txn — so the journal append runs
     // as the admin (the migrator cannot write the journal).
     if cfg.pg.migrator_role.is_some() {
-        if let Err(e) = conn.batch_execute("RESET ROLE").await {
-            let _ = conn.batch_execute("ROLLBACK").await;
+        if let Err(e) = conn.batch("RESET ROLE").await {
+            let _ = conn.batch("ROLLBACK").await;
             return Err(RollbackError::Db(e.into()));
         }
     }
@@ -2926,7 +2926,7 @@ pub(crate) async fn rollback_one_transactional<D: PgSession>(
     // Append the immutable `rolled_back` event in the SAME transaction, as admin.
     let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms)
@@ -2943,13 +2943,13 @@ pub(crate) async fn rollback_one_transactional<D: PgSession>(
         )
         .await
     {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a rolled_back-insert error");
         }
         return Err(RollbackError::Journal(JournalError::Db(e.into())));
     }
 
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 

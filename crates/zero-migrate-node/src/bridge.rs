@@ -20,7 +20,7 @@
 //! in the napi call). This is the fire-and-resolve topology (§B.5).
 //!
 //! ## The tokio-free verb bridge (§B.3)
-//! Each `PgSession` verb ([`crate::session::NapiHostSession`]) calls
+//! Each `SqlSession` verb ([`crate::session::NapiHostSession`]) calls
 //! [`TsfnDispatch::dispatch`], which: allocates a `futures::channel::oneshot`, moves
 //! the `Sender` into the TSFN payload, and `tsfn.call(..., Blocking)`. On the JS
 //! thread the TSFN's `build_callback` closure marshals the request to a JS object,

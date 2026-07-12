@@ -12,8 +12,8 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # addon LOWERs + applies it over the host `pg` / `mysql2` npm drivers). This
 # standalone is **host-pg + SQLite only** — there is NO native compio Postgres
 # driver, and NO embedded V8 in the Rust build graph. The engine's PG path is the
-# driver-neutral `PgSession` seam (host-callback / napi bridge); a native Rust PG
-# driver is intentionally absent. The default build is the driver-neutral PG seam
+# dialect-neutral `seam::SqlSession` seam (host-callback / napi bridge); a native
+# Rust PG driver is intentionally absent. The default build is the network seam
 # (`host-pg`) + the standalone CLI, with NO `v8` anywhere in the graph or dev-deps.
 #
 # The former `v8-host` feature — which gated the in-Rust-V8 authoring front-end
@@ -21,12 +21,12 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # That Rust source remains in-tree but is permanently never-compiled (gated on the
 # `v8_host` internal cfg, which build.rs never emits); Node owns that work now.
 default = ["host-pg", "standalone-cli"]
-# The host-callback PG plumbing: the driver-neutral `PgSession` seam + the whole
-# GENERIC PG apply path (journal/drift/precondition/baseline free fns, the generic
-# `PostgresBackend<D>`, the `<D: PgSession>` executor entries, `ops::status`). It
-# supplies NO in-Rust `PgSession` impl — the in-crate recording driver (behind
-# `cfg(test)`) is the first host-shaped producer, and the napi bridge / Node
-# `PgSession` host is the production producer. `host-pg` lights up the shared
+# The host-callback PG plumbing: the dialect-neutral `seam::SqlSession` seam + the
+# whole GENERIC PG apply path (journal/drift/precondition/baseline free fns, the
+# generic `PostgresBackend<S>`, the `<S: SqlSession>` executor entries,
+# `ops::status`). It supplies NO in-Rust `SqlSession` impl — the in-crate recording
+# driver (behind `cfg(test)`) is the first host-shaped producer, and the napi bridge
+# / Node `SqlSession` host is the production producer. `host-pg` lights up the shared
 # generic path via the internal `pg_seam` cfg (emitted by build.rs). The addon
 # build (`--no-default-features --features host-pg`) stays cross-platform (no
 # io_uring), since no compio PG driver is ever present.
@@ -96,9 +96,9 @@ zero-migrate-guard = { workspace = true }
 # `&uuid::Uuid`.
 uuid = { workspace = true }
 # The Postgres apply flow (journal + apply) runs async on compio — ZERO tokio,
-# per the platform invariant — but always through the driver-neutral `PgSession`
-# seam. This standalone ships NO native Rust PG driver; the seam is fed by the
-# napi/Node host (production) or the in-crate recording driver (tests).
+# per the platform invariant — but always through the dialect-neutral
+# `seam::SqlSession` seam. This standalone ships NO native Rust PG driver; the seam
+# is fed by the napi/Node host (production) or the in-crate recording driver (tests).
 compio = { workspace = true }
 # SQLite migration backend (design 2026-06-19 §2.1.1). The migration connection
 # is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse

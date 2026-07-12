@@ -63,7 +63,7 @@
 //! all contained here, the PG leaf.
 
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::seam::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
@@ -104,7 +104,7 @@ pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
     #[cfg(pg_seam)]
-    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
+    Db(#[from] crate::seam::DbError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
     /// attempt, whitespace, or punctuation. Rejected before any query runs.
@@ -177,7 +177,7 @@ fn quote_ident(ident: &str) -> String {
 ///   boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] — a query failed.
 #[cfg(pg_seam)]
-pub async fn evaluate<D: PgSession>(
+pub async fn evaluate<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     pre: &Precondition,
@@ -238,7 +238,7 @@ pub async fn evaluate<D: PgSession>(
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
 /// check failed and at least one `Skip` check is unmet.
 #[cfg(pg_seam)]
-pub(crate) async fn evaluate_all<D: PgSession>(
+pub(crate) async fn evaluate_all<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     m: &Migration,
@@ -278,7 +278,7 @@ pub(crate) async fn evaluate_all<D: PgSession>(
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the
 /// project schema. Schema + table are BOUND ($1/$2), never interpolated.
 #[cfg(pg_seam)]
-async fn table_exists<D: PgSession>(
+async fn table_exists<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
@@ -292,13 +292,13 @@ async fn table_exists<D: PgSession>(
             &[(&cfg.project_schema).into(), table.into()],
         )
         .await?;
-    Ok(row.get("present"))
+    Ok(row.try_get("present")?)
 }
 
 /// `information_schema.columns` lookup: a column named `column` on the
 /// project-schema table `table`. All three are BOUND, never interpolated.
 #[cfg(pg_seam)]
-async fn column_exists<D: PgSession>(
+async fn column_exists<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
@@ -313,7 +313,7 @@ async fn column_exists<D: PgSession>(
             &[(&cfg.project_schema).into(), table.into(), column.into()],
         )
         .await?;
-    Ok(row.get("present"))
+    Ok(row.try_get("present")?)
 }
 
 /// `count(*)` of the project-schema table `table`.
@@ -325,7 +325,7 @@ async fn column_exists<D: PgSession>(
 /// table has passed `validate_ident`). This mirrors `backfill::build_batch_sql`,
 /// which quotes the same validated identifiers into relation position.
 #[cfg(pg_seam)]
-async fn row_count<D: PgSession>(
+async fn row_count<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     table: &str,
@@ -336,7 +336,7 @@ async fn row_count<D: PgSession>(
         quote_ident(table),
     );
     let row = conn.query_one(&stmt, &[]).await?;
-    Ok(row.get("n"))
+    Ok(row.try_get("n")?)
 }
 
 /// Statically validate that a `SqlBoolean`'s SQL is a no-mutation, no-lock
@@ -465,7 +465,7 @@ fn last_string_part(parts: &[Value]) -> Option<String> {
 /// Evaluate an untrusted `SqlBoolean` precondition: guard → shape gate → run
 /// under the migrator role in a READ ONLY transaction → read one boolean.
 #[cfg(pg_seam)]
-async fn evaluate_sql_boolean<D: PgSession>(
+async fn evaluate_sql_boolean<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     sql: &str,
@@ -495,17 +495,17 @@ async fn evaluate_sql_boolean<D: PgSession>(
     //    READ ONLY) is the real line. `SET LOCAL` (search_path/role) is
     //    transaction-scoped, so it vanishes at COMMIT and never leaks onto the
     //    session — the same H2 discipline the executor uses.
-    conn.batch_execute("BEGIN READ ONLY").await?;
+    conn.batch("BEGIN READ ONLY").await?;
     let result = run_sql_boolean_in_txn(conn, cfg, sql).await;
     // Always end the transaction. A read-only txn has nothing to persist, so we
     // COMMIT on success and ROLLBACK on error (both end the txn + revert the
     // SET LOCALs); failures here are surfaced behind the primary result.
     match &result {
         Ok(_) => {
-            conn.batch_execute("COMMIT").await?;
+            conn.batch("COMMIT").await?;
         }
         Err(_) => {
-            if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
                 tracing::warn!(error = %rb, "zero-migrate: ROLLBACK failed after a SqlBoolean precondition error");
             }
         }
@@ -517,7 +517,7 @@ async fn evaluate_sql_boolean<D: PgSession>(
 /// transaction: pin the project `search_path`, drop to the migrator role (both
 /// `SET LOCAL`, transaction-scoped), then run the `SELECT` and read one boolean.
 #[cfg(pg_seam)]
-async fn run_sql_boolean_in_txn<D: PgSession>(
+async fn run_sql_boolean_in_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     sql: &str,
@@ -527,13 +527,13 @@ async fn run_sql_boolean_in_txn<D: PgSession>(
     // schema, byte-identical to the prior `escape_quote_ident` on every real
     // (quote-free / `-`-bearing UUIDv7) schema.
     let schema_q = crate::render::dml::quote_ident_checked(&cfg.project_schema)?;
-    conn.batch_execute(&format!("SET LOCAL search_path TO {schema_q}"))
+    conn.batch(&format!("SET LOCAL search_path TO {schema_q}"))
         .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &cfg.pg.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
-        conn.batch_execute(&format!("SET LOCAL ROLE {role_q}"))
+        conn.batch(&format!("SET LOCAL ROLE {role_q}"))
             .await?;
     }
     let row = conn.query_one(sql, &[]).await?;

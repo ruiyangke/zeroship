@@ -1,11 +1,11 @@
 //! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
+//!
+//! Generic over the dialect-neutral [`SqlSession`](crate::seam::SqlSession) seam
+//! (engine root `crate::seam`) — a host driver (the napi `pg` shell) supplies the
+//! `SqlSession` impl. SQLite does NOT ride this seam (it is an in-process rusqlite
+//! actor).
 
-// The neutral seam types + the `PgSession` trait — they name no concrete driver
-// type; a host driver (the napi `pg` shell) supplies the `PgSession` impl.
-pub mod seam;
-pub mod session;
-
-pub use session::PgSession;
+use crate::seam::SqlSession;
 
 use super::{
     CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
@@ -24,19 +24,19 @@ use crate::schema::query::SqlDialect;
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
-/// Generic over the [`PgSession`] driver seam. It carries no compio-concrete
+/// Generic over the [`SqlSession`] driver seam. It carries no compio-concrete
 /// `PgOnline`/`PgShadow` harness, so `online()` / `shadow()` always report `None`
 /// — the honest v1 gap (`DryRunError::ShadowUnsupported` on the host path). The
 /// write/DDL/journal apply path never touches them.
 #[cfg(pg_seam)]
 #[derive(Debug)]
-pub struct PostgresBackend<'a, D: PgSession> {
+pub struct PostgresBackend<'a, D: SqlSession> {
     conn: &'a D,
 }
 
 #[cfg(pg_seam)]
-impl<'a, D: PgSession> PostgresBackend<'a, D> {
-    /// Wrap any [`PgSession`] driver as the Postgres backend (host-pg build — no
+impl<'a, D: SqlSession> PostgresBackend<'a, D> {
+    /// Wrap any [`SqlSession`] driver as the Postgres backend (host-pg build — no
     /// compio-concrete online/shadow harness exists to attach).
     #[must_use]
     pub fn new_generic(conn: &'a D) -> Self {
@@ -44,7 +44,7 @@ impl<'a, D: PgSession> PostgresBackend<'a, D> {
     }
 }
 
-impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
+impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     type SessionSnapshot = PgSessionSnapshot;
 
     fn dialect(&self) -> SqlDialect {
@@ -72,7 +72,7 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn reset_role_best_effort(&self) {
-        if let Err(e) = self.conn.batch_execute("RESET ROLE").await {
+        if let Err(e) = self.conn.batch("RESET ROLE").await {
             tracing::warn!(error = %e, "zero-migrate: failed to RESET ROLE after apply (L1)");
         }
     }
@@ -294,7 +294,7 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 }
 
-impl<D: PgSession> CrossDeployObligations for PostgresBackend<'_, D> {
+impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
     fn outstanding_pending_contracts<'a>(
         &'a self,
         cfg: &'a ExecutorConfig,
@@ -372,15 +372,15 @@ impl<D: PgSession> CrossDeployObligations for PostgresBackend<'_, D> {
 }
 
 /// Genericity proof (design §6d + §A): the apply path monomorphizes over a
-/// **non-compio** [`PgSession`] driver. An in-crate recording driver records the
+/// **non-compio** [`SqlSession`] driver. An in-crate recording driver records the
 /// SQL of every WRITE verb, and — now that the read side is widened to the
-/// driver-neutral [`SeamRow`]/[`SeamError`] (§A) — RETURNS canned `SeamRow`s from
+/// driver-neutral [`Row`]/[`DbError`] (§A) — RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
 /// that a host driver can build return values without a `compio_postgres::Row`,
 /// closing the old `unreachable!("read verbs…")` gap.
 #[cfg(test)]
 mod recording_session_genericity {
-    use super::seam::{SeamBind, SeamError, SeamRow, SeamValue};
+    use crate::seam::{Bind, DbError, Row, Value};
     use super::*;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -407,7 +407,7 @@ mod recording_session_genericity {
                 .is_err()
             {
                 panic!(
-                    "PgSession verb issued while another is in flight — the engine \
+                    "SqlSession verb issued while another is in flight — the engine \
                      must be strictly one-verb-at-a-time (§B.6)"
                 );
             }
@@ -423,7 +423,7 @@ mod recording_session_genericity {
         }
     }
 
-    /// A non-compio, host-SHAPED [`PgSession`] that (a) records the SQL + binds of
+    /// A non-compio, host-SHAPED [`SqlSession`] that (a) records the SQL + binds of
     /// every verb, (b) returns canned neutral rows for the read verbs, routed by a
     /// substring match on the SQL so a full apply/introspection sweep decodes, and
     /// (c) enforces the one-in-flight guard (§B.6) on every verb. This is NOT a
@@ -432,11 +432,11 @@ mod recording_session_genericity {
     /// the one-in-flight invariant from by-analogy to mechanically-checked.
     struct RecordingSession {
         log: RefCell<Vec<String>>,
-        binds: RefCell<Vec<Vec<SeamBind>>>,
+        binds: RefCell<Vec<Vec<Bind>>>,
         /// The mechanically-enforced one-verb-at-a-time guard (§B.6).
         in_flight: AtomicBool,
         /// Canned rows the `net_applied` journal read returns (SQL-routed).
-        canned_journal: RefCell<Vec<SeamRow>>,
+        canned_journal: RefCell<Vec<Row>>,
     }
 
     impl RecordingSession {
@@ -449,7 +449,7 @@ mod recording_session_genericity {
             }
         }
 
-        fn with_canned_journal(rows: Vec<SeamRow>) -> Self {
+        fn with_canned_journal(rows: Vec<Row>) -> Self {
             let s = Self::new();
             *s.canned_journal.borrow_mut() = rows;
             s
@@ -463,7 +463,7 @@ mod recording_session_genericity {
         /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
         /// which yields an empty-but-valid decode — enough to drive every path
         /// end-to-end without feeding a wrong-shaped row into a decoder.
-        fn rows_for(&self, sql: &str) -> Vec<SeamRow> {
+        fn rows_for(&self, sql: &str) -> Vec<Row> {
             if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
                 self.canned_journal.borrow().clone()
             } else {
@@ -472,55 +472,55 @@ mod recording_session_genericity {
         }
     }
 
-    impl PgSession for RecordingSession {
-        async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
+    impl SqlSession for RecordingSession {
+        async fn batch(&self, sql: &str) -> Result<(), DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("batch_execute: {sql}"));
+            self.log.borrow_mut().push(format!("batch: {sql}"));
             Ok(())
         }
-        async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError> {
+        async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("execute: {sql}"));
+            self.log.borrow_mut().push(format!("exec: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
             Ok(1)
         }
-        async fn execute_text_params(
+        async fn exec_text(
             &self,
             sql: &str,
             _params: &[Option<String>],
-        ) -> Result<u64, SeamError> {
+        ) -> Result<u64, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
             self.log
                 .borrow_mut()
-                .push(format!("execute_text_params: {sql}"));
+                .push(format!("exec_text: {sql}"));
             Ok(1)
         }
         async fn query(
             &self,
             sql: &str,
-            params: &[SeamBind],
-        ) -> Result<Vec<SeamRow>, SeamError> {
+            params: &[Bind],
+        ) -> Result<Vec<Row>, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("query: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
             Ok(self.rows_for(sql))
         }
-        async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError> {
+        async fn query_one(&self, sql: &str, params: &[Bind]) -> Result<Row, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("query_one: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
             self.rows_for(sql)
                 .into_iter()
                 .next()
-                .ok_or_else(|| SeamError::message("query_one: no canned row"))
+                .ok_or_else(|| DbError::message("query_one: no canned row"))
         }
     }
 
     /// A single completed journal event, shaped like the `applied()` CTE output:
     /// (version, checksum, mig_kind, phase) — exactly what a host `pg` driver would
     /// return for that read.
-    fn canned_journal_row(version: &str, checksum: &str) -> SeamRow {
-        SeamRow::new(
+    fn canned_journal_row(version: &str, checksum: &str) -> Row {
+        Row::new(
             vec![
                 "version".to_string(),
                 "checksum".to_string(),
@@ -528,10 +528,10 @@ mod recording_session_genericity {
                 "phase".to_string(),
             ],
             vec![
-                SeamValue::Text(version.to_string()),
-                SeamValue::Text(checksum.to_string()),
-                SeamValue::Text("apply".to_string()),
-                SeamValue::Text("completed".to_string()),
+                Value::Text(version.to_string()),
+                Value::Text(checksum.to_string()),
+                Value::Text("apply".to_string()),
+                Value::Text("completed".to_string()),
             ],
         )
     }
@@ -559,31 +559,31 @@ mod recording_session_genericity {
         let log = rec.log.borrow();
         assert!(
             log.iter().any(|s| s.contains("pg_advisory_lock")),
-            "advisory-lock acquire ran through the trait's execute: {log:?}"
+            "advisory-lock acquire ran through the trait's exec: {log:?}"
         );
         assert!(
-            log.iter().any(|s| s == "batch_execute: RESET ROLE"),
-            "RESET ROLE ran through the trait's batch_execute: {log:?}"
+            log.iter().any(|s| s == "batch: RESET ROLE"),
+            "RESET ROLE ran through the trait's batch: {log:?}"
         );
         assert!(
             log.iter().any(|s| s.contains("pg_advisory_unlock")),
-            "advisory-unlock release ran through the trait's execute: {log:?}"
+            "advisory-unlock release ran through the trait's exec: {log:?}"
         );
 
         // The advisory-lock verbs bound the project id through the neutral
-        // SeamBind path (§A.1) — the param widening ran, not just the return one.
+        // Bind path (§A.1) — the param widening ran, not just the return one.
         let binds = rec.binds.borrow();
         assert!(
             binds
                 .iter()
-                .any(|b| b.iter().any(|v| matches!(v, SeamBind::Text(t) if t == "prj_x"))),
-            "project id crossed the seam as a neutral SeamBind::Text: {binds:?}"
+                .any(|b| b.iter().any(|v| matches!(v, Bind::Text(t) if t == "prj_x"))),
+            "project id crossed the seam as a neutral Bind::Text: {binds:?}"
         );
     }
 
     /// The read side is now RUN, not merely compiled: the generic journal read
-    /// (`applied`) is driven against canned neutral `SeamRow`s and its decode
-    /// (`SeamRow → AppliedEntry`) runs end-to-end over a non-compio driver — the
+    /// (`applied`) is driven against canned neutral `Row`s and its decode
+    /// (`Row → AppliedEntry`) runs end-to-end over a non-compio driver — the
     /// §A closure of the old `unreachable!("read verbs…")` gap.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
@@ -616,7 +616,7 @@ mod recording_session_genericity {
     ///
     /// It simultaneously proves genericity end-to-end: the WRITE path records the
     /// expected SQL sequence (schema/journal DDL + a journal INSERT with neutral
-    /// SeamBind params), the READ path returns SeamRows the engine decodes
+    /// Bind params), the READ path returns seam::Rows the engine decodes
     /// (`applied` → `AppliedEntry`), and `status()`/`history()` run over the same
     /// driver — their decoded shapes matching what `native-pg` produces.
     #[compio::test]
@@ -628,18 +628,18 @@ mod recording_session_genericity {
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
         // 1. WRITE / DDL — journal bootstrap: CREATE SCHEMA + the append-only events
-        //    table + the immutability trigger, all through `batch_execute`.
+        //    table + the immutability trigger, all through `batch`.
         backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
 
-        // 2. WRITE — a journal INSERT (`record_started`) through `execute` with
-        //    neutral SeamBind params. Drives the param-side seam (§A.1) on a write.
+        // 2. WRITE — a journal INSERT (`record_started`) through `exec` with
+        //    neutral Bind params. Drives the param-side seam (§A.1) on a write.
         crate::apply::journal::record_started(
             &rec, &cfg, "mig_0001", "create_users", "cafef00d", "tester",
         )
         .await
         .expect("record_started journal write");
 
-        // 3. READ (journal) — `applied()` decodes the canned journal SeamRow into an
+        // 3. READ (journal) — `applied()` decodes the canned journal Row into an
         //    AppliedEntry over the non-compio driver.
         let applied = backend.applied(&cfg).await.expect("applied read");
         assert_eq!(applied.len(), 1);
@@ -648,7 +648,7 @@ mod recording_session_genericity {
 
         // 4. READ (drift/catalog) — `snapshot_schema` issues its catalog introspection
         //    queries; the empty canned rows yield an empty-but-valid snapshot, proving
-        //    the whole introspection decode chain runs over SeamRow.
+        //    the whole introspection decode chain runs over Row.
         let snap = backend.snapshot_schema(&cfg).await.expect("snapshot_schema");
         assert!(
             snap.tables.is_empty(),
@@ -656,14 +656,14 @@ mod recording_session_genericity {
         );
 
         // 5. READ — the status()/history() free fns over the SAME driver (§C.5
-        //    holdout 3: generalized to `<D: PgSession>`).
+        //    holdout 3: generalized to `<D: SqlSession>`).
         let st = crate::ops::status::status(&rec, &cfg, &[])
             .await
             .expect("status over host driver");
         // The canned journal row is net-applied, so status sees it as applied.
         assert!(
             st.applied.iter().any(|e| e.version == "mig_0001"),
-            "status decoded the net-applied version over SeamRow: {:?}",
+            "status decoded the net-applied version over Row: {:?}",
             st.applied
         );
         let hist = crate::ops::status::history(&rec, &cfg)
@@ -691,16 +691,16 @@ mod recording_session_genericity {
         );
         assert!(
             log.iter()
-                .any(|s| s.starts_with("execute:") && s.contains("INSERT INTO")),
-            "record_started drove a journal INSERT through execute: {log:?}"
+                .any(|s| s.starts_with("exec:") && s.contains("INSERT INTO")),
+            "record_started drove a journal INSERT through exec: {log:?}"
         );
-        // The journal INSERT bound its fields as neutral SeamBinds (param widening).
+        // The journal INSERT bound its fields as neutral Binds (param widening).
         assert!(
             rec.binds
                 .borrow()
                 .iter()
-                .any(|b| b.iter().any(|v| matches!(v, SeamBind::Text(t) if t == "mig_0001"))),
-            "journal INSERT bound the version as a neutral SeamBind::Text"
+                .any(|b| b.iter().any(|v| matches!(v, Bind::Text(t) if t == "mig_0001"))),
+            "journal INSERT bound the version as a neutral Bind::Text"
         );
     }
 

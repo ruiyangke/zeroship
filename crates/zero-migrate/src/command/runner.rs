@@ -242,7 +242,7 @@ pub enum RunError {
     )]
     TsRecordRequiresAddonHost,
     /// A Postgres engine was selected, but this binary was compiled without the
-    /// `native-pg` driver (`--no-default-features`, no `PgSession` impl). Rebuild
+    /// `native-pg` driver (`--no-default-features`, no `SqlSession` impl). Rebuild
     /// with `--features native-pg` (the default build), or target a SQLite DSN.
     #[error(
         "Postgres apply requires the `native-pg` compio-postgres driver; this binary \

@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::seam::SqlSession;
 
 use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
@@ -100,8 +100,8 @@ pub enum DriftError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::apply::backend::postgres::seam::SeamError> for DriftError {
-    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+impl From<crate::seam::DbError> for DriftError {
+    fn from(error: crate::seam::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -149,7 +149,7 @@ impl ChecksumDriftReport {
 /// # Errors
 /// [`DriftError::Journal`] if the journal read fails.
 #[cfg(pg_seam)]
-pub async fn check_checksum_drift<D: PgSession>(
+pub async fn check_checksum_drift<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -602,7 +602,7 @@ fn parse_index_storage_params_pg(
 }
 
 #[cfg(pg_seam)]
-pub async fn snapshot_schema<D: PgSession>(
+pub async fn snapshot_schema<D: SqlSession>(
     conn: &D,
     project_schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
@@ -627,11 +627,11 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &partition_rows {
-        let bounds_text: String = r.get("bounds");
+        let bounds_text: String = r.try_get("bounds")?;
         partitions.insert(
-            r.get("partition_name"),
+            r.try_get("partition_name")?,
             PartitionSnapshot {
-                of: r.get("parent_name"),
+                of: r.try_get("parent_name")?,
                 bounds: parse_partition_bounds_pg(&bounds_text).map_err(DriftError::Snapshot)?,
             },
         );
@@ -651,7 +651,7 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &table_rows {
-        let name: String = r.get("table_name");
+        let name: String = r.try_get("table_name")?;
         tables.insert(name, TableSnapshot {
             columns: Vec::new(),
             indexes: Vec::new(),
@@ -684,12 +684,12 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &partitioned_table_rows {
-        let table: String = r.get("table_name");
+        let table: String = r.try_get("table_name")?;
         let Some(t) = tables.get_mut(&table) else {
             continue;
         };
         let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
-        let partstrat: i8 = r.get("partstrat");
+        let partstrat: i8 = r.try_get("partstrat")?;
         t.partition_by = match u8::try_from(partstrat).ok().map(char::from) {
             Some('r') => Some(PartitionSpec::Range { columns, collapse: false }),
             Some('l') => Some(PartitionSpec::List { columns, collapse: false }),
@@ -714,8 +714,8 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &view_rows {
-        let name: String = r.get("view_name");
-        let relkind: i8 = r.get("relkind");
+        let name: String = r.try_get("view_name")?;
+        let relkind: i8 = r.try_get("relkind")?;
         let materialized = matches!(u8::try_from(relkind).ok().map(char::from), Some('m'));
         let definition: Option<String> = r.try_get("definition").ok().flatten();
         views.insert(name, ViewSnapshot {
@@ -737,14 +737,14 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &type_rows {
-        let typtype: i8 = r.get("typtype");
+        let typtype: i8 = r.try_get("typtype")?;
         let kind = match u8::try_from(typtype).ok().map(char::from) {
             Some('e') => "enum",
             Some('d') => "domain",
             _ => continue,
         };
         named_types.insert(
-            r.get("type_name"),
+            r.try_get("type_name")?,
             NamedTypeSnapshot {
                 kind: kind.to_string(),
                 comment: r.try_get("comment").ok().flatten(),
@@ -780,12 +780,12 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &col_rows {
-        let table: String = r.get("table_name");
+        let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
-            let nullable: String = r.get("is_nullable");
-            let data_type: String = r.get("data_type");
-            let udt_name: String = r.get("udt_name");
-            let format_type: String = r.get("format_type");
+            let nullable: String = r.try_get("is_nullable")?;
+            let data_type: String = r.try_get("data_type")?;
+            let udt_name: String = r.try_get("udt_name")?;
+            let format_type: String = r.try_get("format_type")?;
             let is_citext = data_type.eq_ignore_ascii_case("USER-DEFINED")
                 && (is_citext_extension_type(&format_type) || udt_name.eq_ignore_ascii_case("citext"));
             // For a `USER-DEFINED` (extension) type, recover the precise spelling
@@ -808,7 +808,7 @@ pub async fn snapshot_schema<D: PgSession>(
             let (comment, comment_sentinel) =
                 split_column_catalog_comment(r.try_get("comment").ok().flatten());
             t.columns.push(ColumnSnapshot {
-                name: r.get("column_name"),
+                name: r.try_get("column_name")?,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 // Defaults and inline encryption sentinels are emission-only.
@@ -892,7 +892,7 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &idx_rows {
-        let table: String = r.get("table_name");
+        let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
             // `array_agg` over an empty/all-expression key set is SQL NULL → an
             // empty column list (a wholly-expression index has no plain columns).
@@ -917,11 +917,11 @@ pub async fn snapshot_schema<D: PgSession>(
                     .collect()
             };
             t.indexes.push(IndexSnapshot {
-                name: r.get("index_name"),
-                unique: r.get("indisunique"),
+                name: r.try_get("index_name")?,
+                unique: r.try_get("indisunique")?,
                 elements,
                 columns,
-                access_method: r.get("access_method"),
+                access_method: r.try_get("access_method")?,
                 predicate: r.try_get("index_pred").ok().flatten(),
                 include,
                 with: parse_index_storage_params_pg(reloptions)?,
@@ -955,9 +955,9 @@ pub async fn snapshot_schema<D: PgSession>(
         )
         .await?;
     for r in &constraint_rows {
-        let table: String = r.get("table_name");
+        let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
-            let contype: i8 = r.get("contype");
+            let contype: i8 = r.try_get("contype")?;
             let kind = match u8::try_from(contype).ok().map(char::from) {
                 Some('p') => "PRIMARY KEY",
                 Some('f') => "FOREIGN KEY",
@@ -967,12 +967,12 @@ pub async fn snapshot_schema<D: PgSession>(
                 _ => "UNKNOWN",
             };
             let definition = if constraint_definition_is_comparable(kind) {
-                r.get("definition")
+                r.try_get("definition")?
             } else {
                 String::new()
             };
             t.constraints.push(ConstraintSnapshot {
-                name: r.get("constraint_name"),
+                name: r.try_get("constraint_name")?,
                 kind: kind.to_string(),
                 definition,
                 comment: r.try_get("comment").ok().flatten(),
@@ -1011,13 +1011,14 @@ pub async fn snapshot_schema<D: PgSession>(
         .await?;
     let mut sequences = std::collections::BTreeMap::new();
     for r in &seq_rows {
-        let as_type = SequenceDataTypeSnapshot::from_pg_type_name(&r.get::<_, String>("data_type"));
-        let increment = SafeI64::new(r.get("increment_by")).map_err(DriftError::Snapshot)?;
-        let min_value = normalize_sequence_min_value(as_type, increment, r.get("min_value"))
+        let as_type =
+            SequenceDataTypeSnapshot::from_pg_type_name(&r.try_get::<_, String>("data_type")?);
+        let increment = SafeI64::new(r.try_get("increment_by")?).map_err(DriftError::Snapshot)?;
+        let min_value = normalize_sequence_min_value(as_type, increment, r.try_get("min_value")?)
             .map_err(DriftError::Snapshot)?;
-        let max_value = normalize_sequence_max_value(as_type, increment, r.get("max_value"))
+        let max_value = normalize_sequence_max_value(as_type, increment, r.try_get("max_value")?)
             .map_err(DriftError::Snapshot)?;
-        let cache_raw: i64 = r.get("cache_size");
+        let cache_raw: i64 = r.try_get("cache_size")?;
         let cache = u64::try_from(cache_raw)
             .map_err(|_| DriftError::Snapshot(format!("sequence cache size {cache_raw} is negative")))
             .and_then(|n| SafeU64::new(n).map_err(DriftError::Snapshot))?;
@@ -1028,15 +1029,15 @@ pub async fn snapshot_schema<D: PgSession>(
             _ => None,
         };
         sequences.insert(
-            r.get("sequence_name"),
+            r.try_get("sequence_name")?,
             SequenceSnapshot {
                 as_type,
                 increment,
                 min_value,
                 max_value,
-                start: SafeI64::new(r.get("start_value")).map_err(DriftError::Snapshot)?,
+                start: SafeI64::new(r.try_get("start_value")?).map_err(DriftError::Snapshot)?,
                 cache,
-                cycle: r.get("cycle"),
+                cycle: r.try_get("cycle")?,
                 owned_by,
                 comment: r.try_get("comment").ok().flatten(),
             },
@@ -1055,9 +1056,9 @@ pub async fn snapshot_schema<D: PgSession>(
     let mut schemas = BTreeMap::new();
     for r in &schema_rows {
         schemas.insert(
-            r.get("schema_name"),
+            r.try_get("schema_name")?,
             SchemaObjectSnapshot {
-                owner: Some(r.get("owner")),
+                owner: Some(r.try_get("owner")?),
             },
         );
     }
@@ -1074,9 +1075,9 @@ pub async fn snapshot_schema<D: PgSession>(
     let mut extensions = BTreeMap::new();
     for r in &extension_rows {
         extensions.insert(
-            r.get("extension_name"),
+            r.try_get("extension_name")?,
             ExtensionSnapshot {
-                schema: Some(r.get("schema_name")),
+                schema: Some(r.try_get("schema_name")?),
             },
         );
     }
@@ -1102,15 +1103,15 @@ pub async fn snapshot_schema<D: PgSession>(
     let mut roles = BTreeMap::new();
     for r in &role_rows {
         roles.insert(
-            r.get("rolname"),
+            r.try_get("rolname")?,
             RoleSnapshot {
-                login: r.get("rolcanlogin"),
-                superuser: r.get("rolsuper"),
-                create_db: r.get("rolcreatedb"),
-                create_role: r.get("rolcreaterole"),
-                bypass_rls: r.get("rolbypassrls"),
-                inherit: r.get("rolinherit"),
-                replication: r.get("rolreplication"),
+                login: r.try_get("rolcanlogin")?,
+                superuser: r.try_get("rolsuper")?,
+                create_db: r.try_get("rolcreatedb")?,
+                create_role: r.try_get("rolcreaterole")?,
+                bypass_rls: r.try_get("rolbypassrls")?,
+                inherit: r.try_get("rolinherit")?,
+                replication: r.try_get("rolreplication")?,
                 member_of: r.try_get("member_of").unwrap_or_default(),
             },
         );

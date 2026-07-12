@@ -4,7 +4,7 @@
 //! The engine is runtime-free and V8-free. Authoring (the JS DSL to op-IR
 //! envelope) and live Postgres/MySQL execution run in the Node host and reach
 //! the engine through the `zero-migrate-node` napi bridge; the Postgres apply
-//! path is the driver-neutral [`PgSession`] seam. In-process SQLite is the one
+//! path is the driver-neutral [`SqlSession`] seam. In-process SQLite is the one
 //! backend the engine drives directly.
 //!
 //! This crate implements the **security core** + the **migration unit** (the
@@ -93,6 +93,14 @@ pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;
+// The dialect-neutral network driver seam (`SqlSession`) — the ONE injected
+// runtime dependency the network-dialect backends (`PostgresBackend`, and the
+// forthcoming `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
+// in-process rusqlite actor). Gated on `pg_seam` (its only current implementor is
+// the compio PG adapter, lit by the `host-pg` feature); a `--no-default-features`
+// build keeps a lean core.
+#[cfg(pg_seam)]
+pub mod seam;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors) — dissolved in from the former `zero-migrate-schema`
 // leaf crate (redesign step 3c). The data-plane query language that used to ride
@@ -125,14 +133,14 @@ pub use apply::backend::{
 // (`host-pg`) — the generic `PostgresBackend<D>` compiles there.
 #[cfg(pg_seam)]
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
-// The driver-neutral `PgSession` seam types (§A). Public so a host (napi) driver
-// can construct return values / binds, and so error consumers read the neutral
-// `SeamError` (SQLSTATE in `.code`). On the whole PG seam — the addon (`host-pg`)
-// is the primary consumer of these neutral types.
+// The driver-neutral `SqlSession` seam types (the engine-root `crate::seam`
+// module). Public so a host (napi) driver can construct return values / binds,
+// and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). On
+// the whole PG seam — the addon (`host-pg`) is the primary consumer of these
+// neutral types. MySQL will ride the same seam; SQLite does NOT (in-process
+// rusqlite).
 #[cfg(pg_seam)]
-pub use apply::backend::postgres::seam::{FromSeam, SeamBind, SeamError, SeamRow, SeamValue};
-#[cfg(pg_seam)]
-pub use apply::backend::postgres::session::PgSession;
+pub use seam::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use plan::author::{
@@ -160,7 +168,7 @@ pub use apply::drift::{
     diff_snapshots, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
-// `check_checksum_drift` reads the journal over a `&D: PgSession`; `snapshot_schema`
+// `check_checksum_drift` reads the journal over a `&D: SqlSession`; `snapshot_schema`
 // introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
 // On the whole PG seam.
 #[cfg(pg_seam)]
@@ -169,7 +177,7 @@ pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
-// `apply` is generic over the `PgSession` seam (§C.5 holdout 1) — on the whole PG
+// `apply` is generic over the `SqlSession` seam (§C.5 holdout 1) — on the whole PG
 // seam. `rollback` is still `&Client`-typed (out of v1 scope) — native-pg only.
 #[cfg(pg_seam)]
 pub use apply::executor::apply;
@@ -203,7 +211,7 @@ pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
 };
-// The PG journal free functions (each takes a `&D: PgSession` connection). The
+// The PG journal free functions (each takes a `&D: SqlSession` connection). The
 // SQLite backend has its own `sqlite/journal_sql.rs` peers. On the whole PG seam.
 #[cfg(pg_seam)]
 pub use apply::journal::{
@@ -226,7 +234,7 @@ pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-// `history` / `status` are generic over the `PgSession` seam (§C.5 holdout 3) —
+// `history` / `status` are generic over the `SqlSession` seam (§C.5 holdout 3) —
 // on the whole PG seam so a host driver can drive the pending-migrations flow.
 #[cfg(pg_seam)]
 pub use ops::status::{history, status};

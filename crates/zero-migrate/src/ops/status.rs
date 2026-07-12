@@ -13,11 +13,11 @@
 
 use std::collections::HashMap;
 
-// `status`/`history`/`read_status_snapshot` are generic over the `PgSession` seam
+// `status`/`history`/`read_status_snapshot` are generic over the `SqlSession` seam
 // (`&D`), so a host (napi) driver can drive the "show me pending migrations" flow.
 // They compile on the whole PG seam (`native-pg` OR `host-pg`).
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::seam::SqlSession;
 
 use crate::conn::ExecutorConfig;
 use crate::apply::executor::{order_pending, ApplyError};
@@ -135,7 +135,7 @@ pub enum StatusError {
 /// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
 ///   unsatisfiable or cyclic (the same fault apply would surface).
 #[cfg(pg_seam)]
-pub async fn status<D: PgSession>(
+pub async fn status<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -145,13 +145,13 @@ pub async fn status<D: PgSession>(
     // One consistent snapshot over both journal reads (applied + rolled_back). A
     // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
     // commit between the two reads can't produce a split bucket view.
-    conn.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    conn.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
         .map_err(|e| StatusError::Journal(JournalError::Db(e.into())))?;
     let snapshot = read_status_snapshot(conn, cfg, migrations).await;
     // Always close the txn; a read-only snapshot has nothing to roll back, but we
     // must not leak an open transaction onto the shared session.
-    let _ = conn.batch_execute("COMMIT").await;
+    let _ = conn.batch("COMMIT").await;
     snapshot
 }
 
@@ -228,7 +228,7 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
 /// The body of [`status`]'s consistent-snapshot read: both journal reads + the
 /// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
 #[cfg(pg_seam)]
-async fn read_status_snapshot<D: PgSession>(
+async fn read_status_snapshot<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -367,7 +367,7 @@ fn derive_pending_contract_status(
 /// # Errors
 /// [`StatusError::Journal`] on a journal read/bootstrap failure.
 #[cfg(pg_seam)]
-pub async fn history<D: PgSession>(
+pub async fn history<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, StatusError> {

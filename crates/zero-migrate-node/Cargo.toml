@@ -8,7 +8,7 @@ name = "zero-migrate-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the driver-neutral PgSession seam, zero tokio, zero io_uring, cross-platform .node"
+description = "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the dialect-neutral seam::SqlSession seam, zero tokio, zero io_uring, cross-platform .node"
 publish = false
 
 # A `cdylib` is terminal (no Rust crate can depend on it) → this is necessarily a

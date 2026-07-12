@@ -1,6 +1,6 @@
-//! The host-callback [`PgSession`] bridge (design §B + §B.6).
+//! The host-callback [`SqlSession`] bridge (design §B + §B.6).
 //!
-//! [`NapiHostSession`] implements [`PgSession`] by marshaling each verb to a host
+//! [`NapiHostSession`] implements [`SqlSession`] by marshaling each verb to a host
 //! *verb dispatcher* and awaiting the reply on a `futures::channel::oneshot`. The
 //! dispatcher is abstracted behind [`VerbDispatch`] so:
 //!
@@ -22,8 +22,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zero_migrate::apply::backend::postgres::seam::{SeamBind, SeamError, SeamRow};
-use zero_migrate::apply::backend::postgres::session::PgSession;
+use zero_migrate::seam::{Bind, DbError, Row};
+use zero_migrate::seam::SqlSession;
 
 use crate::marshal::{
     bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest,
@@ -49,13 +49,13 @@ pub type VerbReply = Result<JsReply, JsError>;
 /// mock impl answers inline. `dispatch` is `async` in the trait but its body never
 /// awaits a JS `Promise` — only a `oneshot::Receiver` (§B.3), so the engine's
 /// reactor-less `block_on` stays sufficient.
-#[allow(async_fn_in_trait)] // !Send single-thread engine, by design (mirrors PgSession)
+#[allow(async_fn_in_trait)] // !Send single-thread engine, by design (mirrors SqlSession)
 pub trait VerbDispatch {
     /// Send one verb request to the host and await its reply.
     async fn dispatch(&self, req: JsRequest) -> VerbReply;
 }
 
-/// A host-driven [`PgSession`] over an abstract [`VerbDispatch`] transport.
+/// A host-driven [`SqlSession`] over an abstract [`VerbDispatch`] transport.
 pub struct NapiHostSession<D: VerbDispatch> {
     dispatch: D,
     /// The mechanically-enforced one-verb-at-a-time guard (§B.6).
@@ -63,7 +63,7 @@ pub struct NapiHostSession<D: VerbDispatch> {
 }
 
 impl<D: VerbDispatch> NapiHostSession<D> {
-    /// Wrap a transport into a `PgSession`.
+    /// Wrap a transport into a `SqlSession`.
     pub fn new(dispatch: D) -> Self {
         Self {
             dispatch,
@@ -84,7 +84,7 @@ impl<D: VerbDispatch> NapiHostSession<D> {
     }
 
     /// Marshal binds and run a verb, returning the full [`JsReply`] (rows + count).
-    async fn call(&self, kind: &str, sql: &str, binds: &[SeamBind]) -> Result<JsReply, SeamError> {
+    async fn call(&self, kind: &str, sql: &str, binds: &[Bind]) -> Result<JsReply, DbError> {
         let _g = self.enter();
         let req = JsRequest {
             kind: kind.to_string(),
@@ -95,19 +95,19 @@ impl<D: VerbDispatch> NapiHostSession<D> {
         self.dispatch.dispatch(req).await.map_err(|e| js_error_to_seam(&e))
     }
 
-    /// Decode a reply's rows into neutral [`SeamRow`]s.
-    fn rows_of(reply: &JsReply) -> Result<Vec<SeamRow>, SeamError> {
+    /// Decode a reply's rows into neutral [`Row`]s.
+    fn rows_of(reply: &JsReply) -> Result<Vec<Row>, DbError> {
         reply
             .rows
             .iter()
             .map(row_to_seam)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(SeamError::message)
+            .map_err(DbError::message)
     }
 }
 
-impl<D: VerbDispatch> PgSession for NapiHostSession<D> {
-    async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
+impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
+    async fn batch(&self, sql: &str) -> Result<(), DbError> {
         let _g = self.enter();
         let req = JsRequest {
             kind: KIND_BATCH.to_string(),
@@ -121,16 +121,16 @@ impl<D: VerbDispatch> PgSession for NapiHostSession<D> {
         }
     }
 
-    async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError> {
+    async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
         let reply = self.call(KIND_EXECUTE, sql, params).await?;
         Ok(affected(&reply))
     }
 
-    async fn execute_text_params(
+    async fn exec_text(
         &self,
         sql: &str,
         params: &[Option<String>],
-    ) -> Result<u64, SeamError> {
+    ) -> Result<u64, DbError> {
         let _g = self.enter();
         // Text-format params: cross verbatim as `(string | null)[]` (§B.2) — NO
         // type coercion, NO explicit OID. `None → null → PG NULL`.
@@ -144,17 +144,17 @@ impl<D: VerbDispatch> PgSession for NapiHostSession<D> {
         Ok(affected(&reply))
     }
 
-    async fn query(&self, sql: &str, params: &[SeamBind]) -> Result<Vec<SeamRow>, SeamError> {
+    async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
         let reply = self.call(KIND_QUERY, sql, params).await?;
         Self::rows_of(&reply)
     }
 
-    async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError> {
+    async fn query_one(&self, sql: &str, params: &[Bind]) -> Result<Row, DbError> {
         let reply = self.call(KIND_QUERY_ONE, sql, params).await?;
         Self::rows_of(&reply)?
             .into_iter()
             .next()
-            .ok_or_else(|| SeamError::message("query_one: host returned no rows"))
+            .ok_or_else(|| DbError::message("query_one: host returned no rows"))
     }
 }
 
@@ -181,7 +181,7 @@ impl<'a> InFlightGuard<'a> {
             .is_err()
         {
             panic!(
-                "PgSession verb issued while another is in flight — the host bridge \
+                "SqlSession verb issued while another is in flight — the host bridge \
                  pins ONE connection and the engine must be strictly one-verb-at-a-time (§B.6)"
             );
         }

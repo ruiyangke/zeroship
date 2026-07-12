@@ -38,9 +38,9 @@
 
 pub mod capability;
 // The PG backend module compiles on the whole PG seam (`native-pg` OR `host-pg`):
-// its generic core (`PostgresBackend<D>` + the `PgSession` trait + the neutral
+// its generic core (`PostgresBackend<D>` + the `SqlSession` trait + the neutral
 // seam types) names no compio type. The compio-concrete pieces inside it
-// (`impl PgSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
+// (`impl SqlSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
 // `#[cfg(feature = "native-pg")]` internally.
 #[cfg(pg_seam)]
 pub mod postgres;
