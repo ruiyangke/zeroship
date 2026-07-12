@@ -8,7 +8,7 @@
 use sha2::{Digest, Sha256};
 use crate::id as typed_id;
 
-use crate::model::precondition::PreconditionCheck;
+use crate::precondition::PreconditionCheck;
 
 /// Typed-id prefix for migration versions (`mig_<base62 uuidv7>`).
 ///
@@ -17,7 +17,7 @@ use crate::model::precondition::PreconditionCheck;
 pub const MIGRATION_PREFIX: &str = "mig";
 
 /// Numeric file versions fit in the high 48 bits of the deterministic UUID image.
-pub(crate) const VERSION_CEILING: u64 = 1u64 << 48;
+pub const VERSION_CEILING: u64 = 1u64 << 48;
 
 /// Error parsing a [`MigrationId`] from a string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -198,13 +198,13 @@ pub struct MigrationFlags {
     /// Must be confirmed before apply (AI never auto-applies destructive).
     pub requires_approval: bool,
     /// Optional per-migration `statement_timeout`, in **milliseconds**. `None`
-    /// falls back to [`crate::conn::PgConfinement::statement_timeout`]. A long
+    /// falls back to `PgConfinement::statement_timeout`. A long
     /// backfill or a big concurrent index sets its own higher ceiling so the
     /// conservative executor default does not kill it mid-flight.
     pub timeout_ms: Option<u64>,
     /// Optional per-migration `lock_timeout`, in **milliseconds**. `None` falls
     /// back to the SHORT executor-wide default
-    /// ([`crate::conn::PgConfinement::lock_timeout`], 3s — the lock-safety
+    /// (`PgConfinement::lock_timeout`, 3s — the lock-safety
     /// envelope). This is the per-deploy maintenance-window knob: a planned
     /// migration that legitimately needs to wait longer to acquire its lock
     /// (run during a quiet window where a brief stall is acceptable) raises ONLY
@@ -440,7 +440,7 @@ impl Checksum {
     /// a render-time concern; it does not belong in the identity checksum.
     #[must_use]
     pub fn of_ir(
-        ops: &crate::model::ir::CanonicalOpList<'_>,
+        ops: &crate::ir::CanonicalOpList<'_>,
         flags: &MigrationFlags,
         owner_app: &str,
         depends_on: &[MigrationId],
@@ -585,7 +585,7 @@ pub struct Migration {
     /// net-applied. The executor's pending computation honors this, so on a fresh
     /// DB applying `S` runs `S.up` once and the superseded `v1..vN` are skipped
     /// (never double-applied), while on an existing DB that already ran `v1..vN`
-    /// the squash is recorded WITHOUT running `S.up` (see [`crate::ops::squash`]).
+    /// the squash is recorded WITHOUT running `S.up` (see `the squash op`).
     #[serde(default)]
     pub supersedes: Vec<MigrationId>,
     /// Optional **preconditions** (v3 Plan D): assertions evaluated against the
@@ -604,7 +604,7 @@ pub struct Migration {
     /// onto this migration at IR-lower time when its source op carried an
     /// `existence_guard` (`ifNotExists`/`ifExists`). At apply time the executor
     /// reads the live catalog under the held project advisory lock + the open
-    /// per-step transaction and [`decide`](crate::render::existence_probe::decide)s whether to
+    /// per-step transaction and `existence_probe::decide`s whether to
     /// run the `up` bare, journal a satisfied no-op (skip the `up`), or fail closed
     /// on a shape divergence. `None` for an unguarded migration and for every
     /// `.sql`-path / declarative migration.
@@ -617,7 +617,7 @@ pub struct Migration {
     /// `skip_serializing_if = "Option::is_none"` so the on-disk wire is unchanged
     /// when unset; it round-trips only the in-memory plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub existence_guard: Option<crate::model::probe::GuardProbe>,
+    pub existence_guard: Option<crate::probe::GuardProbe>,
 }
 
 impl Migration {
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn checksum_is_deterministic_and_sensitive() {
-        use crate::model::precondition::{Precondition, PreconditionCheck};
+        use crate::precondition::{Precondition, PreconditionCheck};
         let f = MigrationFlags::default();
         let base = Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[]));
         // Deterministic.

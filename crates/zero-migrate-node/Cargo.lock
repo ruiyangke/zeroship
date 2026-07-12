@@ -1877,7 +1877,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zero-migrate-ir",
  "zero-migrate-schema",
+]
+
+[[package]]
+name = "zero-migrate-ir"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

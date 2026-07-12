@@ -4996,7 +4996,7 @@ fn enforce_vendor_capability_at_lower(
     op: &Op,
     scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), IrLowerError> {
-    let capabilities = op.vendor_capabilities();
+    let capabilities = crate::model::op_support::vendor_capabilities(op);
     if capabilities.is_empty() {
         return Ok(());
     }

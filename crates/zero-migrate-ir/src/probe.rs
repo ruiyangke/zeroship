@@ -4,7 +4,7 @@
 //! migration model stores them. Keeping the data in `model` prevents the migration
 //! wire type from depending on render code.
 
-use crate::model::ir::ExistenceGuard;
+use crate::ir::ExistenceGuard;
 
 /// One declared column's verifiable shape for a `createTable ifNotExists`
 /// [`GuardProbe::Table`] probe. Built from the SAME shared snapshot the CREATE
@@ -142,4 +142,22 @@ pub enum GuardProbe {
         /// Guard direction.
         direction: GuardDir,
     },
+}
+
+impl GuardProbe {
+    /// The effective schema this probe reads — the `snapshot_schema` argument the
+    /// executor passes so the catalog read targets the op's schema.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        match self {
+            GuardProbe::Table { schema, .. }
+            | GuardProbe::Column { schema, .. }
+            | GuardProbe::Index { schema, .. }
+            | GuardProbe::Constraint { schema, .. }
+            | GuardProbe::View { schema, .. }
+            | GuardProbe::Sequence { schema, .. }
+            | GuardProbe::NamedType { schema, .. }
+            | GuardProbe::ColumnPresence { schema, .. } => schema,
+        }
+    }
 }

@@ -83,6 +83,13 @@ indexmap = { workspace = true }
 # crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
 # snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
 zero-migrate-schema = { workspace = true }
+# The wire contract (redesign step 3a): MigrationIr, the closed Op enum, the
+# closed Expr AST, IrScalar, the precondition/probe vocabulary, the typed-id
+# machinery, the canonical checksum, the fail-closed load gate's policy-free half,
+# and the STRUCTURAL validator. The engine re-exports the whole surface
+# (`pub use zero_migrate_ir as ir;` + flattened root re-exports) so downstream
+# `zero_migrate::{MigrationIr, Op, …}` names are unchanged.
+zero-migrate-ir = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a

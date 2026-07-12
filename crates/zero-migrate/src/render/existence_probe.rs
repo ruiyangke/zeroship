@@ -74,23 +74,9 @@ use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
 use zero_migrate_schema::query::{renderer as schema_renderer, SqlDialect};
 
-impl GuardProbe {
-    /// The effective schema this probe reads — the `snapshot_schema` argument the
-    /// executor passes so the catalog read targets the op's schema.
-    #[must_use]
-    pub fn schema(&self) -> &str {
-        match self {
-            GuardProbe::Table { schema, .. }
-            | GuardProbe::Column { schema, .. }
-            | GuardProbe::Index { schema, .. }
-            | GuardProbe::Constraint { schema, .. }
-            | GuardProbe::View { schema, .. }
-            | GuardProbe::Sequence { schema, .. }
-            | GuardProbe::NamedType { schema, .. }
-            | GuardProbe::ColumnPresence { schema, .. } => schema,
-        }
-    }
-}
+// `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
+// (the type moved into the leaf wire-contract crate — an inherent `impl` here would
+// be an orphan impl on a foreign type).
 
 /// A single same-name object whose shape DIVERGES from the declared one — the
 /// payload of [`GuardVerdict::FailDrift`]. Names + values only, never DDL.

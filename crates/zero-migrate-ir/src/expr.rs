@@ -23,7 +23,7 @@
 //!   (`UNSUPPORTED { kind: "expr" }` at load), there is no "unknown function"
 //!   parse path because there is no text to parse.
 //! - The numeric domain of a [`Literal`](Expr::Literal) is the constrained
-//!   [`IrScalar`](crate::model::ir::IrScalar) — a fractional/exponential/`>=2^53` value
+//!   [`IrScalar`](crate::ir::IrScalar) — a fractional/exponential/`>=2^53` value
 //!   is rejected at DESERIALIZE before any checksum runs (§2.5).
 //!
 //! NB: the per-dialect *rendering* of an `Expr` is the engine's job (Wave C /
@@ -33,7 +33,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::model::ir::IrScalar;
+use crate::ir::IrScalar;
 
 /// A binary operator admitted in the closed AST (§3.3.1 method↔node table).
 ///
@@ -282,7 +282,7 @@ fn is_false(b: &bool) -> bool {
 
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
-/// — same discipline as [`Op`](crate::model::ir::Op), so schemars derives a clean
+/// — same discipline as [`Op`](crate::ir::Op), so schemars derives a clean
 /// discriminated union and serde rejects any out-of-set node tag at deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(

@@ -75,7 +75,9 @@ pub mod engine;
 #[doc(hidden)]
 pub mod fault;
 pub mod guard;
-pub mod id;
+// The typed-id (base62/UUIDv7) machinery moved to the `zero-migrate-ir` leaf crate
+// (redesign step 3a); re-export it under its historical `crate::id` path.
+pub use zero_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
 // byte-identically from the upstream bundle layer (extraction Phase B) so the build
 // front-end emits bundle entries without a the upstream bundle layer normal-graph dep.
