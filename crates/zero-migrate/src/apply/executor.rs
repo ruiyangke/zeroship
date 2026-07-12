@@ -45,6 +45,8 @@ use crate::seam::SqlSession;
 use crate::apply::backend::MigrationBackend;
 #[cfg(pg_seam)]
 use crate::apply::backend::PostgresBackend;
+#[cfg(pg_seam)]
+use crate::apply::backend::MysqlBackend;
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::apply::journal::{AppliedEntry, JournalError, Phase};
@@ -520,6 +522,39 @@ pub async fn apply_with_lock<D: SqlSession>(
     // of `apply_with_lock` is the trusted single-actor `.sql` surface (no co-bundling
     // of distinct reviewed version-ids), so `All` preserves byte-identical behavior.
     let backend = PostgresBackend::new_generic(conn);
+    apply_with_lock_backend(
+        &backend,
+        cfg,
+        migrations,
+        approval,
+        &crate::approval::ApprovalScope::All,
+        applied_by,
+        lock_mode,
+    )
+    .await
+}
+
+/// The **MySQL** counterpart of [`apply_with_lock`]: drive the apply through the
+/// [`MysqlBackend`], which rides the SAME `seam::SqlSession` seam as Postgres but
+/// renders MySQL dialect SQL (`GET_LOCK` project lock, MySQL journal DDL, `?`
+/// placeholders, auto-committing two-phase apply). This is the dialect-selection
+/// entry: a caller that knows the target is MySQL constructs the MySQL backend
+/// here and reuses the identical generic [`apply_with_lock_backend`] orchestration
+/// shell — so the executor holds no dialect SQL and MySQL rides the same seam
+/// (the C1 structural fix).
+///
+/// # Errors
+/// Same as [`apply`].
+#[cfg(pg_seam)]
+pub async fn apply_with_lock_mysql<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    approval: Approval,
+    applied_by: &str,
+    lock_mode: LockMode,
+) -> Result<ApplyOutcome, ApplyError> {
+    let backend = MysqlBackend::new_generic(conn);
     apply_with_lock_backend(
         &backend,
         cfg,

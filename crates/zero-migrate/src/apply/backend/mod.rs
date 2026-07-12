@@ -44,12 +44,20 @@ pub mod capability;
 // `#[cfg(feature = "native-pg")]` internally.
 #[cfg(pg_seam)]
 pub mod postgres;
+// The MySQL backend rides the SAME `seam::SqlSession` seam as Postgres (only its
+// dialect SQL differs), so it compiles on the seam cfg (`pg_seam`, emitted by
+// build.rs from `host-pg`). SQLite, by contrast, is in-process (`rusqlite`) and is
+// always present.
+#[cfg(pg_seam)]
+pub mod mysql;
 pub mod sqlite;
 
 pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
+#[cfg(pg_seam)]
+pub use mysql::MysqlBackend;
 #[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
 
