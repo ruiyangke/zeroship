@@ -15,7 +15,8 @@ use crate::engine::{
 use crate::errors::WorkflowError;
 use crate::store::pg::{
     cascade_cancel_children_on_conn, compensation_progress_on_conn,
-    emit_child_terminal_hook_on_conn, insert_resolved_step_on_conn, PgStore, WorkflowTables,
+    collect_related_run_lock_ids_on_conn, emit_child_terminal_hook_on_conn,
+    insert_resolved_step_on_conn, lock_run_set_for_apply_on_conn, PgStore, WorkflowTables,
 };
 use crate::store::{ChildTerminalPayload, CompensationProgress, StepWriteOutcome};
 
@@ -85,8 +86,7 @@ where
             AND r.app_id = $2 \
             AND app.workflows_enabled \
             AND plan.workflows_allowed \
-            AND NOT plan.archived \
-          FOR UPDATE SKIP LOCKED",
+            AND NOT plan.archived",
         runs = tables.runs
     );
     let rows = tx.query(&select_sql, &[&request.run_id, &request.app_id]).await?;
@@ -117,6 +117,40 @@ where
         plan_name.as_deref(),
         runtime_limits.as_ref(),
     );
+
+    if is_terminal_state(&candidate.state) {
+        return Ok(WorkflowClaimOutcome::Terminal(
+            collect_post_apply_registrations_on_conn(tx, request.app_id, &request.run_id, true)
+                .await?,
+        ));
+    }
+
+    if !is_claimable_state(&candidate.state) {
+        return Ok(WorkflowClaimOutcome::ClaimLost);
+    }
+
+    if candidate
+        .lease_expires
+        .is_some_and(|lease_expires| lease_expires > Utc::now())
+        && candidate.claimed_by.is_some()
+    {
+        return Ok(WorkflowClaimOutcome::ClaimLost);
+    }
+
+    let lock_ids = collect_related_run_lock_ids_on_conn(tx, &tables, &candidate.run_id).await?;
+    let locked_rows = lock_run_set_for_apply_on_conn(tx, &tables, &lock_ids).await?;
+    let Some(locked_candidate) = locked_rows.iter().find(|row| row.id == candidate.run_id) else {
+        return Ok(WorkflowClaimOutcome::ClaimLost);
+    };
+    let mut candidate = candidate;
+    candidate.app_id = locked_candidate.app_id;
+    candidate.workflow_name = locked_candidate.workflow_name.clone();
+    candidate.deploy_id = locked_candidate.deploy_id.clone();
+    candidate.state = locked_candidate.state.clone();
+    candidate.waiting_step_key = locked_candidate.waiting_step_key.clone();
+    candidate.cancel_requested = locked_candidate.cancel_requested;
+    candidate.claimed_by = locked_candidate.claimed_by.clone();
+    candidate.lease_expires = locked_candidate.lease_expires;
 
     if is_terminal_state(&candidate.state) {
         return Ok(WorkflowClaimOutcome::Terminal(

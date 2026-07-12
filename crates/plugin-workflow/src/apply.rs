@@ -7,7 +7,7 @@ use crate::engine::{
 };
 use crate::errors::WorkflowError;
 use crate::store::{
-    ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress, PausedRunUpdate,
+    ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress, PausedRunUpdate, RunLockRow,
     StepWriteOutcome, TransitionRunUpdate, WorkflowStore, WorkflowTx,
 };
 
@@ -20,9 +20,25 @@ pub async fn apply_step_result_on_store<S>(
 where
     S: WorkflowStore,
 {
-    let mut tx = store.begin().await?;
+    let compensation_outcomes = match compensation_outcomes_from_step_outcomes(&result.outcomes) {
+        Ok(outcomes) => outcomes,
+        Err(error) => return Err(WorkflowError::Invalid(error)),
+    };
+    let (checkpoints, run_update) = match fold_outcomes(&result.outcomes) {
+        Ok(folded) => folded,
+        Err(error) => return Err(WorkflowError::Invalid(error)),
+    };
+    result.checkpoints = checkpoints;
+    result.run_update = run_update;
+    result.checkpoints.sort_by_key(|s| s.ordinal);
+    let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
 
-    let Some(row) = tx.lock_run_for_apply(&result.run_id).await? else {
+    let mut tx = store.begin().await?;
+    let lock_plan = tx
+        .plan_apply_locks(config, &result.run_id, &mut result.checkpoints, &result.run_update)
+        .await?;
+    let locked_rows = tx.lock_runs_for_apply(&lock_plan.run_ids).await?;
+    let Some(row) = locked_run_row(&locked_rows, &result.run_id) else {
         tx.commit().await?;
         return Ok(false);
     };
@@ -55,25 +71,6 @@ where
         return Ok(changed > 0);
     }
 
-    let compensation_outcomes = match compensation_outcomes_from_step_outcomes(&result.outcomes) {
-        Ok(outcomes) => outcomes,
-        Err(error) => {
-            tx.commit().await?;
-            return Err(WorkflowError::Invalid(error));
-        }
-    };
-    let (checkpoints, run_update) = match fold_outcomes(&result.outcomes) {
-        Ok(folded) => folded,
-        Err(error) => {
-            tx.commit().await?;
-            return Err(WorkflowError::Invalid(error));
-        }
-    };
-    result.checkpoints = checkpoints;
-    result.run_update = run_update;
-    result.checkpoints.sort_by_key(|s| s.ordinal);
-    let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
-
     if row.state == "compensating" {
         let applied = apply_compensation_result(
             &mut tx,
@@ -81,7 +78,7 @@ where
             &result.run_id,
             &result.dispatch_nonce,
             row.compensation_target.as_deref(),
-            row.current_error,
+            row.current_error.clone(),
             &compensation_outcomes,
         )
         .await?;
@@ -252,6 +249,11 @@ where
             tx.continue_as_new(
                 config,
                 &result.run_id,
+                lock_plan.continued_as_new_run_id.as_deref().ok_or_else(|| {
+                    WorkflowError::Invalid(
+                        "continue-as-new apply missing planned successor run id".to_string(),
+                    )
+                })?,
                 &row.app_id,
                 &row.workflow_name,
                 seed_input.as_ref(),
@@ -307,6 +309,10 @@ where
 
     tx.commit().await?;
     Ok(true)
+}
+
+fn locked_run_row<'a>(rows: &'a [RunLockRow], run_id: &str) -> Option<&'a RunLockRow> {
+    rows.iter().find(|row| row.id == run_id)
 }
 
 async fn reconcile_step_side_effects<T>(
@@ -500,8 +506,9 @@ mod tests {
     };
     use crate::errors::WorkflowError;
     use crate::store::{
-        ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress, PausedRunUpdate,
-        RunLockRow, StepWriteOutcome, TransitionRunUpdate, WorkflowStore, WorkflowTx,
+        ApplyLockPlan, ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress,
+        PausedRunUpdate, RunLockRow, StepWriteOutcome, TransitionRunUpdate, WorkflowStore,
+        WorkflowTx,
     };
 
     #[derive(Debug, Default)]
@@ -520,6 +527,11 @@ mod tests {
         continued_as_new_run_id: Option<String>,
         continued_seed_input: Option<Value>,
         continued_seed_input_ref: Option<WorkflowOutputRef>,
+        planned_foreign_run_ids: Vec<String>,
+        locked_run_ids: Vec<String>,
+        transition_wake_at: Option<DateTime<Utc>>,
+        signal_arrives_after_lock: bool,
+        under_lock_signal_ready: bool,
         committed: bool,
     }
 
@@ -551,24 +563,62 @@ mod tests {
             Ok(())
         }
 
-        async fn lock_run_for_apply(
+        async fn plan_apply_locks(
             &mut self,
-            _run_id: &str,
-        ) -> Result<Option<RunLockRow>, WorkflowError> {
+            _config: &WorkflowEngineConfig,
+            run_id: &str,
+            _checkpoints: &mut [StepCheckpoint],
+            run_update: &RunUpdate,
+        ) -> Result<ApplyLockPlan, WorkflowError> {
             let state = self.state.borrow();
-            Ok(Some(RunLockRow {
-                app_id: state.app_id,
-                workflow_name: "TestWorkflow".to_string(),
-                deploy_id: state.deploy_id.clone(),
-                claimed_by: Some(state.owner_id.clone()),
-                state: state.state.clone(),
-                dispatch_nonce: Some(state.dispatch_nonce.clone()),
-                cancel_requested: state.cancel_requested,
-                stuck_strikes: 0,
-                tree_depth: 0,
-                compensation_target: None,
-                current_error: None,
-            }))
+            let mut run_ids = vec![run_id.to_string()];
+            run_ids.extend(state.planned_foreign_run_ids.clone());
+            let continued_as_new_run_id = if matches!(run_update, RunUpdate::ContinuedAsNew { .. }) {
+                let id = "run_successor".to_string();
+                run_ids.push(id.clone());
+                Some(id)
+            } else {
+                None
+            };
+            run_ids.sort();
+            run_ids.dedup();
+            Ok(ApplyLockPlan {
+                run_ids,
+                continued_as_new_run_id,
+            })
+        }
+
+        async fn lock_runs_for_apply(
+            &mut self,
+            run_ids: &[String],
+        ) -> Result<Vec<RunLockRow>, WorkflowError> {
+            {
+                let mut state = self.state.borrow_mut();
+                state.locked_run_ids = run_ids.to_vec();
+                if state.signal_arrives_after_lock {
+                    state.under_lock_signal_ready = true;
+                }
+            }
+            let state = self.state.borrow();
+            Ok(run_ids
+                .iter()
+                .map(|run_id| RunLockRow {
+                    id: run_id.clone(),
+                    app_id: state.app_id,
+                    workflow_name: "TestWorkflow".to_string(),
+                    deploy_id: state.deploy_id.clone(),
+                    claimed_by: Some(state.owner_id.clone()),
+                    state: state.state.clone(),
+                    dispatch_nonce: Some(state.dispatch_nonce.clone()),
+                    lease_expires: None,
+                    cancel_requested: state.cancel_requested,
+                    stuck_strikes: 0,
+                    waiting_step_key: None,
+                    tree_depth: 0,
+                    compensation_target: None,
+                    current_error: None,
+                })
+                .collect())
         }
 
         async fn apply_compensation_outcome(
@@ -634,16 +684,17 @@ mod tests {
             &mut self,
             _config: &WorkflowEngineConfig,
             _current_run_id: &str,
+            successor_run_id: &str,
             _app_id: &Uuid,
             _workflow_name: &str,
             seed_input: Option<&Value>,
             seed_input_ref: Option<&WorkflowOutputRef>,
         ) -> Result<String, WorkflowError> {
             let mut state = self.state.borrow_mut();
-            state.continued_as_new_run_id = Some("run_successor".to_string());
+            state.continued_as_new_run_id = Some(successor_run_id.to_string());
             state.continued_seed_input = seed_input.cloned();
             state.continued_seed_input_ref = seed_input_ref.cloned();
-            Ok("run_successor".to_string())
+            Ok(successor_run_id.to_string())
         }
 
         async fn insert_resolved_step(
@@ -711,6 +762,12 @@ mod tests {
             let mut state = self.state.borrow_mut();
             state.transitioned_state = Some(update.state.clone());
             state.transitioned_output = update.output.clone();
+            let due_now = state.under_lock_signal_ready.then(Utc::now);
+            state.transition_wake_at = match (update.wake_at, due_now) {
+                (Some(fold_wake), Some(signal_wake)) => Some(fold_wake.min(signal_wake)),
+                (None, Some(signal_wake)) => Some(signal_wake),
+                (wake_at, None) => wake_at,
+            };
             Ok(1)
         }
 
@@ -867,6 +924,102 @@ mod tests {
         assert_eq!(state.steps_written, 0);
         assert_eq!(state.transitioned_state.as_deref(), Some("cancelled"));
         assert!(state.transitioned_output.is_none());
+    }
+
+    #[compio::test]
+    async fn apply_locks_dispatched_and_foreign_runs_in_global_ascending_order() {
+        let app_id = Uuid::new_v4();
+        let store = MemStore {
+            state: Rc::new(RefCell::new(MemState {
+                app_id,
+                deploy_id: "dep_test".to_string(),
+                owner_id: "owner-a".to_string(),
+                dispatch_nonce: "wfd_test".to_string(),
+                state: "running".to_string(),
+                planned_foreign_run_ids: vec![
+                    "run_03_child".to_string(),
+                    "run_01_parent".to_string(),
+                ],
+                ..MemState::default()
+            })),
+        };
+        let config = WorkflowEngineConfig {
+            owner_id: "owner-a".to_string(),
+            ..WorkflowEngineConfig::default()
+        };
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_02_dispatched",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "RunCompleted",
+                    "output": {"done": true}
+                }
+            ]
+        }))
+        .expect("step result");
+
+        let applied = apply_step_result_on_store(&store, &config, result)
+            .await
+            .expect("apply");
+        let state = store.state.borrow();
+        assert!(applied);
+        assert_eq!(
+            state.locked_run_ids,
+            vec![
+                "run_01_parent".to_string(),
+                "run_02_dispatched".to_string(),
+                "run_03_child".to_string()
+            ],
+            "the dispatched run must sort into the write set instead of locking first"
+        );
+    }
+
+    #[compio::test]
+    async fn apply_recomputes_wake_at_from_under_lock_due_signal_frontier() {
+        let app_id = Uuid::new_v4();
+        let future_wake = Utc::now() + chrono::Duration::hours(1);
+        let store = MemStore {
+            state: Rc::new(RefCell::new(MemState {
+                app_id,
+                deploy_id: "dep_test".to_string(),
+                owner_id: "owner-a".to_string(),
+                dispatch_nonce: "wfd_test".to_string(),
+                state: "running".to_string(),
+                signal_arrives_after_lock: true,
+                ..MemState::default()
+            })),
+        };
+        let config = WorkflowEngineConfig {
+            owner_id: "owner-a".to_string(),
+            ..WorkflowEngineConfig::default()
+        };
+        let result: StepResult = serde_json::from_value(serde_json::json!({
+            "runId": "run_sleeping",
+            "dispatchNonce": "wfd_test",
+            "outcomes": [
+                {
+                    "kind": "Sleep",
+                    "ordinal": 0,
+                    "name": "later",
+                    "wakeAt": future_wake.to_rfc3339()
+                }
+            ]
+        }))
+        .expect("step result");
+
+        let applied = apply_step_result_on_store(&store, &config, result)
+            .await
+            .expect("apply");
+        let state = store.state.borrow();
+        let applied_wake = state.transition_wake_at.expect("transition wake_at");
+        assert!(applied);
+        assert_eq!(state.transitioned_state.as_deref(), Some("sleeping"));
+        assert!(
+            applied_wake < future_wake,
+            "a due-now signal committed after the fold snapshot must beat the folded future sleep"
+        );
+        assert!(applied_wake <= Utc::now() + chrono::Duration::seconds(1));
     }
 
     #[compio::test]

@@ -2,17 +2,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compio_postgres::{Client, GenericClient, NoTls};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 use zeroship_core::typed_id;
 
 use crate::engine::{
-    cap_exceeded, child_dedup_key, child_signal_type, state_cap_error, StepCheckpoint,
+    cap_exceeded, child_dedup_key, child_signal_type, state_cap_error, RunUpdate, StepCheckpoint,
     WorkflowEngineConfig, WorkflowOutputRef,
 };
 use crate::errors::WorkflowError;
 use crate::store::{
-    ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress, PausedRunUpdate, RunLockRow,
-    StepWriteOutcome, TransitionRunUpdate, WorkflowStore, WorkflowTx,
+    ApplyLockPlan, ChildTerminalPayload, CompensatingRunUpdate, CompensationProgress,
+    PausedRunUpdate, RunLockRow, StepWriteOutcome, TransitionRunUpdate, WorkflowStore, WorkflowTx,
 };
 
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
@@ -392,35 +393,43 @@ impl WorkflowTx for PgTx {
         Ok(())
     }
 
-    async fn lock_run_for_apply(
+    async fn plan_apply_locks(
         &mut self,
+        _config: &WorkflowEngineConfig,
         run_id: &str,
-    ) -> Result<Option<RunLockRow>, WorkflowError> {
-        let sql = format!(
-            "SELECT app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, cancel_requested, stuck_strikes, \
-                    tree_depth, compensation_target, error \
-               FROM {runs} \
-              WHERE id = $1 \
-              FOR UPDATE",
-            runs = self.tables.runs
-        );
-        let rows = self
-            .conn
-            .query(&sql, &[&run_id])
-            .await?;
-        Ok(rows.first().map(|row| RunLockRow {
-            app_id: row.get("app_id"),
-            workflow_name: row.get("workflow_name"),
-            deploy_id: row.get("deploy_id"),
-            claimed_by: row.get("claimed_by"),
-            state: row.get("state"),
-            dispatch_nonce: row.get("dispatch_nonce"),
-            cancel_requested: row.get("cancel_requested"),
-            stuck_strikes: row.get("stuck_strikes"),
-            tree_depth: row.get("tree_depth"),
-            compensation_target: row.get("compensation_target"),
-            current_error: row.get("error"),
-        }))
+        checkpoints: &mut [StepCheckpoint],
+        run_update: &RunUpdate,
+    ) -> Result<ApplyLockPlan, WorkflowError> {
+        let mut run_ids = collect_related_run_lock_ids_on_conn(&self.conn, &self.tables, run_id).await?;
+        for checkpoint in checkpoints {
+            if checkpoint.kind == "child" && checkpoint.state == "running" {
+                if let Some(child_run_id) =
+                    plan_child_spawn_run_id(&self.conn, &self.tables, run_id, checkpoint).await?
+                {
+                    run_ids.push(child_run_id);
+                }
+            }
+        }
+
+        let continued_as_new_run_id = if matches!(run_update, RunUpdate::ContinuedAsNew { .. }) {
+            let successor_run_id = typed_id::new_workflow_run_id();
+            run_ids.push(successor_run_id.clone());
+            Some(successor_run_id)
+        } else {
+            None
+        };
+
+        Ok(ApplyLockPlan {
+            run_ids: sorted_run_lock_ids(run_ids),
+            continued_as_new_run_id,
+        })
+    }
+
+    async fn lock_runs_for_apply(
+        &mut self,
+        run_ids: &[String],
+    ) -> Result<Vec<RunLockRow>, WorkflowError> {
+        lock_run_set_for_apply_on_conn(&self.conn, &self.tables, run_ids).await
     }
 
     async fn apply_compensation_outcome(
@@ -598,6 +607,7 @@ impl WorkflowTx for PgTx {
         &mut self,
         config: &WorkflowEngineConfig,
         current_run_id: &str,
+        successor_run_id: &str,
         app_id: &Uuid,
         workflow_name: &str,
         seed_input: Option<&Value>,
@@ -608,6 +618,7 @@ impl WorkflowTx for PgTx {
             &self.tables,
             config,
             current_run_id,
+            successor_run_id,
             app_id,
             workflow_name,
             seed_input,
@@ -768,6 +779,15 @@ impl WorkflowTx for PgTx {
         dispatch_nonce: &str,
         update: &TransitionRunUpdate,
     ) -> Result<u64, WorkflowError> {
+        let wake_at = recompute_effective_wake_at(
+            &self.conn,
+            &self.tables,
+            run_id,
+            &update.state,
+            update.wake_at,
+            update.waiting_step_key.as_deref(),
+        )
+        .await?;
         let sql = format!(
             "UPDATE {runs} \
                 SET state = $1, \
@@ -806,7 +826,7 @@ impl WorkflowTx for PgTx {
                     &update.state,
                     &update.output,
                     &update.error,
-                    &update.wake_at,
+                    &wake_at,
                     &update.next_ordinal,
                     &update.waiting_step_key,
                     &update.stuck_strikes,
@@ -885,6 +905,284 @@ impl WorkflowTx for PgTx {
         parent_run_id: &str,
     ) -> Result<u64, WorkflowError> {
         cascade_cancel_children_on_conn(&self.conn, &self.tables, parent_run_id).await
+    }
+}
+
+pub fn sorted_run_lock_ids<I>(ids: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+pub async fn collect_related_run_lock_ids_on_conn<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+) -> Result<Vec<String>, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let mut run_ids = vec![run_id.to_string()];
+
+    let parent_sql = format!(
+        "SELECT parent_run_id \
+           FROM {runs} \
+          WHERE id = $1 \
+            AND parent_run_id IS NOT NULL",
+        runs = tables.runs
+    );
+    for row in conn.query(&parent_sql, &[&run_id]).await? {
+        run_ids.push(row.get("parent_run_id"));
+    }
+
+    let cascade_children_sql = format!(
+        "SELECT id \
+           FROM {runs} \
+          WHERE parent_run_id = $1 \
+            AND parent_cascade \
+            AND state NOT IN ('completed','failed','cancelled','stalled') \
+          ORDER BY id",
+        runs = tables.runs
+    );
+    for row in conn.query(&cascade_children_sql, &[&run_id]).await? {
+        run_ids.push(row.get("id"));
+    }
+
+    let waiting_children_sql = format!(
+        "SELECT child_run_id \
+           FROM {steps} \
+          WHERE run_id = $1 \
+            AND kind = 'child' \
+            AND state = 'running' \
+            AND child_run_id IS NOT NULL \
+          ORDER BY child_run_id",
+        steps = tables.steps
+    );
+    for row in conn.query(&waiting_children_sql, &[&run_id]).await? {
+        run_ids.push(row.get("child_run_id"));
+    }
+
+    Ok(sorted_run_lock_ids(run_ids))
+}
+
+pub async fn lock_run_set_for_apply_on_conn<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_ids: &[String],
+) -> Result<Vec<RunLockRow>, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let sql = format!(
+        "SELECT id, app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, lease_expires, \
+                cancel_requested, stuck_strikes, waiting_step_key, tree_depth, compensation_target, error \
+           FROM {runs} \
+          WHERE id = $1 \
+          FOR UPDATE",
+        runs = tables.runs
+    );
+    let mut locked = Vec::new();
+    for run_id in sorted_run_lock_ids(run_ids.iter().cloned()) {
+        let rows = conn.query(&sql, &[&run_id]).await?;
+        if let Some(row) = rows.first() {
+            locked.push(RunLockRow {
+                id: row.get("id"),
+                app_id: row.get("app_id"),
+                workflow_name: row.get("workflow_name"),
+                deploy_id: row.get("deploy_id"),
+                claimed_by: row.get("claimed_by"),
+                state: row.get("state"),
+                dispatch_nonce: row.get("dispatch_nonce"),
+                lease_expires: row.get("lease_expires"),
+                cancel_requested: row.get("cancel_requested"),
+                stuck_strikes: row.get("stuck_strikes"),
+                waiting_step_key: row.get("waiting_step_key"),
+                tree_depth: row.get("tree_depth"),
+                compensation_target: row.get("compensation_target"),
+                current_error: row.get("error"),
+            });
+        }
+    }
+    Ok(locked)
+}
+
+async fn plan_child_spawn_run_id<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    parent_run_id: &str,
+    checkpoint: &mut StepCheckpoint,
+) -> Result<Option<String>, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    let existing_step_sql = format!(
+        "SELECT child_run_id, signal_type \
+           FROM {steps} \
+          WHERE run_id = $1 \
+            AND ordinal = $2 \
+            AND kind = 'child' \
+            AND state = 'running' \
+          LIMIT 1",
+        steps = tables.steps
+    );
+    let existing_step = conn
+        .query(&existing_step_sql, &[&parent_run_id, &checkpoint.ordinal])
+        .await?;
+    if let Some(row) = existing_step.first() {
+        checkpoint.child_run_id = row.get("child_run_id");
+        checkpoint.signal_type = row
+            .get::<_, Option<String>>("signal_type")
+            .or_else(|| Some(child_signal_type(checkpoint.ordinal)));
+        return Ok(checkpoint.child_run_id.clone());
+    }
+
+    if let Some(child_run_id) = checkpoint.child_run_id.clone() {
+        checkpoint.signal_type
+            .get_or_insert_with(|| child_signal_type(checkpoint.ordinal));
+        return Ok(Some(child_run_id));
+    }
+
+    let Some(child_workflow_name) = checkpoint.child_workflow_name.as_ref() else {
+        return Ok(None);
+    };
+    let parent_sql = format!(
+        "SELECT app_id \
+           FROM {runs} \
+          WHERE id = $1",
+        runs = tables.runs
+    );
+    let parent_rows = conn.query(&parent_sql, &[&parent_run_id]).await?;
+    if let Some(parent) = parent_rows.first() {
+        let app_id: Uuid = parent.get("app_id");
+        let child_key = child_dedup_key(parent_run_id, checkpoint.ordinal);
+        let existing_child_sql = format!(
+            "SELECT id \
+               FROM {runs} \
+              WHERE app_id = $1 \
+                AND workflow_name = $2 \
+                AND dedup_key = $3 \
+              LIMIT 1",
+            runs = tables.runs
+        );
+        let existing_child = conn
+            .query(&existing_child_sql, &[&app_id, child_workflow_name, &child_key])
+            .await?;
+        if let Some(row) = existing_child.first() {
+            let child_run_id: String = row.get("id");
+            checkpoint.child_run_id = Some(child_run_id.clone());
+            checkpoint.signal_type = Some(child_signal_type(checkpoint.ordinal));
+            return Ok(Some(child_run_id));
+        }
+    }
+
+    let child_run_id = checkpoint
+        .child_run_id
+        .clone()
+        .unwrap_or_else(typed_id::new_workflow_run_id);
+    checkpoint.child_run_id = Some(child_run_id.clone());
+    checkpoint.signal_type = Some(child_signal_type(checkpoint.ordinal));
+    Ok(Some(child_run_id))
+}
+
+async fn recompute_effective_wake_at<C>(
+    conn: &C,
+    tables: &WorkflowTables,
+    run_id: &str,
+    state: &str,
+    fold_wake_at: Option<DateTime<Utc>>,
+    waiting_step_key: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, WorkflowError>
+where
+    C: GenericClient + Sync,
+{
+    if !matches!(state, "queued" | "running" | "sleeping" | "waiting" | "compensating") {
+        return Ok(None);
+    }
+
+    let now = Utc::now();
+    let signal_frontier = waiting_step_key
+        .map(|key| due_signal_frontier_for_waiting_key(key, now))
+        .transpose()?
+        .flatten();
+    let (due_signal_type, min_signal_created_at) = signal_frontier
+        .map(|frontier| (Some(frontier.signal_type), frontier.min_created_at))
+        .unwrap_or((None, None));
+
+    let sql = format!(
+        "SELECT MIN(wake_at) AS wake_at \
+           FROM ( \
+                 SELECT $2::timestamptz AS wake_at \
+                  WHERE $2::timestamptz IS NOT NULL \
+                 UNION ALL \
+                SELECT MIN(wake_at) AS wake_at \
+                  FROM {steps} \
+                 WHERE run_id = $1 \
+                   AND state = 'running' \
+                   AND wake_at IS NOT NULL \
+                HAVING MIN(wake_at) IS NOT NULL \
+                 UNION ALL \
+                SELECT now() AS wake_at \
+                 WHERE EXISTS ( \
+                       SELECT 1 \
+                         FROM {signals} \
+                        WHERE run_id = $1 \
+                          AND type = $3 \
+                          AND consumed_by IS NULL \
+                          AND ($4::timestamptz IS NULL OR created_at >= $4) \
+                    ) \
+                ) frontier",
+        steps = tables.steps,
+        signals = tables.signals,
+    );
+    let row = conn
+        .query_one(
+            &sql,
+            &[
+                &run_id,
+                &fold_wake_at,
+                &due_signal_type,
+                &min_signal_created_at,
+            ],
+        )
+        .await?;
+    Ok(row.get("wake_at"))
+}
+
+struct SignalFrontier {
+    signal_type: String,
+    min_created_at: Option<DateTime<Utc>>,
+}
+
+fn due_signal_frontier_for_waiting_key(
+    key: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<SignalFrontier>, WorkflowError> {
+    let parts: Vec<&str> = key.split(':').collect();
+    match parts.as_slice() {
+        ["wait", _, _, signal_type] => Ok(Some(SignalFrontier {
+            signal_type: (*signal_type).to_string(),
+            min_created_at: None,
+        })),
+        ["wait", _, _, signal_type, max_age] => {
+            let max_signal_age_ms = max_age.parse::<i64>().map_err(|_| {
+                WorkflowError::Invalid(format!("invalid wait waiting_step_key max age: {key}"))
+            })?;
+            Ok(Some(SignalFrontier {
+                signal_type: (*signal_type).to_string(),
+                min_created_at: Some(now - chrono::Duration::milliseconds(max_signal_age_ms)),
+            }))
+        }
+        ["child", ordinal, _] => {
+            let ordinal = ordinal.parse::<i32>().map_err(|_| {
+                WorkflowError::Invalid(format!("invalid child waiting_step_key ordinal: {key}"))
+            })?;
+            Ok(Some(SignalFrontier {
+                signal_type: child_signal_type(ordinal),
+                min_created_at: None,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1014,6 +1312,7 @@ async fn continue_as_new<C>(
     tables: &WorkflowTables,
     config: &WorkflowEngineConfig,
     current_run_id: &str,
+    successor_run_id: &str,
     app_id: &Uuid,
     workflow_name: &str,
     seed_input: Option<&Value>,
@@ -1023,7 +1322,6 @@ where
     C: GenericClient + Sync,
 {
     let deploy_id = active_deploy_for_workflow(conn, app_id, workflow_name).await?;
-    let fresh_run_id = typed_id::new_workflow_run_id();
     let (input, input_hash, input_size, input_content_type, journal_bytes, blob_bytes) =
         if let Some(input_ref) = seed_input_ref {
             upsert_workflow_blob_ref(conn, tables, input_ref).await?;
@@ -1061,7 +1359,7 @@ where
     conn.execute(
         &insert_sql,
         &[
-            &fresh_run_id,
+            &successor_run_id,
             &workflow_name,
             app_id,
             &deploy_id,
@@ -1081,9 +1379,9 @@ where
           WHERE id = $1",
         runs = tables.runs
     );
-    conn.execute(&stamp_sql, &[&current_run_id, &fresh_run_id])
+    conn.execute(&stamp_sql, &[&current_run_id, &successor_run_id])
         .await?;
-    Ok(fresh_run_id)
+    Ok(successor_run_id.to_string())
 }
 
 async fn active_deploy_for_workflow<C>(
