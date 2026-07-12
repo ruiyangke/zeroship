@@ -302,6 +302,7 @@ class JournalBackedStep implements WorkflowStep {
   readonly #quiescence: WorkflowMicrotaskQuiescenceBarrier | undefined;
   #cursor = 0;
   #frontier: FrontierCoordinator | undefined;
+  #stepWorkObserved = false;
   #activeStepCallbacks = 0;
   #callbackSyncDepth = 0;
   #parallelIssueWindow = false;
@@ -324,7 +325,7 @@ class JournalBackedStep implements WorkflowStep {
   }
 
   get frontierObserved(): boolean {
-    return this.#frontier?.observed ?? false;
+    return this.#stepWorkObserved || (this.#frontier?.observed ?? false);
   }
 
   get frontierPending(): boolean {
@@ -632,7 +633,10 @@ class JournalBackedStep implements WorkflowStep {
     try {
       return brandStepPromise(
         Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome)),
-        () => this.#quiescence?.markProgress(),
+        () => {
+          this.#stepWorkObserved = true;
+          this.#quiescence?.markProgress();
+        },
       );
     } catch (e) {
       if (e instanceof SuspendSignal) {
@@ -640,7 +644,10 @@ class JournalBackedStep implements WorkflowStep {
       }
       return brandStepPromise(
         Promise.reject(e),
-        () => this.#quiescence?.markProgress(),
+        () => {
+          this.#stepWorkObserved = true;
+          this.#quiescence?.markProgress();
+        },
       );
     }
   }

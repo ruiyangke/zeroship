@@ -37,8 +37,8 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_plugin_workflow::advance::{
-    collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind, WorkflowAdvanceResponse,
-    WorkflowRunDispatchRequest,
+    collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind,
+    WorkflowAdvanceRegistration, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
 use zeroship_plugin_workflow::claim::{claim_workflow_run_on_conn, WorkflowClaimOutcome};
 use zeroship_plugin_workflow::engine::STUCK_STRIKE_LIMIT_FIELD;
@@ -908,6 +908,34 @@ impl StepDispatcher for CompleteDispatcher {
     }
 }
 
+#[derive(Clone, Default)]
+struct PreserveAckDispatcher {
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl PreserveAckDispatcher {
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for PreserveAckDispatcher {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.run_id.clone());
+        DispatchOutcome::Completed(WorkflowAdvanceResponse::ack(
+            request.run_id.clone(),
+            vec![WorkflowAdvanceRegistration::preserve(
+                request.run_id,
+                request.app_id,
+            )],
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct JoinChildrenDispatcher {
     state: Arc<AppState>,
@@ -1250,6 +1278,19 @@ async fn wait_for_requests(dispatcher: &BlockingDispatcher, n: usize) {
     }
     panic!(
         "timed out waiting for {n} dispatch requests, got {}",
+        dispatcher.requests().len()
+    );
+}
+
+async fn wait_for_preserve_requests(dispatcher: &PreserveAckDispatcher, n: usize) {
+    for _ in 0..1_000 {
+        if dispatcher.requests().len() >= n {
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "timed out waiting for {n} preserve dispatch requests, got {}",
         dispatcher.requests().len()
     );
 }
@@ -5057,6 +5098,127 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     .await
     .expect("drive resumed signal");
     wait_for_completed(&fx, &[run_id]).await;
+}
+
+#[compio::test]
+async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
+    let _timing_guard = timing_test_guard();
+    workflow_engine::reset_inflight_dispatches_for_test();
+    let Some(fx) = isolated_fixture("preserve-park").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "preserve-park").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "waiting",
+        -1_000,
+        Some("wait:0:go:go"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("park waiting run in journal");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, signal_type, batch_id, batch_width) \
+             VALUES ($1, 0, 'go', 0, 'wait_signal', 'running', 'go', 'wfd_preserve_park', 1)",
+            &[&run_id],
+        )
+        .await
+        .expect("insert no-timeout wait step");
+
+    let mut cfg = config("owner-preserve-park");
+    cfg.claim_ttl_ms = 20;
+    let dispatcher = Arc::new(PreserveAckDispatcher::default());
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&dispatcher),
+        cfg.clone(),
+    )
+    .await
+    .expect("dispatch no-timeout wait");
+    assert_eq!(claimed, 1);
+    wait_for_preserve_requests(&dispatcher, 1).await;
+
+    for _ in 0..100 {
+        let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
+        if timer.is_none() && inflight.is_none() {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
+    assert!(timer.is_none(), "parked no-timeout wait should not keep a timer");
+    assert!(
+        inflight.is_none(),
+        "preserve ack must clear scheduler inflight for parked no-timeout wait"
+    );
+
+    compio::time::sleep(Duration::from_millis(30)).await;
+    let before_reaper = dispatcher.requests().len();
+    let reaped = workflow_engine::reap_lapsed_inflight_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&dispatcher),
+        cfg,
+        16,
+    )
+    .await
+    .expect("reap parked no-timeout wait");
+    assert_eq!(reaped, 0, "parked no-timeout wait should not be redispatched");
+    compio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        dispatcher.requests().len(),
+        before_reaper,
+        "reaper should not dispatch a parked no-timeout wait"
+    );
+
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri(&format!("/internal/workflows/runs/{run_id}/signal"))
+                .set_json(&serde_json::json!({"type": "go", "payload": {"wake": true}})),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::ACCEPTED);
+    let timer = fx
+        .scheduler_store
+        .timer(&run_id)
+        .await
+        .expect("load signaled timer")
+        .expect("signal should re-register parked wait");
+    assert!(
+        timer.wake_at <= Utc::now() + ChronoDuration::milliseconds(100),
+        "signal should register a due wake, got {:?}",
+        timer.wake_at
+    );
+    let inflight = fx
+        .scheduler_store
+        .inflight(&run_id)
+        .await
+        .expect("load signaled inflight");
+    assert!(inflight.is_none(), "signal registration should not recreate inflight");
 }
 
 #[compio::test]
