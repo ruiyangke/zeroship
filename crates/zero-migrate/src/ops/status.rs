@@ -17,7 +17,7 @@ use std::collections::HashMap;
 // (`&D`), so a host (napi) driver can drive the "show me pending migrations" flow.
 // They compile on the whole PG seam (`native-pg` OR `host-pg`).
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 use crate::conn::ExecutorConfig;
 use crate::apply::executor::{order_pending, ApplyError};

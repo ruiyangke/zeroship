@@ -31,7 +31,7 @@
 //! own history. Bootstrap ([`ensure_journal`]) is idempotent.
 
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
@@ -361,8 +361,8 @@ pub enum JournalError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::seam::DbError> for JournalError {
-    fn from(error: crate::seam::DbError) -> Self {
+impl From<crate::driver::DbError> for JournalError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -1202,7 +1202,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
          VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
         pending = PendingState::Pending.as_str()
     );
-    let obligation_params: [crate::seam::Bind; 8] = [
+    let obligation_params: [crate::driver::Bind; 8] = [
         rec.table.into(),
         rec.from_col.into(),
         rec.to_col.into(),

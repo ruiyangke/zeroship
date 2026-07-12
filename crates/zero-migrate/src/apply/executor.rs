@@ -41,7 +41,7 @@ use crate::approval::Approval;
 // dialect SQL leaves the backend drives live in
 // [`crate::apply::backend::postgres::session`].
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 use crate::apply::backend::MigrationBackend;
 #[cfg(pg_seam)]
 use crate::apply::backend::PostgresBackend;
@@ -145,8 +145,8 @@ impl Error for BackendError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::seam::DbError> for BackendError {
-    fn from(error: crate::seam::DbError) -> Self {
+impl From<crate::driver::DbError> for BackendError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::new(error)
     }
 }
@@ -433,8 +433,8 @@ pub enum ApplyError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::seam::DbError> for ApplyError {
-    fn from(error: crate::seam::DbError) -> Self {
+impl From<crate::driver::DbError> for ApplyError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -535,7 +535,7 @@ pub async fn apply_with_lock<D: SqlSession>(
 }
 
 /// The **MySQL** counterpart of [`apply_with_lock`]: drive the apply through the
-/// [`MysqlBackend`], which rides the SAME `seam::SqlSession` seam as Postgres but
+/// [`MysqlBackend`], which rides the SAME `driver::SqlSession` seam as Postgres but
 /// renders MySQL dialect SQL (`GET_LOCK` project lock, MySQL journal DDL, `?`
 /// placeholders, auto-committing two-phase apply). This is the dialect-selection
 /// entry: a caller that knows the target is MySQL constructs the MySQL backend
@@ -1895,8 +1895,8 @@ pub enum RollbackError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::seam::DbError> for RollbackError {
-    fn from(error: crate::seam::DbError) -> Self {
+impl From<crate::driver::DbError> for RollbackError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
     }
 }

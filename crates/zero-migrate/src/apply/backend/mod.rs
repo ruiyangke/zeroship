@@ -44,7 +44,7 @@ pub mod capability;
 // `#[cfg(feature = "native-pg")]` internally.
 #[cfg(pg_seam)]
 pub mod postgres;
-// The MySQL backend rides the SAME `seam::SqlSession` seam as Postgres (only its
+// The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres (only its
 // dialect SQL differs), so it compiles on the seam cfg (`pg_seam`, emitted by
 // build.rs from `host-pg`). SQLite, by contrast, is in-process (`rusqlite`) and is
 // always present.
@@ -97,7 +97,7 @@ pub struct PgSessionSnapshot {
 /// ([`Numbered`](PlaceholderStyle::Numbered)). A MySQL backend renders the
 /// anonymous `?` ([`Question`](PlaceholderStyle::Question)) — the placeholder
 /// style is a **backend concern**, consulted BEFORE any SQL crosses the
-/// [`SqlSession`](crate::seam::SqlSession) seam, so the generic executor never
+/// [`SqlSession`](crate::driver::SqlSession) seam, so the generic executor never
 /// bakes a dialect's placeholder into shared SQL.
 ///
 /// Exposed via [`MigrationBackend::placeholder_style`] +
@@ -218,7 +218,7 @@ pub trait MigrationBackend {
     /// Postgres, `?` on MySQL). Placeholder style is a **backend concern** so no
     /// dialect placeholder is ever baked into the shared executor's SQL — a
     /// backend renders its lock/journal/DML binds in its own style before the SQL
-    /// crosses the [`SqlSession`](crate::seam::SqlSession) seam. Postgres backends
+    /// crosses the [`SqlSession`](crate::driver::SqlSession) seam. Postgres backends
     /// keep the numbered `$N` form; a MySQL backend overrides to
     /// [`PlaceholderStyle::Question`].
     fn placeholder_style(&self) -> PlaceholderStyle {

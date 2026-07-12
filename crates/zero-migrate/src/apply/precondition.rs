@@ -63,7 +63,7 @@
 //! all contained here, the PG leaf.
 
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
@@ -104,7 +104,7 @@ pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
     #[cfg(pg_seam)]
-    Db(#[from] crate::seam::DbError),
+    Db(#[from] crate::driver::DbError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
     /// attempt, whitespace, or punctuation. Rejected before any query runs.

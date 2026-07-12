@@ -22,8 +22,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zero_migrate::seam::{Bind, DbError, Row};
-use zero_migrate::seam::SqlSession;
+use zero_migrate::driver::{Bind, DbError, Row};
+use zero_migrate::driver::SqlSession;
 
 use crate::marshal::{
     bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest,

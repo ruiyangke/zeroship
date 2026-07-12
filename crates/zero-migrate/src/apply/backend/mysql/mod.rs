@@ -1,8 +1,8 @@
 //! MySQL [`MigrationBackend`](crate::apply::backend::MigrationBackend)
 //! implementation (redesign step 4d).
 //!
-//! Generic over the dialect-neutral [`SqlSession`](crate::seam::SqlSession) seam
-//! (engine root `crate::seam`) — a host driver (the napi `mysql2` shell) supplies
+//! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
+//! (engine root `crate::driver`) — a host driver (the napi `mysql2` shell) supplies
 //! the `SqlSession` impl, exactly as the `pg` shell does for
 //! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
@@ -49,7 +49,7 @@ use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
 ///
@@ -361,7 +361,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 mod render_tests {
     use super::*;
     use crate::model::migration::{Checksum, MigrationFlags};
-    use crate::seam::{Bind, DbError, Row, Value};
+    use crate::driver::{Bind, DbError, Row, Value};
     use std::cell::RefCell;
 
     /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of

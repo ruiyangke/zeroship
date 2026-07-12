@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
@@ -100,8 +100,8 @@ pub enum DriftError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::seam::DbError> for DriftError {
-    fn from(error: crate::seam::DbError) -> Self {
+impl From<crate::driver::DbError> for DriftError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
     }
 }

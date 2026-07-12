@@ -100,7 +100,7 @@ pub mod render;
 // the compio PG adapter, lit by the `host-pg` feature); a `--no-default-features`
 // build keeps a lean core.
 #[cfg(pg_seam)]
-pub mod seam;
+pub mod driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors) — dissolved in from the former `zero-migrate-schema`
 // leaf crate (redesign step 3c). The data-plane query language that used to ride
@@ -133,14 +133,14 @@ pub use apply::backend::{
 // (`host-pg`) — the generic `PostgresBackend<D>` compiles there.
 #[cfg(pg_seam)]
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
-// The driver-neutral `SqlSession` seam types (the engine-root `crate::seam`
+// The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
 // and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). On
 // the whole PG seam — the addon (`host-pg`) is the primary consumer of these
 // neutral types. MySQL will ride the same seam; SQLite does NOT (in-process
 // rusqlite).
 #[cfg(pg_seam)]
-pub use seam::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
+pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use plan::author::{

@@ -29,7 +29,7 @@
 //!   deleted.
 
 #[cfg(pg_seam)]
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
@@ -52,7 +52,7 @@ pub enum BaselineError {
     /// A database error outside a guarded/journaled step.
     #[error("db error: {0}")]
     #[cfg(pg_seam)]
-    Db(#[from] crate::seam::DbError),
+    Db(#[from] crate::driver::DbError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),

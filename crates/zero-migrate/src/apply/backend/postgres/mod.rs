@@ -1,11 +1,11 @@
 //! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`](crate::seam::SqlSession) seam
-//! (engine root `crate::seam`) — a host driver (the napi `pg` shell) supplies the
+//! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
+//! (engine root `crate::driver`) — a host driver (the napi `pg` shell) supplies the
 //! `SqlSession` impl. SQLite does NOT ride this seam (it is an in-process rusqlite
 //! actor).
 
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
@@ -385,7 +385,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 /// closing the old `unreachable!("read verbs…")` gap.
 #[cfg(test)]
 mod recording_session_genericity {
-    use crate::seam::{Bind, DbError, Row, Value};
+    use crate::driver::{Bind, DbError, Row, Value};
     use super::*;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -621,7 +621,7 @@ mod recording_session_genericity {
     ///
     /// It simultaneously proves genericity end-to-end: the WRITE path records the
     /// expected SQL sequence (schema/journal DDL + a journal INSERT with neutral
-    /// Bind params), the READ path returns seam::Rows the engine decodes
+    /// Bind params), the READ path returns driver::Rows the engine decodes
     /// (`applied` → `AppliedEntry`), and `status()`/`history()` run over the same
     /// driver — their decoded shapes matching what `native-pg` produces.
     #[compio::test]

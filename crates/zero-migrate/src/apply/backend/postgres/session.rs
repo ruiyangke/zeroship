@@ -29,7 +29,7 @@ use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 /// A stable i64 advisory-lock key from the project id, mirroring the
 /// `hashtext(project_id)` design intent: we run `pg_advisory_lock(hashtext($1))`

@@ -41,7 +41,7 @@ use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, CompletedRecord};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 /// How long `GET_LOCK` waits (seconds) for the project apply lock before the
 /// acquire is treated as contended. Mirrors the "serialize concurrent deploys"

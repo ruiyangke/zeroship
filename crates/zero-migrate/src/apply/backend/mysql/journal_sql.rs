@@ -37,7 +37,7 @@ use crate::apply::journal::{
     AppliedEntry, CompletedRecord, EventKind, JournalError, JournaledKind, Phase,
 };
 use crate::conn::ExecutorConfig;
-use crate::seam::SqlSession;
+use crate::driver::SqlSession;
 
 /// The fixed, short, table-local immutability trigger names. ASCII-safe literals —
 /// never embed the (hyphenated-UUID) app id (the meta database name carries it).
@@ -180,7 +180,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
             // block is a single simple-query batch (no client-side statement
             // splitting of the trigger body needed — the guard + CREATE TRIGGER are
             // two batches).
-            let exists: Vec<crate::seam::Row> = conn
+            let exists: Vec<crate::driver::Row> = conn
                 .query(
                     "SELECT trigger_name FROM information_schema.triggers \
                      WHERE trigger_schema = ? AND trigger_name = ?",

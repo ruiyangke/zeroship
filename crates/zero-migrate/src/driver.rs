@@ -233,7 +233,7 @@ impl Row {
         debug_assert_eq!(
             columns.len(),
             values.len(),
-            "seam::Row: columns/values length mismatch"
+            "driver::Row: columns/values length mismatch"
         );
         Self { columns, values }
     }

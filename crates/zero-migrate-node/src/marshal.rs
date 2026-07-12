@@ -19,7 +19,7 @@
 //! (the §D.2 contract) round-trips exactly. `Text` covers the `to_char` timestamp
 //! and all text/name/varchar cells.
 
-use zero_migrate::seam::{Bind, DbError, Row, Value};
+use zero_migrate::driver::{Bind, DbError, Row, Value};
 
 #[cfg(feature = "napi")]
 use napi_derive::napi;
