@@ -20,7 +20,7 @@ const OP_RECORDER_JS: &str = include_str!("op_recorder.js");
 /// The schema IR lowering adapter glue.
 const IR_ADAPTER_JS: &str = include_str!("ir_adapter.js");
 
-/// The bundled `@zeroship/migrate` op.* DSL.
+/// The bundled `zero-migrate` op.* DSL.
 ///
 /// The ONE compiled recorder artifact (DSL redesign S0.5): the SDK recorder and
 /// this engine-embedded recorder are the same `tsup` build output of
@@ -28,25 +28,13 @@ const IR_ADAPTER_JS: &str = include_str!("ir_adapter.js");
 /// The former hand-kept `migrate_ops.js` twin is deleted; there is no byte-parity
 /// to maintain, only build provenance. `pnpm build` MUST run before
 /// `cargo build -p zero-migrate` (root `pnpm build` emits this dist file in
-/// dependency order) — the same ordering this file already relies on for the
-/// `@zeroship/db` bundle below.
+/// dependency order). The db type-builder surface is bundled INTO this artifact
+/// (`sdks/migrate/src/db-types.ts`) — there is no separate db module to register.
 const MIGRATE_OPS_JS: &str = include_str!("../../../../sdks/migrate/dist/embedded-recorder.js");
-
-/// The bundled `@zeroship/db` schema DSL.
-const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.js");
-
-/// Minimal `zeroship` facade required by the `@zeroship/db` bundle.
-const ZEROSHIP_FACADE_STUB_JS: &str = r#"
-export const env = Object.freeze({});
-export function waitUntil() {}
-export function getRequest() { return null; }
-export function getRequestContext() { return undefined; }
-export default {};
-"#;
 
 /// The determinism-lint entry module.
 const DETERMINISM_LINT_JS: &str = r#"
-import { lintDeterminism } from "@zeroship/migrate";
+import { lintDeterminism } from "zero-migrate";
 try {
   const findings = lintDeterminism(globalThis.__zsLintSrc || "");
   globalThis.__zsLintOut = JSON.stringify({ ok: true, findings });
@@ -112,9 +100,7 @@ pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
         }
     }
 
-    modules.push(module("@zeroship/migrate", MIGRATE_OPS_JS));
-    modules.push(module("@zeroship/db", ZEROSHIP_DB_DIST_JS));
-    modules.push(module("zeroship", ZEROSHIP_FACADE_STUB_JS));
+    modules.push(module("zero-migrate", MIGRATE_OPS_JS));
 
     modules
 }

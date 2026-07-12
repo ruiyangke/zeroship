@@ -1,5 +1,5 @@
 {
-  "name": "@zero-migrate/node",
+  "name": "zero-migrate-node",
   "version": "0.1.0",
   "private": true,
   "description": "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the driver-neutral PgSession seam. Zero tokio, zero io_uring, cross-platform.",

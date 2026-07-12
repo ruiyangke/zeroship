@@ -18,7 +18,7 @@
 // serializers (§2.5).
 
 import * as userMod from "./__migration__.js";
-import { __begin, __drain } from "@zeroship/migrate";
+import { __begin, __drain } from "zero-migrate";
 
 // Resolve the migration's `up()` (mandatory) + `down()` (optional). Two accepted
 // shapes, mirroring the deploy contract's discovery order:

@@ -21,7 +21,7 @@
 // analog of an Atlas ORM provider emitting the internal representation.
 
 import * as userSchemaMod from "./__schema__.js";
-import { TypeBuilder } from "@zeroship/db";
+import { DbTypeBuilder as TypeBuilder } from "zero-migrate";
 
 // Resolve the schema map from an optional authoring module. This is a
 // migration-generation input, not the deploy contract.
