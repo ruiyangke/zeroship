@@ -7,6 +7,11 @@
 
 use crate::seam::SqlSession;
 
+/// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
+/// backend drives — relocated out of the generic `apply::executor` so no
+/// dialect-specific SQL lives in the shared executor (C1).
+pub(crate) mod session;
+
 use super::{
     CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
 };
@@ -56,19 +61,19 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::acquire_project_lock(self.conn, &cfg.project_id).await
+        session::acquire_project_lock(self.conn, &cfg.project_id).await
     }
 
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::release_project_lock(self.conn, &cfg.project_id).await
+        session::release_project_lock(self.conn, &cfg.project_id).await
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
-        crate::apply::executor::pg::snapshot_session(self.conn).await
+        session::snapshot_session(self.conn).await
     }
 
     async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::restore_session(self.conn, snap).await
+        session::restore_session(self.conn, snap).await
     }
 
     async fn reset_role_best_effort(&self) {
@@ -87,8 +92,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         kind: &str,
     ) -> Result<bool, ApplyError> {
         if kind != "repeatable" && self.uses_two_phase_path(m) {
-            crate::apply::executor::pg::configure_session_non_txn(self.conn, cfg, m).await?;
-            crate::apply::executor::pg::apply_non_transactional(
+            session::configure_session_non_txn(self.conn, cfg, m).await?;
+            session::apply_non_transactional(
                 self.conn,
                 cfg,
                 m,
@@ -98,7 +103,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             )
             .await
         } else {
-            crate::apply::executor::pg::apply_transactional(
+            session::apply_transactional(
                 self.conn, cfg, m, applied_by, supersedes, kind,
             )
             .await?;
@@ -112,11 +117,11 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         m: &Migration,
         applied_by: &str,
     ) -> Result<(), RollbackError> {
-        crate::apply::executor::pg::rollback_one_transactional(self.conn, cfg, m, applied_by).await
+        session::rollback_one_transactional(self.conn, cfg, m, applied_by).await
     }
 
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::validate_non_txn_idempotent(m)
+        session::validate_non_txn_idempotent(m)
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
@@ -252,7 +257,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         if already {
             return Ok(false);
         }
-        crate::apply::executor::apply_dml_transactional(
+        session::apply_dml_transactional(
             self.conn,
             cfg,
             version.as_str(),

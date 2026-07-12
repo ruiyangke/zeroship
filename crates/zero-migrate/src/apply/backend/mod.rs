@@ -83,6 +83,41 @@ pub struct PgSessionSnapshot {
     pub search_path: String,
 }
 
+/// How a backend renders a positional bind placeholder in the SQL it issues.
+///
+/// The lock/journal/DML SQL a backend owns is Postgres-flavoured `$N` today
+/// ([`Numbered`](PlaceholderStyle::Numbered)). A MySQL backend renders the
+/// anonymous `?` ([`Question`](PlaceholderStyle::Question)) — the placeholder
+/// style is a **backend concern**, consulted BEFORE any SQL crosses the
+/// [`SqlSession`](crate::seam::SqlSession) seam, so the generic executor never
+/// bakes a dialect's placeholder into shared SQL.
+///
+/// Exposed via [`MigrationBackend::placeholder_style`] +
+/// [`MigrationBackend::placeholder`]; each backend's own leaves render their SQL
+/// with their native style directly (PG session leaves write `$1` literally),
+/// and a cross-dialect helper can render positionally through this hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceholderStyle {
+    /// Postgres: the 1-based numbered form `$1`, `$2`, … (also SQLite's `?1`
+    /// numbered form is rendered elsewhere via `render::dml`).
+    Numbered,
+    /// MySQL: the anonymous positional `?` (order-of-appearance binding).
+    Question,
+}
+
+impl PlaceholderStyle {
+    /// Render the `n`-th (1-based) positional bind placeholder in this style.
+    /// `$n` for [`Numbered`](Self::Numbered); `?` for [`Question`](Self::Question)
+    /// (MySQL binds positionally, so the index is implicit).
+    #[must_use]
+    pub fn render(self, n: usize) -> String {
+        match self {
+            Self::Numbered => format!("${n}"),
+            Self::Question => "?".to_string(),
+        }
+    }
+}
+
 pub type JournalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, JournalError>> + 'a>>;
 
 /// Cross-deploy pending-contract obligations capability.
@@ -170,6 +205,25 @@ pub trait MigrationBackend {
     /// The SQL dialect this backend targets. Drives the dialect-boundary rejects
     /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
     fn dialect(&self) -> SqlDialect;
+
+    /// The positional bind placeholder style this backend's SQL uses (`$N` on
+    /// Postgres, `?` on MySQL). Placeholder style is a **backend concern** so no
+    /// dialect placeholder is ever baked into the shared executor's SQL — a
+    /// backend renders its lock/journal/DML binds in its own style before the SQL
+    /// crosses the [`SqlSession`](crate::seam::SqlSession) seam. Postgres backends
+    /// keep the numbered `$N` form; a MySQL backend overrides to
+    /// [`PlaceholderStyle::Question`].
+    fn placeholder_style(&self) -> PlaceholderStyle {
+        PlaceholderStyle::Numbered
+    }
+
+    /// Render the `n`-th (1-based) positional placeholder in this backend's
+    /// [`placeholder_style`](Self::placeholder_style). Convenience over
+    /// [`PlaceholderStyle::render`] so a cross-dialect SQL builder can ask the
+    /// backend directly.
+    fn placeholder(&self, n: usize) -> String {
+        self.placeholder_style().render(n)
+    }
 
     /// Whether this backend can commit DDL atomically with its journal row inside
     /// one transaction. Postgres/SQLite return true; auto-commit DDL dialects

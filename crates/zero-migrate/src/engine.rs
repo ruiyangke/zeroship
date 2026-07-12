@@ -389,7 +389,7 @@ impl MigrationEngine {
         // P6a — the lock is acquired/released through the dialect seam
         // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
         // free-fns. For the PG backend this is byte-identical (`PostgresBackend`
-        // delegates straight to `executor::pg::acquire/release_project_lock`, i.e. the
+        // delegates straight to `backend::postgres::session::acquire/release_project_lock`, i.e. the
         // same `pg_advisory_lock(hashtext(project))`); for SQLite the lock is a no-op
         // (single-actor serialization is the lock). The single-acquire / single-release
         // H10 discipline is unchanged.
