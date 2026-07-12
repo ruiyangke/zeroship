@@ -265,6 +265,17 @@ impl WorkflowSchedulerStore {
     }
 
     #[allow(clippy::future_not_send)]
+    pub async fn ack_park(&self, run_id: &str) -> Result<(), WorkflowSchedulerStoreError> {
+        let conn = self.open_conn().await?;
+        conn.execute(
+            &format!("DELETE FROM {}.inflight WHERE run_id = $1", self.quoted_schema()),
+            &[&run_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::future_not_send)]
     pub async fn reconcile_inflight_to_timer(
         &self,
         run_id: &str,

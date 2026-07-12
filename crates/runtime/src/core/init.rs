@@ -781,11 +781,57 @@ async function wfFetchStepOutputBytes(outputRead, runId, name, occurrence) {
 
 // Runtime dispatcher copy: keep behavior in lock-step with
 // sdks/bootstrap/src/dispatcher.ts and sdks/workflows/src/journal.ts.
+class ZsDispatchMicrotaskQuiescenceBarrier {
+    #version = 0;
+    #stopped = false;
+
+    markProgress() {
+        this.#version++;
+    }
+
+    stop() {
+        this.#stopped = true;
+        this.markProgress();
+    }
+
+    waitUntilBlocked(isLegalPending) {
+        return new Promise((_, reject) => {
+            let lastVersion = this.#version;
+            let stableProbes = 0;
+            const probe = () => {
+                if (this.#stopped) return;
+                if (isLegalPending()) {
+                    this.stop();
+                    return;
+                }
+                if (this.#version !== lastVersion) {
+                    lastVersion = this.#version;
+                    stableProbes = 0;
+                    queueMicrotask(probe);
+                    return;
+                }
+                stableProbes++;
+                if (stableProbes >= 3) {
+                    this.#stopped = true;
+                    reject(new ZsNondeterministicError(
+                        "workflow body awaited non-step work outside the microtask replay boundary",
+                    ));
+                    return;
+                }
+                queueMicrotask(probe);
+            };
+            queueMicrotask(probe);
+        });
+    }
+}
+
 class ZsJournalBackedStep {
     #stepsByOrdinal = new Map();
     #nameOccurrences = new Map();
+    #quiescence;
     #cursor = 0;
     #frontier = undefined;
+    #stepWorkObserved = false;
     #activeStepCallbacks = 0;
     #callbackSyncDepth = 0;
     #parallelIssueWindow = false;
@@ -797,12 +843,25 @@ class ZsJournalBackedStep {
     #trigger = {};
     #compensatorRegistry = new Map();
 
-    constructor(steps, runId = "", outputRead = undefined, phase = "running", trigger = {}) {
+    constructor(steps, quiescence, runId = "", outputRead = undefined, phase = "running", trigger = {}) {
+        this.#quiescence = quiescence;
         this.#runId = runId;
         this.#outputRead = outputRead;
         this.#phase = phase;
         this.#trigger = trigger;
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
+    }
+
+    get frontierDrainPromise() {
+        return this.#frontier?.drainPromise;
+    }
+
+    get frontierObserved() {
+        return this.#stepWorkObserved || (this.#frontier?.observed ?? false);
+    }
+
+    get frontierPending() {
+        return this.#frontier?.settled === false;
     }
 
     run(name, configOrFn, maybeFn) {
@@ -834,7 +893,7 @@ class ZsJournalBackedStep {
         this.#assertNotNested();
         const issued = this.#issue(name, "sleep");
         if (issued.record) {
-            if (issued.record.state === "completed") return Promise.resolve();
+            if (issued.record.state === "completed") return brandStepPromise(Promise.resolve());
             return this.#recordPromise(issued.record, {
                 kind: "sleep",
                 ordinal: issued.ordinal,
@@ -859,7 +918,7 @@ class ZsJournalBackedStep {
         const target = typeof when === "number" ? new Date(when) : when;
         const issued = this.#issue(name, "sleep");
         if (issued.record) {
-            if (issued.record.state === "completed") return Promise.resolve();
+            if (issued.record.state === "completed") return brandStepPromise(Promise.resolve());
             return this.#recordPromise(issued.record, {
                 kind: "sleep",
                 ordinal: issued.ordinal,
@@ -884,8 +943,8 @@ class ZsJournalBackedStep {
         const issued = this.#issue(name, "wait_signal");
         if (issued.record) {
             if (issued.record.state === "completed") {
-                if (issued.record.output !== undefined) return Promise.resolve(issued.record.output);
-                return Promise.resolve(issued.record.consumedSignal ?? null);
+                if (issued.record.output !== undefined) return brandStepPromise(Promise.resolve(issued.record.output));
+                return brandStepPromise(Promise.resolve(issued.record.consumedSignal ?? null));
             }
             if (issued.record.state === "failed") return this.#recordPromise(issued.record);
             return this.#recordPromise(issued.record, {
@@ -934,11 +993,11 @@ class ZsJournalBackedStep {
         this.#assertNotNested();
         const materialized = Array.from(items);
         if (materialized.length > ZS_MAX_START_MANY_BATCH) {
-            return Promise.reject(new ZsLimitExceededError(
+            return brandStepPromise(Promise.reject(new ZsLimitExceededError(
                 `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${ZS_MAX_START_MANY_BATCH})`,
-            ));
+            )));
         }
-        return Promise.all(materialized.map((raw) => {
+        return brandStepPromise(Promise.all(materialized.map((raw) => {
             const item = raw || {};
             const itemOptions = item.options && typeof item.options === "object" ? item.options : {};
             const mergedOptions = {
@@ -947,7 +1006,7 @@ class ZsJournalBackedStep {
                 ...(typeof item.key === "string" ? { key: item.key } : {}),
             };
             return this.call(WorkflowClass, item.input, mergedOptions);
-        }));
+        })));
     }
 
     continueAsNew(input) {
@@ -1038,12 +1097,24 @@ class ZsJournalBackedStep {
 
     #recordPromise(record, pendingOutcome) {
         try {
-            return Promise.resolve(this.#resolveRecord(record, pendingOutcome));
+            return brandStepPromise(
+                Promise.resolve(this.#resolveRecord(record, pendingOutcome)),
+                () => {
+                    this.#stepWorkObserved = true;
+                    this.#quiescence.markProgress();
+                },
+            );
         } catch (e) {
             if (e instanceof ZsWorkflowSuspendSignal) {
                 return this.#registerFrontier(Promise.resolve(e.outcome));
             }
-            return Promise.reject(e);
+            return brandStepPromise(
+                Promise.reject(e),
+                () => {
+                    this.#stepWorkObserved = true;
+                    this.#quiescence.markProgress();
+                },
+            );
         }
     }
 
@@ -1113,16 +1184,18 @@ class ZsJournalBackedStep {
     }
 
     #registerFrontier(outcome) {
-        const frontier = this.#frontier ??= new ZsFrontierCoordinator();
+        const frontier = this.#frontier ??= new ZsFrontierCoordinator(this.#quiescence);
         if (!frontier.sealed) {
             frontier.add(outcome);
         }
-        frontier.promise.catch(() => {});
+        frontier.drainPromise.catch(() => {});
+        wfSuppressUnhandledRejection(frontier.promise);
         return frontier.promise;
     }
 
     #issue(name, kind) {
         const ordinal = this.#cursor++;
+        this.#quiescence.markProgress();
         const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
         this.#nameOccurrences.set(name, nameOccurrence + 1);
         const record = this.#stepsByOrdinal.get(ordinal);
@@ -1175,22 +1248,40 @@ class ZsJournalBackedStep {
 
 class ZsFrontierCoordinator {
     promise;
+    drainPromise;
+    #quiescence;
     #pending = 0;
+    #observed = false;
     #sealed = false;
     #settled = false;
     #fatal = undefined;
     #outcomes = [];
     #reject = () => {};
 
-    constructor() {
-        this.promise = new Promise((_, reject) => {
+    constructor(quiescence) {
+        this.#quiescence = quiescence;
+        this.drainPromise = new Promise((_, reject) => {
             this.#reject = reject;
         });
-        queueMicrotask(() => this.seal());
+        this.promise = brandStepPromise(this.drainPromise, () => {
+            this.#observed = true;
+            this.#quiescence.markProgress();
+        });
+        queueMicrotask(() => {
+            queueMicrotask(() => this.seal());
+        });
     }
 
     get sealed() {
         return this.#sealed;
+    }
+
+    get observed() {
+        return this.#observed;
+    }
+
+    get settled() {
+        return this.#settled;
     }
 
     add(outcome) {
@@ -1198,18 +1289,27 @@ class ZsFrontierCoordinator {
         this.#pending++;
         outcome.then(
             (settled) => {
+                this.#quiescence.markProgress();
                 this.#outcomes.push(settled);
             },
             (error) => {
+                this.#quiescence.markProgress();
                 this.#fatal ??= error;
             },
         ).finally(() => {
+            this.#quiescence.markProgress();
             this.#pending--;
             this.#maybeFinish();
         });
     }
 
     seal() {
+        this.#quiescence.markProgress();
+        if (!this.#observed) {
+            this.#fatal ??= new ZsNondeterministicError(
+                "workflow body awaited non-step work while a frontier was pending",
+            );
+        }
         this.#sealed = true;
         this.#maybeFinish();
     }
@@ -1224,6 +1324,76 @@ class ZsFrontierCoordinator {
         this.#outcomes.sort((a, b) => a.ordinal - b.ordinal);
         this.#reject(new ZsWorkflowSuspendSignal(this.#outcomes));
     }
+}
+
+const ZS_STEP_PROMISE_BRAND = Symbol.for("zeroship.workflow.stepPromise");
+
+function isZsWorkflowStepPromise(value) {
+    return (
+        (typeof value === "object" || typeof value === "function") &&
+        value !== null &&
+        value[ZS_STEP_PROMISE_BRAND] === true
+    );
+}
+
+class ZsWorkflowStepPromise extends Promise {
+    #observed = false;
+    #onObserve;
+
+    static get [Symbol.species]() {
+        return Promise;
+    }
+
+    constructor(executor, onObserve) {
+        super(executor);
+        this.#onObserve = onObserve;
+        Object.defineProperty(this, ZS_STEP_PROMISE_BRAND, {
+            value: true,
+            configurable: false,
+            enumerable: false,
+            writable: false,
+        });
+    }
+
+    then(onfulfilled, onrejected) {
+        this.#observe();
+        return super.then(onfulfilled, onrejected);
+    }
+
+    catch(onrejected) {
+        this.#observe();
+        return super.catch(onrejected);
+    }
+
+    finally(onfinally) {
+        this.#observe();
+        return super.finally(onfinally);
+    }
+
+    #observe() {
+        if (this.#observed) return;
+        this.#observed = true;
+        this.#onObserve?.();
+    }
+
+    suppressUnhandledRejection() {
+        super.then(undefined, () => {});
+    }
+}
+
+function brandStepPromise(promise, onObserve) {
+    if (isZsWorkflowStepPromise(promise)) return promise;
+    return new ZsWorkflowStepPromise((resolve, reject) => {
+        promise.then(resolve, reject);
+    }, onObserve);
+}
+
+function wfSuppressUnhandledRejection(promise) {
+    if (promise instanceof ZsWorkflowStepPromise) {
+        promise.suppressUnhandledRejection();
+        return;
+    }
+    promise.catch(() => {});
 }
 
 function resolveWorkflow(userNamespace, workflowName) {
@@ -1323,9 +1493,11 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
         }
+        const quiescence = new ZsDispatchMicrotaskQuiescenceBarrier();
         const trigger = wfTrigger(envelope);
         const step = new ZsJournalBackedStep(
             wfJournal(envelope),
+            quiescence,
             String(envelope.runId ?? ""),
             wfOutputReadConfig(envelope),
             String(envelope.phase ?? "running"),
@@ -1350,10 +1522,43 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             }
             return workflowTerminalResult(envelope, await step.runNextCompensator());
         }
-        const output = await zsWorkflowDispatchAls.run(
-            { mode: "body" },
-            () => workflow.run(trigger, step),
+        const blockedByNonStepWork = quiescence.waitUntilBlocked(() => step.frontierObserved);
+        let outputPromise;
+        try {
+            outputPromise = zsWorkflowDispatchAls.run(
+                { mode: "body" },
+                () => Promise.resolve(workflow.run(trigger, step)),
+            );
+        } catch (e) {
+            quiescence.stop();
+            blockedByNonStepWork.catch(() => {});
+            step.frontierDrainPromise?.catch(() => {});
+            throw e;
+        }
+        outputPromise.then(
+            () => quiescence.stop(),
+            () => quiescence.stop(),
         );
+        outputPromise.catch(() => {});
+        const frontierDrainPromise = step.frontierDrainPromise;
+        if (frontierDrainPromise) {
+            await Promise.race([
+                frontierDrainPromise,
+                outputPromise.then(
+                    () => {
+                        throw new ZsNondeterministicError("workflow completed while a frontier was pending");
+                    },
+                    (error) => {
+                        throw error;
+                    },
+                ),
+                blockedByNonStepWork,
+            ]);
+        }
+        const output = await Promise.race([outputPromise, blockedByNonStepWork]);
+        if (step.frontierPending) {
+            throw new ZsNondeterministicError("workflow completed while a frontier was pending");
+        }
         return workflowTerminalResult(envelope, {
             kind: "RunCompleted",
             runId: envelope.runId,

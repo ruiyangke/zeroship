@@ -1111,9 +1111,15 @@ where
         } else if state == "waiting"
             && waiting_run_has_live_resume_source(conn, tables, &run_id, waiting_step_key.as_deref()).await?
         {
-            // A no-wake parent join/subscription park can race a child/signal
-            // wake that already registered the timer store. Preserve any row
-            // that exists; the next terminal signal will register if none does.
+            // Deliberate event-only park: no timer and no in-flight row. This
+            // is safe only because the live resume source checked above
+            // guarantees a signal/child completion will register a due wake.
+            // `ack_park` clears only in-flight so a concurrent event wake
+            // registration in the timer store is not clobbered.
+            scheduler_store
+                .ack_park(&run_id)
+                .await
+                .map_err(scheduler_store_error_to_registry)?;
         } else {
             scheduler_store
                 .ack_terminal(&run_id)
