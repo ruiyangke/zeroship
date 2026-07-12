@@ -3,7 +3,7 @@
 //! [`VerbDispatch`] that answers with canned `SeamRow`s — NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
-//! (`crates/zeroship-migrate/src/apply/backend/postgres.rs`), but exercised through
+//! (`crates/zero_migrate-migrate/src/apply/backend/postgres.rs`), but exercised through
 //! the *addon's* bridge types (`NapiHostSession` + `VerbDispatch`), so it proves:
 //!
 //! 1. `executor::apply::<NapiHostSession<MockDispatch>>` monomorphizes and runs the

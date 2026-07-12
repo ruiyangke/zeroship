@@ -905,7 +905,7 @@ impl VectorMetric {
 /// SDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff
 /// [`zero_migrate_schema::diff::MaskKind`] EXACTLY. A CLOSED enum — like every other IR
 /// token-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
-/// `.ir.json` cannot smuggle an arbitrary mask-kind string into the `__zsmask`
+/// `.ir.json` cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`
 /// sentinel render seam).
 ///
 /// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the
@@ -995,7 +995,7 @@ impl IrClassification {
 /// A column-masking facet (`.mask({ kind, classification })`) carried on the IR.
 ///
 /// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
-/// mask from the LIVE `__zsmask` COMMENT sentinel on the `_masked` sibling
+/// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
 /// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold
 /// ([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no
 /// sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
@@ -1003,7 +1003,7 @@ impl IrClassification {
 /// `MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the
 /// sentinel — never gets a sentinel emitted because the op lower had no mask to emit).
 /// Carrying it closes BOTH the gen-types type-fidelity gap and the runtime
-/// masking-fidelity gap in one move (the lower stamps the `__zsmask` sentinel from
+/// masking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from
 /// this facet).
 ///
 /// An ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the
@@ -1030,7 +1030,7 @@ pub struct IrMask {
 
 impl IrMask {
     /// Convert to the `{ kind, classification }` JSON sub-object that
-    /// `field_to_sdk_def` / the `__zsmask` sentinel codec
+    /// `field_to_sdk_def` / the `zero-migrate:mask` sentinel codec
     /// ([`zero_migrate_schema::query::mask_sentinel_for_field`]) expect on `def.mask`.
     #[must_use]
     pub fn to_sdk_json(self) -> serde_json::Value {
@@ -1129,9 +1129,9 @@ pub struct IrColumn {
     pub case_sensitive: Option<bool>,
     /// A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike
     /// `id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live
-    /// `__zsmask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
+    /// `zero-migrate:mask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
     /// live DB, so the facet is carried here to keep it through author→generate→fold
-    /// (and so the op lower emits the `__zsmask` sentinel the runtime later reads). An
+    /// (and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An
     /// encrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT
     /// carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`
     /// ⇒ a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.
@@ -2600,7 +2600,7 @@ pub enum Op {
         case_sensitive: Option<bool>,
         /// **#173** — a STANDALONE column mask for a masked added column (the same facet
         /// `IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits
-        /// the `__zsmask` sentinel + `_masked` sibling). Default-absent +
+        /// the `zero-migrate:mask` sentinel + `_masked` sibling). Default-absent +
         /// `skip_serializing_if` ⇒ byte-identical when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mask: Option<IrMask>,
@@ -5710,10 +5710,10 @@ mod tests {
     fn ir_default_nextval_round_trips_compact_wire() {
         for (wire, sequence) in [
             (
-                r#"{"nextval":{"name":"audit_events_id_seq","schema":"zeroship"}}"#,
+                r#"{"nextval":{"name":"audit_events_id_seq","schema":"zero_migrate"}}"#,
                 SequenceRef {
                     name: "audit_events_id_seq".into(),
-                    schema: Some("zeroship".into()),
+                    schema: Some("zero_migrate".into()),
                 },
             ),
             (

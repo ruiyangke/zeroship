@@ -27,17 +27,17 @@ fn token() -> String {
 }
 
 /// Run the binary with an explicit working directory and a clean+augmented env
-/// (so config discovery in CWD and the `ZEROSHIP_MIGRATE_*` vars are exercised
+/// (so config discovery in CWD and the `ZERO_MIGRATE_*` vars are exercised
 /// faithfully). `DATABASE_URL` is removed from the inherited env so a stray host
 /// value never leaks into a config/precedence test.
 fn run_bin_in(cwd: &Path, env: &HashMap<&str, String>, args: &[&str]) -> (bool, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zero-migrate"));
     cmd.current_dir(cwd);
     cmd.env_remove("DATABASE_URL");
-    cmd.env_remove("ZEROSHIP_MIGRATE_MIGRATIONS_DIR");
-    cmd.env_remove("ZEROSHIP_MIGRATE_SCHEMA_FILE");
-    cmd.env_remove("ZEROSHIP_MIGRATE_ENGINE");
-    cmd.env_remove("ZEROSHIP_MIGRATE_PROFILE");
+    cmd.env_remove("ZERO_MIGRATE_MIGRATIONS_DIR");
+    cmd.env_remove("ZERO_MIGRATE_SCHEMA_FILE");
+    cmd.env_remove("ZERO_MIGRATE_ENGINE");
+    cmd.env_remove("ZERO_MIGRATE_PROFILE");
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -91,7 +91,7 @@ fn config_precedence_dir_flag_over_env_over_config() {
 
     // Level 2: env overrides config → lands in env_dir, NOT cfg_dir.
     let mut env = HashMap::new();
-    env.insert("ZEROSHIP_MIGRATE_MIGRATIONS_DIR", "from_env".to_string());
+    env.insert("ZERO_MIGRATE_MIGRATIONS_DIR", "from_env".to_string());
     let (ok, out, err) = run_bin_in(&root, &env, &["new", "beta"]);
     assert!(ok, "env-level new must succeed\n{out}\n{err}");
     assert_eq!(list_sql(&env_dir).len(), 1, "env dir got the file");
@@ -243,7 +243,7 @@ fn malformed_config_is_a_clear_error() {
 /// the config file's `database_url`. Pre-fix, clap's `env = "DATABASE_URL"` yields
 /// `Some("")`, the config fallback is skipped, and `classify_engine("")` →
 /// Unsupported, so `status` fails. Post-fix the config DSN is used. The other four
-/// `ZEROSHIP_MIGRATE_*` vars already treat empty-as-unset; the DSN must match.
+/// `ZERO_MIGRATE_*` vars already treat empty-as-unset; the DSN must match.
 #[test]
 fn empty_database_url_env_falls_back_to_config_dsn() {
     let tok = token();

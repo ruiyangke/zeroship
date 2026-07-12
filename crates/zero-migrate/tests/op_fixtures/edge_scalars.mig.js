@@ -7,7 +7,7 @@
 //   - a fractional value carried via decimal() (a JS float is rejected at load);
 //   - a unicode + escape-bearing string literal;
 //   - a boolean and a null.
-import { table, decimal } from "@zeroship/migrate";
+import { table, decimal } from "zero-migrate";
 
 export const name = "edge_scalars";
 

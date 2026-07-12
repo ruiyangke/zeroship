@@ -679,13 +679,13 @@ pub struct FieldDescriptor {
     pub case_sensitive: Option<bool>,
     /// `t.encrypted({ mode, keyId, wraps })` — the encryption sub-object,
     /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
-    /// `/* zsenc:mode:keyId:wraps */` sentinel (the contract plugin-db reads at
+    /// `/* zero-migrate:enc:mode:keyId:wraps */` sentinel (the contract plugin-db reads at
     /// runtime). Mirrors `encrypted` on the wire `FieldDef`.
     #[serde(default)]
     pub encrypted: Option<serde_json::Value>,
     /// `.mask({ kind, classification })` — the mask sub-object, carried
     /// VERBATIM. When present the table gains a hidden `<col>_masked TEXT` sibling
-    /// + a `COMMENT … __zsmask:…` sentinel. Mirrors `mask` on the wire `FieldDef`.
+    /// + a `COMMENT … zero-migrate:mask:…` sentinel. Mirrors `mask` on the wire `FieldDef`.
     #[serde(default)]
     pub mask: Option<serde_json::Value>,
     /// `t.string().fts(language?)` — `true` ⇒ this text column participates in the
@@ -1073,7 +1073,7 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 
 /// **P4 HALF A** — build the shared [`zero_migrate_schema::diff::EncryptionMeta`] for
 /// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
-/// Used to render the PG `COMMENT ON COLUMN` `zsenc:` sentinel (via the shared
+/// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
 /// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
 /// the inline sentinel emitter (`mode = randomised`, `keyId = default`,
@@ -2053,7 +2053,7 @@ fn build_table_snapshot_impl(
         // phantom-drifts against the live table the engine creates. It round-
         // trips as a plain nullable TEXT column.
         //
-        // **P4 HALF A** — the `__zsmask:kind=…,classification=…` sentinel that
+        // **P4 HALF A** — the `zero-migrate:mask:kind=…,classification=…` sentinel that
         // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
         // read-pass is now EMITTED into the generated DDL: it rides on the
         // sibling column's `mask_sentinel`, which `render_create_table` /
@@ -4175,7 +4175,7 @@ impl DeclarativeAuthor {
     /// ([`descriptor_to_sdk_schema`], stashed on [`DesiredSchema::sqlite_schemas`])
     /// and hands it to the same builder plugin-db's runtime uses — so the
     /// `generate`d SQLite table (system fields, mask `_masked` siblings + inline
-    /// `__zsmask:` sentinels, encrypted BLOB columns + inline `zsenc:` sentinels,
+    /// `zero-migrate:mask:` sentinels, encrypted BLOB columns + inline `zero-migrate:enc:` sentinels,
     /// inline FK clauses, the three system-field indexes) is byte-for-byte the same
     /// shape, and lands UNqualified in `main` (= the app file).
     ///
@@ -4918,7 +4918,7 @@ impl DeclarativeAuthor {
             // legacy T12 `__fts` generated-column sentinel path.
             let default = default_clause(c.default.as_deref());
             let checks = inline_checks_clause(c);
-            // **P4 HALF A** — the inline `/* zsenc:… */` sentinel rides between
+            // **P4 HALF A** — the inline `/* zero-migrate:enc:… */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
             // column is byte-identical to a `registerModel`-created one.
@@ -4976,8 +4976,8 @@ impl DeclarativeAuthor {
         );
         let mut statements: Vec<String> = vec![create];
         // **P4 HALF A** — append `COMMENT ON COLUMN … '<sentinel>'` for every
-        // column carrying a comment sentinel (`__zsmask:…` on a masked sibling,
-        // `zsenc:…` on an encrypted column), so the runtime sentinel is part of
+        // column carrying a comment sentinel (`zero-migrate:mask:…` on a masked sibling,
+        // `zero-migrate:enc:…` on an encrypted column), so the runtime sentinel is part of
         // the same migration as the table create (an interrupted apply never
         // leaves a column without its sentinel). The comment body is built by
         // the shared codecs; we only quote it into the statement here. Each
@@ -5121,7 +5121,7 @@ impl DeclarativeAuthor {
 
     /// **P4 HALF A** — render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
     /// '<sentinel>'` statement for a column carrying a `comment_sentinel`
-    /// (`__zsmask:…` for a masked sibling or `zsenc:…` for an encrypted column),
+    /// (`zero-migrate:mask:…` for a masked sibling or `zero-migrate:enc:…` for an encrypted column),
     /// or `None` for a column without one. The sentinel BODY is built by the
     /// shared codecs (threaded onto the snapshot in `desired_snapshot`) — never
     /// re-spelled here; this only wraps it in the schema-qualified
@@ -6104,7 +6104,7 @@ impl DdlEmitter for PgEmitter {
         );
         let mut up: Vec<String> = vec![add];
         // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
-        // sentinel (`__zsmask:…` for a masked sibling, `zsenc:…` for an
+        // sentinel (`zero-migrate:mask:…` for a masked sibling, `zero-migrate:enc:…` for an
         // encrypted column) in the same migration (atomic with the column), as its
         // OWN structural statement.
         if let Some(stmt) = self.comment_stmt(table, c) {
@@ -6306,7 +6306,7 @@ impl DdlEmitter for SqliteEmitter {
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
         let checks = inline_checks_clause(c);
-        // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
+        // **P4 HALF A** — inline `/* zero-migrate:enc:… */` for an encrypted column added
         // after the table exists.
         let enc = c
             .encryption_sentinel
@@ -6324,10 +6324,10 @@ impl DdlEmitter for SqliteEmitter {
         // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
         // exactly like a create-time sentinel.
         //
-        // `comment_sentinel` holds the BARE body (`__zsmask:…` / `zsenc:…`, no
+        // `comment_sentinel` holds the BARE body (`zero-migrate:mask:…` / `zero-migrate:enc:…`, no
         // `/* */`); the SQLite inline form needs the `/* */` wrapper. The ENCRYPTED
         // column case is already covered by `enc` above (`encryption_sentinel` is the
-        // pre-wrapped `/* zsenc:… */` form), so only the MASKED-SIBLING case
+        // pre-wrapped `/* zero-migrate:enc:… */` form), so only the MASKED-SIBLING case
         // (`comment_sentinel` set, `encryption_sentinel` unset) rides here — wrapped.
         let sqlite_inline_sentinel = if c.encryption_sentinel.is_none() {
             c.comment_sentinel
@@ -7116,7 +7116,7 @@ mod snapshot_builder_refactor_safety_tests {
                 },
             ],
         );
-        let snap = build_resolved_table_snapshot("zeroship", &d, SqlDialect::Postgres)
+        let snap = build_resolved_table_snapshot("zero_migrate", &d, SqlDialect::Postgres)
             .expect("platform-exact JSON-backed table snapshot builds");
         assert_eq!(
             snap.columns
@@ -7134,7 +7134,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
 
         let sql =
-            DeclarativeAuthor::new("zeroship", "platform").render_create_table(&d.name, &snap, &[]);
+            DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(&d.name, &snap, &[]);
         assert!(
             !sql.contains("\"payload\" jsonb NOT NULL DEFAULT"),
             "platform-exact json column without explicit default must not render DEFAULT:\n{sql}"
@@ -7183,7 +7183,7 @@ mod snapshot_builder_refactor_safety_tests {
                 ..field("settings", "json")
             }],
         );
-        let snap = build_resolved_table_snapshot("zeroship", &d, SqlDialect::Postgres)
+        let snap = build_resolved_table_snapshot("zero_migrate", &d, SqlDialect::Postgres)
             .expect("platform-exact explicit JSON default snapshot builds");
         assert_eq!(
             snap.columns
@@ -7195,7 +7195,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
 
         let sql =
-            DeclarativeAuthor::new("zeroship", "platform").render_create_table(&d.name, &snap, &[]);
+            DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(&d.name, &snap, &[]);
         assert!(
             sql.contains("\"settings\" jsonb NOT NULL DEFAULT '{}'::jsonb"),
             "platform-exact explicit json default must still render:\n{sql}"

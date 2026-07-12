@@ -1,6 +1,6 @@
 // op-level dialect() fixture: a whole PostgreSQL-only op is present on PG and
 // absent on SQLite/MySQL.
-import { dialect, table, t } from "@zeroship/migrate";
+import { dialect, table, t } from "zero-migrate";
 
 export default {
   name: "dialectal_ops",

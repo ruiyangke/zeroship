@@ -83,10 +83,10 @@ TableSnapshot {
             identity: None,
             case_sensitive: None,
             encryption_sentinel: Some(
-                "/* zsenc:randomised:default:string */",
+                "/* zero-migrate:enc:randomised:default:string */",
             ),
             comment_sentinel: Some(
-                "zsenc:randomised:default:string",
+                "zero-migrate:enc:randomised:default:string",
             ),
             comment: None,
         },

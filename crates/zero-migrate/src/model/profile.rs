@@ -2410,7 +2410,7 @@ mod tests {
             &cap,
             ceiling,
             draft,
-            "zeroship",
+            "zero_migrate",
             KEY,
             b"nonce-sealed-raw-rls".to_vec(),
             ISSUED_AT,
@@ -2421,7 +2421,7 @@ mod tests {
         assert!(guard_cfg.require_rls());
 
         let author = crate::render::lower::IrAuthor::new(
-            "zeroship",
+            "zero_migrate",
             "app_corpus",
             zero_migrate_schema::query::SqlDialect::Postgres,
         )
@@ -2435,7 +2435,7 @@ mod tests {
             name: "sealed_raw_rls".to_string(),
             owner_app: "app_corpus".to_string(),
             ops: vec![crate::model::ir::Op::PgRaw {
-                sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".to_string(),
+                sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".to_string(),
                 reason: "require_rls raw table creation regression".to_string(),
             }],
             flags: Default::default(),

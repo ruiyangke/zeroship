@@ -381,7 +381,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
     let vendor_samples = vec![
         Expr::FnCall {
             r#fn: ScalarFn::CurrentSetting,
-            args: vec![lit_str("zeroship.tenant_app"), Expr::lit(IrScalar::Bool(true))],
+            args: vec![lit_str("zero_migrate.tenant_app"), Expr::lit(IrScalar::Bool(true))],
         },
         Expr::FnCall {
             r#fn: ScalarFn::CurrentUser,

@@ -5,10 +5,10 @@
 //! committed `.ir.json` bytes without a normal-graph dependency on
 //! the upstream bundle layer:
 //!
-//! - [`MigrationFileEntry`] — the manifest entry type, copied from
-//!   `the upstream bundle layer::manifest::MigrationFileEntry` (identical fields + serde).
-//! - [`sha256_hex`] — the canonical content-addressed hash, copied from
-//!   `the upstream bundle layer::sha256_hex`.
+//! - [`MigrationFileEntry`] — the manifest entry type, copied from the upstream
+//!   bundle layer's `manifest::MigrationFileEntry` (identical fields + serde).
+//! - [`sha256_hex`] — the canonical content-addressed hash, copied from the
+//!   upstream bundle layer's `sha256_hex`.
 //!
 //! The serde shape and the hash bytes must stay identical to the originals: the
 //! committed migration `.ir.json` hash is content-addressed, so any drift would

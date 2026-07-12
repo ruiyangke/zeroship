@@ -373,7 +373,7 @@ fn split_column_catalog_comment(comment: Option<String>) -> (Option<String>, Opt
 }
 
 fn is_internal_column_comment_sentinel(comment: &str) -> bool {
-    comment.starts_with("__zsmask:") || comment.starts_with("zsenc:")
+    comment.starts_with("zero-migrate:mask:") || comment.starts_with("zero-migrate:enc:")
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {

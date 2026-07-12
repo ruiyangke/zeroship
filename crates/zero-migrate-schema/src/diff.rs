@@ -240,7 +240,7 @@ pub struct ColumnInfo {
     /// (SQLite); `None` otherwise (the default — every existing
     /// non-vector column). PR 4/5 populate this from
     /// `information_schema` / `sqlite_master.sql` introspection
-    /// (Q-P4-A — regex on DDL today, sidecar `__zs_schema_meta` is
+    /// (Q-P4-A — regex on DDL today, sidecar `__zero_migrate_schema_meta` is
     /// the upgrade path).
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub vector_dims: Option<i32>,
@@ -327,9 +327,9 @@ impl Default for ColumnInfo {
 /// - **PG** (PR 2): from `<meta>.encrypted_columns` rows the
 ///   `register_model` DDL emitter writes alongside the table create.
 /// - **SQLite** (PR 3): from a sentinel CHECK comment
-///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
+///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern P4 uses for
-///   vector dims; sidecar `__zs_schema_meta` is the upgrade path).
+///   vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
     /// Encryption mode declared by the SDK.
@@ -376,7 +376,7 @@ pub enum WrappedType {
 /// - **PG**: from `<meta>.mask_columns` rows the DDL
 ///   emitter writes alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
-///   `/* zsmask:{kind}:{classification} */` parsed out of
+///   `/* zero-migrate:mask:{kind}:{classification} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern P4 / P5 use).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskMeta {
@@ -615,7 +615,7 @@ pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, S
     //
     // **P5.5 PR 6** — the LEFT JOIN against `pg_description` pulls the
     // per-column comment populated by the
-    // `COMMENT ON COLUMN <coll>.<sibling> IS '__zsmask:...'`
+    // `COMMENT ON COLUMN <coll>.<sibling> IS 'zero-migrate:mask:...'`
     // statements the DDL emitter writes alongside CREATE TABLE +
     // ALTER ADD COLUMN. We hand the raw description string back as
     // `pg_comment`; the second pass below parses sentinel-tagged
@@ -670,18 +670,18 @@ SELECT c.relname AS table_name,
             .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
         // **P4 HALF A** — column comments carry TWO sentinel families:
-        //   - `__zsmask:…` on a `<col>_masked` sibling → deferred to the second
+        //   - `zero-migrate:mask:…` on a `<col>_masked` sibling → deferred to the second
         //     pass (stamps `MaskMeta` on the PARENT);
-        //   - `zsenc:…` on the encrypted column itself → parsed inline here into
-        //     `EncryptionMeta`. On PG the inline `/* zsenc */` DDL comment is
+        //   - `zero-migrate:enc:…` on the encrypted column itself → parsed inline here into
+        //     `EncryptionMeta`. On PG the inline `/* zero-migrate:enc */` DDL comment is
         //     parse-discarded, so the engine/registerModel also write a
-        //     `COMMENT ON COLUMN` carrying the `zsenc:` body; this is where the
+        //     `COMMENT ON COLUMN` carrying the `zero-migrate:enc:` body; this is where the
         //     data plane (and the diff) recover it.
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
-            if comment.starts_with("__zsmask:") && column.ends_with("_masked") {
+            if comment.starts_with("zero-migrate:mask:") && column.ends_with("_masked") {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with("zsenc:") {
+            } else if comment.starts_with("zero-migrate:enc:") {
                 match crate::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
@@ -697,7 +697,7 @@ SELECT c.relname AS table_name,
                             column = %column,
                             comment = %comment,
                             error = %e,
-                            "diff: malformed zsenc sentinel on PG column; \
+                            "diff: malformed zero-migrate:enc sentinel on PG column; \
                              treating column as unencrypted"
                         );
                     }
@@ -719,7 +719,7 @@ SELECT c.relname AS table_name,
         );
     }
     // **P5.5 PR 6** — second pass: for every sibling carrying a
-    // `__zsmask:…` sentinel, parse the kind+classification and stamp
+    // `zero-migrate:mask:…` sentinel, parse the kind+classification and stamp
     // `MaskMeta` onto the PARENT column. The diff classifier reads
     // `parent.mask` to decide whether to emit a 6a backfill /
     // 6b rewrite / 6c removal op.
@@ -1343,7 +1343,7 @@ pub fn compute_diff(
     // column the instant the schema says "encrypted" → corruption.
     //
     // Detect the transition by comparing the LIVE encryption state
-    // (introspected from the `zsenc:` sentinel into `ColumnInfo.encryption`)
+    // (introspected from the `zero-migrate:enc:` sentinel into `ColumnInfo.encryption`)
     // against the DECLARED encryption state (`def.encrypted`). When they
     // disagree we emit a `RewriteColumnType` op classified Destructive so
     // the transition is VISIBLE — refused by validation and routed to a
@@ -2167,7 +2167,7 @@ mod tests {
         // attachment so PG introspection round-trips on the next deploy.
         let sql = add_sibling[0].sql.as_deref().unwrap_or("");
         assert!(
-            sql.contains("ADD COLUMN") && sql.contains("ssn_masked") && sql.contains("__zsmask:"),
+            sql.contains("ADD COLUMN") && sql.contains("ssn_masked") && sql.contains("zero-migrate:mask:"),
             "sibling ADD must include COMMENT ON COLUMN sentinel: {sql}"
         );
 

@@ -2079,12 +2079,12 @@ fn t2b_privileged_constructs_still_denied_under_confined() {
     assert_denied("ALTER TABLE project_acme.t FORCE ROW LEVEL SECURITY");
     assert_denied("DROP OWNED BY evil");
     // cross-schema to the platform schema stays denied.
-    assert_cross_schema("CREATE TABLE zeroship.t(id int)");
+    assert_cross_schema("CREATE TABLE zero_migrate.t(id int)");
     // a 0025-style bootstrap DO block is denied under Confined.
     assert_denied(
         "DO $bootstrap$ BEGIN \
-         EXECUTE 'CREATE ROLE zeroship_app NOLOGIN'; \
-         EXECUTE 'ALTER ROLE zeroship_app SET search_path = zeroship, public'; \
+         EXECUTE 'CREATE ROLE zero_migrate_app NOLOGIN'; \
+         EXECUTE 'ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public'; \
          END $bootstrap$;",
     );
 }

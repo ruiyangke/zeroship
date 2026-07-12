@@ -45,7 +45,7 @@ const DEFAULT_DIR: &str = "./migrations";
 
 /// The generic meta/journal schema for the public (Trusted/Confined) tool —
 /// dbmate's `schema_migrations` lives in `public`. The Platform profile overrides
-/// this to `<primary-schema>_migrations` (e.g. `zeroship_migrations`).
+/// this to `<primary-schema>_migrations` (e.g. `zero_migrate_migrations`).
 const DEFAULT_GENERIC_SCHEMA: &str = "public";
 
 /// dbmate's conventional schema-dump output path.
@@ -61,7 +61,7 @@ struct Cli {
     /// Migration directory. dbmate files (`<14-digit>_<desc>.sql` with
     /// `-- migrate:up`/`down` sections) or Flyway files (`V<NNNN>__*.sql`) are
     /// auto-detected. Precedence (highest first): this flag, then the
-    /// `ZEROSHIP_MIGRATE_MIGRATIONS_DIR` env, then `migrations_dir` in
+    /// `ZERO_MIGRATE_MIGRATIONS_DIR` env, then `migrations_dir` in
     /// `zero-migrate.toml`, then the default `./migrations`. No clap
     /// `default_value`, so the bin can tell "flag absent" from "flag given".
     #[arg(long, global = true)]
@@ -72,7 +72,7 @@ struct Cli {
     /// use clap's `env=` here: clap 4 yields `Some("")` for a present-but-empty var,
     /// which would defeat the config fallback (and `classify_engine("")` is an
     /// Unsupported error). Instead the bin reads `DATABASE_URL` explicitly through the
-    /// SAME empty-is-unset rule the four `ZEROSHIP_MIGRATE_*` vars use, so an empty
+    /// SAME empty-is-unset rule the four `ZERO_MIGRATE_*` vars use, so an empty
     /// value falls through to the config DSN (MED-1). This field holds ONLY the
     /// `--database-url` flag value.
     #[arg(long, global = true)]
@@ -81,7 +81,7 @@ struct Cli {
     /// Force the database engine, overriding DSN-shape auto-detection: `pg` |
     /// `sqlite` | `mysql`. Resolves an ambiguous bare-path DSN; ERRORS if it contradicts an
     /// unambiguous DSN scheme (e.g. `--engine sqlite` with a `postgres://` URL).
-    /// Precedence (highest first): this flag, then `ZEROSHIP_MIGRATE_ENGINE`, then
+    /// Precedence (highest first): this flag, then `ZERO_MIGRATE_ENGINE`, then
     /// `engine` in the config. Absent means DSN auto-detect (no behaviour change for
     /// existing runs).
     #[arg(long, global = true, value_enum)]
@@ -92,12 +92,12 @@ struct Cli {
     /// `platform` widens the guard for the platform's own schemas (the
     /// internal compose/ops posture — must be passed EXPLICITLY); `confined` is
     /// the full creator deny-list, single-schema. Precedence: this flag >
-    /// `ZEROSHIP_MIGRATE_PROFILE` env > `profile` in the config > default `trusted`.
+    /// `ZERO_MIGRATE_PROFILE` env > `profile` in the config > default `trusted`.
     #[arg(long, global = true, value_enum)]
     profile: Option<ProfileArg>,
 
     /// Schema allowlist for the `platform` profile (repeatable). Default:
-    /// `zeroship`, `public`. The FIRST value is the primary schema
+    /// `zero_migrate`, `public`. The FIRST value is the primary schema
     /// pinned into `search_path`. Ignored under `trusted` (no confinement).
     #[arg(long = "schema", global = true)]
     schema: Vec<String>,
@@ -143,7 +143,7 @@ struct Cli {
     /// Schema-dump file path — the output of `dump`, the input of `load`, and the
     /// target of the auto-refresh after `migrate`/`up`/`rollback`/`down`. Global so
     /// it is available on every command (dbmate's `--schema-file`). Precedence
-    /// (highest first): this flag, then `ZEROSHIP_MIGRATE_SCHEMA_FILE` env, then
+    /// (highest first): this flag, then `ZERO_MIGRATE_SCHEMA_FILE` env, then
     /// `schema_file` in `zero-migrate.toml`, then the default `./db/schema.sql`.
     #[arg(long, global = true)]
     schema_file: Option<PathBuf>,
@@ -151,7 +151,7 @@ struct Cli {
     /// Suppress the automatic `schema.sql` refresh that follows a successful
     /// `migrate`/`up`/`rollback`/`down` (dbmate's `--no-dump-schema`). Auto-dump is
     /// ON by default (dbmate parity). Precedence (highest first): this flag, then
-    /// `ZEROSHIP_MIGRATE_DUMP_SCHEMA` env, then `dump_schema` in the config; default
+    /// `ZERO_MIGRATE_DUMP_SCHEMA` env, then `dump_schema` in the config; default
     /// = auto-dump ON. The flag is one-directional (it can only turn auto-dump OFF);
     /// to force it ON despite a config that disables it, simply omit the flag.
     #[arg(long, global = true)]
@@ -1567,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_run_config_uses_zeroship_allowlist_and_migrations_meta() {
+    fn platform_run_config_uses_default_allowlist_and_migrations_meta() {
         let cli = parse(&[
             "zero-migrate",
             "migrate",
@@ -1578,9 +1578,12 @@ mod tests {
         ]);
         let cfg = run_config(&cli, &empty_layer()).expect("config builds");
         assert_eq!(cfg.profile, RunProfile::Platform);
-        assert_eq!(cfg.project_schema, "zeroship");
-        assert_eq!(cfg.meta_schema, "zeroship_migrations");
-        assert_eq!(cfg.schemas, vec!["zeroship".to_string(), "public".to_string()]);
+        // The standalone default allowlist is `["public"]`; the primary (first)
+        // schema drives the `<primary>_migrations` journal derivation. A host
+        // that runs a multi-schema project injects its own allowlist via config.
+        assert_eq!(cfg.project_schema, "public");
+        assert_eq!(cfg.meta_schema, "public_migrations");
+        assert_eq!(cfg.schemas, vec!["public".to_string()]);
     }
 
     #[test]

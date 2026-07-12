@@ -28,9 +28,9 @@ use crate::apply::executor::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
-// `PolicyProfile` is consumed only by the zsv8-gated `build_policy_profile`.
+// `PolicyProfile` is consumed only by the addon-host-gated `build_policy_profile`.
 use crate::plan::loader::{load_dir, LoaderError};
-// `PLATFORM_OWNER_APP` feeds only the zsv8-gated platform-TS-apply path.
+// `PLATFORM_OWNER_APP` feeds only the addon-host-gated platform-TS-apply path.
 use crate::ops::status::{status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -77,10 +77,10 @@ pub struct RunConfig {
     /// to the same `pg_advisory_lock(hashtext(project_id))` and serialize (§9).
     pub project_id: String,
     /// The primary platform schema, pinned into `search_path` (the first
-    /// `--schema`, conventionally `zeroship`).
+    /// `--schema`, conventionally `zero_migrate`).
     pub project_schema: String,
     /// The Platform schema allowlist (`--schema`, repeatable; default
-    /// `zeroship`,`public`).
+    /// `zero_migrate`,`public`).
     pub schemas: Vec<String>,
     /// The `CREATE EXTENSION` allowlist (default `citext`,`uuid-ossp`).
     pub extensions: Vec<String>,
@@ -227,20 +227,20 @@ pub enum RunError {
     /// V8-free (`--no-default-features`) build. Names a *build-time* absence,
     /// distinct from the *CLI-path* policy of [`RunError::MysqlLiveExecUnimplemented`].
     #[error(
-        "MySQL execution requires the `zsv8` runtime host. This binary was \
-         compiled V8-free (`--no-default-features`); rebuild with `--features zsv8` \
+        "MySQL execution requires the `addon-host` runtime host. This binary was \
+         compiled V8-free (`--no-default-features`); rebuild with `--features addon-host` \
          (the default build)."
     )]
-    MysqlRequiresZsv8,
+    MysqlRequiresAddonHost,
     /// Authoring `.ts` migration records requires the V8 runtime host, absent
     /// from a V8-free (`--no-default-features`) build.
     #[error(
-        "Authoring `.ts` migration records requires the `zsv8` runtime host; this \
+        "Authoring `.ts` migration records requires the `addon-host` runtime host; this \
          binary was compiled V8-free (`--no-default-features`). Rebuild with \
-         `--features zsv8` (the default build), or supply committed `.ir.json` / \
+         `--features addon-host` (the default build), or supply committed `.ir.json` / \
          `.sql` corpus instead."
     )]
-    TsRecordRequiresZsv8,
+    TsRecordRequiresAddonHost,
     /// A Postgres engine was selected, but this binary was compiled without the
     /// `native-pg` driver (`--no-default-features`, no `PgSession` impl). Rebuild
     /// with `--features native-pg` (the default build), or target a SQLite DSN.
@@ -250,7 +250,7 @@ pub enum RunError {
          `--features native-pg` (the default build), or use a SQLite DSN."
     )]
     PgRequiresNativePg,
-    /// An explicit `--engine` (or `ZEROSHIP_MIGRATE_ENGINE` / config `engine`)
+    /// An explicit `--engine` (or `ZERO_MIGRATE_ENGINE` / config `engine`)
     /// contradicts the engine the DSN's unambiguous scheme implies. We refuse
     /// rather than silently trusting one side.
     #[error(
@@ -319,7 +319,7 @@ pub enum RunError {
 
 #[inline]
 fn mysql_live_unsupported() -> RunError {
-    RunError::MysqlRequiresZsv8
+    RunError::MysqlRequiresAddonHost
 }
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
@@ -1622,9 +1622,14 @@ async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
 }
 
 /// Convenience for the bin: the conventional Platform schema allowlist default.
+///
+/// The standalone default is `["public"]` — the primary (first) schema drives
+/// the `<primary>_migrations` journal derivation. A host that runs a
+/// multi-schema project (e.g. the zero_migrate control plane) injects its own
+/// allowlist (`["<primary>", "public"]`) via config.
 #[must_use]
 pub fn default_platform_schemas() -> Vec<String> {
-    vec!["zeroship".to_string(), "public".to_string()]
+    vec!["public".to_string()]
 }
 
 /// Convenience for the bin: the conventional Platform extension allowlist default.
@@ -1650,7 +1655,7 @@ mod tests {
         let mut m = Migration {
             version: migration_id_for_version(version),
             name: format!("m{version}"),
-            up: "CREATE TABLE zeroship.t (id int)".to_string(),
+            up: "CREATE TABLE zero_migrate.t (id int)".to_string(),
             down: None,
             checksum: Checksum::of(&ChecksumInput {
                 up: "",
@@ -1691,7 +1696,7 @@ mod tests {
     fn mysql_run_config() -> RunConfig {
         RunConfig {
             dir: std::path::PathBuf::from("/definitely/missing/mysql-render-only-migrations"),
-            database_url: "mysql://localhost/zeroship".to_string(),
+            database_url: "mysql://localhost/zero_migrate".to_string(),
             engine_override: Some(EngineKind::Mysql),
             profile: RunProfile::Trusted,
             project_id: "mysql_render_only".to_string(),
@@ -1761,7 +1766,7 @@ mod tests {
         // Both feature states fail closed before touching the migration dir; only
         // the variant differs (CLI-path policy vs. V8-free build-out refusal).
         assert!(
-            matches!(err, RunError::MysqlRequiresZsv8),
+            matches!(err, RunError::MysqlRequiresAddonHost),
             "expected MySQL fail-closed error, got {err:?}"
         );
     }
@@ -1776,10 +1781,10 @@ mod tests {
             engine_override: None,
             profile: RunProfile::Platform,
             project_id: "platform".to_string(),
-            project_schema: "zeroship".to_string(),
+            project_schema: "zero_migrate".to_string(),
             schemas: default_platform_schemas(),
             extensions: default_platform_extensions(),
-            meta_schema: "zeroship_migrations".to_string(),
+            meta_schema: "zero_migrate_migrations".to_string(),
             yes: false,
             statement_timeout: Duration::from_secs(60),
             lock_timeout: Duration::from_secs(30),
@@ -1838,7 +1843,7 @@ mod tests {
         // NOT a SQLite bare path — the byte-identical guard for keyword DSNs.
         assert_eq!(
             classify_engine(
-                "host=localhost port=5440 user=postgres password=zeroship dbname=zero_migrate_test"
+                "host=localhost port=5440 user=postgres password=zero_migrate dbname=zero_migrate_test"
             ),
             Engine::Postgres
         );
@@ -1862,8 +1867,8 @@ mod tests {
             Engine::Sqlite(PathBuf::from(":memory:"))
         );
         assert_eq!(
-            classify_engine("/var/lib/zeroship/dev.sqlite"),
-            Engine::Sqlite(PathBuf::from("/var/lib/zeroship/dev.sqlite"))
+            classify_engine("/var/lib/zero-migrate/dev.sqlite"),
+            Engine::Sqlite(PathBuf::from("/var/lib/zero-migrate/dev.sqlite"))
         );
 
         assert_eq!(classify_engine("mysql://user@host/db"), Engine::Mysql);

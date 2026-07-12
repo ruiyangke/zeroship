@@ -369,11 +369,11 @@ mod tests {
         assert!(!confined.grants(VendorCapability::Role));
         // Platform (Allowlist) → all caps + the schemas carried.
         let platform = VendorCapabilities::from_scope(Some(&SchemaScope::Allowlist(vec![
-            "zeroship".into(),
+            "zero_migrate".into(),
             "public".into(),
         ])));
         assert!(platform.grants(VendorCapability::Role));
-        assert_eq!(platform.schemas, vec!["zeroship".to_string(), "public".to_string()]);
+        assert_eq!(platform.schemas, vec!["zero_migrate".to_string(), "public".to_string()]);
         // Omitted/default public capability (None) → confined, not operator.
         let defaulted = VendorCapabilities::from_scope(None);
         assert!(!defaulted.grants(VendorCapability::RawSql));

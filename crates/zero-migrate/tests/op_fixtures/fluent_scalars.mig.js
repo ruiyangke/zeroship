@@ -7,7 +7,7 @@
 //     spelling is HARD-REJECTED by the Rust `IrScalar` deserializer).
 // This is the round-trip proof that spec-blessed decimal/bytes author values emit
 // shapes Rust accepts value-equal.
-import { table, t, decimal } from "@zeroship/migrate";
+import { table, t, decimal } from "zero-migrate";
 
 export const name = "fluent_scalars";
 

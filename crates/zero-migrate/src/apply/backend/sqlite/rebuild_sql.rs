@@ -335,7 +335,7 @@ async fn run_rebuild_steps(
 
     // (a0) H2 — Drop any stale temp table FIRST. The shared emitter renders the temp
     //      CREATE as `CREATE TABLE IF NOT EXISTS <tmp>`; a creator who pre-created
-    //      `<t>__zsrebuild` in a prior CreatorUp migration would otherwise have the
+    //      `<t>__zero_migrate_rebuild` in a prior CreatorUp migration would otherwise have the
     //      `IF NOT EXISTS` SILENTLY REUSE their polluted table — we'd INSERT…SELECT
     //      into the stale shape and RENAME the pollution into place. This engine-
     //      controlled DROP (under CreatorUp, on `main`) clears any such pollution so
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {
-        assert_eq!(SqliteRebuildSpec::tmp_name("users"), "users__zsrebuild");
+        assert_eq!(SqliteRebuildSpec::tmp_name("users"), "users__zero_migrate_rebuild");
     }
 
     #[test]

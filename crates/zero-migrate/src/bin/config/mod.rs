@@ -20,17 +20,17 @@ use std::path::{Path, PathBuf};
 pub const CONFIG_FILE_NAME: &str = "zero-migrate.toml";
 
 /// The DSN env var (unchanged name). Read HERE through the same empty-is-unset rule
-/// as the `ZEROSHIP_MIGRATE_*` vars (MED-1) — NOT via clap's `env=`, which would
+/// as the `ZERO_MIGRATE_*` vars (MED-1) — NOT via clap's `env=`, which would
 /// surface a present-but-empty `DATABASE_URL=` as `Some("")` and defeat the config
 /// fallback.
 pub const ENV_DATABASE_URL: &str = "DATABASE_URL";
 
 /// Env var names (analogous to the existing `DATABASE_URL`).
-pub const ENV_MIGRATIONS_DIR: &str = "ZEROSHIP_MIGRATE_MIGRATIONS_DIR";
-pub const ENV_SCHEMA_FILE: &str = "ZEROSHIP_MIGRATE_SCHEMA_FILE";
-pub const ENV_ENGINE: &str = "ZEROSHIP_MIGRATE_ENGINE";
-pub const ENV_PROFILE: &str = "ZEROSHIP_MIGRATE_PROFILE";
-pub const ENV_DUMP_SCHEMA: &str = "ZEROSHIP_MIGRATE_DUMP_SCHEMA";
+pub const ENV_MIGRATIONS_DIR: &str = "ZERO_MIGRATE_MIGRATIONS_DIR";
+pub const ENV_SCHEMA_FILE: &str = "ZERO_MIGRATE_SCHEMA_FILE";
+pub const ENV_ENGINE: &str = "ZERO_MIGRATE_ENGINE";
+pub const ENV_PROFILE: &str = "ZERO_MIGRATE_PROFILE";
+pub const ENV_DUMP_SCHEMA: &str = "ZERO_MIGRATE_DUMP_SCHEMA";
 
 /// The parsed `zero-migrate.toml`. Every key is optional; an absent key leaves
 /// that field `None` so the next-lower precedence layer supplies it.
@@ -199,7 +199,7 @@ fn parse_bool_env(s: &str) -> Option<bool> {
     }
 }
 
-/// Fold `ZEROSHIP_MIGRATE_DUMP_SCHEMA` (non-empty, parseable) over the file value.
+/// Fold `ZERO_MIGRATE_DUMP_SCHEMA` (non-empty, parseable) over the file value.
 /// A present-but-empty / unparseable env var is treated as unset.
 fn resolve_dump_schema(file_value: Option<bool>) -> Option<bool> {
     match std::env::var(ENV_DUMP_SCHEMA) {

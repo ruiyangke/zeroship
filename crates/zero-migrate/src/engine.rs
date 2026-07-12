@@ -44,7 +44,7 @@ use crate::render::step::{PlanStep, RenameStep};
 /// owns the obligation set, so the "refuse-if-any-outstanding" decision is made
 /// here, not at lower-time). It contains a NUL byte so it can never equal a real
 /// (parseable) table identifier.
-pub const TOUCHES_UNKNOWN: &str = "\0__zeroship_touches_unknown__";
+pub(crate) const TOUCHES_UNKNOWN: &str = "\0__zero_migrate_touches_unknown__";
 
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]

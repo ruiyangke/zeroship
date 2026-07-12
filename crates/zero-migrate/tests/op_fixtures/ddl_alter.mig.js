@@ -1,7 +1,7 @@
 // op.* migration fixture — setColumnType + set/drop not-null + set/drop default
 // + renameColumn + addConstraint (FK) + dropConstraint. Authored via the fluent
 // table() surface. Records the byte-identical frozen wire ops as before.
-import { table, t } from "@zeroship/migrate";
+import { table, t } from "zero-migrate";
 
 export const name = "ddl_alter";
 

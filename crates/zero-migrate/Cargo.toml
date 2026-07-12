@@ -31,13 +31,13 @@ default = ["host-pg", "standalone-cli"]
 # build (`--no-default-features --features host-pg`) stays cross-platform (no
 # io_uring), since no compio PG driver is ever present.
 host-pg = []
-# NOTE: the former `v8-host` / `zsv8` features are REMOVED. They used to gate the
+# NOTE: the former `v8-host` / `addon-host` features are REMOVED. They used to gate the
 # in-Rust-V8 authoring front-end (`src/frontend/`) + live-MySQL backend
 # (`src/apply/backend/mysql/`). Node now owns authoring/MySQL/PG execution (via the
 # `zero-migrate` host-recorder + the `zero-migrate-node` napi bridge over the
 # `pg`/`mysql2` npm drivers), so no in-Rust V8 host exists. That Rust source stays
 # in-tree as permanently never-compiled dead code, still spelled
-# `#[cfg(feature = "v8-host")]` / `#[cfg(feature = "zsv8")]`; build.rs declares
+# `#[cfg(feature = "v8-host")]` / `#[cfg(feature = "addon-host")]`; build.rs declares
 # those as expected cfg values (checked-cfg) so the build stays warning-free
 # without resurrecting the feature or pulling `v8`.
 #

@@ -33,7 +33,7 @@ napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 # The core engine, host-callback path ONLY: NO compio (→ no io_uring → the .node
-# is cross-platform), NO V8/zsv8. SQLite stays native (rusqlite bundled) inside
+# is cross-platform), NO V8/addon-host. SQLite stays native (rusqlite bundled) inside
 # the core; the host supplies PG/MySQL over the seam.
 zero-migrate = { path = "../zero-migrate", default-features = false, features = ["host-pg"] }
 

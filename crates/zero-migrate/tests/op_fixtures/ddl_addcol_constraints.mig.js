@@ -11,7 +11,7 @@
 //
 // Cases:
 //   - `.add({ type: t.text().unique() })`   ⇒ addColumn + addConstraint(unique)
-import { table, t } from "@zeroship/migrate";
+import { table, t } from "zero-migrate";
 
 export const name = "ddl_addcol_constraints";
 

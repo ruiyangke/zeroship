@@ -769,7 +769,7 @@ pub fn fold_ops(
                     });
                 }
                 // **#173 / #174** — thread the carried facets so the SNAPSHOT for a vector
-                // / masked added column renders the metric opclass / `__zsmask` sentinel
+                // / masked added column renders the metric opclass / `zero-migrate:mask` sentinel
                 // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
                 // the `<col>_masked` sibling for a masked column so the offline fold matches
                 // the live apply.
@@ -929,7 +929,7 @@ pub fn fold_ops(
                 // its `encryption_sentinel` / `comment_sentinel` — the EXACT fields
                 // P2 gen-types reads to drive the AEAD encrypt/decrypt pass. The
                 // apply path (`render_alter_column_type`) emits ONLY `ALTER COLUMN
-                // … TYPE bytea`, never the `COMMENT ON COLUMN … zsenc` an encrypted
+                // … TYPE bytea`, never the `COMMENT ON COLUMN … zero-migrate:enc` an encrypted
                 // column needs, so the LIVE DB also lacks the metadata after such an
                 // alter. Folding only `data_type` here would carry the OLD (now
                 // wrong / stale) sentinel — a silently-wrong snapshot, which P1
@@ -1013,7 +1013,7 @@ pub fn fold_ops(
                 if target_has_sentinel || source_has_sentinel {
                     return Err(FoldError::Unsupported(
                         "setColumnType to/from an encrypted (or masked) column \
-                         (the apply path cannot re-stamp the zsenc/zsmask sentinel; \
+                         (the apply path cannot re-stamp the zero-migrate:enc/zero-migrate:mask sentinel; \
                          fail-closed rather than fold a stale encryption contract)",
                     ));
                 }
@@ -2438,7 +2438,7 @@ pub fn fold_to_field_defs(
                     // **#173** — AddColumn carries no `id_prefix` (an added column is never
                     // the system PK), but it DOES carry the `vector_metric` + standalone
                     // `mask` facets, so the reconstructed descriptor for an added vector /
-                    // masked column round-trips the metric opclass / `__zsmask` mask
+                    // masked column round-trips the metric opclass / `zero-migrate:mask` mask
                     // through the offline fold.
                     let field = ir_column_to_field(&IrColumn {
                         name: column.clone(),
@@ -4366,7 +4366,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Finding #1 (MED) — setColumnType to/from an encrypted column must NOT
     // silently lose / carry a stale encryption sentinel. The fold fails closed
-    // (the apply path cannot re-stamp the zsenc sentinel today).
+    // (the apply path cannot re-stamp the zero-migrate:enc sentinel today).
     // -----------------------------------------------------------------------
 
     fn encrypted_text() -> ColType {
@@ -4385,7 +4385,7 @@ mod tests {
     }
 
     /// A FRESH `t.encrypted(text)` column folds WITH an encryption sentinel (the
-    /// shared builder stamps the `zsenc:` contract P2 gen-types reads). This is the
+    /// shared builder stamps the `zero-migrate:enc:` contract P2 gen-types reads). This is the
     /// baseline the alter path must preserve — assert the sentinel is present so the
     /// "alter loses it" regression below is meaningful.
     #[test]
@@ -4394,7 +4394,7 @@ mod tests {
         let c = snap.tables["v"].columns.iter().find(|c| c.name == "secret").unwrap();
         assert!(
             c.encryption_sentinel.is_some() || c.comment_sentinel.is_some(),
-            "a fresh encrypted column carries the zsenc sentinel (the P2 contract)"
+            "a fresh encrypted column carries the zero-migrate:enc sentinel (the P2 contract)"
         );
     }
 
@@ -4402,7 +4402,7 @@ mod tests {
     /// Pre-fix the fold transplanted ONLY `data_type` (bytea), keeping the OLD
     /// `encryption_sentinel=None` — so the folded encrypted column carried NO
     /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
-    /// from Eq). The apply path likewise never emits the `COMMENT … zsenc`, so live
+    /// from Eq). The apply path likewise never emits the `COMMENT … zero-migrate:enc`, so live
     /// also lacks it. Until apply can re-stamp it, the fold refuses the change.
     #[test]
     fn alter_column_type_to_encrypted_is_unsupported() {
@@ -4419,7 +4419,7 @@ mod tests {
 
     /// REGRESSION (Finding #1, symmetric): encrypted→plain via `setColumnType` is
     /// also FAIL-CLOSED. The SOURCE column carries the sentinel; transplanting only
-    /// `data_type` would leave the now-stale `zsenc` sentinel on a plaintext column.
+    /// `data_type` would leave the now-stale `zero-migrate:enc` sentinel on a plaintext column.
     #[test]
     fn alter_column_type_from_encrypted_is_unsupported() {
         let err = fold(&[

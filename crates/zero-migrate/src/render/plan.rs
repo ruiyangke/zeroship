@@ -57,7 +57,7 @@ impl SqliteRebuildSpec {
     /// The engine-chosen temp-table name for `table`.
     #[must_use]
     pub fn tmp_name(table: &str) -> String {
-        format!("{table}__zsrebuild")
+        format!("{table}__zero_migrate_rebuild")
     }
 }
 

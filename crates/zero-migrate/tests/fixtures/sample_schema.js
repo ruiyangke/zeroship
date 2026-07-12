@@ -1,8 +1,8 @@
 // Sample creator schema.js for the JS-front-end tests. Uses the REAL
-// `@zeroship/db` `t.*` DSL (resolved to the embedded dist by the eval graph),
+// `zero-migrate` `t.*` DSL (resolved to the embedded dist by the eval graph),
 // exercising the full-capability facets: encrypted (auto-masked), vector, an
 // explicit mask, and a ref.
-import { t } from "@zeroship/db";
+import { t } from "zero-migrate";
 
 const users = {
   email: t.string().required().unique(),

@@ -6481,7 +6481,7 @@ mod tests {
         )
         .is_ok());
         // Platform allow-list excluding "anything": refused.
-        let scope = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
+        let scope = SchemaScope::Allowlist(vec!["zero_migrate".into(), "public".into()]);
         let err = validate_ir_scoped(
             &foreign,
             Dialect::Postgres,
@@ -6495,7 +6495,7 @@ mod tests {
         let ok = ir_with(vec![Op::DropTable {
             table: "t".into(),
             cascade: None,
-            schema: Some("zeroship".into()),
+            schema: Some("zero_migrate".into()),
             existence_guard: None,
         }]);
         assert!(validate_ir_scoped(

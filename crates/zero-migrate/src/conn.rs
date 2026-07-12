@@ -173,7 +173,7 @@ pub struct ExecutorConfig {
     /// executor into a privileged profile.
     pub(crate) trust: crate::model::policy::TrustProfile,
     /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
-    /// references to (e.g. `zeroship` / `public`). Empty for
+    /// references to (e.g. `zero_migrate` / `public`). Empty for
     /// Confined (the `project_schema` is the sole permitted schema there) and for
     /// Trusted (no cross-schema confinement at all).
     pub(crate) platform_schemas: Vec<String>,
@@ -324,7 +324,7 @@ impl ExecutorConfig {
     ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
     ///   unqualified `up` name can never resolve to the journal — C1).
     /// - **Platform** ⇒ the full configured schema allowlist (e.g.
-    ///   `"zeroship", "public"`). A multi-schema changelog relies on
+    ///   `"zero_migrate", "public"`). A multi-schema changelog relies on
     ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
     ///   must resolve a creation target (`public`) — and at that point the
     ///   project schema does not yet exist, so a project-schema-only path would

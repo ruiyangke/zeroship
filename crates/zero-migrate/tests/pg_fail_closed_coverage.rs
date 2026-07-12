@@ -90,7 +90,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
     vec![
         Expr::FnCall {
             r#fn: ScalarFn::CurrentSetting,
-            args: vec![lit_str("zeroship.tenant_app"), Expr::lit(IrScalar::Bool(true))],
+            args: vec![lit_str("zero_migrate.tenant_app"), Expr::lit(IrScalar::Bool(true))],
         },
         Expr::FnCall {
             r#fn: ScalarFn::CurrentUser,
@@ -508,6 +508,6 @@ fn raw_view_body_is_not_part_of_pg_only_vendor_sweep() {
     assert_eq!(
         pg_vendor_op_kind(&raw_view),
         None,
-        "RawViewBody is capability-gated, but it is not a PG-only @zeroship/migrate op"
+        "RawViewBody is capability-gated, but it is not a PG-only zero-migrate op"
     );
 }

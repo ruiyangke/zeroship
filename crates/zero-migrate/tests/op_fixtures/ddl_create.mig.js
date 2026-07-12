@@ -6,7 +6,7 @@
 // constraint, but this fixture's golden has an EMPTY constraints list (it is the
 // no-constraint createTable carrier). `note` is nullable-by-default (the fluent
 // chain OMITS the nullable key for a nullable column).
-import { table, t, genRandomUuid } from "@zeroship/migrate";
+import { table, t, genRandomUuid } from "zero-migrate";
 
 export const name = "ddl_create";
 

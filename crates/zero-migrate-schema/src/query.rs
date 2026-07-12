@@ -31,7 +31,7 @@ pub enum QueryError {
     /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
     /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
-    /// generic `invalid_identifier` thrown by the `_*` / `__zs_*` prefix
+    /// generic `invalid_identifier` thrown by the `_*` / `__zero_migrate_*` prefix
     /// reservations. Filter-time use of these names is unrestricted
     /// (`db.users.find({ id: ... })` is the canonical query shape); the
     /// fence only fires on declaration paths (`field_to_column`).
@@ -579,7 +579,7 @@ mod schema_renderer_tests {
 /// The SQLite session strips the prefix and base64-decodes the
 /// remainder; PG never sees a value with this prefix because
 /// [`SqlDialect::wrap_encrypted_param`] is a no-op on the PG arm.
-pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
+pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zero_migrate_enc_blob__:";
 
 pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
@@ -608,8 +608,8 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
 /// - Must not contain a null byte.
 /// - Must not start with `pg_` (case-insensitive) — reserved for Postgres
 ///   system catalogs.
-/// - Must not start with `__zeroship` (case-insensitive) — reserved for the
-///   platform's own internal tables (e.g. `__zeroship_migrations`).
+/// - Must not start with `__zero_migrate` (case-insensitive) — reserved for the
+///   platform's own internal tables (e.g. `__zero_migrate_migrations`).
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -634,9 +634,9 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
             "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
         )));
     }
-    if bytes.len() >= 10 && bytes[..10].eq_ignore_ascii_case(b"__zeroship") {
+    if bytes.len() >= 14 && bytes[..14].eq_ignore_ascii_case(b"__zero_migrate") {
         return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix '__zeroship' (platform internal)"
+            "collection name '{name}' uses reserved prefix '__zero_migrate' (platform internal)"
         )));
     }
     if !name
@@ -729,8 +729,8 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     ReservedName::Prefix("_"),
     // Platform bookkeeping table prefixes. Mirrors the
     // `validate_collection` reservations for table-name shape.
-    ReservedName::Prefix("__zs_"),
-    ReservedName::Prefix("__zeroship_"),
+    ReservedName::Prefix("__zero_migrate_"),
+    ReservedName::Prefix("__zero_migrate_"),
     ReservedName::Prefix("sqlite_"),
     // **P5.5 PR 1** — masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
@@ -1100,7 +1100,7 @@ pub fn build_create_table_with_fks(
 ///   SQLite `<schema>.<index_name> ON <table>`.
 /// - whether `COMMENT ON COLUMN` mask sentinels (PG only) are
 ///   appended; the SQLite arm drops them (the inline
-///   `/* __zsmask:... */` comment on the sibling column is the
+///   `/* zero-migrate:mask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
 /// The `id TEXT PRIMARY KEY` is identical on both backends. **P7 PR 3**
@@ -1264,7 +1264,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 // forbids creator-declared columns ending in
                 // `_masked`); no collision possible.
                 //
-                // **P5.5 PR 6** — attach a `/* __zsmask:kind=…,
+                // **P5.5 PR 6** — attach a `/* zero-migrate:mask:kind=…,
                 // classification=… */` inline comment to the sibling
                 // DDL so the SQLite introspector can recover the mask
                 // metadata from `sqlite_master.sql`. PG ignores SQL
@@ -1388,7 +1388,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
     // SQLite arm `COMMENT ON COLUMN` is a syntax error — the
     // dialect-routing skips the `COMMENT ON COLUMN` append when
-    // `dialect == Sqlite`; the inline `/* __zsmask:... */` comment
+    // `dialect == Sqlite`; the inline `/* zero-migrate:mask:... */` comment
     // baked into the CREATE TABLE body is the SQLite-side wire (see
     // `mask_sentinel_for_field`).
     let create_table = format!(
@@ -1419,7 +1419,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     Ok(statements)
 }
 
-/// **P4 HALF B** — render the `COMMENT ON COLUMN … 'zsenc:<mode>:<keyId>:<wraps>'`
+/// **P4 HALF B** — render the `COMMENT ON COLUMN … 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
@@ -2301,7 +2301,7 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
 ///
 /// Only the PG arm executes these statements — SQLite doesn't support
 /// `COMMENT ON COLUMN`. The SQLite arm relies on the inline
-/// `/* __zsmask:... */` comment emitted by `build_create_table_with_fks`,
+/// `/* zero-migrate:mask:... */` comment emitted by `build_create_table_with_fks`,
 /// preserved verbatim in `sqlite_master.sql`.
 ///
 /// Returns the empty vector when the schema declares no masked
@@ -2368,11 +2368,11 @@ pub fn build_mask_sentinel_comment_for_field(
     ))
 }
 
-/// **P4 HALF A** — render the inline `/* zsenc:{mode}:{keyId}:{wraps} */`
+/// **P4 HALF A** — render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
-/// This is the SINGLE source of truth for the `zsenc` wire shape — both
+/// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape — both
 /// [`field_to_column_for_dialect`] (the column-DDL emitter that bakes it after
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
@@ -2388,9 +2388,9 @@ pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> 
     encryption_sentinel_body_for_field(def).map(|body| format!("/* {body} */"))
 }
 
-/// **P4** — the bare `zsenc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
+/// **P4** — the bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
-/// or `None` for a plain column. The SINGLE source of truth for the `zsenc` wire
+/// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: [`encryption_sentinel_for_field`] wraps it in `/* */` for the inline
 /// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
 /// `COMMENT ON COLUMN … '…'` statement for the PG-recoverable form. The runtime
@@ -2405,7 +2405,7 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
     let mode_norm = if mode == "randomized" { "randomised" } else { mode };
     let key_id = enc.get("keyId").and_then(|v| v.as_str()).unwrap_or("default");
     let wraps = enc.get("wraps").and_then(|v| v.as_str()).unwrap_or("string");
-    Some(format!("zsenc:{mode_norm}:{key_id}:{wraps}"))
+    Some(format!("zero-migrate:enc:{mode_norm}:{key_id}:{wraps}"))
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
@@ -2427,7 +2427,7 @@ fn field_to_column_for_dialect(
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
     //
-    // **P5 PR 3** — emit a `/* zsenc:{mode}:{keyId}:{wraps} */` sentinel
+    // **P5 PR 3** — emit a `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` sentinel
     // comment alongside the column type so the SQLite-arm introspector
     // can regex-recover the encryption metadata from `sqlite_master.sql`.
     // PG ignores SQL comments at parse time (the type is still BYTEA);
@@ -2436,7 +2436,7 @@ fn field_to_column_for_dialect(
     // FLOA/REAL/DOUB substring match), which still accepts BLOB values
     // — same column shape both engines see byte-identical inserts.
     // Sentinel-on-DDL is the same regex-on-DDL pattern P4 PR 4 used for
-    // vector dims; sidecar `__zs_schema_meta` is the upgrade path
+    // vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path
     // (Q-P5 deferred). See
     // `docs/proposals/p5-encryption-backup-implementation-plan.md` §5.
     let enc_comment_owned;
@@ -2449,7 +2449,7 @@ fn field_to_column_for_dialect(
     let sql_type = def_to_column_type_for_dialect(def, dialect);
     let constraints = def_to_constraints_for_dialect(field, def, dialect);
     // The sentinel comment (when present) sits between the type and the
-    // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
+    // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
     // `sqlite_master.sql` for the introspector regex.
     Ok(format!(
@@ -2999,7 +2999,7 @@ pub fn build_conflict_probe_with_dialect(
     let mut conditions = Vec::new();
 
     for (field, value) in obj {
-        if field.starts_with("__zsenc__") {
+        if field.starts_with("__zero_migrate_enc__") {
             continue;
         }
         validate_field_name(field)?;
@@ -3010,7 +3010,7 @@ pub fn build_conflict_probe_with_dialect(
         }
 
         let raw = value_to_param(value);
-        let encrypted = obj.contains_key(&format!("__zsenc__{field}"));
+        let encrypted = obj.contains_key(&format!("__zero_migrate_enc__{field}"));
         let param_value = if encrypted {
             dialect.wrap_encrypted_param(raw)
         } else {
@@ -3571,7 +3571,7 @@ pub fn build_insert_with_dialect(
     let table = quote_ident(collection);
 
     // **P5 PR 2** — the encryption pass marks each encrypted column
-    // with a sibling `__zsenc__<col>` key (`Value::Bool(true)`); the
+    // with a sibling `__zero_migrate_enc__<col>` key (`Value::Bool(true)`); the
     // value at `<col>` is base64-encoded ciphertext. Walk the doc once
     // to collect those marker keys so we can:
     //   1. Skip emitting marker keys as columns.
@@ -3584,7 +3584,7 @@ pub fn build_insert_with_dialect(
     let mut params: Vec<String> = Vec::new();
 
     for (key, value) in obj {
-        if key.starts_with("__zsenc__") {
+        if key.starts_with("__zero_migrate_enc__") {
             continue;
         }
         columns.push(quote_ident(key));
@@ -3624,7 +3624,7 @@ pub fn build_insert_with_dialect(
 
 /// **P5 PR 2** — collect the set of column names the encryption pass
 /// has marked as encrypted. The marker is a sibling key
-/// `__zsenc__<col> = true` inserted by
+/// `__zero_migrate_enc__<col> = true` inserted by
 /// `crate::crud::encryption_pass::encrypt_row_on_write`. Callers walk
 /// the doc once with this set to know which placeholders need the
 /// `decode($N, 'base64')::bytea` cast.
@@ -3633,7 +3633,7 @@ pub fn collect_encrypted_cols(
 ) -> std::collections::HashSet<&str> {
     let mut out = std::collections::HashSet::new();
     for (k, v) in obj {
-        if let Some(name) = k.strip_prefix("__zsenc__") {
+        if let Some(name) = k.strip_prefix("__zero_migrate_enc__") {
             if v.as_bool() == Some(true) {
                 out.insert(name);
             }
@@ -3776,7 +3776,7 @@ pub fn build_set_clauses_with_system_fields(
 
     // **P5 PR 2** — collect encrypted-column markers from the update
     // doc (top-level AND nested `$set`). The encryption pass deposits
-    // both the base64 value and a `__zsenc__<col>` marker; we use the
+    // both the base64 value and a `__zero_migrate_enc__<col>` marker; we use the
     // marker set to wrap the placeholder via the dialect's bind shape
     // (`SqlDialect::encrypted_column_bind_placeholder`).
     let mut encrypted_cols = collect_encrypted_cols(update_obj);
@@ -3785,11 +3785,11 @@ pub fn build_set_clauses_with_system_fields(
     }
 
     // Collect all fields: flatten $set inline, keep other keys as-is.
-    // Skip every `__zsenc__*` marker key — they're a side-channel from
+    // Skip every `__zero_migrate_enc__*` marker key — they're a side-channel from
     // the encryption pass, not user-declared columns.
     let mut fields: Vec<(&String, &Value)> = Vec::new();
     for (key, value) in update_obj.iter() {
-        if key.starts_with("__zsenc__") {
+        if key.starts_with("__zero_migrate_enc__") {
             continue;
         }
         if key == "$set" {
@@ -3798,7 +3798,7 @@ pub fn build_set_clauses_with_system_fields(
                 .as_object()
                 .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
             for (k, v) in obj.iter() {
-                if k.starts_with("__zsenc__") {
+                if k.starts_with("__zero_migrate_enc__") {
                     continue;
                 }
                 fields.push((k, v));
@@ -4089,7 +4089,7 @@ pub fn build_insert_many_with_dialect(
     let table = quote_ident(collection);
 
     // **P5 PR 2** — encrypted-column union across all docs. We treat
-    // a column as encrypted iff ANY doc carries the `__zsenc__<col>`
+    // a column as encrypted iff ANY doc carries the `__zero_migrate_enc__<col>`
     // marker (the encryption pass marks every doc consistently — if
     // the schema says the column is encrypted, every row in the batch
     // gets the marker after the pass runs).
@@ -4103,7 +4103,7 @@ pub fn build_insert_many_with_dialect(
     }
 
     // Union all columns across all documents (not just the first).
-    // Skip every `__zsenc__*` marker key — they're a side-channel from
+    // Skip every `__zero_migrate_enc__*` marker key — they're a side-channel from
     // the encryption pass, not user-declared columns.
     let mut column_set = std::collections::BTreeSet::<&String>::new();
     for doc in arr {
@@ -4111,7 +4111,7 @@ pub fn build_insert_many_with_dialect(
             QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
         })?;
         for key in obj.keys() {
-            if key.starts_with("__zsenc__") {
+            if key.starts_with("__zero_migrate_enc__") {
                 continue;
             }
             column_set.insert(key);
@@ -5902,7 +5902,7 @@ pub fn build_upsert_with_dialect(
     let mut doc_has_updated_at = false;
 
     for (key, value) in obj {
-        if key.starts_with("__zsenc__") {
+        if key.starts_with("__zero_migrate_enc__") {
             continue;
         }
         columns.push(quote_ident(key));
@@ -7244,13 +7244,13 @@ mod tests {
         let doc = json!({
             "email": "a@b.com",
             "ssn": "Y2lwaGVydGV4dA==",
-            "__zsenc__ssn": true,
+            "__zero_migrate_enc__ssn": true,
         });
         let conflict = json!(["email"]);
         let q = build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Sqlite)
             .unwrap();
         assert!(
-            !q.sql.contains("__zsenc__"),
+            !q.sql.contains("__zero_migrate_enc__"),
             "marker keys must never be emitted as real columns: {}",
             q.sql
         );
@@ -7804,10 +7804,10 @@ mod tests {
         // version/updated_at/updated_by SET clauses must NOT be wrapped
         // with the encrypted-column placeholder shape.
         let filter = json!({ "id": "post_x" });
-        // `__zsenc__secret` marks the `secret` column encrypted.
+        // `__zero_migrate_enc__secret` marks the `secret` column encrypted.
         let update = json!({
             "secret": "ciphertext",
-            "__zsenc__secret": true,
+            "__zero_migrate_enc__secret": true,
         });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -7848,7 +7848,7 @@ mod tests {
         let filter = json!({ "id": "post_x" });
         let update = json!({
             "secret": "ciphertext",
-            "__zsenc__secret": true,
+            "__zero_migrate_enc__secret": true,
         });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -7987,7 +7987,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "post_x" });
         let update = serde_json::json!({
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
-            "__zsenc__ssn": true,
+            "__zero_migrate_enc__ssn": true,
         });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -8018,7 +8018,7 @@ mod tests {
         );
     }
 
-    /// The PR 4 auto-bump SQL must NOT carry an `__zsenc__updated_by`
+    /// The PR 4 auto-bump SQL must NOT carry an `__zero_migrate_enc__updated_by`
     /// marker — system fields are platform-managed plaintext and bypass
     /// encryption by construction.
     #[test]
@@ -9137,14 +9137,14 @@ mod tests {
         }
     }
 
-    /// Names starting with `__zeroship` (any case) must be rejected.
+    /// Names starting with `__zero_migrate` (any case) must be rejected.
     #[test]
-    fn validate_collection_rejects_zeroship_prefix() {
-        for name in &["__zeroship_migrations", "__ZEROSHIP_audit", "__zeroship"] {
+    fn validate_collection_rejects_zero_migrate_prefix() {
+        for name in &["__zero_migrate_migrations", "__ZERO_MIGRATE_audit", "__zero_migrate"] {
             let err = validate_collection(name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("__zeroship") || msg.contains("reserved"),
+                    msg.contains("__zero_migrate") || msg.contains("reserved"),
                     "for '{name}': {msg}"
                 ),
                 other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
@@ -10043,7 +10043,7 @@ mod tests {
 
     /// `validate_field_name_for_declaration` MUST still enforce all
     /// the underlying `validate_field_name` rules (ASCII allowlist,
-    /// length cap, null bytes, the `_*` / `__zs_*` / `_masked` reserved
+    /// length cap, null bytes, the `_*` / `__zero_migrate_*` / `_masked` reserved
     /// shapes). Regression fence for the wrapper composition.
     #[test]
     fn validate_field_name_for_declaration_layers_underlying_rules() {
@@ -10114,7 +10114,7 @@ mod tests {
         let doc = serde_json::json!({
             "id": "row1",
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
-            "__zsenc__ssn": true,
+            "__zero_migrate_enc__ssn": true,
         });
         let bq = build_insert("app1", "users", &doc).expect("build_insert ok");
         assert!(
@@ -10128,7 +10128,7 @@ mod tests {
             bq.sql,
         );
         // The encrypted param must reach the bind layer as plain
-        // base64 (no `__zsenc_blob__:` sentinel on the PG arm).
+        // base64 (no `__zero_migrate_enc_blob__:` sentinel on the PG arm).
         assert!(
             bq.params
                 .iter()
@@ -10138,7 +10138,7 @@ mod tests {
         );
         // The marker key itself must not leak as a column.
         assert!(
-            !bq.sql.contains("__zsenc__"),
+            !bq.sql.contains("__zero_migrate_enc__"),
             "marker keys must not appear as columns: {}",
             bq.sql,
         );
@@ -10153,7 +10153,7 @@ mod tests {
         let doc = serde_json::json!({
             "id": "row1",
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
-            "__zsenc__ssn": true,
+            "__zero_migrate_enc__ssn": true,
         });
         let bq = build_insert_with_dialect("app1", "users", &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect ok");
@@ -10178,7 +10178,7 @@ mod tests {
         );
         // The marker key itself must not leak as a column.
         assert!(
-            !bq.sql.contains("__zsenc__"),
+            !bq.sql.contains("__zero_migrate_enc__"),
             "marker keys must not appear as columns: {}",
             bq.sql,
         );
@@ -10192,7 +10192,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "row1" });
         let update = serde_json::json!({
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
-            "__zsenc__ssn": true,
+            "__zero_migrate_enc__ssn": true,
         });
         let bq = build_update_one_with_dialect(
             "app1",
@@ -10218,8 +10218,8 @@ mod tests {
     #[test]
     fn build_insert_many_sqlite_encrypted_columns_all_tagged() {
         let docs = serde_json::json!([
-            { "id": "row1", "ssn": "Y2lwaGVydGV4dF9ibG9i", "__zsenc__ssn": true },
-            { "id": "row2", "ssn": "YW5vdGhlcl9jaXBoZXI=", "__zsenc__ssn": true },
+            { "id": "row1", "ssn": "Y2lwaGVydGV4dF9ibG9i", "__zero_migrate_enc__ssn": true },
+            { "id": "row2", "ssn": "YW5vdGhlcl9jaXBoZXI=", "__zero_migrate_enc__ssn": true },
         ]);
         let bq = build_insert_many_with_dialect("app1", "users", &docs, SqlDialect::Sqlite)
             .expect("build_insert_many_with_dialect ok");
@@ -10312,12 +10312,12 @@ mod tests {
             "expected COMMENT ON COLUMN for sibling: {sql}"
         );
         assert!(
-            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
             "expected sentinel literal: {sql}"
         );
     }
 
-    /// **P5.5 PR 6** — sibling DDL inline `/* __zsmask:... */` comment
+    /// **P5.5 PR 6** — sibling DDL inline `/* zero-migrate:mask:... */` comment
     /// for SQLite-arm introspection (PG ignores SQL comments; SQLite
     /// preserves them in `sqlite_master.sql`).
     #[test]
@@ -10331,8 +10331,8 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"email_masked\" TEXT /* __zsmask:kind=email,classification=pii */"),
-            "expected inline /* __zsmask:... */ comment on sibling: {sql}"
+            sql.contains("\"email_masked\" TEXT /* zero-migrate:mask:kind=email,classification=pii */"),
+            "expected inline /* zero-migrate:mask:... */ comment on sibling: {sql}"
         );
     }
 
@@ -10353,7 +10353,7 @@ mod tests {
             "kind=none must emit no COMMENT: {sql}"
         );
         assert!(
-            !sql.contains("__zsmask:"),
+            !sql.contains("zero-migrate:mask:"),
             "kind=none must emit no sentinel: {sql}"
         );
     }
@@ -10376,7 +10376,7 @@ mod tests {
             "comment: {sql}"
         );
         assert!(
-            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
             "sentinel: {sql}"
         );
     }
@@ -11460,8 +11460,8 @@ mod tests {
         assert!(via_stable.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."accounts" ("#));
     }
 
-    /// `MainUnqualified` SQLite carries the goodies: the inline `__zsmask:` mask
-    /// sentinel on the `_masked` sibling, the inline `zsenc:` encryption
+    /// `MainUnqualified` SQLite carries the goodies: the inline `zero-migrate:mask:` mask
+    /// sentinel on the `_masked` sibling, the inline `zero-migrate:enc:` encryption
     /// sentinel on the BLOB column, and an unqualified FK clause — so all three
     /// survive into `sqlite_master.sql` for the P5 drift snapshot to recover.
     #[test]
@@ -11478,13 +11478,13 @@ mod tests {
 
         // Mask sentinel rides inline on the `<col>_masked` sibling column.
         assert!(
-            sql.contains(r#""ssn_masked" TEXT /* __zsmask:"#),
+            sql.contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
             "mask sentinel must ride inline on the sibling: {sql}"
         );
-        // Encryption: BLOB physical column + inline `zsenc:` sentinel.
+        // Encryption: BLOB physical column + inline `zero-migrate:enc:` sentinel.
         assert!(
-            sql.contains("BLOB") && sql.contains("/* zsenc:"),
-            "encrypted column must be BLOB with an inline zsenc sentinel: {sql}"
+            sql.contains("BLOB") && sql.contains("/* zero-migrate:enc:"),
+            "encrypted column must be BLOB with an inline zero-migrate:enc sentinel: {sql}"
         );
         // FK present and UNqualified (SQLite REFERENCES rejects a schema-qualified
         // parent name).

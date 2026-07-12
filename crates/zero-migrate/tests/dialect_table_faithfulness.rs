@@ -1179,7 +1179,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     assert_eq!(
         generated, sidecar,
         "generated dialect_table.rs drifted from dialect-support.toml — regenerate with \
-         `pnpm --filter @zeroship/migrate gen:dialect-table`"
+         `pnpm --filter zero-migrate gen:dialect-table`"
     );
 
     // TransparentDegradable is not a general escape hatch. It is currently

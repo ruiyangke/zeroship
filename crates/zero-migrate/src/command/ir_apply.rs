@@ -169,7 +169,7 @@ pub enum PostgresIrApplyError {
     ///
     /// The front-end recorder error is carried as its rendered text so this
     /// variant (and the `PostgresIrApplyError` enum dependents match on) stays
-    /// V8-free — the `.ts`-record path lives behind `zsv8`, but the enum shape
+    /// V8-free — the `.ts`-record path lives behind `addon-host`, but the enum shape
     /// does not.
     #[error("record platform TS migration ({file}): {message}")]
     Record {

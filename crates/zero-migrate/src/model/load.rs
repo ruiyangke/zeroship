@@ -713,31 +713,31 @@ mod tests {
         // shape-agnostic: same-file structural attachments must resolve against
         // the table registered by the createTable pre-pass.
         let ops = r#"[
-            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+            {"op":"createTable","name":"platform_registry","schema":"zero_migrate","columns":[
                 {"name":"app_id","type":"text","nullable":false},
                 {"name":"route","type":"text","nullable":false},
                 {"name":"target","type":"text","nullable":false}
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]},
-            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true,"forced":true},
+            {"op":"setRls","table":"platform_registry","schema":"zero_migrate","enabled":true,"forced":true},
             {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
-                "schema":"zeroship","forCmd":"all",
+                "schema":"zero_migrate","forCmd":"all",
                 "using":{"node":"literal","value":true}},
-            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+            {"op":"comment","target":{"kind":"table","schema":"zero_migrate",
                 "name":"platform_registry"},"comment":"Platform route registry"},
-            {"op":"createIndex","table":"platform_registry","schema":"zeroship",
+            {"op":"createIndex","table":"platform_registry","schema":"zero_migrate",
                 "name":"platform_registry_target_idx",
                 "columns":[{"kind":"column","name":"target"}]},
-            {"op":"createFunction","name":"platform_registry_touch","schema":"zeroship",
+            {"op":"createFunction","name":"platform_registry_touch","schema":"zero_migrate",
                 "returns":"trigger","language":"plpgsql","replace":true,
                 "body":"BEGIN RETURN NEW; END;"},
             {"op":"createTrigger","name":"platform_registry_touch_trg",
-                "table":"platform_registry","schema":"zeroship","timing":"before",
+                "table":"platform_registry","schema":"zero_migrate","timing":"before",
                 "events":["update"],"forEach":"row",
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[]);
-        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zeroship".into()]);
+        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
         let profile = platform_profile();
         let ir = load_ir_document(
             &bytes,
@@ -753,9 +753,9 @@ mod tests {
 
     #[test]
     fn load_refuses_unknown_table_structural_attach_fail_closed() {
-        let ops = r#"[{"op":"setRls","table":"never_declared","schema":"zeroship","enabled":true}]"#;
+        let ops = r#"[{"op":"setRls","table":"never_declared","schema":"zero_migrate","enabled":true}]"#;
         let bytes = ir_json(ops, "");
-        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zeroship".into()]);
+        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
         let profile = platform_profile();
         let err = load_ir_document(
             &bytes,
