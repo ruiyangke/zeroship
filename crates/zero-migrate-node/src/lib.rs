@@ -26,6 +26,12 @@
 // the engine's blanket deny stays intact everywhere else.
 #![allow(unsafe_code)]
 
+/// The single source of truth for every N-API boundary DTO (redesign step 5a): the
+/// driver cell transport + the typed verb request/response envelopes. napi-rs emits
+/// ONE `index.d.ts` from these `#[napi(object)]` structs; the TS host imports it
+/// (no hand-copied interfaces).
+pub mod wire;
+
 pub mod marshal;
 pub mod runtime;
 pub mod session;

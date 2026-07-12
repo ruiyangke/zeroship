@@ -1,13 +1,11 @@
-//! napi ⇄ `zero_migrate` Seam-type marshaling (design §B.2).
+//! napi ⇄ `zero_migrate` driver-type marshaling (design §B.2).
 //!
 //! The host driver (`pg`/`mysql2` in JS) speaks JS cells; the engine speaks the
-//! driver-neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] types. This
-//! module is the ONLY place those two representations meet.
-//!
-//! The `#[napi(object)]` structs below are the wire shape that crosses the N-API
-//! boundary — plain owned data (`String`/`f64`/`Vec`/`bool`), all `Send + 'static`,
-//! so they may ride a `ThreadsafeFunction` call and come back through a `done`
-//! callback without ever carrying an engine `!Send` handle or a V8 handle (§B.3).
+//! driver-neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] types. This module is the
+//! ONLY place those two representations meet. The DTOs the fold operates over
+//! ([`JsCell`]/[`JsRow`]/[`JsReply`]/[`JsError`]/[`JsRequest`]) live in
+//! [`crate::wire`] — the single source of truth for every N-API boundary type — and
+//! are re-exported here for the fold + the mock-apply test.
 //!
 //! Value union (§A.2, verified exhaustively): `Null | Text | Int | Bool | TextArray`.
 //! Ints cross as JS strings when they exceed the safe-integer domain? — NO: the
@@ -21,91 +19,12 @@
 
 use zero_migrate::driver::{Bind, DbError, Row, Value};
 
-#[cfg(feature = "napi")]
-use napi_derive::napi;
-
-/// The kind tag of a driver-neutral scalar cell — mirrors [`Value`]'s variants.
-///
-/// A `#[napi(object)]` cannot be a Rust enum with data, so a cell crosses as a
-/// tagged struct: `kind` selects the arm, and the matching payload field carries
-/// the value (all others `None`/default). This keeps the union explicit on both
-/// sides without a fragile positional encoding.
-#[cfg_attr(feature = "napi", napi(object))]
-#[derive(Debug, Clone)]
-pub struct JsCell {
-    /// `"null" | "text" | "int" | "bool" | "textArray"`.
-    pub kind: String,
-    /// Payload for `kind == "text"`.
-    pub text: Option<String>,
-    /// Payload for `kind == "int"` when the value fits a JS `number` safely.
-    pub int: Option<f64>,
-    /// Payload for `kind == "int"` carried as a decimal string (int8/numeric that a
-    /// `pg` type-parser stringified per §D.2). Preferred over `int` when present.
-    pub int_str: Option<String>,
-    /// Payload for `kind == "bool"`.
-    pub bool: Option<bool>,
-    /// Payload for `kind == "textArray"`; a JS `null` element is `None`.
-    pub text_array: Option<Vec<Option<String>>>,
-}
-
-/// A driver-neutral row crossing the boundary: parallel column-name / cell vectors.
-#[cfg_attr(feature = "napi", napi(object))]
-#[derive(Debug, Clone)]
-pub struct JsRow {
-    /// Column names, positionally aligned with `cells`.
-    pub columns: Vec<String>,
-    /// One [`JsCell`] per column.
-    pub cells: Vec<JsCell>,
-}
-
-/// A successful verb reply crossing the boundary: the returned rows (empty for a
-/// pure DML `execute`/`executeTextParams`) plus the driver's affected-/returned-row
-/// count (`result.rowCount` from node-pg). The engine's `execute` verbs read the
-/// count; `query`/`queryOne` read the rows.
-#[cfg_attr(feature = "napi", napi(object))]
-#[derive(Debug, Clone)]
-pub struct JsReply {
-    /// Rows for `query`/`queryOne` (empty for pure DML).
-    pub rows: Vec<JsRow>,
-    /// `result.rowCount` — affected/returned rows. Carried as `f64` (JS `number`);
-    /// `None` when the driver reports no count (e.g. `batch`).
-    pub row_count: Option<f64>,
-}
-
-/// A driver-neutral error crossing the boundary (§A.5): message + optional SQLSTATE.
-#[cfg_attr(feature = "napi", napi(object))]
-#[derive(Debug, Clone)]
-pub struct JsError {
-    /// Human-readable message (`err.message` from node-pg).
-    pub message: String,
-    /// SQLSTATE if the driver surfaced one (`err.code` from node-pg).
-    pub code: Option<String>,
-}
-
-/// A single verb request the engine hands to the host driver (§B.2).
-///
-/// `kind` selects the verb (`batch | execute | executeTextParams | query |
-/// queryOne`); `sql` is the statement; `binds` carries the neutral params for
-/// `execute`/`query`/`queryOne`; `textParams` carries the `&[Option<String>]`
-/// text-format params for `executeTextParams` (§B.2 — text-format, server-inferred
-/// OID). Exactly one of `binds`/`textParams` is populated per verb kind.
-#[cfg_attr(feature = "napi", napi(object))]
-#[derive(Debug, Clone)]
-pub struct JsRequest {
-    /// The verb: `"batch" | "execute" | "executeTextParams" | "query" | "queryOne"`.
-    pub kind: String,
-    /// The SQL statement.
-    pub sql: String,
-    /// Neutral binds for `execute`/`query`/`queryOne` (as [`JsCell`]s).
-    pub binds: Vec<JsCell>,
-    /// Text-format params for `executeTextParams` (`None` element → SQL NULL bind).
-    pub text_params: Vec<Option<String>>,
-}
+pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 
 // ---------------------------------------------------------------------------
 // Conversions — the neutral ↔ JS-cell fold. Pure functions, no napi types, so
-// this whole module (except the derive) compiles WITHOUT the `napi` feature and
-// the mock-apply integration test exercises the folds directly.
+// this whole module compiles WITHOUT the `napi` feature and the mock-apply
+// integration test exercises the folds directly.
 // ---------------------------------------------------------------------------
 
 /// `Bind → JsCell` (Rust → JS bind fold, §B.2). `Int→int`, `Text→text`,

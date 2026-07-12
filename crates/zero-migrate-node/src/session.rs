@@ -164,7 +164,7 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
 /// idempotent recovery), so a faithful count matters.
 fn affected(reply: &JsReply) -> u64 {
     match reply.row_count {
-        Some(c) if c >= 0.0 => c as u64,
+        Some(c) if c >= 0 => c as u64,
         _ => reply.rows.len() as u64,
     }
 }

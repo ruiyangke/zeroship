@@ -40,10 +40,16 @@ zero-migrate = { path = "../zero-migrate", default-features = false, features = 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
 # ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the
 # ThreadsafeFunction; `napi5` supplies `Env::create_function_from_closure`
-# (the per-call `done` JS closure capturing the oneshot Sender, §B.3) + Deferred.
-# Node/Bun both implement N-API ≥5. NO "async", NO "tokio_rt" — the `cargo tree`
-# gate asserts zero tokio in the leaf.
-napi = { version = "3", default-features = false, features = ["napi4", "napi5"], optional = true }
+# (the per-call `done` JS closure capturing the oneshot Sender, §B.3) + Deferred;
+# `napi6` (redesign step 5a) supplies the BigInt bindings so the exact-integer
+# domain (verb row counts, journal `event_seq`) crosses as a JS `bigint` — ending
+# the `row_count: Option<f64>` vs `intStr`-string incoherence. `serde-json` lets a
+# typed verb envelope carry the IR `ops` AST + a lowered `Migration` as a REAL JS
+# value (not a re-serialized `*_json` string), so every verb request/response is a
+# typed `#[napi(object)]` (`wire.rs`) — no more `Promise<string>`. Node/Bun both
+# implement N-API ≥6. NO "async", NO "tokio_rt" — the `cargo tree` gate asserts zero
+# tokio in the leaf.
+napi = { version = "3", default-features = false, features = ["napi6", "serde-json"], optional = true }
 napi-derive = { version = "3", optional = true }
 
 # The tokio-free executor: `futures::executor::block_on` on a spawned std::thread

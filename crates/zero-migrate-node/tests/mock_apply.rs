@@ -66,7 +66,7 @@ impl VerbDispatch for MockDispatch {
         let rows = self.rows_for(&req.sql);
         Ok(JsReply {
             rows,
-            row_count: Some(1.0),
+            row_count: Some(1),
         })
     }
 }
