@@ -616,6 +616,42 @@ fn restored_state_expr() -> &'static str {
      END)"
 }
 
+fn resume_wake_frontier_sql(tables: &WorkflowTables) -> String {
+    format!(
+        "(SELECT MIN(wake_at) \
+            FROM ( \
+                  SELECT MIN(wake_at) AS wake_at \
+                    FROM {steps} \
+                   WHERE run_id = r.id \
+                     AND state = 'running' \
+                     AND wake_at IS NOT NULL \
+                  HAVING MIN(wake_at) IS NOT NULL \
+                  UNION ALL \
+                  SELECT now() AS wake_at \
+                   WHERE EXISTS ( \
+                         SELECT 1 \
+                           FROM {signals} sig \
+                          WHERE sig.run_id = r.id \
+                            AND sig.consumed_by IS NULL \
+                            AND ( \
+                                (r.waiting_step_key LIKE 'wait:%' \
+                                 AND split_part(r.waiting_step_key, ':', 4) = sig.type) \
+                                OR EXISTS ( \
+                                    SELECT 1 \
+                                      FROM {steps} child \
+                                     WHERE child.run_id = r.id \
+                                       AND child.kind = 'child' \
+                                       AND child.state = 'running' \
+                                       AND child.signal_type = sig.type \
+                                ) \
+                            ) \
+                      ) \
+                 ) frontier)",
+        steps = tables.steps,
+        signals = tables.signals,
+    )
+}
+
 fn status_output(row: &compio_postgres::Row) -> Value {
     let output_kind: String = row.get("output_kind");
     if output_kind == "blob" {
@@ -2788,6 +2824,9 @@ async fn restart_run_inner(
     tx.commit()
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    workflow_engine::register_run_timer(state, &run_id)
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     Ok(json!({
         "runId": run_id,
@@ -2857,6 +2896,7 @@ async fn control_transition(
                     &format!("UPDATE {runs} \
                         SET state = 'paused', \
                             terminal_at = NULL, \
+                            wake_at = NULL, \
                             paused_from_status = CASE \
                                 WHEN state = 'paused' THEN paused_from_status \
                                 ELSE state \
@@ -2893,14 +2933,24 @@ async fn control_transition(
                     "cannot resume workflow run in state {current}"
                 )))
             } else {
+                let wake_frontier = resume_wake_frontier_sql(&tables);
                 let sql = format!(
-                    "UPDATE {runs} \
+                    "UPDATE {runs} AS r \
                         SET state = {}, \
+                            wake_at = CASE \
+                                WHEN {} IN ('queued','running') THEN COALESCE({}, now()) \
+                                WHEN {} IN ('sleeping','waiting','compensating') THEN {} \
+                                ELSE NULL \
+                            END, \
                             terminal_at = NULL, \
                             paused_from_status = NULL \
-                      WHERE id = $1 AND app_id = $2 \
+                      WHERE r.id = $1 AND r.app_id = $2 \
                       RETURNING state",
                     restored_state_expr(),
+                    restored_state_expr(),
+                    wake_frontier,
+                    restored_state_expr(),
+                    wake_frontier,
                     runs = tables.runs,
                 );
                 tx.query(&sql, &[&run_id, &app_id])
@@ -3073,6 +3123,9 @@ async fn control_transition(
         }
     }
     if let Err(e) = tx.commit().await {
+        return WorkflowApiError::Database(e.to_string()).response();
+    }
+    if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
         return WorkflowApiError::Database(e.to_string()).response();
     }
     for run_id in cascade_run_ids {

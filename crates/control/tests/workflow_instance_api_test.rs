@@ -23,6 +23,7 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -70,6 +71,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
+    WorkflowSchedulerStore::new(db_url.to_string())
+        .provision()
+        .await
+        .expect("provision workflow scheduler store");
     let setup_pg = pg(db_url).await;
     setup_pg
         .execute(
@@ -759,6 +764,18 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         )
         .await
         .expect("make sleeping");
+    fx.pg
+        .execute(
+            &wf_sql(
+                app_id,
+                "INSERT INTO zeroship.workflow_steps \
+                    (run_id, ordinal, name, name_occurrence, kind, state, wake_at, batch_id, batch_width) \
+                 VALUES ($1, 0, 'cooldown', 0, 'sleep', 'running', $2, 'wfd_pause_resume', 1)",
+            ),
+            &[&run_id, &future_wake],
+        )
+        .await
+        .expect("insert sleeping frontier step");
 
     let resp = test::call_service(
         &app,
@@ -784,14 +801,9 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         .await
         .expect("paused row");
     assert_eq!(row.get::<_, String>("state"), "paused");
-    let paused_wake: DateTime<Utc> = row.get("wake_at");
     assert!(
-        paused_wake
-            .signed_duration_since(future_wake)
-            .num_milliseconds()
-            .abs()
-            <= 1,
-        "pause should preserve wake_at, got {paused_wake:?} vs {future_wake:?}"
+        row.get::<_, Option<DateTime<Utc>>>("wake_at").is_none(),
+        "pause should clear wake_at"
     );
 
     let resp = test::call_service(

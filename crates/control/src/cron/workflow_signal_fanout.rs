@@ -5,6 +5,7 @@
 //! `workflow_signals` rows to matching subscriptions, and relies on the
 //! `(broadcast_id, run_id)` marker to make re-drain idempotent after a crash.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -208,7 +209,7 @@ async fn drain_one_broadcast(
         .map_err(RegistryError::from)?;
 
     let mut deliveries = 0;
-    let mut woken_run_ids = Vec::new();
+    let mut run_ids_to_register = BTreeSet::new();
     for subscriber in subscribers {
         let run_id: String = subscriber.get("run_id");
         let signal_id = typed_id::new_workflow_signal_id();
@@ -257,7 +258,7 @@ async fn drain_one_broadcast(
             .await
             .map_err(RegistryError::from)?;
             if woken > 0 {
-                woken_run_ids.push(run_id);
+                run_ids_to_register.insert(run_id);
             }
         }
     }
@@ -286,6 +287,104 @@ async fn drain_one_broadcast(
         .await
         .map_err(RegistryError::from)?
         .get("n");
+    let delivered_rows = tx
+        .query(
+            &super::workflow_engine::journal_sql(
+                &tables,
+                "SELECT DISTINCT sig.run_id \
+                   FROM zeroship.workflow_signals sig \
+                   JOIN zeroship.workflow_runs r ON r.id = sig.run_id AND r.app_id = $2 \
+                  WHERE sig.broadcast_id = $1 \
+                    AND r.state IN ('queued','running','sleeping','waiting','compensating') \
+                    AND r.wake_at IS NOT NULL",
+            ),
+            &[&broadcast_id, &app_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    for row in delivered_rows {
+        run_ids_to_register.insert(row.get("run_id"));
+    }
+
+    tx.commit().await.map_err(RegistryError::from)?;
+    for run_id in run_ids_to_register {
+        super::workflow_engine::register_run_timer(state, &run_id).await?;
+    }
+    if remaining == 0 {
+        complete_broadcast_if_drained(state, &broadcast_id, app_id, &topic, &signal_type).await?;
+    }
+    Ok(FanoutStats {
+        broadcasts: 1,
+        deliveries,
+    })
+}
+
+async fn complete_broadcast_if_drained(
+    state: &AppState,
+    broadcast_id: &str,
+    app_id: Uuid,
+    topic: &str,
+    signal_type: &str,
+) -> Result<(), RegistryError> {
+    let mut conn = state.registry.conn().await?;
+    let tx = conn.transaction().await.map_err(RegistryError::from)?;
+    let rows = tx
+        .query(
+            "SELECT fanout_state \
+               FROM zeroship.workflow_broadcasts \
+              WHERE id = $1 \
+              FOR UPDATE",
+            &[&broadcast_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    let Some(row) = rows.first() else {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(());
+    };
+    let fanout_state: String = row.get("fanout_state");
+    if fanout_state == "completed" {
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(());
+    }
+
+    let Some(tables) = super::workflow_engine::existing_tables(&tx, &app_id).await? else {
+        tx.execute(
+            "UPDATE zeroship.workflow_broadcasts \
+                SET fanout_state = 'completed' \
+              WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+        tx.commit().await.map_err(RegistryError::from)?;
+        return Ok(());
+    };
+
+    let remaining: i64 = tx
+        .query_one(
+            &super::workflow_engine::journal_sql(
+                &tables,
+                "SELECT COUNT(*)::bigint AS n \
+                   FROM zeroship.workflow_subscriptions s \
+                   JOIN zeroship.workflow_runs r ON r.id = s.run_id AND r.app_id = s.app_id \
+                  WHERE s.app_id = $1 \
+                    AND s.topic = $2 \
+                    AND (s.type_filter IS NULL OR s.type_filter = $3) \
+                    AND (s.expires_at IS NULL OR s.expires_at >= now()) \
+                    AND r.state NOT IN ('completed', 'failed', 'cancelled', 'stalled', 'compensating') \
+                    AND NOT EXISTS ( \
+                        SELECT 1 \
+                          FROM zeroship.workflow_signals sig \
+                         WHERE sig.broadcast_id = $4 \
+                           AND sig.run_id = s.run_id \
+                    )",
+            ),
+            &[&app_id, &topic, &signal_type, &broadcast_id],
+        )
+        .await
+        .map_err(RegistryError::from)?
+        .get("n");
     if remaining == 0 {
         tx.execute(
             "UPDATE zeroship.workflow_broadcasts \
@@ -296,15 +395,8 @@ async fn drain_one_broadcast(
         .await
         .map_err(RegistryError::from)?;
     }
-
     tx.commit().await.map_err(RegistryError::from)?;
-    for run_id in woken_run_ids {
-        super::workflow_engine::register_run_timer(state, &run_id).await?;
-    }
-    Ok(FanoutStats {
-        broadcasts: 1,
-        deliveries,
-    })
+    Ok(())
 }
 
 #[cfg(test)]

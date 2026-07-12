@@ -36,6 +36,7 @@ struct CandidateRun {
     deploy_id: String,
     deploy_hash: String,
     state: String,
+    wake_at: Option<DateTime<Utc>>,
     input: Option<Value>,
     started_at: DateTime<Utc>,
     waiting_step_key: Option<String>,
@@ -75,7 +76,7 @@ where
     let tables = WorkflowTables::for_app_id(&request.app_id);
     let select_sql = format!(
         "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
-                r.state, r.input, r.started_at, r.waiting_step_key, r.cancel_requested, \
+                r.state, r.wake_at, r.input, r.started_at, r.waiting_step_key, r.cancel_requested, \
                 r.claimed_by, r.lease_expires, \
                 app.plan_id, plan.name AS plan_name, plan.runtime_limits_json \
            FROM {runs} r \
@@ -101,6 +102,7 @@ where
         deploy_id: row.get("deploy_id"),
         deploy_hash: row.get("deploy_hash"),
         state: row.get("state"),
+        wake_at: row.get("wake_at"),
         input: row.get("input"),
         started_at: row.get("started_at"),
         waiting_step_key: row.get("waiting_step_key"),
@@ -147,6 +149,7 @@ where
     candidate.workflow_name = locked_candidate.workflow_name.clone();
     candidate.deploy_id = locked_candidate.deploy_id.clone();
     candidate.state = locked_candidate.state.clone();
+    candidate.wake_at = locked_candidate.wake_at;
     candidate.waiting_step_key = locked_candidate.waiting_step_key.clone();
     candidate.cancel_requested = locked_candidate.cancel_requested;
     candidate.claimed_by = locked_candidate.claimed_by.clone();
@@ -258,6 +261,13 @@ where
         )));
     }
 
+    if !candidate.cancel_requested && candidate.wake_at.is_some_and(|wake_at| wake_at > Utc::now()) {
+        return Ok(WorkflowClaimOutcome::Terminal(
+            collect_post_apply_registrations_on_conn(tx, candidate.app_id, &candidate.run_id, true)
+                .await?,
+        ));
+    }
+
     if candidate.cancel_requested && candidate.state != "compensating" {
         if cancel_requested_run_for_app(tx, tables, &candidate.run_id).await? {
             return Ok(WorkflowClaimOutcome::Terminal(
@@ -276,7 +286,17 @@ where
     if candidate.state == "compensating"
         && !has_due_compensation(tx, tables, &candidate.run_id).await?
     {
-        finalize_compensation_if_drained(tx, tables, &candidate.run_id).await?;
+        if finalize_compensation_if_drained(tx, tables, &candidate.run_id).await? {
+            return Ok(WorkflowClaimOutcome::Terminal(
+                collect_post_apply_registrations_on_conn(
+                    tx,
+                    candidate.app_id,
+                    &candidate.run_id,
+                    true,
+                )
+                .await?,
+            ));
+        }
         return Ok(WorkflowClaimOutcome::ClaimLost);
     }
 

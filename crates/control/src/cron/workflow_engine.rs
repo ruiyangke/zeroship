@@ -535,6 +535,7 @@ where
             claimed += 1;
             spawn_dispatch(
                 scheduler_store.clone(),
+                state.registry.clone(),
                 dispatcher.clone(),
                 WorkflowRunDispatchRequest {
                     run_id: timer.run_id,
@@ -575,6 +576,7 @@ where
         redispatched = redispatched.saturating_add(1);
         spawn_dispatch(
             scheduler_store.clone(),
+            _state.registry.clone(),
             dispatcher.clone(),
             WorkflowRunDispatchRequest {
                 run_id: timer.run_id,
@@ -694,6 +696,7 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, RegistryError> {
 
 fn spawn_dispatch<D>(
     scheduler_store: WorkflowSchedulerStore,
+    registry: Registry,
     dispatcher: Arc<D>,
     request: WorkflowRunDispatchRequest,
 ) where
@@ -711,7 +714,7 @@ fn spawn_dispatch<D>(
                     .clone()
                     .unwrap_or_else(|| dispatch_run_id.clone());
                 inflight_guard.release();
-                if let Err(e) = apply_workflow_advance_ack(&scheduler_store, &response).await {
+                if let Err(e) = apply_workflow_advance_ack(&scheduler_store, &registry, &response).await {
                     tracing::error!(error = %e, run_id = %run_id, "workflow_engine: scheduler worker ack registration failed");
                 }
             }
@@ -769,6 +772,7 @@ fn spawn_dispatch<D>(
 
 async fn apply_workflow_advance_ack(
     scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
     response: &WorkflowAdvanceResponse,
 ) -> Result<(), RegistryError> {
     if response.registrations.is_empty() {
@@ -778,13 +782,14 @@ async fn apply_workflow_advance_ack(
     }
 
     for registration in &response.registrations {
-        apply_workflow_advance_registration(scheduler_store, registration).await?;
+        apply_workflow_advance_registration(scheduler_store, registry, registration).await?;
     }
     Ok(())
 }
 
 async fn apply_workflow_advance_registration(
     scheduler_store: &WorkflowSchedulerStore,
+    registry: &Registry,
     registration: &WorkflowAdvanceRegistration,
 ) -> Result<(), RegistryError> {
     if let Some(next_wake_at) = registration.next_wake_at.clone() {
@@ -798,7 +803,7 @@ async fn apply_workflow_advance_registration(
             .await
             .map_err(scheduler_store_error_to_registry)?;
     }
-    Ok(())
+    sync_scheduler_for_run(scheduler_store, registry, &registration.run_id).await
 }
 
 struct InflightDispatchGuard {
