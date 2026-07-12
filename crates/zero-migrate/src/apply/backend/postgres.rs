@@ -1,21 +1,9 @@
 //! Postgres [`MigrationBackend`](super::MigrationBackend) implementation.
 
-// The neutral seam types + the `PgSession` trait compile on the whole PG seam
-// (`native-pg` OR `host-pg`) — they name no compio type. The compio adapters
-// inside `session.rs` are `#[cfg(feature = "native-pg")]` internally.
+// The neutral seam types + the `PgSession` trait — they name no concrete driver
+// type; a host driver (the napi `pg` shell) supplies the `PgSession` impl.
 pub mod seam;
 pub mod session;
-// The backfill/online/shadow harnesses are compio-concrete (they run on a compio
-// `Client` / run-loop `JoinHandle`), so they stay `native-pg`-only.
-#[cfg(feature = "native-pg")]
-pub mod backfill;
-#[cfg(feature = "native-pg")]
-pub mod online;
-#[cfg(feature = "native-pg")]
-pub mod shadow;
-
-#[cfg(feature = "native-pg")]
-use compio_postgres::Client;
 
 pub use session::PgSession;
 
@@ -34,74 +22,19 @@ use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use zero_migrate_schema::query::SqlDialect;
 
-/// The Postgres [`MigrationBackend`] implementation.
+/// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
-/// Generic over the [`PgSession`] driver seam (default: the native
-/// `compio_postgres::Client`). The generic `D` lets a future non-compio driver
-/// (a Node/napi `pg`-client shell) plug into the same apply logic. The
-/// `online`/`shadow` capabilities stay PG-concrete (their lifecycle — the online
-/// EXPAND `&Client` entry points, the shadow `CREATE DATABASE` + compio run-loop
-/// `JoinHandle` — is compio-specific), so they are `Option` and present only on
-/// the native path; a non-compio `D` reports `online() == None` / `shadow() ==
-/// None`, both already permitted by the `MigrationBackend` capability seam.
-// The default type param is the compio `Client` only on the native build; on a
-// host-pg-only build there is no `Client`, so the generic parameter has no
-// default and callers name their `D` (the addon supplies a napi `PgSession`).
-#[cfg(feature = "native-pg")]
-#[derive(Debug)]
-pub struct PostgresBackend<'a, D: PgSession = Client> {
-    conn: &'a D,
-    online: Option<online::PgOnline<'a>>,
-    shadow: Option<shadow::PgShadow<'a>>,
-}
-
-/// The generic Postgres backend on a host-pg build. It carries no compio-concrete
-/// `PgOnline`/`PgShadow` harness (those are `native-pg`-only), so `online()` /
-/// `shadow()` always report `None` — the honest v1 gap (`DryRunError::ShadowUnsupported`
-/// on the host path). The write/DDL/journal apply path never touches them.
-#[cfg(all(pg_seam, not(feature = "native-pg")))]
+/// Generic over the [`PgSession`] driver seam. It carries no compio-concrete
+/// `PgOnline`/`PgShadow` harness, so `online()` / `shadow()` always report `None`
+/// — the honest v1 gap (`DryRunError::ShadowUnsupported` on the host path). The
+/// write/DDL/journal apply path never touches them.
+#[cfg(pg_seam)]
 #[derive(Debug)]
 pub struct PostgresBackend<'a, D: PgSession> {
     conn: &'a D,
 }
 
-#[cfg(feature = "native-pg")]
-impl<'a> PostgresBackend<'a, Client> {
-    /// Wrap a migrator connection as the Postgres backend (native path).
-    ///
-    /// `D` is fixed to the concrete `compio_postgres::Client` here, so the
-    /// PG-concrete `PgOnline`/`PgShadow` harnesses type-check and are always
-    /// present — byte-for-byte the pre-seam behavior.
-    #[must_use]
-    pub fn new(conn: &'a Client) -> Self {
-        Self {
-            conn,
-            online: Some(online::PgOnline::new(conn)),
-            shadow: Some(shadow::PgShadow::new(conn)),
-        }
-    }
-}
-
-#[cfg(feature = "native-pg")]
-impl<'a, D: PgSession> PostgresBackend<'a, D> {
-    /// Wrap any [`PgSession`] driver as the Postgres backend, WITHOUT the
-    /// PG-concrete online/shadow harnesses (both `None`).
-    ///
-    /// Used to monomorphize the backend over a non-compio driver — the recording
-    /// `PgSession` used to prove genericity, and any future Node/napi driver. The
-    /// online/shadow capabilities report `None` for such a `D`; the write/DDL/
-    /// journal apply path (which never touches them) runs unchanged.
-    #[must_use]
-    pub fn new_generic(conn: &'a D) -> Self {
-        Self {
-            conn,
-            online: None,
-            shadow: None,
-        }
-    }
-}
-
-#[cfg(all(pg_seam, not(feature = "native-pg")))]
+#[cfg(pg_seam)]
 impl<'a, D: PgSession> PostgresBackend<'a, D> {
     /// Wrap any [`PgSession`] driver as the Postgres backend (host-pg build — no
     /// compio-concrete online/shadow harness exists to attach).
@@ -265,37 +198,12 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
         )))
     }
 
-    #[cfg(feature = "native-pg")]
-    async fn run_backfill_step(
-        &self,
-        cfg: &ExecutorConfig,
-        spec: &BackfillSpec,
-        approval: crate::approval::Approval,
-        _scope: &crate::approval::ApprovalScope,
-        applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
-        let outcome = backfill::run_backfill(self.conn, cfg, spec, approval, applied_by)
-            .await
-            .map_err(|e| ApplyError::Backend(format!("backfill step failed: {e}")))?;
-        let applied = if outcome.complete {
-            vec![spec.name.clone()]
-        } else {
-            Vec::new()
-        };
-        Ok(crate::apply::executor::ApplyOutcome {
-            applied,
-            skipped: Vec::new(),
-            recovered: Vec::new(),
-        })
-    }
 
     // Host-pg build: the online/backfill harness (`backfill::run_backfill`) is a
     // compio-concrete `native-pg`-only module, and the host addon's v1 facade does
     // not surface expand/online. A backfill step routed to the host PG backend is a
     // routing bug (the differ never emits one on the plain apply path), so refuse
     // it explicitly rather than pull the compio backfill runner into the addon.
-    #[cfg(not(feature = "native-pg"))]
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
@@ -358,26 +266,16 @@ impl<D: PgSession> MigrationBackend for PostgresBackend<'_, D> {
         Ok(true)
     }
 
-    #[cfg(feature = "native-pg")]
-    fn online(&self) -> Option<&dyn OnlineSchemaChange> {
-        self.online.as_ref().map(|o| o as &dyn OnlineSchemaChange)
-    }
 
     // Host-pg build: no compio-concrete online harness → always `None`.
-    #[cfg(not(feature = "native-pg"))]
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         None
     }
 
-    #[cfg(feature = "native-pg")]
-    fn shadow(&self) -> Option<&dyn ShadowDryRun> {
-        self.shadow.as_ref().map(|s| s as &dyn ShadowDryRun)
-    }
 
     // Host-pg build: no compio-concrete shadow harness → always `None`, so
     // `dry_run`/`dry_run_declarative` return `DryRunError::ShadowUnsupported`
     // (the honest v1 gap — host-side shadow is sequenced later).
-    #[cfg(not(feature = "native-pg"))]
     fn shadow(&self) -> Option<&dyn ShadowDryRun> {
         None
     }

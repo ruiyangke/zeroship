@@ -41,10 +41,6 @@ host-pg = []
 # those as expected cfg values (checked-cfg) so the build stays warning-free
 # without resurrecting the feature or pulling `v8`.
 #
-# The kernel sandbox for the recorder child (seccomp/landlock/netns/rlimits). These
-# are KERNEL primitives — independent of V8. Kept for embedders that want the
-# sandbox around a host-side recorder child; not on the default path.
-sandbox = ["dep:seccompiler", "dep:landlock", "dep:libc"]
 # The standalone apply/runner CLI (the `zero-migrate` bin, which STAYS in this
 # crate — it needs no in-Rust V8 host, only child-mediated recording). Pulls clap.
 standalone-cli = ["dep:clap"]
@@ -129,19 +125,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # The `zero-migrate.toml` project config for the CLI (DX parity). SYNC + leaf —
 # zero tokio. Only the bin reads it; the library trust domain is unchanged.
 toml = { workspace = true }
-# Raw syscalls for the kernel-sandboxed recorder child (rlimits, no-new-privs,
-# namespaces), matching the existing sandbox-agent raw-libc posture. OPTIONAL —
-# its only users are the sandbox paths, so it is folded into `sandbox` (no in-core
-# consumers → kept out of the sandbox-free tree). NOT a V8 dep.
-libc = { workspace = true, optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# Kernel sandbox for the V8 recorder child: seccomp-bpf default-deny plus a
-# Landlock read-only filesystem ruleset. Linux-only; other targets keep the
-# userland budget floor. OPTIONAL — used only in the V8-gated `frontend/` +
-# recorder-child paths, so folded into `zsv8`.
-seccompiler = { workspace = true, optional = true }
-landlock = { workspace = true, optional = true }
 
 # ---------------------------------------------------------------------------
 # The operator-side CLI binary (Phase 3, design §9). compio (NOT tokio): the
@@ -154,13 +137,6 @@ landlock = { workspace = true, optional = true }
 name = "zero-migrate"
 path = "src/bin/zero-migrate.rs"
 required-features = ["standalone-cli"]
-
-# NOTE: the two V8-host bins — the authoring CLI (`zero-migrate-js`) and the
-# kernel-sandboxed recorder child — live in the sibling host crate
-# `crates/zero-migrate-host`, because they must link the host impl (which depends
-# back on this crate) and would otherwise form a Cargo cycle. This lib crate names
-# NO bin that pulls the V8 host, so it stays a clean runtime-free library. The
-# recorder resolves the child binary by name.
 
 [dev-dependencies]
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro

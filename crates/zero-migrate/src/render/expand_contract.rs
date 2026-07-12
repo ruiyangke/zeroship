@@ -693,8 +693,6 @@ fn build_dual_write_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "native-pg")]
-    use crate::apply::backend::postgres::online::run_expand_pg;
 
     fn author() -> ExpandContractAuthor {
         ExpandContractAuthor::new("proj_acme", "app_acme")
@@ -1059,93 +1057,4 @@ mod tests {
     //
     // The refusal fires BEFORE any DDL/backfill, so the connection is never used on this
     // path — but `run_expand_pg` needs a `&Client`, so we open one (skip if :5440 is down).
-    #[cfg(feature = "native-pg")]
-    #[compio::test]
-    async fn empty_expand_under_scoped_versions_is_refused_not_fail_open() {
-        const DSN: &str =
-            "host=localhost port=5440 user=postgres password=zeroship dbname=zero_migrate_test";
-        let dsn = std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DSN.to_string());
-        let Ok(conn) = crate::conn::connect(&dsn).await else {
-            // PR9d (2) — extend the faithful-e2e hard-gate to the migrate crate.
-            // This is a FAIL-CLOSED security proof (an empty-expand scope check that
-            // must REFUSE, not fall open). Under MIGRATE_REQUIRE_DB an unreachable
-            // :5440 must be a HARD failure, never a vacuous green skip — mirroring
-            // the control crate's `admin_conn` gate. Without the gate a misconfigured
-            // CI could pass this proof green without ever running it (the masking risk).
-            assert!(
-                std::env::var("MIGRATE_REQUIRE_DB").is_err(),
-                "MIGRATE_REQUIRE_DB is set but zero_migrate_test on :5440 is unreachable; \
-                 the faithful-deploy security suite must NOT silently skip in CI — \
-                 a missing test DB is a hard failure, not a vacuous green pass"
-            );
-            eprintln!("SKIP: zero_migrate_test :5440 unreachable");
-            return;
-        };
-
-        let cfg = crate::conn::ExecutorConfig::new("prj_low_i", "prj_low_i");
-        let backfill = BackfillSpec {
-            schema: "prj_low_i".into(),
-            table: "users".into(),
-            cursor_column: "id".into(),
-            batch_size: 50,
-            set_clause: "full_name = name".into(),
-            filter: None,
-            name: "noop".into(),
-        };
-        // A deterministic E2 trigger version — the resolved scope-version when `expand`
-        // is empty. The reviewed set does NOT contain it ⇒ fail-closed refusal.
-        let trigger = MigrationId::generate();
-        let mut reviewed = std::collections::BTreeSet::new();
-        reviewed.insert("some_other_unreviewed_version".to_string());
-        let scope = crate::approval::ApprovalScope::Versions(reviewed);
-
-        let err = run_expand_pg(
-            &conn,
-            &[], // EMPTY expand chain — the fail-open hole pre-fix.
-            &backfill,
-            crate::approval::Approval::Approved,
-            &scope,
-            &trigger,
-            &cfg,
-            "test-low-i",
-            crate::apply::executor::LockMode::Acquire,
-        )
-        .await
-        .expect_err("an empty expand under Versions({other}) must be REFUSED, not fall open");
-        match err {
-            crate::engine::OnlineError::ApprovalNotScoped { version } => {
-                assert_eq!(
-                    version,
-                    trigger.as_str(),
-                    "the refusal must key on the E2 trigger_version (the resolved scope-version \
-                     when the expand chain is empty)"
-                );
-            }
-            other => panic!("expected ApprovalNotScoped, got {other:?}"),
-        }
-
-        // POSITIVE CONTROL: with the trigger_version IN the reviewed set, the gate ADMITS;
-        // an empty expand then short-circuits to `Ok(empty)` (split_last on []), proving the
-        // gate's new unconditional form does not over-refuse a legitimately-scoped rename.
-        let mut ok_set = std::collections::BTreeSet::new();
-        ok_set.insert(trigger.as_str().to_string());
-        let scope_ok = crate::approval::ApprovalScope::Versions(ok_set);
-        let outcome = run_expand_pg(
-            &conn,
-            &[],
-            &backfill,
-            crate::approval::Approval::Approved,
-            &scope_ok,
-            &trigger,
-            &cfg,
-            "test-low-i-ok",
-            crate::apply::executor::LockMode::Acquire,
-        )
-        .await
-        .expect("an in-scope empty expand is admitted then no-ops");
-        assert!(
-            outcome.applied.is_empty() && outcome.skipped.is_empty(),
-            "an empty expand applies nothing once admitted"
-        );
-    }
 }

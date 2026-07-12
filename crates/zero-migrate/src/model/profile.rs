@@ -6,15 +6,22 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::conn::ExecutorConfig;
-use crate::guard::GuardConfig;
 use crate::model::capability::{SealApplier, VendorCapabilities};
+// The sealed-profile → executor/guard plumbing is currently exercised only by the
+// in-crate test suite (its production caller was the removed native-pg apply
+// path), so these imports ride behind `cfg(test)`.
+#[cfg(test)]
+use std::time::Duration;
+#[cfg(test)]
+use crate::conn::ExecutorConfig;
+#[cfg(test)]
+use crate::guard::GuardConfig;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -595,6 +602,7 @@ impl OperationalConfig {
     }
 
     /// Apply the currently-backed operational knobs to an executor config clone.
+    #[cfg(test)]
     pub(crate) fn apply_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
         let lock_ceiling = duration_millis_u64(exec_cfg.pg.lock_timeout);
         let statement_ceiling = duration_millis_u64(exec_cfg.pg.statement_timeout);
@@ -688,6 +696,7 @@ fn validate_timeout_ms(
     Ok(value)
 }
 
+#[cfg(test)]
 const fn min_non_zero_timeout_ms(left: u64, right: u64) -> Option<u64> {
     match (left, right) {
         (0, 0) => None,
@@ -697,6 +706,7 @@ const fn min_non_zero_timeout_ms(left: u64, right: u64) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -1025,6 +1035,7 @@ impl SealedEffectiveProfile {
         })
     }
 
+    #[cfg(test)]
     fn to_guard_config(&self) -> GuardConfig {
         match self.posture {
             SealedPosture::Confined => {
@@ -1273,28 +1284,16 @@ impl SealedProfile {
         self.effective.posture
     }
 
-    pub(crate) fn project_schema(&self) -> &str {
-        &self.effective.project_schema
-    }
-
+    #[cfg(test)]
     pub(crate) fn to_guard_config(&self) -> GuardConfig {
         self.effective.to_guard_config()
-    }
-
-    pub(crate) fn policy_profile(&self) -> PolicyProfile {
-        PolicyProfile {
-            extends: None,
-            capabilities: self.effective.capabilities.clone(),
-            operational: self.effective.operational.clone(),
-            data_security: self.effective.data_security.clone(),
-            system_shape: self.effective.system_shape.clone(),
-        }
     }
 
     /// Ensure the sealed line-1 capability profile is backed by the executor's
     /// line-2 database role. A least-privilege `migrator_<app>` role is the
     /// DB-enforced floor; a sealed profile that grants platform-only capabilities
     /// must not be paired with a config that will `SET ROLE` into that floor.
+    #[cfg(test)]
     pub(crate) fn reconcile_with_executor_config(
         &self,
         exec_cfg: &ExecutorConfig,
@@ -1311,9 +1310,6 @@ impl SealedProfile {
         Ok(())
     }
 
-    pub(crate) fn apply_operational_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
-        self.effective.operational.apply_to_executor_config(exec_cfg);
-    }
 
     #[cfg(test)]
     fn tamper_first_nonce_byte(&mut self) {
@@ -1380,6 +1376,7 @@ pub fn seal_effective_profile(
 }
 
 impl SealedEffectiveProfile {
+    #[cfg(test)]
     fn migrator_unbacked_capability(&self) -> Option<&'static str> {
         let caps = &self.capabilities;
         if caps.role.allow {

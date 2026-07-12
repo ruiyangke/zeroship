@@ -37,8 +37,6 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-#[cfg(feature = "v8-host")]
-pub mod mysql;
 // The PG backend module compiles on the whole PG seam (`native-pg` OR `host-pg`):
 // its generic core (`PostgresBackend<D>` + the `PgSession` trait + the neutral
 // seam types) names no compio type. The compio-concrete pieces inside it
@@ -54,15 +52,6 @@ pub use capability::{
 };
 #[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
-#[cfg(all(test, feature = "v8-host"))]
-pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
-#[cfg(feature = "v8-host")]
-pub use mysql::{
-    deprovision_mysql_migrator_account, mysql_migration_lock_name,
-    provision_mysql_migrator_account, provision_mysql_migrator_account_with_password,
-    JsDriverConn, JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
-    MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
-};
 
 use std::future::Future;
 use std::pin::Pin;

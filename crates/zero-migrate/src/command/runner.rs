@@ -19,30 +19,18 @@ use std::time::Duration;
 
 use crate::analysis::analyze::Advisory;
 use crate::apply::backend::MigrationBackend;
-#[cfg(feature = "native-pg")]
-use crate::apply::backend::PostgresBackend;
 use crate::apply::backend::sqlite::SqliteBackend;
-#[cfg(feature = "native-pg")]
-use crate::conn::connect;
 use crate::conn::{ConnectError, ExecutorConfig};
 use crate::apply::drift::{ChecksumDriftReport, DriftError};
-#[cfg(feature = "native-pg")]
-use crate::apply::drift::check_checksum_drift;
 use crate::engine::{EngineError, MigrationEngine, MigrationPlan, RollbackEngineError};
 use crate::apply::executor::{
-    ApplyOutcome, RollbackError, RollbackOutcome, RollbackRequest, RollbackTarget,
+    ApplyOutcome, RollbackError, RollbackOutcome, RollbackTarget,
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
 // `PolicyProfile` is consumed only by the zsv8-gated `build_policy_profile`.
-#[cfg(feature = "v8-host")]
-use crate::model::profile::PolicyProfile;
 use crate::plan::loader::{load_dir, LoaderError};
 // `PLATFORM_OWNER_APP` feeds only the zsv8-gated platform-TS-apply path.
-#[cfg(feature = "v8-host")]
-use crate::plan::loader::PLATFORM_OWNER_APP;
-#[cfg(feature = "native-pg")]
-use crate::ops::status::status;
 use crate::ops::status::{status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -328,20 +316,7 @@ pub enum RunError {
     IrApply(#[from] crate::command::ir_apply::PostgresIrApplyError),
 }
 
-/// The error the CLI's live-MySQL command arms return.
-///
-/// Under `zsv8` the V8 host is present but the CLI still refuses live MySQL DSNs
-/// as policy ([`RunError::MysqlLiveExecUnimplemented`]). Under a V8-free
-/// (`--no-default-features`) build the MySQL backend is not compiled at all, so
-/// the arm instead names the *build-time* absence
-/// ([`RunError::MysqlRequiresZsv8`]). The distinction is intentional.
-#[cfg(feature = "v8-host")]
-#[inline]
-fn mysql_live_unsupported() -> RunError {
-    RunError::MysqlLiveExecUnimplemented
-}
 
-#[cfg(not(feature = "v8-host"))]
 #[inline]
 fn mysql_live_unsupported() -> RunError {
     RunError::MysqlRequiresZsv8
@@ -364,80 +339,7 @@ fn load_dir_flat(dir: &Path) -> Result<Vec<crate::model::migration::Migration>, 
     Ok(migrations)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MigrationCorpusFormat {
-    Ts,
-    Sql,
-}
 
-/// Detect the top-level migration corpus shape for the Platform Postgres
-/// `migrate` command.
-///
-/// Model C selects `.ts` as the platform source format: the runner records each
-/// file to transient IR at migrate time and applies that IR. The `.sql` branch is
-/// retained only for legacy/generic SQL corpora, not as the platform source.
-/// Committed Platform `.ir.json` is intentionally rejected here; creator
-/// migrations are also `.ts` source with transient IR.
-fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
-    let read = std::fs::read_dir(dir).map_err(|e| {
-        RunError::Load(LoaderError::Io {
-            path: dir.display().to_string(),
-            message: e.to_string(),
-        })
-    })?;
-    let mut first_ts: Option<String> = None;
-    let mut first_ir: Option<String> = None;
-    let mut first_sql: Option<String> = None;
-    for entry in read {
-        let entry = entry.map_err(|e| {
-            RunError::Load(LoaderError::Io {
-                path: dir.display().to_string(),
-                message: e.to_string(),
-            })
-        })?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".ir.json") {
-            first_ir.get_or_insert_with(|| name.to_string());
-        } else if name.ends_with(".ts") {
-            first_ts.get_or_insert_with(|| name.to_string());
-        } else if name.ends_with(".sql") {
-            first_sql.get_or_insert_with(|| name.to_string());
-        }
-    }
-    let mut found = Vec::new();
-    if let Some(ts) = &first_ts {
-        found.push(format!(".ts '{ts}'"));
-    }
-    if let Some(ir) = &first_ir {
-        found.push(format!(".ir.json '{ir}'"));
-    }
-    if let Some(sql) = &first_sql {
-        found.push(format!(".sql '{sql}'"));
-    }
-    if found.len() > 1 {
-        return Err(RunError::MixedPlatformMigrationCorpus {
-            dir: dir.display().to_string(),
-            found: found.join(", "),
-        });
-    }
-    match (first_ts, first_ir, first_sql) {
-        (Some(_), None, None) => Ok(MigrationCorpusFormat::Ts),
-        (None, Some(ir), None) => Err(RunError::PlatformIrCorpusUnsupported {
-            dir: dir.display().to_string(),
-            ir,
-        }),
-        // Preserve the existing loader as the source of truth for empty dirs,
-        // malformed SQL names, dbmate files, and stray files.
-        (None, None, _) => Ok(MigrationCorpusFormat::Sql),
-        _ => unreachable!("mixed platform corpus returned above"),
-    }
-}
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
 ///
@@ -741,6 +643,7 @@ fn open_sqlite_backend(app: &Path) -> Result<SqliteBackend, RunError> {
 
 /// Build the [`ExecutorConfig`] for a run, minting the [`OperatorCapability`]
 /// internally for operator profiles. This is the named CLI-runner mint seam.
+#[cfg(test)]
 fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
     let mut exec = match cfg.profile {
         RunProfile::Platform => {
@@ -787,17 +690,6 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
     }
 }
 
-/// The resolved migration policy profile paired with the executor/guard config.
-/// Only the zsv8-gated platform-TS-apply path consumes it, so it is gated too.
-#[cfg(feature = "v8-host")]
-fn build_policy_profile(cfg: &RunConfig) -> PolicyProfile {
-    match cfg.profile {
-        RunProfile::Platform => PolicyProfile::platform(),
-        #[cfg(any(test, feature = "standalone-cli"))]
-        RunProfile::Trusted => PolicyProfile::platform(),
-        RunProfile::Confined => PolicyProfile::confined(),
-    }
-}
 
 /// The SQLite [`ExecutorConfig`] for the CLI's SQLite leg. SQLite ignores the PG
 /// schema/role machinery (the single migration actor serializes structurally, the
@@ -829,9 +721,6 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 /// destructive-without-`--yes` refusal / apply.
 pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => run_migrate_pg(cfg).await,
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
@@ -855,77 +744,7 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
     Ok(RunReport::Migrate(outcome))
 }
 
-/// The Postgres leg of `migrate`.
-#[cfg(feature = "native-pg")]
-async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    if cfg.profile == RunProfile::Platform {
-        match platform_corpus_format(&cfg.dir)? {
-            #[cfg(feature = "v8-host")]
-            MigrationCorpusFormat::Ts => return run_migrate_pg_platform_ts(cfg).await,
-            #[cfg(not(feature = "v8-host"))]
-            MigrationCorpusFormat::Ts => return Err(RunError::TsRecordRequiresZsv8),
-            MigrationCorpusFormat::Sql => {}
-        }
-    }
-    let migrations = load_dir_flat(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let guard_cfg = build_guard_cfg(cfg);
-    let engine = MigrationEngine::new();
-    let plan = engine.plan(&migrations, &guard_cfg);
-    // H1: refuse a destructive plan without --yes; only then forward Approved.
-    let approval = destructive_gate_decision(&plan, cfg.yes)?;
-    let outcome = engine
-        .apply(
-            &plan,
-            approval,
-            &PostgresBackend::new(&conn),
-            &exec_cfg,
-            "platform-migrate",
-        )
-        .await?;
-    Ok(RunReport::Migrate(outcome))
-}
 
-/// The Platform Postgres `.ts` leg of `migrate`.
-///
-/// Drives the V8 authoring front-end (records `.ts` → transient IR) and applies
-/// the recorded IR to LIVE Postgres over the compio-concrete `connect` /
-/// `apply_platform_ts_postgres` (`native-pg`-only). It is only reachable from the
-/// `native-pg`-gated `run_migrate_pg`, so it is gated on BOTH features; the
-/// V8-free build routes the `Ts` arm to [`RunError::TsRecordRequiresZsv8`], and
-/// this standalone (no native PG driver) never reaches it.
-#[cfg(all(feature = "v8-host", feature = "native-pg"))]
-async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let guard_cfg = build_guard_cfg(cfg);
-    let policy_profile = build_policy_profile(cfg);
-    let approval = if cfg.yes {
-        Approval::Approved
-    } else {
-        Approval::None
-    };
-    let via = crate::frontend::RecordVia::local();
-    let outcome = crate::command::ir_apply::apply_platform_ts_postgres(
-        &PostgresBackend::new(&conn),
-        &cfg.project_schema,
-        PLATFORM_OWNER_APP,
-        &cfg.dir,
-        &via,
-        &exec_cfg,
-        &guard_cfg,
-        &policy_profile,
-        approval,
-        "platform-migrate-ts",
-    )
-    .await?;
-    Ok(RunReport::Migrate(ApplyOutcome {
-        applied: outcome.applied,
-        skipped: outcome.skipped,
-        recovered: Vec::new(),
-    }))
-}
 
 /// `status` — read the journal, print applied vs pending (+ rolled-back). NO DDL
 /// beyond the journal's idempotent bootstrap (design §9). Dispatches by engine:
@@ -937,13 +756,6 @@ async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunErr
 pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let migrations = load_dir_flat(&cfg.dir)?;
     let st = match cfg.resolve_engine()? {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => {
-            let conn = connect(&cfg.database_url).await?;
-            let exec_cfg = build_exec_cfg(cfg);
-            status(&conn, &exec_cfg, &migrations).await?
-        }
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => return Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => {
             let backend = open_sqlite_backend(&app)?;
@@ -991,280 +803,13 @@ pub async fn run_resolve_pending(
     abort: bool,
     ack_data_loss: bool,
 ) -> Result<RunReport, RunError> {
-    #[cfg(feature = "native-pg")]
-    {
-        run_resolve_pending_pg(cfg, version, apply, abort, ack_data_loss).await
-    }
-    #[cfg(not(feature = "native-pg"))]
     {
         let _ = (cfg, version, apply, abort, ack_data_loss);
         Err(RunError::PgRequiresNativePg)
     }
 }
 
-#[cfg(feature = "native-pg")]
-async fn run_resolve_pending_pg(
-    cfg: &RunConfig,
-    version: &str,
-    apply: bool,
-    abort: bool,
-    ack_data_loss: bool,
-) -> Result<RunReport, RunError> {
-    // Exactly one of --apply / --abort.
-    if apply == abort {
-        return Err(RunError::ResolvePending(
-            "exactly one of --apply or --abort is required".to_string(),
-        ));
-    }
-    // Both paths are destructive (C2 drops a column; --abort drops the shadow
-    // column + trigger) — the human checkpoint. No approval bypass.
-    if !cfg.yes {
-        return Err(RunError::ResolvePending(
-            "resolve-pending is destructive (the deferred online-rename contract / abort \
-             drops a column + trigger); re-run with --yes to confirm"
-                .to_string(),
-        ));
-    }
-    // **PR9b L3 — DISTINCT acknowledgement for the DATA-DISCARDING `--abort`.**
-    // `--abort` does something `--apply` never does: it DISCARDS data. After cutover,
-    // app code may have written values ONLY to the shadow `to` column; `--abort` drops
-    // that shadow column, so any such writes are LOST. `--apply` instead preserves data
-    // (it completes the rename — the shadow `to` column becomes the live column). So
-    // `--abort` requires a SEPARATE, explicit acknowledgement (`--acknowledge-shadow-data-loss`)
-    // that is NOT satisfied by the shared `--yes` an `--apply` already uses — a blanket
-    // `--yes` must not silently authorize the data-discarding abort. `--apply` ignores
-    // this flag (its data is preserved).
-    if abort && !ack_data_loss {
-        return Err(RunError::ResolvePending(
-            "--abort discards data written ONLY to the shadow `to` column since cutover \
-             (the shadow column is dropped); re-run with --acknowledge-shadow-data-loss to \
-             confirm (this is SEPARATE from --yes, which --apply uses — --apply preserves \
-             data, --abort discards it)"
-                .to_string(),
-        ));
-    }
-    // PG-only: a SQLite rename has no pending-contract partition (§2.0.2 / D7).
-    match cfg.resolve_engine()? {
-        Engine::Postgres => {}
-        Engine::Sqlite(_) => {
-            return Err(RunError::ResolvePending(
-                "resolve-pending applies only to Postgres online renames; a SQLite rename is \
-                 atomic and has no pending-contract partition"
-                    .to_string(),
-            ))
-        }
-        Engine::Mysql => return Err(mysql_live_unsupported()),
-        Engine::Unsupported => return Err(RunError::UnsupportedEngine),
-    }
 
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let backend = PostgresBackend::new(&conn);
-    let engine = MigrationEngine::new();
-
-    // Bootstrap the journal so the obligation table exists, then read the
-    // OUTSTANDING set and find the obligation for `version`. The whole sequence
-    // runs under the project lock acquired by `apply_plan(LockMode::Acquire)` below
-    // for the contract apply; the obligation read here is consistent because the
-    // command is single-actor and the obligation table is admin-only.
-    backend.ensure_journal(&exec_cfg).await?;
-    let pending_contracts = backend
-        .pending_contracts()
-        .expect("Postgres backend exposes pending-contract capability");
-    let outstanding = pending_contracts
-        .outstanding_pending_contracts(&exec_cfg)
-        .await?;
-    let Some(pc) = outstanding
-        .iter()
-        .find(|pc| pc.pending_version == version)
-        .cloned()
-    else {
-        return Err(RunError::ResolvePending(format!(
-            "no OUTSTANDING pending contract for version `{version}` (already resolved, or \
-             never opened)"
-        )));
-    };
-
-    // Re-derive the contract DDL DETERMINISTICALLY from the obligation's stored
-    // identity facts. The author is byte-stable, so the re-derived C1 (drop
-    // trigger+fn) / C2 (drop old column) / shadow-drop SQL is exactly what the
-    // original rename would emit. We apply them as PLAIN, phase-less `Ddl`
-    // migrations (NOT phase=Contract) so the executor's expand-contract gate
-    // (`check_expand_contract_gate`) does not re-gate them on the journaled E-phase
-    // versions — the obligation read-back IS the gate here, under the held lock.
-    // Fresh `MigrationId`s are fine: these are net-new journal entries (the
-    // original C1/C2 were never applied), and we discharge the obligation
-    // explicitly below (NOT via the engine's contract-version match).
-    let author = crate::render::expand_contract::ExpandContractAuthor::new(
-        exec_cfg.project_schema.clone(),
-        "resolve-pending",
-    );
-    let plan = author
-        .author(&crate::render::expand_contract::OnlineIntent::RenameColumn {
-            table: pc.table.clone(),
-            from: pc.from_col.clone(),
-            to: pc.to_col.clone(),
-            ty: pc.ty.clone(),
-        })
-        .map_err(|e| RunError::ResolvePending(format!("re-author contract: {e}")))?;
-
-    // --apply: C1 (drop trigger+fn) then C2 (drop old column) — the full contract.
-    // --abort: C1 (drop trigger+fn) then drop the SHADOW (`to`) column (E1's down),
-    //          leaving `from` intact (pre-rename shape).
-    let (steps, resolution): (Vec<crate::render::step::PlanStep>, crate::apply::journal::Resolution) = if apply {
-        let c1 = plan
-            .contract
-            .first()
-            .ok_or_else(|| RunError::ResolvePending("contract has no C1 step".to_string()))?;
-        let c2 = plan
-            .contract
-            .get(1)
-            .ok_or_else(|| RunError::ResolvePending("contract has no C2 step".to_string()))?;
-        (
-            vec![
-                crate::render::step::PlanStep::Ddl(plain_ddl(
-                    &format!("resolve_apply_c1_{}", pc.table),
-                    c1.up.clone(),
-                    false,
-                )),
-                crate::render::step::PlanStep::Ddl(plain_ddl(
-                    &format!("resolve_apply_c2_{}", pc.table),
-                    c2.up.clone(),
-                    true,
-                )),
-            ],
-            crate::apply::journal::Resolution::Applied,
-        )
-    } else {
-        // **PR9b L3** — LOUD operator-facing warning on the data-discarding abort.
-        tracing::warn!(
-            table = %pc.table,
-            from_col = %pc.from_col,
-            to_col = %pc.to_col,
-            pending_version = %pc.pending_version,
-            "resolve-pending --abort: DISCARDING data written ONLY to the shadow `{to}` column \
-             since cutover — the shadow column is being dropped, leaving the pre-rename `{from}` \
-             column. Any value written to `{to}` (and not also to `{from}`) is permanently LOST.",
-            to = pc.to_col,
-            from = pc.from_col,
-        );
-        // Re-author the abort steps through the SHARED `build_abort_steps` — the
-        // SAME path the engine's same-deploy recovery
-        // (`abort_same_deploy_expands`) drives — so the CLI `--abort` and the
-        // automatic recovery can never drift in what they emit (C1 drop trigger+fn,
-        // then `DROP COLUMN IF EXISTS <to>`, both idempotent on resume).
-        let steps = crate::apply::backend::postgres::online::build_abort_steps(
-            &exec_cfg.project_schema,
-            &pc,
-        )
-            .map_err(|e| RunError::ResolvePending(format!("re-author abort: {e}")))?;
-        (steps, crate::apply::journal::Resolution::Aborted)
-    };
-
-    // Apply under the REAL Approval::Approved gate (no bypass) via the dedicated
-    // resolve entry: it holds the project lock once, EXEMPTS the named obligation
-    // from the touched-table refusal (these drops ARE the resolution of that
-    // obligation, not a new op fighting it), runs the plain DDL, and — only on
-    // success — APPENDS the `resolved` row with the chosen resolution
-    // (`applied`/`aborted`). Resolve-after-apply (inside the held lock) is
-    // fail-closed: an apply failure leaves the obligation OUTSTANDING, never a
-    // resolved-but-not-applied fail-open state.
-    let outcome = engine
-        .apply_plan_resolving(
-            &steps,
-            &[],
-            // No plan-level `depends_on` on the resolve-pending path: this deploy's
-            // sole job is to discharge the named obligation, not to apply a
-            // dependent plan (§2.0.4 is irrelevant here).
-            &[],
-            std::slice::from_ref(&(pc.clone(), resolution)),
-            Approval::Approved,
-            // The resolve-pending path is the operator's explicit, single-obligation
-            // discharge of an ALREADY-reviewed pending contract (the C1/C2 drops the
-            // operator confirmed via `resolve-pending --apply|--abort`). It carries
-            // the BLANKET scope — there is no co-bundling of distinct reviewed
-            // version-ids here, and the obligation it discharges was itself reviewed
-            // at the `resolve-pending` boundary (PR9b applies its anti-bypass scope to
-            // the routine out-of-band approved DEPLOY surface, not this hand-driven
-            // single-obligation resolve).
-            &crate::approval::ApprovalScope::All,
-            &backend,
-            &exec_cfg,
-            "resolve-pending",
-            crate::apply::executor::LockMode::Acquire,
-            // The resolve-pending path discharges an obligation; it opens none, so no
-            // deploy recovery scope (PR9e).
-            None,
-        )
-        .await
-        .map_err(|e| match e {
-            crate::engine::DeclarativeApplyError::Plain(inner) => RunError::Apply(inner),
-            crate::engine::DeclarativeApplyError::Expand(inner) => {
-                RunError::ResolvePending(format!("online: {inner}"))
-            }
-        })?;
-
-    // **PR9b L3** — carry the explicit data-loss warning on the `--abort` outcome so
-    // the CLI printer surfaces it prominently. `--apply` preserves data ⇒ `None`.
-    let data_loss_warning = if resolution == crate::apply::journal::Resolution::Aborted {
-        Some(format!(
-            "DATA DISCARDED: --abort dropped the shadow `{to}` column on `{table}` — any value \
-             written ONLY to `{to}` since cutover (not also to `{from}`) is permanently lost.",
-            to = pc.to_col,
-            from = pc.from_col,
-            table = pc.table,
-        ))
-    } else {
-        None
-    };
-
-    Ok(RunReport::ResolvePending(ResolveOutcome {
-        pending_version: pc.pending_version,
-        table: pc.table,
-        resolution,
-        applied: outcome.applied.applied,
-        data_loss_warning,
-    }))
-}
-
-/// Build a PLAIN, phase-less [`Migration`](crate::model::migration::Migration) for the
-/// resolve-pending drops — a fresh-id, approval-gated (and optionally destructive)
-/// DDL whose `up` is the re-derived contract/abort SQL. Phase-less so the
-/// executor's expand-contract gate does NOT re-gate it on journaled E-phase
-/// versions; the obligation read-back is the gate (the resolve entry exempts the
-/// named obligation's table from the touched-table refusal).
-fn plain_ddl(name: &str, up: String, destructive: bool) -> crate::model::migration::Migration {
-    use crate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
-    let flags = MigrationFlags {
-        destructive,
-        requires_approval: destructive,
-        ..MigrationFlags::default()
-    };
-    let mut m = crate::model::migration::Migration {
-        version: MigrationId::generate(),
-        name: name.to_string(),
-        up,
-        down: None,
-        checksum: Checksum::of(&ChecksumInput {
-            up: "",
-            down: None,
-            flags: &flags,
-            owner_app: "resolve-pending",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        }),
-        flags,
-        owner_app: "resolve-pending".to_string(),
-        depends_on: Vec::new(),
-        supersedes: Vec::new(),
-        preconditions: Vec::new(),
-        existence_guard: None,
-    };
-    // Re-derive the checksum over the actual content.
-    m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
-    m
-}
 
 /// `validate` — dry-run every file on a SHADOW DB + report checksum drift against
 /// the journal + surface destructive advisories. NO DDL on the real DB (design §9;
@@ -1282,9 +827,6 @@ fn plain_ddl(name: &str, up: String, destructive: bool) -> crate::model::migrati
 /// drift read failure.
 pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => run_validate_pg(cfg).await,
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
@@ -1312,53 +854,6 @@ fn validate_plan_signals(
     (advisories, plan.destructive || plan.requires_approval)
 }
 
-/// The Postgres leg of `validate` — the existing path, byte-identical.
-#[cfg(feature = "native-pg")]
-async fn run_validate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    let migrations = load_dir_flat(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let guard_cfg = build_guard_cfg(cfg);
-    let engine = MigrationEngine::new();
-
-    // The plan tells us destructiveness + advisories WITHOUT touching the DB.
-    let plan = engine.plan(&migrations, &guard_cfg);
-    let (advisories, destructive) = validate_plan_signals(&plan);
-
-    // Dry-run on a THROWAWAY shadow database (CREATE/DROP DATABASE on a clone) —
-    // the real DB sees no migration DDL.
-    let shadow_cfg = crate::apply::backend::ShadowConfig {
-        admin_dsn: cfg.database_url.clone(),
-        db_name_prefix: "zsmig_shadow_".to_string(),
-    };
-    let dry_run = engine
-        .dry_run(
-            &PostgresBackend::new(&conn),
-            &migrations,
-            &exec_cfg,
-            &shadow_cfg,
-            "platform-validate",
-        )
-        .await?;
-
-    // Checksum drift against the REAL journal (read-only). Bootstrap the journal
-    // first — the SAME idempotent `CREATE … IF NOT EXISTS` meta-schema bootstrap
-    // `status` performs (so a fresh DB drift-checks cleanly). This touches ONLY
-    // the meta schema; NO migration DDL hits the project schema (the §9 "no DDL on
-    // the real DB" guarantee is about migration DDL — the drift read needs the
-    // journal to exist, exactly as `status` does).
-    crate::apply::journal::ensure_journal(&conn, &exec_cfg)
-        .await
-        .map_err(crate::ops::status::StatusError::Journal)?;
-    let drift = check_checksum_drift(&conn, &exec_cfg, &migrations).await?;
-
-    Ok(RunReport::Validate(Box::new(ValidateReport {
-        dry_run,
-        drift,
-        destructive,
-        advisories,
-    })))
-}
 
 /// The SQLite leg of `validate` — the dbmate-parity peer of [`run_validate_pg`].
 ///
@@ -1604,17 +1099,7 @@ pub async fn dump_schema_sqlite(app: &Path) -> Result<String, RunError> {
 /// [`RunError`] on an unsupported engine / connect / a journal read failure.
 pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunError> {
     match cfg.resolve_engine()? {
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg),
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => {
-            let conn = connect(&cfg.database_url).await?;
-            let exec_cfg = build_exec_cfg(cfg);
-            // Ensure the journal exists (same idempotent bootstrap `status` does) so a
-            // fresh DB yields an empty trailer rather than erroring on a missing table.
-            crate::apply::journal::ensure_journal(&conn, &exec_cfg).await?;
-            pg_net_applied_trailer(&conn, &exec_cfg).await
-        }
         Engine::Sqlite(app) => {
             let backend = open_sqlite_backend(&app)?;
             let exec_cfg = sqlite_exec_cfg(cfg);
@@ -1637,48 +1122,6 @@ pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunE
     }
 }
 
-/// PG net-applied `(version, checksum, name)` for the dump trailer — per version the
-/// LATEST event must be `applied`; its name/checksum are read from that completed
-/// event. Mirrors [`crate::apply::journal::applied`]'s DISTINCT-ON-latest logic, additionally
-/// carrying `name` (which `AppliedEntry` does not). Ordered by version.
-#[cfg(feature = "native-pg")]
-async fn pg_net_applied_trailer(
-    conn: &compio_postgres::Client,
-    exec_cfg: &ExecutorConfig,
-) -> Result<Vec<TrailerEntry>, RunError> {
-    // Engine-supplied meta schema: route through the ONE shared engine seam so it
-    // fails closed on an empty / NUL name (byte-identical to the prior
-    // `escape_quote_ident` for every real schema). Journal-table read → mapped
-    // through `JournalError` (RunError carries `From<JournalError>`).
-    let meta = crate::render::dml::quote_ident_checked(&exec_cfg.pg.meta_schema)
-        .map_err(crate::apply::journal::JournalError::from)?;
-    let rows = conn
-        .query(
-            &format!(
-                "WITH latest AS (
-                     SELECT DISTINCT ON (version) version, name, checksum, event_kind
-                       FROM {meta}.schema_migrations
-                      ORDER BY version, event_seq DESC
-                 )
-                 SELECT version, name, checksum
-                   FROM latest
-                  WHERE event_kind = '{applied}'
-                  ORDER BY version COLLATE \"C\"",
-                applied = crate::apply::journal::EventKind::Applied.as_str()
-            ),
-            &[],
-        )
-        .await
-        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
-    Ok(rows
-        .iter()
-        .map(|r| TrailerEntry {
-            version: r.get("version"),
-            name: r.get("name"),
-            checksum: r.get("checksum"),
-        })
-        .collect())
-}
 
 /// The marker line that separates a dump's DDL body from its applied-versions
 /// trailer (dbmate `db:dump`/`db:load` round-trip). The bin's `dump` writes it
@@ -1779,6 +1222,7 @@ pub fn parse_schema_dump(content: &str) -> Result<(String, Vec<TrailerEntry>), R
 /// that an older server rejects as an unrecognised GUC) — dbmate sidesteps this by
 /// piping to `psql`, but we restore over the SQL protocol where one rejected GUC
 /// would abort the whole batch.
+#[cfg(test)]
 const PG_DUMP_SESSION_SETTINGS: &[&str] = &[
     "statement_timeout",
     "lock_timeout",
@@ -1805,6 +1249,7 @@ const PG_DUMP_SESSION_SETTINGS: &[&str] = &[
 /// but it refuses to drop a line that merely STARTS with `SET …` and continues
 /// onto the next line (a hypothetical multi-line statement whose first line happens
 /// to begin with an allowlisted keyword), which would otherwise corrupt the body.
+#[cfg(test)]
 fn is_pg_dump_session_setting(line: &str) -> bool {
     let t = line.trim();
     // The line-oriented stripping in `strip_psql_meta_commands` only sees ONE line
@@ -1843,6 +1288,7 @@ fn is_pg_dump_session_setting(line: &str) -> bool {
 /// self-terminated line. [`is_pg_dump_session_setting`] additionally requires the
 /// trailing `;` (L1) so a multi-line statement whose first line happens to begin
 /// with an allowlisted keyword is never partially stripped.
+#[cfg(test)]
 fn strip_psql_meta_commands(ddl: &str) -> String {
     let mut out = String::with_capacity(ddl.len());
     for line in ddl.lines() {
@@ -1919,9 +1365,6 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     let (ddl, entries) = parse_schema_dump(content)?;
 
     match cfg.resolve_engine()? {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => run_load_pg(cfg, &ddl, &entries).await,
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_load_sqlite(cfg, &app, &ddl, &entries).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
@@ -1929,172 +1372,9 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     }
 }
 
-/// The Postgres leg of `load`: restore the DDL via the admin connection, then
-/// record each trailer version as a baseline `completed` event under the project
-/// advisory lock (the SAME serialization + immutable journal path `migrate` uses).
-#[cfg(feature = "native-pg")]
-async fn run_load_pg(
-    cfg: &RunConfig,
-    ddl: &str,
-    entries: &[TrailerEntry],
-) -> Result<RunReport, RunError> {
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
 
-    // Serialize against all migration activity (design §2.3), exactly like apply /
-    // baseline. Held for the whole load; released on every exit.
-    conn.execute(
-        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-        &[&cfg.project_id],
-    )
-    .await
-    .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
-    let result = run_load_pg_locked(&conn, &exec_cfg, ddl, entries).await;
-    let unlock = conn
-        .execute(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[&cfg.project_id],
-        )
-        .await;
-    let outcome = result?;
-    unlock.map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
-    Ok(RunReport::Load(outcome))
-}
 
-/// The PG `load` body, run while holding the project advisory lock: first-entry
-/// guard → restore DDL → journal the trailer versions.
-#[cfg(feature = "native-pg")]
-async fn run_load_pg_locked(
-    conn: &compio_postgres::Client,
-    exec_cfg: &ExecutorConfig,
-    ddl: &str,
-    entries: &[TrailerEntry],
-) -> Result<LoadOutcome, RunError> {
-    // H2: first-entry guard, BEFORE any DDL. `load` bootstraps a FRESH DB and must
-    // never clobber one the engine already manages OR one that already carries user
-    // objects. Two checks:
-    //   (a) the EXISTING journal records no net-applied migration (probed WITHOUT
-    //       creating the table — an `ensure_journal` here would pre-create
-    //       `<meta>.schema_migrations`, which then collides with the dump's own
-    //       `CREATE TABLE … schema_migrations` on restore); and
-    //   (b) the target schema holds no user tables (a dump-less hand-populated DB
-    //       has no journal but is NOT empty — restoring over it would error mid-
-    //       batch on the first `CREATE TABLE` collision, leaving a half state).
-    let net = load_pg_net_applied(conn, exec_cfg).await?;
-    if !net.is_empty() {
-        return Err(RunError::LoadCmd(format!(
-            "cannot load: the journal already records {} net-applied migration(s); \
-             `load` targets a fresh/empty database (a DB the engine already manages \
-             cannot be loaded over)",
-            net.len()
-        )));
-    }
-    let user_tables = load_pg_user_tables(conn, exec_cfg).await?;
-    if user_tables > 0 {
-        return Err(RunError::LoadCmd(format!(
-            "cannot load: the target schema {:?} already has {} user table(s); \
-             `load` targets a fresh/empty database",
-            exec_cfg.project_schema, user_tables
-        )));
-    }
 
-    // 1. Restore the dump DDL inside ONE explicit transaction (H1) so a failure
-    //    mid-dump rolls back to the pre-load state rather than leaving a half-
-    //    restored DB. A `pg_dump --schema-only` of the project schemas is txn-safe (no
-    //    CREATE DATABASE / CREATE INDEX CONCURRENTLY / etc. in a schema-only dump).
-    //    The dump RECREATES the journal objects too (they live in the dumped
-    //    schema), so we must NOT pre-create them. `strip_psql_meta_commands` drops
-    //    the psql backslash directives + the pg_dump session-`SET` preamble;
-    //    everything else is verbatim.
-    let sql = strip_psql_meta_commands(ddl);
-    if !sql.trim().is_empty() {
-        conn.batch_execute(&format!("BEGIN;\n{sql}\nCOMMIT;"))
-            .await
-            .map_err(|e| RunError::LoadCmd(format!("restore dump DDL: {e}")))?;
-    }
-
-    // 1b. Ensure the journal exists (idempotent `CREATE … IF NOT EXISTS`): a dump
-    //     that did NOT carry the journal objects (e.g. a hand-written schema, or a
-    //     platform meta-schema not in the dumped set) still needs them to record into.
-    crate::apply::journal::ensure_journal(conn, exec_cfg).await?;
-
-    // 2. Journal each trailer entry as a baseline `completed` event (recorded-not-
-    //    run), via the SAME immutable `record_baseline` path baseline uses. The
-    //    version + checksum + name come from the dump trailer (M1+M2), NOT from
-    //    `--dir`, so the journaled checksum is the dump's own → drift stays clean.
-    for e in entries {
-        crate::apply::journal::record_baseline(
-            conn,
-            exec_cfg,
-            crate::apply::journal::BaselineRecord {
-                version: &e.version,
-                name: &e.name,
-                checksum: &e.checksum,
-                applied_by: "platform-load",
-                kind: "baseline",
-                supersedes: &[],
-            },
-        )
-        .await?;
-    }
-
-    Ok(LoadOutcome {
-        versions: entries.iter().map(|e| e.version.clone()).collect(),
-    })
-}
-
-/// Count the user tables in the `load` target schema (the H2 schema-emptiness
-/// probe — a DB with no journal but pre-existing user objects is NOT a fresh load
-/// target). Counts base tables in the project schema only; the journal's own
-/// `schema_migrations*` tables live there too but a fresh load target has none yet
-/// (the journal-presence check `load_pg_net_applied` already covers the managed
-/// case, so any table here on a journal-less DB is genuine user data).
-#[cfg(feature = "native-pg")]
-async fn load_pg_user_tables(
-    conn: &compio_postgres::Client,
-    exec_cfg: &ExecutorConfig,
-) -> Result<i64, RunError> {
-    let rows = conn
-        .query(
-            "SELECT count(*)::bigint AS n
-               FROM information_schema.tables
-              WHERE table_schema = $1
-                AND table_type = 'BASE TABLE'",
-            &[&exec_cfg.project_schema],
-        )
-        .await
-        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
-    Ok(rows.first().map(|r| r.get::<_, i64>("n")).unwrap_or(0))
-}
-
-/// Probe the EXISTING PG journal's net-applied versions WITHOUT creating it (the
-/// `load` first-entry guard). A `load` target with no journal table yet is FRESH;
-/// pre-creating the table here would collide with the dump's own
-/// `CREATE TABLE … schema_migrations` on restore. So we check the meta table's
-/// existence first (via `to_regclass`, NULL when absent) and only read net state if
-/// it exists.
-#[cfg(feature = "native-pg")]
-async fn load_pg_net_applied(
-    conn: &compio_postgres::Client,
-    exec_cfg: &ExecutorConfig,
-) -> Result<Vec<String>, RunError> {
-    // Does `<meta>.schema_migrations` exist? `to_regclass` returns NULL if not.
-    let qualified = format!("{}.schema_migrations", exec_cfg.pg.meta_schema);
-    let row = conn
-        .query("SELECT to_regclass($1) IS NOT NULL AS present", &[&qualified])
-        .await
-        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
-    let present = row.first().map(|r| r.get::<_, bool>("present")).unwrap_or(false);
-    if !present {
-        return Ok(Vec::new());
-    }
-    let already = crate::apply::journal::applied(conn, exec_cfg).await?;
-    Ok(already
-        .iter()
-        .filter(|e| e.phase == crate::apply::journal::Phase::Completed)
-        .map(|e| e.version.as_str().to_string())
-        .collect())
-}
 
 /// The SQLite leg of `load`: restore the DDL onto `main` then journal the trailer
 /// versions through the hardened backend (first-entry-guarded).
@@ -2170,9 +1450,6 @@ pub async fn run_rollback(
     };
 
     match cfg.resolve_engine()? {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => run_rollback_pg(cfg, target).await,
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg),
         Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
         Engine::Mysql => Err(mysql_live_unsupported()),
@@ -2180,26 +1457,6 @@ pub async fn run_rollback(
     }
 }
 
-/// The Postgres leg of `rollback` — the existing path, byte-identical.
-#[cfg(feature = "native-pg")]
-async fn run_rollback_pg(cfg: &RunConfig, target: RollbackTarget) -> Result<RunReport, RunError> {
-    let migrations = load_dir_flat(&cfg.dir)?;
-    let conn = connect(&cfg.database_url).await?;
-    let exec_cfg = build_exec_cfg(cfg);
-    let engine = MigrationEngine::new();
-    let request = RollbackRequest::new(target);
-    let outcome = engine
-        .rollback(
-            &migrations,
-            request,
-            Approval::Approved,
-            &conn,
-            &exec_cfg,
-            "platform-rollback",
-        )
-        .await?;
-    Ok(RunReport::Rollback(outcome))
-}
 
 /// The SQLite leg of `rollback`: select the target versions from the net-applied
 /// `_mig` journal and reverse each via [`MigrationBackend::rollback_one_transactional`]
@@ -2349,18 +1606,9 @@ pub async fn run_wait(
 /// always ready). An unsupported URL fails the probe with a clear message (so
 /// `wait` times out honestly rather than panicking).
 // `database_url` is consumed only by the `native-pg` Postgres arm below.
-#[cfg_attr(not(feature = "native-pg"), allow(unused_variables))]
+#[allow(unused_variables)]
 async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
     match engine {
-        #[cfg(feature = "native-pg")]
-        Engine::Postgres => {
-            let conn = connect(database_url).await.map_err(|e| e.to_string())?;
-            conn.query("SELECT 1", &[])
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-        #[cfg(not(feature = "native-pg"))]
         Engine::Postgres => Err(RunError::PgRequiresNativePg.to_string()),
         Engine::Sqlite(app) => {
             // The SQLite "is it ready?" probe: can we open the hardened backend on
@@ -2512,12 +1760,6 @@ mod tests {
             .expect_err("live MySQL migrate must be refused");
         // Both feature states fail closed before touching the migration dir; only
         // the variant differs (CLI-path policy vs. V8-free build-out refusal).
-        #[cfg(feature = "v8-host")]
-        assert!(
-            matches!(err, RunError::MysqlLiveExecUnimplemented),
-            "expected MySQL fail-closed error, got {err:?}"
-        );
-        #[cfg(not(feature = "v8-host"))]
         assert!(
             matches!(err, RunError::MysqlRequiresZsv8),
             "expected MySQL fail-closed error, got {err:?}"

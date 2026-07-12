@@ -8,8 +8,6 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "native-pg")]
-use compio_postgres::{Client, NoTls};
 
 /// Error opening a migrator connection.
 ///
@@ -18,10 +16,6 @@ use compio_postgres::{Client, NoTls};
 /// connect path exists to construct it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
-    /// The underlying compio-postgres driver failed to connect.
-    #[cfg(feature = "native-pg")]
-    #[error("connect: {0}")]
-    Connect(#[from] compio_postgres::Error),
 }
 
 /// The **Postgres confinement parameters** — the per-engine apply-confinement
@@ -264,6 +258,7 @@ impl ExecutorConfig {
     /// The real caller is the operator-side `command::runner` (the CLI,
     /// Phase 3); the token is the in-crate enforcement primitive.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn platform(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
@@ -298,7 +293,7 @@ impl ExecutorConfig {
     /// The real caller is the operator-side `command::runner` (the public
     /// CLI, Phase A2); the token is the in-crate enforcement primitive.
     #[must_use]
-    #[cfg(any(test, feature = "standalone-cli"))]
+    #[cfg(test)]
     pub(crate) fn trusted(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
@@ -397,48 +392,4 @@ impl ExecutorConfig {
     }
 }
 
-/// Open a migrator connection and spawn its driver loop on the compio runtime.
-///
-/// Mirrors the `connect` + `spawn(conn.run()).detach()` pattern used across
-/// `crates/control` and `crates/auth`: the `Connection` half must be driven
-/// for the [`Client`] to make progress, and on compio it runs as a detached
-/// task on the current runtime.
-///
-/// # Errors
-/// [`ConnectError::Connect`] if the driver cannot establish the session.
-#[cfg(feature = "native-pg")]
-pub async fn connect(dsn: &str) -> Result<Client, ConnectError> {
-    let (client, handle) = connect_with_handle(dsn).await?;
-    // Run-loop ownership not needed by this caller: detach it (background).
-    handle.detach();
-    Ok(client)
-}
 
-/// Open a migrator connection, returning BOTH the [`Client`] and the
-/// [`JoinHandle`](compio::runtime::JoinHandle) for its detached driver loop.
-///
-/// Unlike [`connect`] (which detaches the run-loop), this hands the run-loop
-/// handle back to the caller so it can be **deterministically closed** before a
-/// destructive admin op. The shadow-DB dry-run uses this so it can `cancel()`
-/// the shadow session's run-loop after dropping the client and BEFORE
-/// `DROP DATABASE … WITH (FORCE)` — leaving the FORCE drop nothing to fight (a
-/// still-registered backend would otherwise be a race; H2 fix). A plain
-/// [`connect`] caller that does not need that control keeps detaching.
-///
-/// The returned handle is `#[must_use]`: drop it to cancel the run-loop, call
-/// `.detach()` to background it, or `.cancel().await` to close it deterministically.
-///
-/// # Errors
-/// [`ConnectError::Connect`] if the driver cannot establish the session.
-#[cfg(feature = "native-pg")]
-pub async fn connect_with_handle(
-    dsn: &str,
-) -> Result<(Client, compio::runtime::JoinHandle<()>), ConnectError> {
-    let (client, connection) = compio_postgres::connect(dsn, NoTls).await?;
-    let handle = compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            tracing::error!(error = %e, "zero-migrate: pg connection loop ended with error");
-        }
-    });
-    Ok((client, handle))
-}

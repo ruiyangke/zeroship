@@ -6899,8 +6899,8 @@ mod snapshot_builder_refactor_safety_tests {
     // `default`/`encryption_sentinel`/`comment_sentinel`/`opclass` emission-only
     // fields ARE part of the debug print, so this golden also pins the sentinel /
     // default rendering the drift `PartialEq` ignores.
-    const GOLDEN_PG: &str = include_str!("../snapshots/refactor_safety_pg.txt");
-    const GOLDEN_SQLITE: &str = include_str!("../snapshots/refactor_safety_sqlite.txt");
+    const GOLDEN_PG: &str = include_str!("../../tests/goldens/refactor_safety_pg.txt");
+    const GOLDEN_SQLITE: &str = include_str!("../../tests/goldens/refactor_safety_sqlite.txt");
 
     #[test]
     fn capture_goldens() {
@@ -6912,12 +6912,12 @@ mod snapshot_builder_refactor_safety_tests {
         let pg = build_table_snapshot("app", &d, SqlDialect::Postgres).unwrap();
         let sq = build_table_snapshot("app", &d, SqlDialect::Sqlite).unwrap();
         std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshots/refactor_safety_pg.txt"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens/refactor_safety_pg.txt"),
             format!("{pg:#?}\n"),
         )
         .unwrap();
         std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/src/snapshots/refactor_safety_sqlite.txt"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens/refactor_safety_sqlite.txt"),
             format!("{sq:#?}\n"),
         )
         .unwrap();

@@ -58,11 +58,6 @@ impl OperatorCapability {
     }
 }
 
-/// Mint an [`OperatorCapability`] for the operator-side shadow dry-run harness.
-#[must_use]
-pub(crate) const fn mint_shadow_operator_capability() -> OperatorCapability {
-    OperatorCapability::new()
-}
 
 /// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
 /// §3.2). Each [`crate::model::ir::Op`] vendor variant maps to one or more of these via
