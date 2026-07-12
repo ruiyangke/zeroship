@@ -17,6 +17,9 @@ use crate::store::{
 
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
 pub const JOURNAL_TABLE_SUFFIXES: [&str; 5] = ["runs", "steps", "signals", "subscriptions", "blobs"];
+const WORKFLOW_JOURNAL_OWNER_ROLE: &str = "__zeroship_platform_role";
+const WORKFLOW_JOURNAL_OWNER_ROLE_ATTRS: &str =
+    "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT";
 
 #[derive(Clone, Debug)]
 pub struct PgStore {
@@ -56,7 +59,20 @@ impl PgStore {
     {
         let tables = WorkflowTables::for_app_id(app_id);
         platform_client
-            .batch_execute(&provision_sql(&tables))
+            .batch_execute(&provision_owner_sql(&tables))
+            .await?;
+        platform_client
+            .batch_execute(&set_workflow_journal_owner_role_sql())
+            .await?;
+        let provision_result = platform_client.batch_execute(&provision_sql(&tables)).await;
+        let reset_result = platform_client.batch_execute("RESET ROLE").await;
+        match (provision_result, reset_result) {
+            (Err(e), _) => return Err(e.into()),
+            (Ok(_), Err(e)) => return Err(e.into()),
+            (Ok(_), Ok(_)) => {}
+        }
+        platform_client
+            .batch_execute(&reconcile_owner_sql(&tables))
             .await?;
         reassert_table_revokes(platform_client, &tables).await?;
         Ok(tables)
@@ -125,11 +141,8 @@ async fn open_conn(url: &str) -> Result<Client, WorkflowError> {
 }
 
 fn provision_sql(tables: &WorkflowTables) -> String {
-    let schema = quote_ident(&tables.app_schema);
     format!(
         r#"
-CREATE SCHEMA IF NOT EXISTS {schema};
-
 CREATE TABLE IF NOT EXISTS {runs} (
   id text PRIMARY KEY,
   workflow_name text NOT NULL,
@@ -290,6 +303,40 @@ CREATE INDEX IF NOT EXISTS workflow_subscriptions_app_topic_idx ON {subscription
         subscriptions = tables.subscriptions,
         blobs = tables.blobs,
     )
+}
+
+fn provision_owner_sql(tables: &WorkflowTables) -> String {
+    let schema = quote_ident(&tables.app_schema);
+    let owner = quote_ident(WORKFLOW_JOURNAL_OWNER_ROLE);
+    let owner_literal = sql_string_literal(WORKFLOW_JOURNAL_OWNER_ROLE);
+    format!(
+        r#"
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {owner_literal}) THEN
+    CREATE ROLE {owner} {attrs};
+  END IF;
+END
+$$;
+CREATE SCHEMA IF NOT EXISTS {schema};
+ALTER SCHEMA {schema} OWNER TO {owner};
+"#,
+        attrs = WORKFLOW_JOURNAL_OWNER_ROLE_ATTRS,
+    )
+}
+
+fn set_workflow_journal_owner_role_sql() -> String {
+    format!("SET ROLE {}", quote_ident(WORKFLOW_JOURNAL_OWNER_ROLE))
+}
+
+fn reconcile_owner_sql(tables: &WorkflowTables) -> String {
+    let owner = quote_ident(WORKFLOW_JOURNAL_OWNER_ROLE);
+    tables
+        .all()
+        .into_iter()
+        .map(|table| format!("ALTER TABLE {table} OWNER TO {owner};"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn reassert_table_revokes<C>(conn: &C, tables: &WorkflowTables) -> Result<(), WorkflowError>
