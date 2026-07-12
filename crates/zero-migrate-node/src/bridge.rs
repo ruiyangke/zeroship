@@ -48,6 +48,34 @@ use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 
+/// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
+/// two NETWORK dialects reach the host driver — SQLite is in-process rusqlite and
+/// never crosses the seam, so it is not a host-apply target.
+#[derive(Debug, Clone, Copy)]
+enum ApplyDialect {
+    Postgres,
+    Mysql,
+}
+
+impl ApplyDialect {
+    /// Map the wire dialect spelling to the host-apply backend selector. `"sqlite"`
+    /// is rejected here: it has no host-driver path (in-process rusqlite).
+    fn parse(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "postgres" => Ok(Self::Postgres),
+            "mysql" => Ok(Self::Mysql),
+            "sqlite" => Err(
+                "sqlite has no host-driver apply path (it runs in-process via rusqlite); \
+                 pass a postgres or mysql driver"
+                    .to_string(),
+            ),
+            other => Err(format!(
+                "unknown dialect {other:?} (expected postgres|mysql for host apply)"
+            )),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sync, DB-free entrypoints (§C.5) — inline on the napi call thread.
 // ---------------------------------------------------------------------------
@@ -320,6 +348,14 @@ pub fn apply_ir(
             .map_err(|e| Error::from_reason(format!("lowered migrations re-parse failed: {e}")))?
     };
 
+    // Dialect selects the backend (C1 fix, step 4e): Postgres and MySQL ride the
+    // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
+    // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
+    // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,
+    // `?` placeholders). SQLite is in-process rusqlite and never reaches the host
+    // seam, so it is not a valid host-driver dialect here.
+    let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
+
     let dispatch = build_host_dispatch(host_driver)?;
     let (deferred, promise) = env.create_deferred::<String, _>()?;
     let approval = if approved { Approval::Approved } else { Approval::None };
@@ -331,10 +367,25 @@ pub fn apply_ir(
             if let Some(role) = migrator_role {
                 cfg = cfg.with_migrator_role(role);
             }
-            let out = zero_migrate::apply::executor::apply(
-                &session, &cfg, &migrations, approval, &applied_by,
-            )
-            .await;
+            let out = match target {
+                ApplyDialect::Postgres => {
+                    zero_migrate::apply::executor::apply(
+                        &session, &cfg, &migrations, approval, &applied_by,
+                    )
+                    .await
+                }
+                ApplyDialect::Mysql => {
+                    zero_migrate::apply::executor::apply_with_lock_mysql(
+                        &session,
+                        &cfg,
+                        &migrations,
+                        approval,
+                        &applied_by,
+                        zero_migrate::apply::executor::LockMode::Acquire,
+                    )
+                    .await
+                }
+            };
             match out {
                 Ok(outcome) => Ok(serde_json::json!({
                     "applied": outcome.applied,

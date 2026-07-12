@@ -213,13 +213,21 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn evaluate_preconditions(
         &self,
         _cfg: &ExecutorConfig,
-        _m: &Migration,
+        m: &Migration,
     ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
-        // The precondition evaluator issues boolean-SELECT probes gated by the
-        // `pg_query` parser + PG-flavoured catalog reads. A MySQL-native
-        // precondition evaluator is a later cut; until then a MySQL migration
-        // carrying preconditions is refused rather than silently treated as
-        // satisfied.
+        // The executor calls this for EVERY migration, precondition-bearing or not.
+        // A migration with NO preconditions needs no evaluator at all — evaluating an
+        // empty list is `AllMet` by construction (exactly what the PG evaluator's
+        // `evaluate_all` returns for an empty `m.preconditions`), so it must apply
+        // normally on MySQL rather than trip the v1 capability gap.
+        if m.preconditions.is_empty() {
+            return Ok(crate::apply::executor::PreconditionVerdict::AllMet);
+        }
+        // A GENUINE precondition (boolean-SELECT probes gated by the `pg_query`
+        // parser + PG-flavoured catalog reads) has no MySQL-native evaluator yet, so
+        // a MySQL migration that DECLARES preconditions is refused (fail closed)
+        // rather than silently treated as satisfied. A later cut adds the MySQL
+        // evaluator behind live-MySQL tests.
         Err(ApplyError::Backend(
             "mysql backend: precondition evaluation is not yet implemented on MySQL in v1"
                 .to_string(),
@@ -694,7 +702,22 @@ mod render_tests {
             backend.snapshot_schema(&cfg).await.is_err(),
             "snapshot_schema fails closed (no fake empty snapshot)"
         );
-        assert!(backend.evaluate_preconditions(&cfg, &m).await.is_err());
+        // A migration with NO preconditions applies normally (empty list ⇒ AllMet,
+        // no evaluator needed — the executor calls this for every migration).
+        assert_eq!(
+            backend.evaluate_preconditions(&cfg, &m).await.unwrap(),
+            crate::apply::executor::PreconditionVerdict::AllMet,
+            "an empty precondition list is AllMet, not the v1 capability gap",
+        );
+        // A migration that DECLARES a precondition fails closed (no MySQL evaluator).
+        let mut m_pc = trivial_migration();
+        m_pc.preconditions = vec![crate::model::precondition::PreconditionCheck::halt(
+            crate::model::precondition::Precondition::TableNotExists { table: "t".into() },
+        )];
+        assert!(
+            backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
+            "a DECLARED precondition fails closed on MySQL v1",
+        );
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());
         assert!(backend.record_squash(&cfg, &m, "t", &["v1"]).await.is_err());
         assert!(backend.online().is_none(), "no online harness in v1");
