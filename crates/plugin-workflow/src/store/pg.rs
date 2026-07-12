@@ -975,7 +975,7 @@ where
     C: GenericClient + Sync,
 {
     let sql = format!(
-        "SELECT id, app_id, workflow_name, deploy_id, claimed_by, state, dispatch_nonce, lease_expires, \
+        "SELECT id, app_id, workflow_name, deploy_id, claimed_by, state, wake_at, dispatch_nonce, lease_expires, \
                 cancel_requested, stuck_strikes, waiting_step_key, tree_depth, compensation_target, error \
            FROM {runs} \
           WHERE id = $1 \
@@ -993,6 +993,7 @@ where
                 deploy_id: row.get("deploy_id"),
                 claimed_by: row.get("claimed_by"),
                 state: row.get("state"),
+                wake_at: row.get("wake_at"),
                 dispatch_nonce: row.get("dispatch_nonce"),
                 lease_expires: row.get("lease_expires"),
                 cancel_requested: row.get("cancel_requested"),

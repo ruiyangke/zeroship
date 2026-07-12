@@ -3779,7 +3779,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
         "pause-mid-dispatch should land a checkpoint exactly once"
     );
-    wait_for_scheduler_counts(&fx, &pause_run, (1, 0)).await;
+    wait_for_scheduler_counts(&fx, &pause_run, (0, 0)).await;
     let skipped = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
@@ -3789,19 +3789,14 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("paused skip tick");
     assert_eq!(
-        skipped, 1,
-        "paused checkpointed run should fire one light dispatch that the worker claim-loses"
+        skipped, 0,
+        "paused checkpointed run should not leave stale scheduler work"
     );
     assert_eq!(run_state(&fx.pg, &pause_run).await.0, "paused");
     assert_eq!(
         step_rows(&fx, &pause_run).await,
         vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
-        "paused claim-lost dispatch must not replay or apply"
-    );
-    assert_eq!(
-        scheduler_counts(&fx, &pause_run).await,
-        (0, 1),
-        "claim-lost paused run should stay in scheduler inflight for reaper/register"
+        "paused skip must not replay or apply"
     );
     let resume_body = post_control(
         &control_url,
@@ -3812,7 +3807,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(resume_body["state"], "queued");
-    register_existing_run_timer(&fx, &pause_run).await;
+    let _ = wait_for_scheduler_timer(&fx, &pause_run).await;
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -3852,10 +3847,6 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     assert_eq!(cancel_body["state"], "cancelled");
-    fx.scheduler_store
-        .ack_terminal(&cancel_run)
-        .await
-        .expect("retire cancelled run scheduler row");
     let _ = cancel_release_tx.send(());
     compio::time::sleep(Duration::from_millis(150)).await;
     let (state, wake_at, claimed_by, nonce) = run_state(&fx.pg, &cancel_run).await;
@@ -3884,8 +3875,8 @@ async fn durable_workflows_m1_keystone_real_spine() {
     .await
     .expect("cancelled skip tick");
     assert_eq!(
-        skipped, 1,
-        "cancelled run should fire one light dispatch that the worker terminal-acks"
+        skipped, 0,
+        "cancelled run should already be retired from the scheduler store"
     );
     let (state, wake_at, claimed_by, nonce) = run_state(&fx.pg, &cancel_run).await;
     assert_eq!(state, "cancelled");
@@ -4665,7 +4656,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .get("fanout_state");
     assert_eq!(completed_state, "completed");
     for run_id in &topic_runs {
-        register_existing_run_timer(&fx, run_id).await;
+        let _ = wait_for_scheduler_timer(&fx, run_id).await;
     }
     let delivered_rows = fx
         .pg
@@ -5472,7 +5463,7 @@ async fn compensation_saga_rollback_real_spine() {
     )
     .await;
     assert_eq!(cancel["state"], "compensating");
-    register_existing_run_timer(&fx, &cancel_run).await;
+    let _ = wait_for_scheduler_timer(&fx, &cancel_run).await;
     drive_until_cancelled(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -5495,4 +5486,5 @@ async fn compensation_saga_rollback_real_spine() {
             .and_then(|c| c.get("outcome").cloned()),
         Some(serde_json::Value::String("completed".to_string()))
     );
+    wait_for_scheduler_counts(&fx, &cancel_run, (0, 0)).await;
 }

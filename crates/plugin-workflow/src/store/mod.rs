@@ -16,6 +16,7 @@ pub struct RunLockRow {
     pub deploy_id: String,
     pub claimed_by: Option<String>,
     pub state: String,
+    pub wake_at: Option<DateTime<Utc>>,
     pub dispatch_nonce: Option<String>,
     pub lease_expires: Option<DateTime<Utc>>,
     pub cancel_requested: bool,

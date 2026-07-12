@@ -52,10 +52,14 @@ impl Default for SpawnOptions {
 }
 
 impl SpawnOptions {
-    fn assert_no_dual_workflow_timer_authority(self) {
+    fn assert_workflow_timer_liveness(self) {
         assert!(
             !(self.scheduler_authoritative && self.workflow_scan),
             "durable workflow startup refused: control workflow scan cannot run while the scheduler tier is authoritative"
+        );
+        assert!(
+            !self.workflow_sweeps || self.scheduler_authoritative || self.workflow_scan,
+            "durable workflow startup refused: workflow sweeps can create wakes only when a workflow timer authority is enabled"
         );
     }
 }
@@ -80,7 +84,7 @@ pub fn spawn_all_with_options(
     retention_check_secs: u64,
     options: SpawnOptions,
 ) {
-    options.assert_no_dual_workflow_timer_authority();
+    options.assert_workflow_timer_liveness();
 
     // Audit-retention sweep — needs only the registry (cheap clone of the
     // db-url handle inside `AppState`).
@@ -118,7 +122,9 @@ pub fn spawn_all_with_options(
     }
 
     // Lost-ack recovery reads only workflow_scheduler.inflight, then goes
-    // through the normal dispatch/apply/register path for the claimed run.
+    // through the normal dispatch/apply/register path for the claimed run. The
+    // journal reconcile inside this loop is a DR backstop for scheduler-store
+    // loss; routine wake liveness must come from each producer's register path.
     if options.workflow_reaper {
         let workflow_reaper_state = Arc::clone(&state);
         compio::runtime::spawn(async move {

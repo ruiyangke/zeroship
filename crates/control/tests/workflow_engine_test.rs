@@ -26,6 +26,7 @@ use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::{
     deploy_retention, workflow_blob_gc, workflow_retention, workflow_schedules,
+    workflow_signal_fanout,
 };
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, RunUpdate, StepCheckpoint, StepDispatcher,
@@ -659,6 +660,26 @@ async fn seed_run(
             .expect("register seeded workflow timer");
     }
     run_id
+}
+
+async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
+    for _ in 0..120 {
+        if let Some(row) = fx
+            .pg
+            .query(
+                "SELECT wake_at FROM workflow_scheduler.timers WHERE run_id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("load scheduler timer")
+            .into_iter()
+            .next()
+        {
+            return row.get("wake_at");
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("scheduler timer for {run_id} did not appear");
 }
 
 async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
@@ -2111,6 +2132,132 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
 }
 
 #[compio::test]
+async fn claim_compensation_drain_registers_parent_wake() {
+    let Some(fx) = isolated_fixture("claim-comp-drain-parent").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim-comp-drain-parent").await;
+    let parent = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "waiting",
+        -1_000,
+        Some("child:0:CompensatingChild"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL WHERE id = $1",
+            &[&parent],
+        )
+        .await
+        .expect("park parent without scheduler wake");
+    fx.scheduler_store
+        .ack_terminal(&parent)
+        .await
+        .expect("remove parent scheduler row");
+
+    let child = zeroship_core::typed_id::new_workflow_run_id();
+    let signal_type = workflow_engine::child_signal_type(0);
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_runs \
+                (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, \
+                 parent_run_id, parent_wait_step_key, parent_cascade, tree_depth, started_at, \
+                 compensation_target, error) \
+             VALUES ($1, 'CompensatingChild', $2, $3, 'compensating', $4, $5, now(), \
+                     $6, $7, true, 1, now(), 'cancelled', $8)",
+            &[
+                &child,
+                &app_id,
+                &deploy_id,
+                &serde_json::json!({}),
+                &workflow_engine::child_dedup_key(&parent, 0),
+                &parent,
+                &signal_type,
+                &serde_json::json!({"type": "Cancelled", "message": "cancelled"}),
+            ],
+        )
+        .await
+        .expect("insert compensating child");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, output, output_kind, \
+                 batch_id, batch_width, finished_at, compensation_state, compensation_finished_at) \
+             VALUES ($1, 0, 'already-undone', 0, 'run', 'completed', $2, 'inline', \
+                     'wfd_comp_drain', 1, now(), 'completed', now())",
+            &[&child, &serde_json::json!({"ok": true})],
+        )
+        .await
+        .expect("insert drained compensation step");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, signal_type, child_run_id, batch_id, batch_width) \
+             VALUES ($1, 0, 'CompensatingChild', 0, 'child', 'running', $2, $3, 'wfd_parent_wait', 1)",
+            &[&parent, &signal_type, &child],
+        )
+        .await
+        .expect("insert parent child wait step");
+    fx.scheduler_store
+        .ack_register_next(&child, app_id, Utc::now())
+        .await
+        .expect("register compensating child");
+
+    let claimed = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(CompleteDispatcher::new(&fx.state)),
+        config("owner-claim-comp-drain"),
+    )
+    .await
+    .expect("claim drained compensation");
+    assert_eq!(claimed, 1);
+
+    let mut parent_wake = None;
+    for _ in 0..100 {
+        let parent_row = fx
+            .pg
+            .query_one(
+                "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+                &[&parent],
+            )
+            .await
+            .expect("parent after child compensation drain");
+        assert_eq!(parent_row.get::<_, String>("state"), "waiting");
+        parent_wake = parent_row.get::<_, Option<DateTime<Utc>>>("wake_at");
+        if parent_wake.is_some()
+            && fx
+                .scheduler_store
+                .timer(&parent)
+                .await
+                .expect("load parent scheduler timer")
+                .is_some()
+        {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let parent_wake = parent_wake.expect("child terminal hook should wake parent");
+    assert!(
+        parent_wake <= Utc::now() + ChronoDuration::milliseconds(100),
+        "parent wake should be due-now after compensation drain, got {parent_wake:?}"
+    );
+    let timer = fx
+        .scheduler_store
+        .timer(&parent)
+        .await
+        .expect("load parent scheduler timer")
+        .expect("claim drain should register parent timer");
+    assert_eq!(timer.run_id, parent);
+}
+
+#[compio::test]
 async fn parent_cancel_cascades_cooperatively_to_descendants() {
     let Some(fx) = isolated_fixture("child-cascade").await else {
         return;
@@ -2986,6 +3133,120 @@ async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
     })
     .await
     .expect("test timeout");
+}
+
+#[compio::test]
+async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
+    let Some(fx) = isolated_fixture("fanout-redrain-register").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "fanout-redrain-register").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "waiting",
+        -1_000,
+        Some("wait:0:topic:topic.event"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = now() WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("simulate committed fanout wake");
+    fx.scheduler_store
+        .ack_terminal(&run_id)
+        .await
+        .expect("simulate lost post-commit fanout register");
+
+    let topic = format!("fanout-redrain-{}", Uuid::new_v4().simple());
+    let broadcast_id = zeroship_core::typed_id::new_workflow_broadcast_id();
+    let signal_id = zeroship_core::typed_id::new_workflow_signal_id();
+    let subscription_id = zeroship_core::typed_id::new_workflow_subscription_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_subscriptions \
+                (id, app_id, topic, run_id, signal_name, type_filter, ordinal, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), now() + interval '30 seconds')",
+            &[&subscription_id, &app_id, &topic, &run_id],
+        )
+        .await
+        .expect("insert topic subscription");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_broadcasts \
+                (id, app_id, topic, type, payload, origin, idempotency_key, deploy_id, fanout_state, expires_at) \
+             VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', now() + interval '30 seconds')",
+            &[
+                &broadcast_id,
+                &app_id,
+                &topic,
+                &serde_json::json!({"ok": true}),
+                &format!("idem-{broadcast_id}"),
+                &deploy_id,
+            ],
+        )
+        .await
+        .expect("insert pending broadcast");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_signals \
+                (id, run_id, type, payload, origin, delivery, topic, broadcast_id, idempotency_key) \
+             VALUES ($1, $2, 'topic.event', $3, 'app', 'topic', $4, $5, $6)",
+            &[
+                &signal_id,
+                &run_id,
+                &serde_json::json!({"ok": true}),
+                &topic,
+                &broadcast_id,
+                &format!("sig-{signal_id}"),
+            ],
+        )
+        .await
+        .expect("insert delivered signal without scheduler registration");
+
+    let stats = workflow_signal_fanout::tick_with_config(
+        &fx.state,
+        workflow_signal_fanout::FanoutSweepConfig {
+            max_broadcasts_per_tick: 1,
+            max_deliveries_per_broadcast: 100,
+        },
+    )
+    .await
+    .expect("redrain pending broadcast");
+    assert_eq!(stats.broadcasts, 1);
+    assert_eq!(
+        stats.deliveries, 0,
+        "redrain should not duplicate delivered signal"
+    );
+
+    let timer = fx
+        .scheduler_store
+        .timer(&run_id)
+        .await
+        .expect("load redrained timer")
+        .expect("redrain should register delivered wake");
+    assert!(
+        timer.wake_at <= Utc::now() + ChronoDuration::milliseconds(100),
+        "redrained timer should be due, got {:?}",
+        timer.wake_at
+    );
+    let state: String = fx
+        .pg
+        .query_one(
+            "SELECT fanout_state FROM zeroship.workflow_broadcasts WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .expect("load broadcast state")
+        .get("fanout_state");
+    assert_eq!(state, "completed");
 }
 
 #[compio::test]
@@ -4004,6 +4265,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
     assert!(wake_at.is_some(), "first strike requeues for another attempt");
     assert_eq!(strikes, 1);
     assert_eq!(error, None);
+    let _ = wait_for_scheduler_timer(&fx, &run_id).await;
     assert!(
         workflow_step_summaries(&fx, &run_id).await.is_empty(),
         "UNSETTLED frontier creates no workflow_steps row"
@@ -4524,6 +4786,22 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
             .await
             .expect("load wake")
             .get("wake_at");
+        if let Some(waiting_key) = waiting_key {
+            let (kind, name, signal_type) = if waiting_key.starts_with("sleep:") {
+                ("sleep", "cooldown", None)
+            } else {
+                ("wait_signal", "go", Some("go"))
+            };
+            fx.pg
+                .execute(
+                    "INSERT INTO zeroship.workflow_steps \
+                        (run_id, ordinal, name, name_occurrence, kind, state, wake_at, signal_type, batch_id, batch_width) \
+                     VALUES ($1, 0, $2, 0, $3, 'running', $4, $5, 'wfd_pause_restore', 1)",
+                    &[&run_id, &name, &kind, &wake_at, &signal_type],
+                )
+                .await
+                .expect("insert paused frontier step");
+        }
         runs.push((run_id, state.to_string(), wake_at));
     }
 
@@ -4534,7 +4812,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     )
     .await;
 
-    for (run_id, original_state, original_wake) in &runs {
+    for (run_id, original_state, _) in &runs {
         let resp = test::call_service(
             &app,
             authed(
@@ -4561,14 +4839,14 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
             row.get::<_, Option<String>>("paused_from_status").as_deref(),
             Some(original_state.as_str())
         );
-        let paused_wake: DateTime<Utc> = row.get("wake_at");
         assert!(
-            paused_wake
-                .signed_duration_since(*original_wake)
-                .num_milliseconds()
-                .abs()
-                <= 1,
-            "pause should preserve wake_at for {original_state}"
+            row.get::<_, Option<DateTime<Utc>>>("wake_at").is_none(),
+            "pause should suppress wake_at for {original_state}"
+        );
+        let (timer, inflight) = scheduler_presence(&fx, run_id).await;
+        assert!(
+            timer.is_none() && inflight.is_none(),
+            "pause should de-register scheduler rows for {original_state}"
         );
     }
 
@@ -4581,8 +4859,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     .await
     .expect("tick");
     assert_eq!(
-        claimed, 2,
-        "due paused rows should fire light dispatches that the worker claim-loses"
+        claimed, 0,
+        "paused rows should not leave stale scheduler work to claim-lose"
     );
 
     for (run_id, original_state, original_wake) in &runs {
@@ -4609,16 +4887,25 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
             .expect("load resumed run");
         assert_eq!(row.get::<_, String>("state"), original_state.as_str());
         assert_eq!(row.get::<_, Option<String>>("paused_from_status"), None);
-        let resumed_wake: DateTime<Utc> = row.get("wake_at");
-        assert!(
-            resumed_wake
-                .signed_duration_since(*original_wake)
-                .num_milliseconds()
-                .abs()
-                <= 1,
-            "resume should preserve wake_at for {original_state}"
-        );
-        register_existing_run_timer(&fx, run_id).await;
+        let resumed_wake: DateTime<Utc> = row
+            .get::<_, Option<DateTime<Utc>>>("wake_at")
+            .expect("resume should restore a wake for this test case");
+        if matches!(original_state.as_str(), "queued" | "running") {
+            assert!(
+                resumed_wake <= Utc::now() + ChronoDuration::milliseconds(100),
+                "resume should register due-now for {original_state}, got {resumed_wake:?}"
+            );
+        } else {
+            assert!(
+                resumed_wake
+                    .signed_duration_since(*original_wake)
+                    .num_milliseconds()
+                    .abs()
+                    <= 1,
+                "resume should recompute frontier wake for {original_state}"
+            );
+        }
+        assert_scheduler_presence(&fx, run_id, "resume target registration").await;
     }
 
     let due_runs: Vec<String> = runs
@@ -4635,6 +4922,141 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     .await
     .expect("tick resumed");
     wait_for_completed(&fx, &due_runs).await;
+}
+
+#[compio::test]
+async fn pause_signal_resume_registers_no_timeout_waiting_run() {
+    let Some(fx) = isolated_fixture("pause-signal-resume").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-signal-resume").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "waiting",
+        -1_000,
+        Some("wait:0:go:go"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("park wait without timeout");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, signal_type, batch_id, batch_width) \
+             VALUES ($1, 0, 'go', 0, 'wait_signal', 'running', 'go', 'wfd_pause_signal', 1)",
+            &[&run_id],
+        )
+        .await
+        .expect("insert no-timeout wait step");
+    fx.scheduler_store
+        .ack_terminal(&run_id)
+        .await
+        .expect("start with no scheduler row");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    let paused = fx
+        .pg
+        .query_one(
+            "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("paused row");
+    assert_eq!(paused.get::<_, String>("state"), "paused");
+    assert_eq!(paused.get::<_, Option<DateTime<Utc>>>("wake_at"), None);
+    let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
+    assert!(timer.is_none() && inflight.is_none(), "pause should de-register");
+
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri(&format!("/internal/workflows/runs/{run_id}/signal"))
+                .set_json(&serde_json::json!({"type": "go", "payload": {"during": "pause"}})),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::ACCEPTED);
+    let paused_after_signal = fx
+        .pg
+        .query_one(
+            "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("paused signaled row");
+    assert_eq!(paused_after_signal.get::<_, String>("state"), "paused");
+    assert_eq!(
+        paused_after_signal.get::<_, Option<DateTime<Utc>>>("wake_at"),
+        None,
+        "signal during pause must buffer without re-arming the paused row"
+    );
+
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    let resumed = fx
+        .pg
+        .query_one(
+            "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("resumed row");
+    assert_eq!(resumed.get::<_, String>("state"), "waiting");
+    let wake_at: DateTime<Utc> = resumed
+        .get::<_, Option<DateTime<Utc>>>("wake_at")
+        .expect("resume should re-arm pending signal");
+    assert!(
+        wake_at <= Utc::now() + ChronoDuration::milliseconds(100),
+        "resume should register a due pending signal wake, got {wake_at:?}"
+    );
+    assert_scheduler_presence(&fx, &run_id, "resume after paused signal").await;
+
+    workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(CompleteDispatcher::new(&fx.state)),
+        config("owner-pause-signal-resume"),
+    )
+    .await
+    .expect("drive resumed signal");
+    wait_for_completed(&fx, &[run_id]).await;
 }
 
 #[compio::test]
@@ -4772,7 +5194,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     )
     .await;
     assert_eq!(resp.status(), ntex::http::StatusCode::OK);
-    register_existing_run_timer(&fx, &run_id).await;
+    assert_scheduler_presence(&fx, &run_id, "resume after paused checkpoint").await;
     workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
