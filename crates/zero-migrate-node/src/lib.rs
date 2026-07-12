@@ -19,6 +19,13 @@
 //! is `None`, so a shadow dry-run would return `DryRunError::ShadowUnsupported`. The
 //! host-side shadow harness (§F) is a deferred follow-up.
 
+// The workspace pins `unsafe_code = "deny"` (correct for the pure-Rust engine
+// crates). This addon is the ONE workspace member that MUST use `unsafe`: the napi
+// bridge FFIs into the Node ABI (`ToNapiValue`/`FromNapiValue` raw conversions in
+// `bridge.rs`) are `unsafe fn`s by contract. Scope the allowance to this crate so
+// the engine's blanket deny stays intact everywhere else.
+#![allow(unsafe_code)]
+
 pub mod marshal;
 pub mod runtime;
 pub mod session;
