@@ -2,25 +2,24 @@
 //! feature.
 //!
 //! ## Sync, DB-free entrypoints (run inline, no bridge)
-//! `irVersion`, `loadVerify` — pure functions ([`crate::api`]) returning a JSON
-//! string on the napi call thread.
+//! `irVersion`, `loadVerify` — pure functions ([`crate::api`]). `loadVerify` returns
+//! a typed [`LoadVerifyReply`] on the napi call thread (no JSON string).
 //!
 //! ## Async, host-driven entrypoints (fire-and-resolve)
-//! `apply`, `status`, `history` — each:
-//! 1. builds a [`TsfnDispatch`] from the JS host-driver callback (a
-//!    `ThreadsafeFunction`);
-//! 2. `env.create_deferred()`s a JS `Promise`;
-//! 3. spawns the engine on its OWN std::thread ([`crate::runtime::run_engine_blocking`])
-//!    running a reactor-less `futures::executor::block_on`;
-//! 4. resolves/rejects the `Promise` cross-thread from that worker thread when
-//!    `block_on` completes.
+//! `applyIr`, `apply`, `status`, `history` — each goes through the ONE generic
+//! [`run_verb`]: it builds a [`TsfnDispatch`] from the JS host-driver callback, opens
+//! a `create_deferred` promise, spawns the engine on its OWN std::thread
+//! ([`crate::runtime::run_engine_blocking`]) running a reactor-less
+//! `futures::executor::block_on`, and resolves/rejects the promise cross-thread with
+//! a TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) when `block_on`
+//! completes — NO `Promise<string>`, NO per-verb copy-pasted plumbing.
 //!
 //! The JS thread is **never** `join()`ed on the worker — that would deadlock
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
 //! in the napi call). This is the fire-and-resolve topology (§B.5).
 //!
 //! ## The tokio-free verb bridge (§B.3)
-//! Each `PgSession` verb ([`crate::session::NapiHostSession`]) calls
+//! Each `SqlSession` verb ([`crate::session::NapiHostSession`]) calls
 //! [`TsfnDispatch::dispatch`], which: allocates a `futures::channel::oneshot`, moves
 //! the `Sender` into the TSFN payload, and `tsfn.call(..., Blocking)`. On the JS
 //! thread the TSFN's `build_callback` closure marshals the request to a JS object,
@@ -33,20 +32,56 @@
 //! NO `tokio_rt`.
 
 use std::cell::RefCell;
+use std::future::Future;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Env;
 use napi_derive::napi;
 
+use zero_migrate::apply::executor::ApplyOutcome;
+use zero_migrate::apply::journal::{HistoryEvent, HistoryKind};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
+use zero_migrate::ops::status::MigrationStatus;
 
 use crate::api;
 use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
+use crate::wire::{
+    ApplyReply, ApplyRequest, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
+    StatusReply, StatusRequest,
+};
+
+/// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
+/// two NETWORK dialects reach the host driver — SQLite is in-process rusqlite and
+/// never crosses the seam, so it is not a host-apply target.
+#[derive(Debug, Clone, Copy)]
+enum ApplyDialect {
+    Postgres,
+    Mysql,
+}
+
+impl ApplyDialect {
+    /// Map the wire dialect spelling to the host-apply backend selector. `"sqlite"`
+    /// is rejected here: it has no host-driver path (in-process rusqlite).
+    fn parse(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "postgres" => Ok(Self::Postgres),
+            "mysql" => Ok(Self::Mysql),
+            "sqlite" => Err(
+                "sqlite has no host-driver apply path (it runs in-process via rusqlite); \
+                 pass a postgres or mysql driver"
+                    .to_string(),
+            ),
+            other => Err(format!(
+                "unknown dialect {other:?} (expected postgres|mysql for host apply)"
+            )),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Sync, DB-free entrypoints (§C.5) — inline on the napi call thread.
@@ -59,16 +94,15 @@ pub fn ir_version() -> u32 {
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate, §C.5). Returns a
-/// JSON-serialized `LoadVerifyReport` (`{ ok, ir_version, op_count, error }`); never
-/// throws for a malformed document.
+/// typed [`LoadVerifyReply`]; never throws for a malformed document.
 #[napi(js_name = "loadVerify")]
 pub fn load_verify(
     ir_json: String,
     deploying_app: String,
     dialect: String,
-    registry_json: String,
-) -> String {
-    api::load_verify_json(&ir_json, &deploying_app, &dialect, &registry_json)
+    registry: std::collections::HashMap<String, String>,
+) -> LoadVerifyReply {
+    api::load_verify(&ir_json, &deploying_app, &dialect, &registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -206,13 +240,8 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Async, host-driven entrypoints (§C.5) — fire-and-resolve.
+// Async, host-driven entrypoints (§C.5) — the ONE generic driver.
 // ---------------------------------------------------------------------------
-
-/// The JSON-serialized outcome an async entrypoint resolves its Promise with. Plain
-/// owned data, `Send + 'static`, so it crosses from the worker thread to the JS
-/// thread via `deferred.resolve` (§B.3).
-type EngineOutcome = std::result::Result<String, String>;
 
 /// Detach the borrow of a `create_deferred` promise `Object<'_>` (which borrows the
 /// by-value `Env` local) so it can be returned from a `#[napi]` fn. The underlying
@@ -225,56 +254,34 @@ fn detach_promise(env: Env, promise: Object<'_>) -> Result<Object<'static>> {
     Ok(detached)
 }
 
-/// `apply` — drive the engine's generic `executor::apply` over the host driver
-/// (§C.5 convergence point). Migrations cross as a JSON `Vec<Migration>`.
+/// The ONE generic host-verb driver (redesign step 5a) — the single home of the
+/// build-dispatch → create-deferred → spawn-engine → resolve/reject plumbing every
+/// async verb shares.
 ///
-/// Returns a `Promise<string>` resolving to a JSON `ApplyOutcome`
-/// (`{ applied, skipped, recovered }`) or rejecting with the engine error.
-#[napi(ts_return_type = "Promise<string>")]
-pub fn apply(
-    env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
-    host_driver: HostDriverFn,
-    project_id: String,
-    project_schema: String,
-    migrator_role: Option<String>,
-    migrations_json: String,
-    approved: bool,
-    applied_by: String,
-) -> Result<Object<'static>> {
-    let migrations: Vec<Migration> = serde_json::from_str(&migrations_json)
-        .map_err(|e| Error::from_reason(format!("migrations_json is not Vec<Migration>: {e}")))?;
-
+/// - `T` is the verb's TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) — it
+///   crosses to JS via `deferred.resolve`, so it must be `ToNapiValue + Send`.
+/// - `engine` runs on the worker thread; it is handed the host [`NapiHostSession`]
+///   and returns `Result<T, String>` (the projected typed reply, or an engine-error
+///   message that becomes a promise rejection).
+///
+/// The returned `Object` is the JS `Promise<T>`; the engine's whole lifetime lives on
+/// the worker thread (the JS thread is never joined — §B.5).
+fn run_verb<T, Fut, E>(env: Env, host_driver: HostDriverFn, engine: E) -> Result<Object<'static>>
+where
+    T: ToNapiValue + Send + 'static,
+    Fut: Future<Output = std::result::Result<T, String>>,
+    E: FnOnce(NapiHostSession<TsfnDispatch>) -> Fut + Send + 'static,
+{
     let dispatch = build_host_dispatch(host_driver)?;
-
-    let (deferred, promise) = env.create_deferred::<String, _>()?;
-
-    let approval = if approved { Approval::Approved } else { Approval::None };
+    let (deferred, promise) = env.create_deferred::<T, _>()?;
 
     run_engine_blocking(
-        move || async move {
-            // The engine future — strictly one-verb-at-a-time over the host session.
+        move || {
             let session = NapiHostSession::new(dispatch);
-            let mut cfg = ExecutorConfig::new(project_id, project_schema);
-            if let Some(role) = migrator_role {
-                cfg = cfg.with_migrator_role(role);
-            }
-            let out = zero_migrate::apply::executor::apply(
-                &session, &cfg, &migrations, approval, &applied_by,
-            )
-            .await;
-            match out {
-                Ok(outcome) => Ok(serde_json::json!({
-                    "applied": outcome.applied,
-                    "skipped": outcome.skipped,
-                    "recovered": outcome.recovered,
-                })
-                .to_string()),
-                Err(e) => Err(e.to_string()),
-            }
+            engine(session)
         },
-        move |outcome: EngineOutcome| match outcome {
-            Ok(json) => deferred.resolve(move |_| Ok(json)),
+        move |outcome: std::result::Result<T, String>| match outcome {
+            Ok(reply) => deferred.resolve(move |_| Ok(reply)),
             Err(msg) => deferred.reject(Error::from_reason(msg)),
         },
     );
@@ -282,37 +289,93 @@ pub fn apply(
     detach_promise(env, promise)
 }
 
+// ---------------------------------------------------------------------------
+// Engine-result → typed-reply projections (named — no closure-local mapping).
+// ---------------------------------------------------------------------------
+
+/// Project an [`ApplyOutcome`] into the typed [`ApplyReply`].
+fn apply_reply(outcome: ApplyOutcome) -> ApplyReply {
+    ApplyReply {
+        applied: outcome.applied,
+        skipped: outcome.skipped,
+        recovered: outcome.recovered,
+    }
+}
+
+/// Project a [`MigrationStatus`] into the typed [`StatusReply`] (the load-bearing
+/// fields: current version + applied/pending/rolled-back version ids).
+fn status_reply(s: &MigrationStatus) -> StatusReply {
+    StatusReply {
+        current_version: s.current_version.as_ref().map(|v| v.as_str().to_string()),
+        applied: s.applied.iter().map(|e| e.version.clone()).collect(),
+        pending: s.pending.iter().map(|v| v.as_str().to_string()).collect(),
+        rolled_back: s.rolled_back.iter().map(|e| e.version.clone()).collect(),
+    }
+}
+
+/// The wire spelling of a [`HistoryKind`] — the single home of the mapping (was a
+/// closure-local `match` in the `history` entrypoint).
+fn history_kind_str(kind: HistoryKind) -> &'static str {
+    match kind {
+        HistoryKind::Completed => "applied",
+        HistoryKind::RolledBack => "rolled_back",
+    }
+}
+
+/// Project one [`HistoryEvent`] into the typed [`HistoryEventDto`] (`event_seq` as a
+/// JS `bigint`, napi6).
+fn history_event_dto(e: &HistoryEvent) -> HistoryEventDto {
+    HistoryEventDto {
+        event_seq: e.event_seq.into(),
+        version: e.version.clone(),
+        name: e.name.clone(),
+        kind: history_kind_str(e.kind).to_string(),
+        at: e.at.clone(),
+        applied_by: e.applied_by.clone(),
+        checksum: e.checksum.clone(),
+    }
+}
+
+/// Project a `Vec<HistoryEvent>` into the typed [`HistoryReply`].
+fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
+    HistoryReply {
+        events: events.iter().map(history_event_dto).collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The typed verbs (§C.5) — each is a thin `run_verb` closure over the engine.
+// ---------------------------------------------------------------------------
+
 /// `applyIr` — the HOST-AUTHORING apply entry (§D.1): take a pure-JS `.ir.json`
-/// ENVELOPE (`{ ir_version, name, ops }`), run the fail-closed LOAD GATE + LOWER
-/// **in Rust** (stamping `owner_app` + folding the authoritative `Checksum::of_ir`
-/// — the checksum is NEVER computed in JS), then drive `executor::apply` over the
-/// host driver. The envelope must NOT carry `owner_app`; it is stamped from the
-/// `owner_app` arg (provenance, §D.1).
+/// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
+/// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
+/// authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then
+/// drive `executor::apply` over the host driver. The envelope must NOT carry
+/// `owner_app`; it is stamped from `req.owner_app` (provenance, §D.1).
 ///
-/// This is the entry the `zero-migrate/host` facade's `apply` calls: the host
-/// recorder produces the envelope purely in JS, this addon owns the checksum.
-/// Returns a `Promise<string>` resolving to a JSON `ApplyOutcome`.
-#[napi(ts_return_type = "Promise<string>")]
+/// This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
+/// recorder produces the envelope, this addon owns the checksum.
+/// Resolves to a typed [`ApplyReply`].
+#[napi(ts_return_type = "Promise<ApplyReply>")]
 pub fn apply_ir(
     env: Env,
     #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
     host_driver: HostDriverFn,
-    owner_app: String,
-    project_schema: String,
-    migrator_role: Option<String>,
-    dialect: String,
-    registry_json: String,
-    envelope_json: String,
-    approved: bool,
-    applied_by: String,
+    req: ApplyRequest,
 ) -> Result<Object<'static>> {
-    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here, §D.1).
+    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here, §D.1). The
+    // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
+    let envelope_json = serde_json::to_string(&req.envelope)
+        .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
+    let registry_json = serde_json::to_string(&req.registry)
+        .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
     let migrations: Vec<Migration> = {
         let json = crate::lower::lower_envelope_to_migrations_json(
             &envelope_json,
-            &owner_app,
-            &project_schema,
-            &dialect,
+            &req.owner_app,
+            &req.project_schema,
+            &req.dialect,
             &registry_json,
         )
         .map_err(Error::from_reason)?;
@@ -320,38 +383,50 @@ pub fn apply_ir(
             .map_err(|e| Error::from_reason(format!("lowered migrations re-parse failed: {e}")))?
     };
 
-    let dispatch = build_host_dispatch(host_driver)?;
-    let (deferred, promise) = env.create_deferred::<String, _>()?;
+    // Dialect selects the backend (C1 fix, step 4e): Postgres and MySQL ride the
+    // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
+    // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
+    // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,
+    // `?` placeholders). SQLite is in-process rusqlite and never reaches the host
+    // seam, so it is not a valid host-driver dialect here.
+    let target = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
+
+    let ApplyRequest {
+        owner_app: _,
+        project_schema,
+        migrator_role,
+        approved,
+        applied_by,
+        ..
+    } = req;
     let approval = if approved { Approval::Approved } else { Approval::None };
 
-    run_engine_blocking(
-        move || async move {
-            let session = NapiHostSession::new(dispatch);
-            let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
-            if let Some(role) = migrator_role {
-                cfg = cfg.with_migrator_role(role);
+    run_verb(env, host_driver, move |session| async move {
+        let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
+        if let Some(role) = migrator_role {
+            cfg = cfg.with_migrator_role(role);
+        }
+        let out = match target {
+            ApplyDialect::Postgres => {
+                zero_migrate::apply::executor::apply(
+                    &session, &cfg, &migrations, approval, &applied_by,
+                )
+                .await
             }
-            let out = zero_migrate::apply::executor::apply(
-                &session, &cfg, &migrations, approval, &applied_by,
-            )
-            .await;
-            match out {
-                Ok(outcome) => Ok(serde_json::json!({
-                    "applied": outcome.applied,
-                    "skipped": outcome.skipped,
-                    "recovered": outcome.recovered,
-                })
-                .to_string()),
-                Err(e) => Err(e.to_string()),
+            ApplyDialect::Mysql => {
+                zero_migrate::apply::executor::apply_with_lock_mysql(
+                    &session,
+                    &cfg,
+                    &migrations,
+                    approval,
+                    &applied_by,
+                    zero_migrate::apply::executor::LockMode::Acquire,
+                )
+                .await
             }
-        },
-        move |outcome: EngineOutcome| match outcome {
-            Ok(json) => deferred.resolve(move |_| Ok(json)),
-            Err(msg) => deferred.reject(Error::from_reason(msg)),
-        },
-    );
-
-    detach_promise(env, promise)
+        };
+        out.map(apply_reply).map_err(|e| e.to_string())
+    })
 }
 
 /// The `project_id` an `ExecutorConfig` carries. The IR host path uses the project
@@ -364,93 +439,55 @@ fn owner_app_project(project_schema: &str) -> String {
 }
 
 /// `status` — the generic `ops::status::status` over the host driver (§C.5).
-/// Migrations cross as a JSON `Vec<Migration>`. Resolves to a JSON `MigrationStatus`.
-#[napi(ts_return_type = "Promise<string>")]
+/// Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
+/// typed [`StatusReply`].
+#[napi(ts_return_type = "Promise<StatusReply>")]
 pub fn status(
     env: Env,
     #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
     host_driver: HostDriverFn,
-    project_id: String,
-    project_schema: String,
-    migrations_json: String,
+    req: StatusRequest,
 ) -> Result<Object<'static>> {
-    let migrations: Vec<Migration> = serde_json::from_str(&migrations_json)
-        .map_err(|e| Error::from_reason(format!("migrations_json is not Vec<Migration>: {e}")))?;
-    let dispatch = build_host_dispatch(host_driver)?;
-    let (deferred, promise) = env.create_deferred::<String, _>()?;
+    let migrations: Vec<Migration> = req
+        .migrations
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| Error::from_reason(format!("a status migration is not a Migration: {e}")))?;
+    let StatusRequest {
+        project_id,
+        project_schema,
+        ..
+    } = req;
 
-    run_engine_blocking(
-        move || async move {
-            let session = NapiHostSession::new(dispatch);
-            let cfg = ExecutorConfig::new(project_id, project_schema);
-            match zero_migrate::ops::status::status(&session, &cfg, &migrations).await {
-                // `MigrationStatus` is not `Serialize`; project the load-bearing
-                // fields (current version + applied/pending version ids) to JSON.
-                Ok(s) => Ok(serde_json::json!({
-                    "current_version": s.current_version.as_ref().map(|v| v.as_str().to_string()),
-                    "applied": s.applied.iter().map(|e| e.version.clone()).collect::<Vec<_>>(),
-                    "pending": s.pending.iter().map(|v| v.as_str().to_string()).collect::<Vec<_>>(),
-                    "rolled_back": s.rolled_back.iter().map(|e| e.version.clone()).collect::<Vec<_>>(),
-                })
-                .to_string()),
-                Err(e) => Err(e.to_string()),
-            }
-        },
-        move |outcome: EngineOutcome| match outcome {
-            Ok(json) => deferred.resolve(move |_| Ok(json)),
-            Err(msg) => deferred.reject(Error::from_reason(msg)),
-        },
-    );
-
-    detach_promise(env, promise)
+    run_verb(env, host_driver, move |session| async move {
+        let cfg = ExecutorConfig::new(project_id, project_schema);
+        zero_migrate::ops::status::status(&session, &cfg, &migrations)
+            .await
+            .map(|s| status_reply(&s))
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `history` — the generic `ops::status::history` over the host driver (§C.5).
-/// Resolves to a JSON `Vec<HistoryEvent>`.
-#[napi(ts_return_type = "Promise<string>")]
+/// Resolves to a typed [`HistoryReply`].
+#[napi(ts_return_type = "Promise<HistoryReply>")]
 pub fn history(
     env: Env,
     #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
     host_driver: HostDriverFn,
-    project_id: String,
-    project_schema: String,
+    req: HistoryRequest,
 ) -> Result<Object<'static>> {
-    let dispatch = build_host_dispatch(host_driver)?;
-    let (deferred, promise) = env.create_deferred::<String, _>()?;
+    let HistoryRequest {
+        project_id,
+        project_schema,
+    } = req;
 
-    run_engine_blocking(
-        move || async move {
-            let session = NapiHostSession::new(dispatch);
-            let cfg = ExecutorConfig::new(project_id, project_schema);
-            match zero_migrate::ops::status::history(&session, &cfg).await {
-                // `HistoryEvent` is not `Serialize`; project the audit fields.
-                Ok(h) => Ok(serde_json::Value::Array(
-                    h.iter()
-                        .map(|e| {
-                            serde_json::json!({
-                                "event_seq": e.event_seq,
-                                "version": e.version,
-                                "name": e.name,
-                                "kind": match e.kind {
-                                    zero_migrate::apply::journal::HistoryKind::Completed => "applied",
-                                    zero_migrate::apply::journal::HistoryKind::RolledBack => "rolled_back",
-                                },
-                                "at": e.at,
-                                "applied_by": e.applied_by,
-                                "checksum": e.checksum,
-                            })
-                        })
-                        .collect(),
-                )
-                .to_string()),
-                Err(e) => Err(e.to_string()),
-            }
-        },
-        move |outcome: EngineOutcome| match outcome {
-            Ok(json) => deferred.resolve(move |_| Ok(json)),
-            Err(msg) => deferred.reject(Error::from_reason(msg)),
-        },
-    );
-
-    detach_promise(env, promise)
+    run_verb(env, host_driver, move |session| async move {
+        let cfg = ExecutorConfig::new(project_id, project_schema);
+        zero_migrate::ops::status::history(&session, &cfg)
+            .await
+            .map(|h| history_reply(&h))
+            .map_err(|e| e.to_string())
+    })
 }

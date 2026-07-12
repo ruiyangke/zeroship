@@ -31,7 +31,7 @@
 //! own history. Bootstrap ([`ensure_journal`]) is idempotent.
 
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::driver::SqlSession;
 
 use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
@@ -361,8 +361,8 @@ pub enum JournalError {
 }
 
 #[cfg(pg_seam)]
-impl From<crate::apply::backend::postgres::seam::SeamError> for JournalError {
-    fn from(error: crate::apply::backend::postgres::seam::SeamError) -> Self {
+impl From<crate::driver::DbError> for JournalError {
+    fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
     }
 }
@@ -392,13 +392,13 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
 #[cfg(pg_seam)]
-pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), JournalError> {
+pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema))?;
     let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
-    conn.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
+    conn.batch(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
 
     // 2. The append-only journal of record — the SINGLE consolidated events table
@@ -437,7 +437,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     //    per-`event_kind` shape (`applied` ⇒ all three NOT NULL; `rolled_back` ⇒ all
     //    three NULL). `by`/`at` unify the old `applied_by`/`rolled_back_by` and
     //    `applied_at`/`rolled_back_at`.
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             event_kind  TEXT NOT NULL CHECK (event_kind IN ('applied','rolled_back')),
@@ -477,7 +477,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     //     squash_version is validated by the caller before journaling.)
     //     (No shared sequence: supersedes is a relation [set-membership of edges],
     //     not part of the event total order, so it gets its OWN native IDENTITY PK.)
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
             id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             squash_version     TEXT NOT NULL,
@@ -523,7 +523,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     //     `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
     //     sub-version that no plan-level set ever exposes (PR9a HIGH);
     //     `contract_versions` is the JSON array of C1/C2 ids.
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
             event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             state             TEXT NOT NULL CHECK (state IN ('pending','resolved')),
@@ -598,7 +598,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     //     UPDATE/DELETE); the net state per (deploy_id, pending_version) is the latest
     //     `event_seq` row. The migrator role has NO grant on the meta schema, so a
     //     creator migration can neither forge nor suppress a recovery marker.
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_deploy_recovery (
             event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deploy_id        TEXT NOT NULL,
@@ -613,7 +613,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
     //     guarded by the immutability trigger — the marker is deleted on
     //     completion / recovery.
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_inflight (
             version     TEXT PRIMARY KEY,
             name        TEXT NOT NULL,
@@ -628,7 +628,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     //    0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
     //    append-only tables (the consolidated schema_migrations events table +
     //    …_supersedes).
-    conn.batch_execute(&format!(
+    conn.batch(&format!(
         "CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger AS $fn$
          BEGIN
              RAISE EXCEPTION 'migration journal is append-only (no UPDATE/DELETE)';
@@ -680,7 +680,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
         ] {
             let trg_lit = trg.replace('\'', "''");
             let trg_q = quote_ident(trg)?;
-            conn.batch_execute(&format!(
+            conn.batch(&format!(
                 "DO $do$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM pg_trigger t
@@ -726,7 +726,7 @@ pub async fn ensure_journal<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Res
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
 /// phase value is unrecognized.
 #[cfg(pg_seam)]
-pub async fn applied<D: PgSession>(
+pub async fn applied<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
@@ -772,9 +772,9 @@ pub async fn applied<D: PgSession>(
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let version: String = row.get("version");
-        let checksum: String = row.get("checksum");
-        let phase_s: String = row.get("phase");
+        let version: String = row.try_get("version")?;
+        let checksum: String = row.try_get("checksum")?;
+        let phase_s: String = row.try_get("phase")?;
         let phase = Phase::parse(&phase_s).ok_or(JournalError::BadPhase(phase_s))?;
         // The journaled kind of the latest completed event. A `started` marker
         // carries NULL; a completed row whose kind is unrecognized is a tampered /
@@ -858,7 +858,7 @@ pub struct HistoryEvent {
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn net_rolled_back<D: PgSession>(
+pub async fn net_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
@@ -886,12 +886,12 @@ pub async fn net_rolled_back<D: PgSession>(
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         out.push(RolledBackEntry {
-            version: row.get("version"),
-            name: row.get("name"),
-            checksum: row.get("checksum"),
-            rolled_back_by: row.get("actor"),
-            exec_ms: row.get("exec_ms"),
-            at: row.get("at"),
+            version: row.try_get("version")?,
+            name: row.try_get("name")?,
+            checksum: row.try_get("checksum")?,
+            rolled_back_by: row.try_get("actor")?,
+            exec_ms: row.try_get("exec_ms")?,
+            at: row.try_get("at")?,
         });
     }
     Ok(out)
@@ -907,7 +907,7 @@ pub async fn net_rolled_back<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn history<D: PgSession>(
+pub async fn history<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
@@ -926,7 +926,7 @@ pub async fn history<D: PgSession>(
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let kind_s: String = row.get("event_kind");
+        let kind_s: String = row.try_get("event_kind")?;
         // Route the read-back string through the typed `EventKind` contract: an
         // unparseable value is a corrupted / tampered row, surfaced as a typed
         // error rather than silently mis-classified.
@@ -935,14 +935,14 @@ pub async fn history<D: PgSession>(
             EventKind::RolledBack => HistoryKind::RolledBack,
         };
         out.push(HistoryEvent {
-            event_seq: row.get("event_seq"),
-            version: row.get("version"),
-            name: row.get("name"),
+            event_seq: row.try_get("event_seq")?,
+            version: row.try_get("version")?,
+            name: row.try_get("name")?,
             kind,
-            at: row.get("at"),
-            exec_ms: row.get("exec_ms"),
-            applied_by: row.get("actor"),
-            checksum: row.get("checksum"),
+            at: row.try_get("at")?,
+            exec_ms: row.try_get("exec_ms")?,
+            applied_by: row.try_get("actor")?,
+            checksum: row.try_get("checksum")?,
         });
     }
     Ok(out)
@@ -962,7 +962,7 @@ pub async fn history<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
 #[cfg(pg_seam)]
-pub async fn record_rolled_back<D: PgSession>(
+pub async fn record_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
@@ -973,7 +973,7 @@ pub async fn record_rolled_back<D: PgSession>(
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms)
@@ -1000,7 +1000,7 @@ pub async fn record_rolled_back<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
 #[cfg(pg_seam)]
-pub async fn record_started<D: PgSession>(
+pub async fn record_started<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
@@ -1009,7 +1009,7 @@ pub async fn record_started<D: PgSession>(
     applied_by: &str,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
-    conn.execute(
+    conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations_inflight
                  (version, name, checksum, applied_by)
@@ -1049,7 +1049,7 @@ pub struct CompletedRecord<'a> {
 /// # Errors
 /// [`JournalError::Db`] on failure.
 #[cfg(pg_seam)]
-pub async fn record_completed<D: PgSession>(
+pub async fn record_completed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
@@ -1061,7 +1061,7 @@ pub async fn record_completed<D: PgSession>(
     // `rolled_back` already exist for this version and `applied()` made it pending
     // again. Append-only: never an UPDATE.
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
@@ -1079,7 +1079,7 @@ pub async fn record_completed<D: PgSession>(
         )
         .await?;
     debug_assert_eq!(n, 1, "record_completed must insert exactly one journal row");
-    conn.execute(
+    conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[rec.version.into()],
     )
@@ -1101,7 +1101,7 @@ pub async fn record_completed<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn outstanding_pending_contracts<D: PgSession>(
+pub async fn outstanding_pending_contracts<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<PendingContract>, JournalError> {
@@ -1128,7 +1128,7 @@ pub async fn outstanding_pending_contracts<D: PgSession>(
         .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let cv_json: String = row.get("contract_versions");
+        let cv_json: String = row.try_get("contract_versions")?;
         // The contract_versions column is a JSON array of version-id strings. A
         // parse failure is a corrupted/out-of-band-mutated row — fail closed by
         // surfacing it as a Db-class error rather than silently dropping the
@@ -1140,12 +1140,12 @@ pub async fn outstanding_pending_contracts<D: PgSession>(
             ))
         })?;
         out.push(PendingContract {
-            table: row.get("table"),
-            from_col: row.get("from_col"),
-            to_col: row.get("to_col"),
-            ty: row.get("ty"),
-            pending_version: row.get("pending_version"),
-            plan_version: row.get("plan_version"),
+            table: row.try_get("table")?,
+            from_col: row.try_get("from_col")?,
+            to_col: row.try_get("to_col")?,
+            ty: row.try_get("ty")?,
+            pending_version: row.try_get("pending_version")?,
+            plan_version: row.try_get("plan_version")?,
             contract_versions,
         });
     }
@@ -1185,7 +1185,7 @@ pub async fn outstanding_pending_contracts<D: PgSession>(
 /// statement fails, the whole transaction is rolled back so there is never an
 /// obligation without its marker (nor a marker without its obligation).
 #[cfg(pg_seam)]
-pub async fn record_pending_contract_with_recovery<D: PgSession>(
+pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     rec: PendingContractRecord<'_>,
@@ -1202,7 +1202,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
          VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
         pending = PendingState::Pending.as_str()
     );
-    let obligation_params: [crate::apply::backend::postgres::seam::SeamBind; 8] = [
+    let obligation_params: [crate::driver::Bind; 8] = [
         rec.table.into(),
         rec.from_col.into(),
         rec.to_col.into(),
@@ -1216,7 +1216,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
     // No recovery scope (routine / resolve / abort path) — a single autocommit
     // obligation INSERT, byte-identical to the pre-PR9e behavior.
     let Some(scope) = scope else {
-        let n = conn.execute(&obligation_sql, &obligation_params).await?;
+        let n = conn.exec(&obligation_sql, &obligation_params).await?;
         debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
         return Ok(());
     };
@@ -1224,12 +1224,12 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
     // Deploy path — bracket the obligation row AND its `in_progress` recovery marker
     // in ONE transaction so they commit atomically (PR9e: no obligation-without-marker
     // window). Roll the whole thing back on any failure.
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
     let result = async {
-        let n = conn.execute(&obligation_sql, &obligation_params).await?;
+        let n = conn.exec(&obligation_sql, &obligation_params).await?;
         debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
         let m = conn
-            .execute(
+            .exec(
                 &format!(
                     "INSERT INTO {meta}.schema_deploy_recovery
                          (deploy_id, pending_version, state, \"by\")
@@ -1243,7 +1243,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
     }
     .await;
     if let Err(e) = result {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(
                 error = %rb,
                 "zero-migrate: ROLLBACK failed after a \
@@ -1252,7 +1252,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
         }
         return Err(e);
     }
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 
@@ -1270,7 +1270,7 @@ pub async fn record_pending_contract_with_recovery<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
 #[cfg(pg_seam)]
-pub async fn resolve_pending_contract<D: PgSession>(
+pub async fn resolve_pending_contract<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     pc: &PendingContract,
@@ -1282,7 +1282,7 @@ pub async fn resolve_pending_contract<D: PgSession>(
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_pending_contracts
                      (state, \"table\", from_col, to_col, ty, pending_version,
@@ -1344,7 +1344,7 @@ pub struct DeployRecovery {
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
 #[cfg(pg_seam)]
-pub async fn mark_deploy_recovery_committed<D: PgSession>(
+pub async fn mark_deploy_recovery_committed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
@@ -1353,7 +1353,7 @@ pub async fn mark_deploy_recovery_committed<D: PgSession>(
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_deploy_recovery
                      (deploy_id, pending_version, state, \"by\")
@@ -1391,7 +1391,7 @@ pub async fn mark_deploy_recovery_committed<D: PgSession>(
 /// [`JournalError::Db`] on any insert/commit failure (the partial batch is rolled
 /// back so no marker is left half-promoted).
 #[cfg(pg_seam)]
-pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
+pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
@@ -1401,7 +1401,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
     if pending_versions.is_empty() {
         return Ok(());
     }
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
     let result = async {
         for pv in pending_versions {
             mark_deploy_recovery_committed(conn, cfg, deploy_id, pv, by).await?;
@@ -1410,7 +1410,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
     }
     .await;
     if let Err(e) = result {
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(
                 error = %rb,
                 "zero-migrate: ROLLBACK failed after a \
@@ -1419,7 +1419,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
         }
         return Err(e);
     }
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 
@@ -1431,7 +1431,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on insert failure.
 #[cfg(pg_seam)]
-pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
+pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     deploy_id: &str,
@@ -1440,7 +1440,7 @@ pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_deploy_recovery
                      (deploy_id, pending_version, state, \"by\")
@@ -1484,7 +1484,7 @@ pub async fn mark_deploy_recovery_reconciled<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn outstanding_deploy_recoveries<D: PgSession>(
+pub async fn outstanding_deploy_recoveries<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<DeployRecovery>, JournalError> {
@@ -1513,13 +1513,14 @@ pub async fn outstanding_deploy_recoveries<D: PgSession>(
             &[],
         )
         .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| DeployRecovery {
-            deploy_id: row.get("deploy_id"),
-            pending_version: row.get("pending_version"),
+    rows.into_iter()
+        .map(|row| {
+            Ok(DeployRecovery {
+                deploy_id: row.try_get("deploy_id")?,
+                pending_version: row.try_get("pending_version")?,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, JournalError>>()
 }
 
 /// Count the number of versions the journal currently records as **net-applied**
@@ -1535,7 +1536,7 @@ pub async fn outstanding_deploy_recoveries<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
+pub async fn applied_count<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let row = conn
         .query_one(
@@ -1551,7 +1552,7 @@ pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Resu
             &[],
         )
         .await?;
-    Ok(row.get("n"))
+    Ok(row.try_get("n")?)
 }
 
 /// Read the set of versions **superseded by a net-applied squash** (Plan 9).
@@ -1575,7 +1576,7 @@ pub async fn applied_count<D: PgSession>(conn: &D, cfg: &ExecutorConfig) -> Resu
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn superseded_versions<D: PgSession>(
+pub async fn superseded_versions<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
@@ -1606,7 +1607,9 @@ pub async fn superseded_versions<D: PgSession>(
             &[],
         )
         .await?;
-    Ok(rows.iter().map(|r| r.get::<_, String>("v")).collect())
+    rows.iter()
+        .map(|r| r.try_get::<_, String>("v").map_err(JournalError::from))
+        .collect()
 }
 
 /// Read the **latest `completed` checksum per version** from the journal of
@@ -1645,7 +1648,7 @@ pub async fn superseded_versions<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn latest_completed_checksums<D: PgSession>(
+pub async fn latest_completed_checksums<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
@@ -1662,10 +1665,14 @@ pub async fn latest_completed_checksums<D: PgSession>(
             &[],
         )
         .await?;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get::<_, String>("version"), r.get::<_, String>("checksum")))
-        .collect())
+    rows.iter()
+        .map(|r| {
+            Ok((
+                r.try_get::<_, String>("version")?,
+                r.try_get::<_, String>("checksum")?,
+            ))
+        })
+        .collect::<Result<std::collections::HashMap<String, String>, JournalError>>()
 }
 
 /// The fields of a baseline/squash `completed` event recorded WITHOUT running its
@@ -1708,21 +1715,21 @@ pub struct BaselineRecord<'a> {
 /// # Errors
 /// [`JournalError::Db`] on insert failure (the partial work is rolled back).
 #[cfg(pg_seam)]
-pub async fn record_baseline<D: PgSession>(
+pub async fn record_baseline<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
-    conn.batch_execute("BEGIN").await?;
+    conn.batch("BEGIN").await?;
     let result = record_baseline_inner(conn, cfg, rec).await;
     if let Err(e) = result {
         // Roll back the partial row/edges; surface the original error.
-        if let Err(rb) = conn.batch_execute("ROLLBACK").await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %rec.version, "zero-migrate: ROLLBACK failed after a record_baseline error (#3)");
         }
         return Err(e);
     }
-    conn.batch_execute("COMMIT").await?;
+    conn.batch("COMMIT").await?;
     Ok(())
 }
 
@@ -1730,14 +1737,14 @@ pub async fn record_baseline<D: PgSession>(
 /// (#3). Split out so the caller can ROLLBACK on the first failure, making the
 /// completed row and its full edge set atomic.
 #[cfg(pg_seam)]
-async fn record_baseline_inner<D: PgSession>(
+async fn record_baseline_inner<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let n = conn
-        .execute(
+        .exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations
                      (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
@@ -1755,7 +1762,7 @@ async fn record_baseline_inner<D: PgSession>(
         .await?;
     debug_assert_eq!(n, 1, "record_baseline must insert exactly one journal row");
     for sup in rec.supersedes {
-        conn.execute(
+        conn.exec(
             &format!(
                 "INSERT INTO {meta}.schema_migrations_supersedes
                      (squash_version, superseded_version)
@@ -1774,13 +1781,13 @@ async fn record_baseline_inner<D: PgSession>(
 /// # Errors
 /// [`JournalError::Db`] on failure.
 #[cfg(pg_seam)]
-pub async fn clear_inflight<D: PgSession>(
+pub async fn clear_inflight<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
-    conn.execute(
+    conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[version.into()],
     )

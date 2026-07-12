@@ -6,7 +6,7 @@
 //!
 //! A STANDALONE `.mask()` on a PLAINTEXT column (`t.string().mask({ kind: "last4" })`)
 //! used to be DROPPED: the IR `IrColumn` had no `mask` field, and the offline op fold
-//! has no live `__zsmask` COMMENT sentinel to read (the runtime's recovery source). So
+//! has no live `zero-migrate:mask` COMMENT sentinel to read (the runtime's recovery source). So
 //! the creator's `MaskedValue<string>` silently downgraded to `string`, AND the op lower
 //! emitted no sentinel — so the RUNTIME (which DOES read the sentinel) never masked the
 //! field either.
@@ -16,12 +16,12 @@
 //!      the produced `IrColumn`;
 //!   2. the lower `ir_column_to_field` maps `IrColumn.mask` → `FieldDescriptor.mask`
 //!      (explicit mask WINS over the encrypted auto-mask);
-//!   3. so `fold_to_field_defs` recovers it AND the op lower emits the `__zsmask`
+//!   3. so `fold_to_field_defs` recovers it AND the op lower emits the `zero-migrate:mask`
 //!      sentinel + `_masked` sibling (closing the runtime masking-fidelity gap too).
 //!
 //! This test PINS the round-trip: a standalone mask authored on a plaintext column
 //! SURVIVES descriptors → ops → fold and reappears on the recovered FieldDef. (The
-//! live-PG `__zsmask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
+//! live-PG `zero-migrate:mask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
 
 use zero_migrate::render::declarative::{
     descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,

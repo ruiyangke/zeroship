@@ -1,4 +1,4 @@
-import { raw } from "@zeroship/migrate";
+import { raw } from "zero-migrate";
 
 export const name = "platform_ts_denied_host_reach";
 

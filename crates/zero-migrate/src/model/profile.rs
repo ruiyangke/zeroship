@@ -6,15 +6,22 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::conn::ExecutorConfig;
-use crate::guard::GuardConfig;
 use crate::model::capability::{SealApplier, VendorCapabilities};
+// The sealed-profile → executor/guard plumbing is currently exercised only by the
+// in-crate test suite (its production caller was the removed native-pg apply
+// path), so these imports ride behind `cfg(test)`.
+#[cfg(test)]
+use std::time::Duration;
+#[cfg(test)]
+use crate::conn::ExecutorConfig;
+#[cfg(test)]
+use crate::guard::GuardConfig;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -595,6 +602,7 @@ impl OperationalConfig {
     }
 
     /// Apply the currently-backed operational knobs to an executor config clone.
+    #[cfg(test)]
     pub(crate) fn apply_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
         let lock_ceiling = duration_millis_u64(exec_cfg.pg.lock_timeout);
         let statement_ceiling = duration_millis_u64(exec_cfg.pg.statement_timeout);
@@ -688,6 +696,7 @@ fn validate_timeout_ms(
     Ok(value)
 }
 
+#[cfg(test)]
 const fn min_non_zero_timeout_ms(left: u64, right: u64) -> Option<u64> {
     match (left, right) {
         (0, 0) => None,
@@ -697,6 +706,7 @@ const fn min_non_zero_timeout_ms(left: u64, right: u64) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -881,42 +891,11 @@ impl DataSecurityConfig {
     }
 }
 
-/// Destructive operation posture. Ordered from more restrictive to less
-/// restrictive. `RequireApproval` is retained as a server composition value, but
-/// sealed engine configs accept only the enforceable `forbid`/`warn`/`allow`
-/// states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DestructiveOps {
-    /// Forbid destructive operations.
-    Forbid,
-    /// Allow destructive operations and surface a structured warning.
-    Warn,
-    /// Require server approval before projecting to forbid/allow.
-    RequireApproval,
-    /// Allow today's approval-gated behavior.
-    #[default]
-    Allow,
-}
-
-impl DestructiveOps {
-    const fn rank(self) -> u8 {
-        match self {
-            Self::RequireApproval => 0,
-            Self::Forbid => 1,
-            Self::Warn => 2,
-            Self::Allow => 3,
-        }
-    }
-
-    const fn tightest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
-    }
-
-    const fn is_looser_than(self, ceiling: Self) -> bool {
-        self.rank() > ceiling.rank()
-    }
-}
+// `DestructiveOps` moved to the `zero-migrate-ir` leaf (`zero_migrate_ir::policy`)
+// so the guard crate can name it without depending on the engine. Re-exported
+// under `crate::model::profile::DestructiveOps` (below) for the engine's existing
+// references.
+pub use zero_migrate_ir::policy::DestructiveOps;
 
 /// Polarity category for profile knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1025,6 +1004,7 @@ impl SealedEffectiveProfile {
         })
     }
 
+    #[cfg(test)]
     fn to_guard_config(&self) -> GuardConfig {
         match self.posture {
             SealedPosture::Confined => {
@@ -1187,7 +1167,7 @@ impl SealedProfile {
 
     /// Crate-private mint seam for the server path that has a distinct operator
     /// ceiling and submitted draft. The composed effective profile is sealed and
-    /// later lowered to the guard used by [`crate::command::ir_apply::apply_sealed`].
+    /// later lowered to the guard used by [`crate::apply::ir_apply::apply_sealed`].
     #[allow(dead_code)]
     pub(crate) fn mint_composed(
         _cap: &SealApplier,
@@ -1273,28 +1253,16 @@ impl SealedProfile {
         self.effective.posture
     }
 
-    pub(crate) fn project_schema(&self) -> &str {
-        &self.effective.project_schema
-    }
-
+    #[cfg(test)]
     pub(crate) fn to_guard_config(&self) -> GuardConfig {
         self.effective.to_guard_config()
-    }
-
-    pub(crate) fn policy_profile(&self) -> PolicyProfile {
-        PolicyProfile {
-            extends: None,
-            capabilities: self.effective.capabilities.clone(),
-            operational: self.effective.operational.clone(),
-            data_security: self.effective.data_security.clone(),
-            system_shape: self.effective.system_shape.clone(),
-        }
     }
 
     /// Ensure the sealed line-1 capability profile is backed by the executor's
     /// line-2 database role. A least-privilege `migrator_<app>` role is the
     /// DB-enforced floor; a sealed profile that grants platform-only capabilities
     /// must not be paired with a config that will `SET ROLE` into that floor.
+    #[cfg(test)]
     pub(crate) fn reconcile_with_executor_config(
         &self,
         exec_cfg: &ExecutorConfig,
@@ -1311,9 +1279,6 @@ impl SealedProfile {
         Ok(())
     }
 
-    pub(crate) fn apply_operational_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
-        self.effective.operational.apply_to_executor_config(exec_cfg);
-    }
 
     #[cfg(test)]
     fn tamper_first_nonce_byte(&mut self) {
@@ -1380,6 +1345,7 @@ pub fn seal_effective_profile(
 }
 
 impl SealedEffectiveProfile {
+    #[cfg(test)]
     fn migrator_unbacked_capability(&self) -> Option<&'static str> {
         let caps = &self.capabilities;
         if caps.role.allow {
@@ -1611,7 +1577,7 @@ mod tests {
     use crate::model::capability::VendorCapabilities;
     use crate::model::policy::TrustProfile;
     use crate::render::declarative::{build_table_snapshot, CollectionDescriptor};
-    use zero_migrate_schema::query::SqlDialect;
+    use crate::schema::query::SqlDialect;
 
     const KEY: &[u8] = b"stage-1 test key for sealed migrate policy";
     const ISSUED_AT: u64 = 1_719_792_000;
@@ -2413,7 +2379,7 @@ mod tests {
             &cap,
             ceiling,
             draft,
-            "zeroship",
+            "zero_migrate",
             KEY,
             b"nonce-sealed-raw-rls".to_vec(),
             ISSUED_AT,
@@ -2424,9 +2390,9 @@ mod tests {
         assert!(guard_cfg.require_rls());
 
         let author = crate::render::lower::IrAuthor::new(
-            "zeroship",
+            "zero_migrate",
             "app_corpus",
-            zero_migrate_schema::query::SqlDialect::Postgres,
+            crate::schema::query::SqlDialect::Postgres,
         )
         .with_schema_scope(
             guard_cfg
@@ -2438,7 +2404,7 @@ mod tests {
             name: "sealed_raw_rls".to_string(),
             owner_app: "app_corpus".to_string(),
             ops: vec![crate::model::ir::Op::PgRaw {
-                sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".to_string(),
+                sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".to_string(),
                 reason: "require_rls raw table creation regression".to_string(),
             }],
             flags: Default::default(),

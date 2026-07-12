@@ -1,4 +1,4 @@
-import { view } from "@zeroship/migrate";
+import { view } from "zero-migrate";
 
 export default {
   up() {

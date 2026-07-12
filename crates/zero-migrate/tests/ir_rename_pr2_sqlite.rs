@@ -33,7 +33,7 @@ use zero_migrate::{
     apply::executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
     SqliteBackend, PolicyProfile, resolve_create_table_policy,
 };
-use zero_migrate_schema::query::SqlDialect as SchemaDialect;
+use zero_migrate::schema::query::SqlDialect as SchemaDialect;
 
 const PROJECT: &str = "prj_rename";
 const APP: &str = "app_rename";

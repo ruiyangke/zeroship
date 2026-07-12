@@ -12,7 +12,7 @@ use zero_migrate::model::validate::{
     CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zero_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";
 

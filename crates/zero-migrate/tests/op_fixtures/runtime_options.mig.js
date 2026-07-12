@@ -1,7 +1,7 @@
 // op.* migration fixture — collection runtime options that are not recoverable
 // from physical catalog state. Covers create-time runtimeOptions, a runtime-
 // visible compound index, and a later metadata-only setTableOptions patch.
-import { table, t } from "@zeroship/migrate";
+import { table, t } from "zero-migrate";
 
 export const name = "runtime_options";
 

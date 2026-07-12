@@ -1,581 +1,120 @@
-//! MySQL [`MigrationBackend`](super::MigrationBackend) implementation.
+//! MySQL [`MigrationBackend`](crate::apply::backend::MigrationBackend)
+//! implementation (redesign step 4d).
 //!
-//! The backend talks to MySQL through the platform-owned Trusted JS driver
-//! isolate. The isolate loads the vendored, unmodified `mysql2/promise` bundle
-//! and bound SQL reaches the server through `connection.execute`; transaction
-//! control uses mysql2's `beginTransaction`/`commit`/`rollback` on the same
-//! connection.
+//! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
+//! (engine root `crate::driver`) — a host driver (the napi `mysql2` shell) supplies
+//! the `SqlSession` impl, exactly as the `pg` shell does for
+//! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the
+//! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
+//! placeholders) differs, and all of it lives here + in [`session`] / [`journal_sql`]
+//! — never in the shared executor (the C1 structural fix that lets MySQL ride the
+//! same seam).
+//!
+//! **MySQL DDL is auto-committing** (an implicit COMMIT brackets every DDL
+//! statement), so a migration's `up` cannot commit atomically with its journal
+//! row. Every MySQL migration therefore takes the **two-phase non-transactional
+//! path** — `ddl_is_transactional()` returns `false`, which routes all versioned
+//! migrations through the started-marker → run-`up` → completed-row protocol (the
+//! generalization of Postgres' `CREATE INDEX CONCURRENTLY` path to every MySQL
+//! migration).
+//!
+//! # v1 capability surface (honest gaps)
+//!
+//! This first MySQL backend implements the **core apply path**: the `GET_LOCK`
+//! project lock, MySQL journal DDL + net-state reads + event writes, the two-phase
+//! apply, rollback, session setup, and the (dialect-agnostic) checksum-drift gate
+//! over the MySQL journal read. The Postgres/SQLite-specific *advanced* paths —
+//! live-schema introspection (`snapshot_schema`), online expand-contract
+//! (`online`), shadow dry-run (`shadow`), the SQLite table rebuild (`rebuild_one`),
+//! batched backfill / parameterized-DML steps, preconditions, baseline/squash
+//! journal-without-running, and the cross-deploy pending-contract partition — are
+//! **fail-closed** on this v1 MySQL backend (they surface a clear
+//! `ApplyError::Backend` / capability-absent `None` rather than a silent
+//! mis-apply), exactly as the host-PG backend fails closed on its native-pg-only
+//! online/backfill harness and SQLite fails closed on its capability gaps. A later
+//! cut widens them behind live-MySQL tests.
 
-pub mod embedding;
-pub mod snapshot;
-pub mod transport;
-
-use std::cell::RefCell;
-use std::collections::HashMap;
-#[cfg(test)]
-use std::rc::Rc;
-use std::time::{Duration, Instant};
+pub(crate) mod journal_sql;
+pub(crate) mod session;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
-use super::{CrossDeployObligations, MigrationBackend};
+use super::{CrossDeployObligations, MigrationBackend, PlaceholderStyle};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::apply::drift::{ChecksumDriftReport, DriftError};
-use crate::apply::executor::{
-    ApplyError, ApplyOutcome, LockMode, PreconditionVerdict, RollbackError,
-};
-use crate::apply::journal::{self, AppliedEntry, JournalError};
-use crate::approval::{Approval, ApprovalScope};
+use crate::apply::drift::DriftError;
+use crate::apply::executor::{ApplyError, RollbackError};
+use crate::apply::journal::{AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
-use crate::model::probe::GuardProbe;
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::existence_probe::GuardVerdict;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
-use snapshot::{rowsets_to_schema_snapshot, MysqlCatalogRowSets};
-use sha2::{Digest, Sha256};
-pub use transport::{JsDriverConn, JsDriverError, RowSet};
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
+use crate::driver::SqlSession;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MysqlSessionSnapshot {
-    pub innodb_lock_wait_timeout: String,
-    pub sql_mode: String,
-}
-
-/// The MySQL [`MigrationBackend`], generic over the V8-host seam
-/// [`JsDriverHost`](crate::runtime_host::JsDriverHost).
+/// The generic MySQL [`MigrationBackend`] implementation.
 ///
-/// Extraction Phase A made this host-parametric: it holds a `JsDriverConn<H>` whose
-/// `H::Session` carries the isolate. The engine exports the generic
-/// `MysqlBackend<H>`; the monorepo adapter re-exports a defaulted alias
-/// `MysqlBackend = MysqlBackend<ZeroMigrateHost>` so callers keep writing the
-/// bare name (design §3.2.1). It stays a concrete, non-`dyn` type.
-pub struct MysqlBackend<H: crate::runtime_host::JsDriverHost> {
-    conn: RefCell<JsDriverConn<H>>,
-    guarded_fragments: RefCell<HashMap<String, Vec<MysqlGuardedFragment>>>,
-    #[cfg(test)]
-    after_fragment_hook: RefCell<Option<Rc<dyn Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction>>>,
+/// Generic over the [`SqlSession`] driver seam. It carries no online/shadow
+/// harness (`online()` / `shadow()` are always `None` — the honest v1 gap), and
+/// the auto-committing MySQL DDL routes every migration through the two-phase
+/// non-transactional apply path.
+#[derive(Debug)]
+pub struct MysqlBackend<'a, D: SqlSession> {
+    conn: &'a D,
 }
 
-impl<H: crate::runtime_host::JsDriverHost> std::fmt::Debug for MysqlBackend<H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MysqlBackend")
-            .field("conn", &self.conn)
-            .field("guarded_fragments", &self.guarded_fragments)
-            .finish_non_exhaustive()
+impl<'a, D: SqlSession> MysqlBackend<'a, D> {
+    /// Wrap any [`SqlSession`] driver as the MySQL backend.
+    #[must_use]
+    pub fn new_generic(conn: &'a D) -> Self {
+        Self { conn }
     }
 }
 
-const MYSQL_MIGRATOR_USER_PREFIX: &str = "zs_mig_";
-const MYSQL_MIGRATOR_USER_MAX_CHARS: usize = 32;
-const MYSQL_MIGRATOR_USER_HEX_CHARS: usize = 25;
-const MYSQL_MIGRATOR_HOST: &str = "%";
-const MYSQL_LOCK_PREFIX: &str = "zs_mig_";
-const MYSQL_LOCK_HEX_CHARS: usize = 56;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MysqlMigratorAccount {
-    pub user: String,
-    pub host: String,
-    pub password: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MysqlGuardedFragment {
-    pub sql: String,
-    pub existence_guard: GuardProbe,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MysqlFragmentDecision {
-    RunBare,
-    SatisfiedNoop,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MysqlFragmentEvent {
-    pub version: String,
-    pub fragment_index: usize,
-    pub sql: String,
-    pub decision: MysqlFragmentDecision,
-    pub had_inflight: bool,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MysqlFragmentHookAction {
-    Continue,
-    CloseConnection,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MysqlMigratorAccountError {
-    #[error("mysql migrator account db error: {0}")]
-    Db(#[from] JsDriverError),
-    #[error("mysql migrator account journal bootstrap failed: {0}")]
-    Journal(#[from] JournalError),
-    #[error("mysql migrator account identifier error: {0}")]
-    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
-}
-
-impl<H: crate::runtime_host::JsDriverHost> MysqlBackend<H> {
-    pub fn new(conn: JsDriverConn<H>) -> Self {
-        Self {
-            conn: RefCell::new(conn),
-            guarded_fragments: RefCell::new(HashMap::new()),
-            #[cfg(test)]
-            after_fragment_hook: RefCell::new(None),
-        }
-    }
-
-    pub fn echo_with(host: H) -> Result<Self, JsDriverError> {
-        Ok(Self::new(JsDriverConn::open_echo_with(host)?))
-    }
-
-    pub fn open_mysql_dsn_json_with(
-        host: H,
-        dsn_json: String,
-        command_timeout: Duration,
-    ) -> Result<Self, JsDriverError> {
-        Ok(Self::new(JsDriverConn::open_mysql_dsn_json_with(
-            host,
-            dsn_json,
-            command_timeout,
-        )?))
-    }
-
-    pub fn open_mysql_dsn_json_with_policy(
-        host: H,
-        dsn_json: String,
-        net_policy: crate::runtime_host::NetPolicy,
-        command_timeout: Duration,
-    ) -> Result<Self, JsDriverError> {
-        Ok(Self::new(JsDriverConn::open_mysql_dsn_json_with_policy(
-            host,
-            dsn_json,
-            net_policy,
-            command_timeout,
-        )?))
-    }
-
-    pub async fn exec(&self, sql: &str) -> Result<(), JsDriverError> {
-        self.conn.borrow_mut().exec(sql).await
-    }
-
-    pub async fn exec_with_binds(
-        &self,
-        sql: &str,
-        binds: &[BindValue],
-    ) -> Result<(), JsDriverError> {
-        self.conn.borrow_mut().exec_with_binds(sql, binds).await
-    }
-
-    async fn begin_transaction(&self) -> Result<(), JsDriverError> {
-        self.conn.borrow_mut().begin_transaction().await
-    }
-
-    async fn commit(&self) -> Result<(), JsDriverError> {
-        self.conn.borrow_mut().commit().await
-    }
-
-    async fn rollback(&self) -> Result<(), JsDriverError> {
-        self.conn.borrow_mut().rollback().await
-    }
-
-    pub async fn query_json(
-        &self,
-        sql: &str,
-        binds: &[BindValue],
-    ) -> Result<RowSet, JsDriverError> {
-        self.conn.borrow_mut().query_json(sql, binds).await
-    }
-
-    pub fn register_guarded_fragments(
-        &self,
-        version: &str,
-        fragments: Vec<MysqlGuardedFragment>,
-    ) {
-        self.guarded_fragments
-            .borrow_mut()
-            .insert(version.to_string(), fragments);
-    }
-
-    #[cfg(test)]
-    pub fn set_after_fragment_hook(
-        &self,
-        hook: impl Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction + 'static,
-    ) {
-        *self.after_fragment_hook.borrow_mut() = Some(Rc::new(hook));
-    }
-
-    #[cfg(test)]
-    pub fn clear_after_fragment_hook(&self) {
-        *self.after_fragment_hook.borrow_mut() = None;
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MysqlApplyDecision {
-    RunBare,
-    SatisfiedNoop,
-}
-
-impl<H: crate::runtime_host::JsDriverHost> MysqlBackend<H> {
-    fn mysql_guarded_fragments(
-        &self,
-        m: &Migration,
-    ) -> Result<Vec<MysqlGuardedFragment>, ApplyError> {
-        let version = m.version.as_str();
-        if let Some(fragments) = self.guarded_fragments.borrow().get(version).cloned() {
-            return validate_mysql_guarded_fragments(m, fragments);
-        }
-
-        let fragments = mysql_statement_fragments(&m.up);
-        if fragments.len() != 1 {
-            return Err(ApplyError::NonIdempotentNonTxn {
-                version: version.to_string(),
-                reason: format!(
-                    "MySQL non-transactional `up` contains {} SQL fragments but no \
-                     per-fragment existence probes were supplied",
-                    fragments.len()
-                ),
-            });
-        }
-        let Some(existence_guard) = m.existence_guard.clone() else {
-            return Err(ApplyError::NonIdempotentNonTxn {
-                version: version.to_string(),
-                reason: "MySQL non-transactional DDL must carry an executor existence probe"
-                    .to_string(),
-            });
-        };
-        validate_mysql_guarded_fragments(
-            m,
-            vec![MysqlGuardedFragment {
-                sql: fragments[0].clone(),
-                existence_guard,
-            }],
-        )
-    }
-
-    async fn after_fragment_decision(
-        &self,
-        version: &str,
-        fragment_index: usize,
-        sql: &str,
-        decision: MysqlApplyDecision,
-        had_inflight: bool,
-    ) -> Result<(), ApplyError> {
-        #[cfg(test)]
-        {
-            let event = MysqlFragmentEvent {
-                version: version.to_string(),
-                fragment_index,
-                sql: sql.to_string(),
-                decision: match decision {
-                    MysqlApplyDecision::RunBare => MysqlFragmentDecision::RunBare,
-                    MysqlApplyDecision::SatisfiedNoop => MysqlFragmentDecision::SatisfiedNoop,
-                },
-                had_inflight,
-            };
-            let action = self
-                .after_fragment_hook
-                .borrow()
-                .as_ref()
-                .map_or(MysqlFragmentHookAction::Continue, |hook| hook(event));
-            if action == MysqlFragmentHookAction::CloseConnection {
-                let close_result = self
-                    .conn
-                    .borrow_mut()
-                    .close_for_test(format!(
-                        "test hook closed MySQL JS driver after fragment {fragment_index}"
-                    ))
-                    .await;
-                return Err(ApplyError::Db(transport::backend_error(
-                    close_result.err().unwrap_or_else(|| {
-                        JsDriverError::transport(format!(
-                            "test hook closed MySQL JS driver after fragment {fragment_index}"
-                        ))
-                    }),
-                )));
-            }
-        }
-        let _ = (version, fragment_index, sql, decision, had_inflight);
-        Ok(())
-    }
-}
-
-fn validate_mysql_guarded_fragments(
-    m: &Migration,
-    fragments: Vec<MysqlGuardedFragment>,
-) -> Result<Vec<MysqlGuardedFragment>, ApplyError> {
-    if fragments.is_empty() {
-        return Err(ApplyError::NonIdempotentNonTxn {
-            version: m.version.as_str().to_string(),
-            reason: "MySQL guarded fragment list is empty".to_string(),
-        });
-    }
-    if let Some((idx, _)) = fragments
-        .iter()
-        .enumerate()
-        .find(|(_, fragment)| fragment.sql.trim().is_empty())
-    {
-        return Err(ApplyError::NonIdempotentNonTxn {
-            version: m.version.as_str().to_string(),
-            reason: format!("MySQL guarded fragment #{idx} is empty"),
-        });
-    }
-    let reassembled = fragments
-        .iter()
-        .map(|fragment| fragment.sql.trim())
-        .collect::<Vec<_>>()
-        .join(";\n");
-    if reassembled != m.up.trim() {
-        return Err(ApplyError::NonIdempotentNonTxn {
-            version: m.version.as_str().to_string(),
-            reason: "MySQL guarded fragments do not reassemble to the migration `up`"
-                .to_string(),
-        });
-    }
-    Ok(fragments)
-}
-
-pub fn mysql_migration_lock_name(project_id: &str) -> String {
-    let digest = Sha256::digest(project_id.as_bytes());
-    let suffix = hex::encode(digest);
-    format!(
-        "{MYSQL_LOCK_PREFIX}{}",
-        &suffix[..MYSQL_LOCK_HEX_CHARS.min(suffix.len())]
-    )
-}
-
-pub fn mysql_migrator_account_user(project_id: &str) -> String {
-    let digest = Sha256::digest(project_id.as_bytes());
-    let suffix = hex::encode(digest);
-    let user = format!(
-        "{MYSQL_MIGRATOR_USER_PREFIX}{}",
-        &suffix[..MYSQL_MIGRATOR_USER_HEX_CHARS.min(suffix.len())]
-    );
-    debug_assert!(user.len() <= MYSQL_MIGRATOR_USER_MAX_CHARS);
-    user
-}
-
-fn mysql_get_lock_timeout_seconds(timeout: Duration) -> String {
-    let millis = if timeout.is_zero() {
-        0
-    } else {
-        timeout.as_millis().max(1)
-    };
-    format!("{}.{:03}", millis / 1000, millis % 1000)
-}
-
-fn mysql_lock_timeout_error(lock_name: &str, timeout_seconds: &str) -> ApplyError {
-    ApplyError::Db(transport::backend_error(JsDriverError::Remote {
-        code: 1205,
-        sqlstate: "HY000".to_string(),
-        message: format!(
-            "timed out waiting for MySQL migration advisory lock {lock_name} after {timeout_seconds}s"
-        ),
-    }))
-}
-
-fn mysql_quote_string_lit(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
-fn mysql_account_sql(user: &str, host: &str) -> String {
-    format!(
-        "{}@{}",
-        mysql_quote_string_lit(user),
-        mysql_quote_string_lit(host)
-    )
-}
-
-fn mysql_generated_password() -> String {
-    format!("zs_{}", uuid::Uuid::new_v4().simple())
-}
-
-pub async fn provision_mysql_migrator_account<H: crate::runtime_host::JsDriverHost>(
-    admin: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
-    provision_mysql_migrator_account_with_password(admin, cfg, mysql_generated_password()).await
-}
-
-pub async fn provision_mysql_migrator_account_with_password<H: crate::runtime_host::JsDriverHost>(
-    admin: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    password: impl Into<String>,
-) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
-    let password = password.into();
-    let user = mysql_migrator_account_user(&cfg.project_id);
-    let account = mysql_account_sql(&user, MYSQL_MIGRATOR_HOST);
-    let password_lit = mysql_quote_string_lit(&password);
-
-    admin
-        .exec(&format!(
-            "CREATE USER IF NOT EXISTS {account} IDENTIFIED BY {password_lit}"
-        ))
-        .await?;
-    admin
-        .exec(&format!("ALTER USER {account} IDENTIFIED BY {password_lit}"))
-        .await?;
-    admin
-        .exec(&format!(
-            "REVOKE ALL PRIVILEGES, GRANT OPTION FROM {account}"
-        ))
-        .await?;
-
-    ensure_journal_mysql(admin, cfg).await?;
-
-    let project = mysql_quote_ident(&cfg.project_schema)?;
-    admin
-        .exec(&format!(
-            "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, \
-                    CREATE VIEW, SHOW VIEW, TRIGGER, CREATE ROUTINE, ALTER ROUTINE, EVENT
-               ON {project}.* TO {account}"
-        ))
-        .await?;
-
-    for table in [
-        "schema_migrations",
-        "schema_migrations_inflight",
-        "schema_migrations_supersedes",
-    ] {
-        let table = mysql_meta_table(cfg, table)?;
-        admin
-            .exec(&format!(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {account}"
-            ))
-            .await?;
-    }
-
-    Ok(MysqlMigratorAccount {
-        user,
-        host: MYSQL_MIGRATOR_HOST.to_string(),
-        password,
-    })
-}
-
-pub async fn deprovision_mysql_migrator_account<H: crate::runtime_host::JsDriverHost>(
-    admin: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<(), MysqlMigratorAccountError> {
-    let user = mysql_migrator_account_user(&cfg.project_id);
-    admin
-        .exec(&format!(
-            "DROP USER IF EXISTS {}",
-            mysql_account_sql(&user, MYSQL_MIGRATOR_HOST)
-        ))
-        .await?;
-    Ok(())
-}
-
-impl<H: crate::runtime_host::JsDriverHost> MigrationBackend for MysqlBackend<H> {
-    type SessionSnapshot = MysqlSessionSnapshot;
+impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
+    type SessionSnapshot = ();
 
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Mysql
     }
 
+    fn placeholder_style(&self) -> PlaceholderStyle {
+        PlaceholderStyle::Question
+    }
+
+    /// MySQL DDL is auto-committing: an implicit COMMIT brackets every DDL
+    /// statement, so a migration's `up` can NEVER commit atomically with its
+    /// journal row. This forces every MySQL migration onto the two-phase
+    /// non-transactional apply path (`uses_two_phase_path` returns true for every
+    /// versioned migration).
     fn ddl_is_transactional(&self) -> bool {
         false
     }
 
     async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-        let lock_name = mysql_migration_lock_name(&cfg.project_id);
-        let timeout = mysql_get_lock_timeout_seconds(cfg.pg.lock_timeout);
-        let rows = self
-            .query_json(
-                "SELECT GET_LOCK(?, CAST(? AS DECIMAL(10,3))) AS acquired",
-                &[
-                    BindValue::Text(lock_name.clone()),
-                    BindValue::Decimal(timeout.clone()),
-                ],
-            )
-            .await
-            .map_err(apply_db)?;
-        let row = rows.rows.first().ok_or_else(|| {
-            ApplyError::Backend("mysql GET_LOCK returned no row".to_string())
-        })?;
-        match value_to_string(row.get("acquired")).as_deref() {
-            Some("1") => Ok(()),
-            Some("0") => Err(mysql_lock_timeout_error(&lock_name, &timeout)),
-            Some(other) => Err(ApplyError::Backend(format!(
-                "mysql GET_LOCK returned unexpected value {other:?} for {lock_name}"
-            ))),
-            None => Err(ApplyError::Backend(format!(
-                "mysql GET_LOCK returned NULL for {lock_name}"
-            ))),
-        }
+        session::acquire_project_lock(self.conn, &cfg.project_id).await
     }
 
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-        let lock_name = mysql_migration_lock_name(&cfg.project_id);
-        let rows = self
-            .query_json(
-                "SELECT RELEASE_LOCK(?) AS released",
-                &[BindValue::Text(lock_name.clone())],
-            )
-            .await
-            .map_err(apply_db)?;
-        let row = rows.rows.first().ok_or_else(|| {
-            ApplyError::Backend("mysql RELEASE_LOCK returned no row".to_string())
-        })?;
-        match value_to_string(row.get("released")).as_deref() {
-            Some("1") => Ok(()),
-            Some(other) => Err(ApplyError::Backend(format!(
-                "mysql RELEASE_LOCK returned {other:?} for {lock_name}; lock was not held by this session"
-            ))),
-            None => Err(ApplyError::Backend(format!(
-                "mysql RELEASE_LOCK returned NULL for {lock_name}"
-            ))),
-        }
+        session::release_project_lock(self.conn, &cfg.project_id).await
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
-        let rows = self
-            .query_json(
-                "SELECT CAST(@@innodb_lock_wait_timeout AS CHAR) AS innodb_lock_wait_timeout, \
-                        @@sql_mode AS sql_mode",
-                &[],
-            )
-            .await
-            .map_err(apply_db)?;
-        let row = rows.rows.first().ok_or_else(|| {
-            ApplyError::Backend("mysql session snapshot returned no row".to_string())
-        })?;
-        Ok(MysqlSessionSnapshot {
-            innodb_lock_wait_timeout: value_to_string(row.get("innodb_lock_wait_timeout"))
-                .unwrap_or_else(|| "50".to_string()),
-            sql_mode: value_to_string(row.get("sql_mode")).unwrap_or_default(),
-        })
+        // MySQL session budgets are re-applied per migration in `apply_one`
+        // (`configure_session`); there is no session-wide GUC to snapshot/restore
+        // the way Postgres restores `search_path` / `statement_timeout`. The
+        // budgets are session-scoped SETs that are harmless to leave, and every
+        // apply re-sets them, so the snapshot is the unit value.
+        Ok(())
     }
 
-    async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
-        let lock_wait = snap
-            .innodb_lock_wait_timeout
-            .parse::<i64>()
-            .unwrap_or(50);
-        self.exec_with_binds(
-            "SET SESSION innodb_lock_wait_timeout = ?",
-            &[BindValue::Int(lock_wait)],
-        )
-        .await
-        .map_err(apply_db)?;
-        self.exec_with_binds(
-            "SET SESSION sql_mode = ?",
-            &[BindValue::Text(snap.sql_mode.clone())],
-        )
-        .await
-        .map_err(apply_db)?;
+    async fn restore_session(&self, _snap: &Self::SessionSnapshot) -> Result<(), ApplyError> {
         Ok(())
     }
 
     async fn reset_role_best_effort(&self) {
-        // MySQL confinement is by least-privilege account identity, not SET ROLE.
+        // MySQL confinement is the connecting user's grants, not a `SET ROLE`
+        // switch bracketing the `up` (the PG least-privilege migrator-role model),
+        // so there is no per-apply role to reset. No-op.
     }
 
     async fn apply_one(
@@ -587,100 +126,14 @@ impl<H: crate::runtime_host::JsDriverHost> MigrationBackend for MysqlBackend<H> 
         supersedes: &[&str],
         kind: &str,
     ) -> Result<bool, ApplyError> {
-        let version = m.version.as_str();
-        let fragments = self.mysql_guarded_fragments(m)?;
-        record_started_mysql(self, cfg, version, &m.name, m.checksum.as_str(), applied_by)
-            .await?;
-
-        let started = Instant::now();
-        for (idx, fragment) in fragments.iter().enumerate() {
-            let live = snapshot_schema_mysql_for_schema(self, fragment.existence_guard.schema())
-                .await
-                .map_err(mysql_drift_to_apply)?;
-            match crate::render::existence_probe::decide(
-                &fragment.existence_guard,
-                &live,
-                SqlDialect::Mysql,
-            ) {
-                GuardVerdict::RunBare => {
-                    self.exec(&fragment.sql).await.map_err(|e| ApplyError::MigrationFailed {
-                        version: version.to_string(),
-                        source: transport::backend_error(e),
-                    })?;
-                    self.after_fragment_decision(
-                        version,
-                        idx,
-                        &fragment.sql,
-                        MysqlApplyDecision::RunBare,
-                        had_inflight,
-                    )
-                    .await?;
-                }
-                GuardVerdict::SatisfiedNoop => {
-                    self.after_fragment_decision(
-                        version,
-                        idx,
-                        &fragment.sql,
-                        MysqlApplyDecision::SatisfiedNoop,
-                        had_inflight,
-                    )
-                    .await?;
-                }
-                GuardVerdict::FailDrift(d) => {
-                    return Err(ApplyError::ExistenceGuardDrift {
-                        version: version.to_string(),
-                        object: d.object,
-                        field: d.field,
-                        expected: d.expected,
-                        actual: d.actual,
-                    });
-                }
-            }
-        }
-        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-
-        let journal_kind = if kind == "squash" { "squash" } else { kind };
-        if supersedes.is_empty() {
-            record_completed_mysql(
-                self,
-                cfg,
-                journal::CompletedRecord {
-                    version,
-                    name: &m.name,
-                    checksum: m.checksum.as_str(),
-                    applied_by,
-                    exec_ms,
-                    kind: journal_kind,
-                },
-            )
-            .await?;
-        } else {
-            self.begin_transaction().await.map_err(apply_db)?;
-            let result = async {
-                record_completed_mysql(
-                    self,
-                    cfg,
-                    journal::CompletedRecord {
-                        version,
-                        name: &m.name,
-                        checksum: m.checksum.as_str(),
-                        applied_by,
-                        exec_ms,
-                        kind: "squash",
-                    },
-                )
-                .await?;
-                insert_supersedes_edges_mysql(self, cfg, version, supersedes).await
-            }
-            .await;
-            if let Err(e) = result {
-                let _ = self.rollback().await;
-                return Err(ApplyError::Journal(e));
-            }
-            self.commit().await.map_err(apply_db)?;
-        }
-
-        Ok(had_inflight)
+        // A repeatable rides the same two-phase path on MySQL (there is no
+        // transactional fast path — DDL auto-commits), so `kind` only informs the
+        // journaled stamp, which `apply_two_phase` derives from `supersedes` for
+        // the squash case; a plain apply/repeatable stamps `apply`. Configure the
+        // per-migration session budgets first.
+        let _ = kind;
+        session::configure_session(self.conn, cfg, m).await?;
+        session::apply_two_phase(self.conn, cfg, m, applied_by, had_inflight, supersedes).await
     }
 
     async fn rollback_one_transactional(
@@ -689,115 +142,130 @@ impl<H: crate::runtime_host::JsDriverHost> MigrationBackend for MysqlBackend<H> 
         m: &Migration,
         applied_by: &str,
     ) -> Result<(), RollbackError> {
-        let Some(down) = m.down.as_deref() else {
-            return Err(RollbackError::Backend(format!(
-                "mysql backend: migration '{}' has no down SQL",
-                m.version.as_str()
-            )));
-        };
-        let started = Instant::now();
-        for fragment in mysql_statement_fragments(down) {
-            self.exec(&fragment).await.map_err(rollback_db)?;
-        }
-        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        record_rolled_back_mysql(
-            self,
-            cfg,
-            m.version.as_str(),
-            &m.name,
-            m.checksum.as_str(),
-            applied_by,
-            exec_ms,
-        )
-        .await
-        .map_err(RollbackError::Journal)
+        // "Transactional" is the trait's name for the rollback entry; on MySQL the
+        // `down` auto-commits and the `rolled_back` append is ordered after it (the
+        // same two-phase reality as apply). The trait method name is kept for a
+        // single generic rollback caller.
+        session::rollback_one(self.conn, cfg, m, applied_by).await
     }
 
-    fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
-        self.mysql_guarded_fragments(m).map(|_| ())
+    fn validate_non_txn(&self, _m: &Migration) -> Result<(), ApplyError> {
+        // The PG non-txn idempotency scan (forbid bare DML, require IF NOT EXISTS on
+        // CONCURRENTLY) is Postgres-specific (`pg_query`-parsed). On MySQL every
+        // migration is two-phase by construction (auto-commit DDL), and MySQL has no
+        // `CREATE INDEX CONCURRENTLY` INVALID-residue hazard; author-side idempotence
+        // (`IF (NOT) EXISTS`) is the crash-recovery contract. A dedicated MySQL
+        // non-txn idempotency scan is a later cut; v1 accepts the `up` here.
+        Ok(())
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        ensure_journal_mysql(self, cfg).await
+        journal_sql::ensure_journal(self.conn, cfg).await
     }
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-        applied_mysql(self, cfg).await
+        journal_sql::applied(self.conn, cfg).await
     }
 
     async fn superseded_versions(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<Vec<String>, JournalError> {
-        superseded_versions_mysql(self, cfg).await
+        journal_sql::superseded_versions(self.conn, cfg).await
     }
 
     async fn latest_completed_checksums(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<HashMap<String, String>, JournalError> {
-        latest_completed_checksums_mysql(self, cfg).await
-    }
-
-    fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
-        None
+    ) -> Result<std::collections::HashMap<String, String>, JournalError> {
+        journal_sql::latest_completed_checksums(self.conn, cfg).await
     }
 
     async fn check_checksum_drift(
         &self,
         cfg: &ExecutorConfig,
         migrations: &[Migration],
-    ) -> Result<ChecksumDriftReport, DriftError> {
-        let applied = applied_mysql(self, cfg).await?;
-        Ok(crate::apply::drift::compare_applied_to_set(
-            &applied,
-            migrations,
-        ))
+    ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
+        // The drift/tamper comparison is dialect-agnostic
+        // (`compare_applied_to_set`); only the journal read underneath is
+        // dialect-coupled. Read the net-applied state through the MySQL journal and
+        // run the SAME shared comparison the PG/SQLite backends use, so the
+        // repeatable-exemption / kind-mismatch / tamper rules never diverge across
+        // dialects.
+        let applied = journal_sql::applied(self.conn, cfg).await?;
+        Ok(crate::apply::drift::compare_applied_to_set(&applied, migrations))
     }
 
-    async fn snapshot_schema(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<SchemaSnapshot, DriftError> {
-        snapshot_schema_mysql(self, cfg).await
+    async fn snapshot_schema(&self, _cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
+        // Live-schema introspection (`information_schema` catalog read → a neutral
+        // `SchemaSnapshot`) is the deepest MySQL surface; the declarative diff /
+        // structural-drift consumers are not wired for MySQL in v1. Fail closed with
+        // a clear message rather than return a fake empty snapshot that a differ
+        // would misread as "no tables exist" (a silent destructive plan). A later
+        // cut adds the MySQL catalog reader behind live-MySQL tests.
+        Err(DriftError::Backend(
+            "mysql backend: live-schema introspection (snapshot_schema) is not yet \
+             implemented — structural drift / declarative diff is unsupported on MySQL in v1"
+                .to_string(),
+        ))
     }
 
     async fn evaluate_preconditions(
         &self,
         _cfg: &ExecutorConfig,
         m: &Migration,
-    ) -> Result<PreconditionVerdict, ApplyError> {
+    ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
+        // The executor calls this for EVERY migration, precondition-bearing or not.
+        // A migration with NO preconditions needs no evaluator at all — evaluating an
+        // empty list is `AllMet` by construction (exactly what the PG evaluator's
+        // `evaluate_all` returns for an empty `m.preconditions`), so it must apply
+        // normally on MySQL rather than trip the v1 capability gap.
         if m.preconditions.is_empty() {
-            Ok(PreconditionVerdict::AllMet)
-        } else {
-            Err(ApplyError::Backend(
-                "mysql backend E1: live precondition evaluation is Phase E2".to_string(),
-            ))
+            return Ok(crate::apply::executor::PreconditionVerdict::AllMet);
         }
+        // A GENUINE precondition (boolean-SELECT probes gated by the `pg_query`
+        // parser + PG-flavoured catalog reads) has no MySQL-native evaluator yet, so
+        // a MySQL migration that DECLARES preconditions is refused (fail closed)
+        // rather than silently treated as satisfied. A later cut adds the MySQL
+        // evaluator behind live-MySQL tests.
+        Err(ApplyError::Backend(
+            "mysql backend: precondition evaluation is not yet implemented on MySQL in v1"
+                .to_string(),
+        ))
     }
 
     async fn record_squash(
         &self,
         _cfg: &ExecutorConfig,
-        squash_migration: &Migration,
+        _squash_migration: &Migration,
         _applied_by: &str,
         _supersedes: &[&str],
     ) -> Result<(), ApplyError> {
-        Err(ApplyError::Backend(format!(
-            "mysql backend E1: squash journaling is not wired yet ({})",
-            squash_migration.version.as_str()
-        )))
+        // The existing-DB squash path journals a `squash` event WITHOUT running its
+        // `up` (baseline-style). That records-not-run primitive is not wired for
+        // MySQL in v1 (it shares the baseline machinery below). The FRESH-path
+        // squash — where the squash's `up` DOES run — is handled inline by
+        // `apply_two_phase` (non-empty `supersedes`), so this refusal is only the
+        // existing-DB record-not-run variant.
+        Err(ApplyError::Backend(
+            "mysql backend: existing-DB squash (record-not-run) is not yet implemented on \
+             MySQL in v1"
+                .to_string(),
+        ))
     }
 
     async fn rebuild_one(
         &self,
         spec: &SqliteRebuildSpec,
         _m: &Migration,
-        _scope: &ApprovalScope,
+        _scope: &crate::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
+        // A SQLite 12-step table rebuild reaching the MySQL backend is a routing bug
+        // (only the SQLite differ produces rebuilds), surfaced as a clear error.
         Err(ApplyError::Backend(format!(
-            "mysql backend: SQLite table rebuild requested for '{}' (routing bug)",
+            "mysql backend: SQLite table rebuild requested for '{}' — only the SQLite \
+             differ produces rebuilds (routing bug)",
             spec.table
         )))
     }
@@ -806,844 +274,483 @@ impl<H: crate::runtime_host::JsDriverHost> MigrationBackend for MysqlBackend<H> 
         &self,
         _cfg: &ExecutorConfig,
         spec: &BackfillSpec,
-        _approval: Approval,
-        _scope: &ApprovalScope,
+        _approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
         _applied_by: &str,
-        _lock_mode: LockMode,
-    ) -> Result<ApplyOutcome, ApplyError> {
+        _lock_mode: crate::apply::executor::LockMode,
+    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
+        // The batched-backfill executor (windowed UPDATE, resumable cursor) is
+        // PG/SQLite-specific; the MySQL batched backfill is a later cut. Fail closed
+        // rather than silently skip the data transform.
         Err(ApplyError::Backend(format!(
-            "mysql backend E1: backfill step '{}' is not wired until Phase E2",
+            "mysql backend: batched backfill step '{}' is not yet implemented on MySQL in v1",
             spec.name
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_dml_step(
         &self,
-        cfg: &ExecutorConfig,
-        version: &MigrationId,
+        _cfg: &ExecutorConfig,
+        _version: &MigrationId,
         name: &str,
-        template: &str,
-        binds: &[BindValue],
-        destructive: bool,
-        owner_app: &str,
-        approval: Approval,
-        scope: &ApprovalScope,
-        applied_by: &str,
-        _lock_mode: LockMode,
+        _template: &str,
+        _binds: &[BindValue],
+        _destructive: bool,
+        _owner_app: &str,
+        _approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
+        _applied_by: &str,
+        _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<bool, ApplyError> {
-        if destructive && approval != Approval::Approved {
-            return Err(ApplyError::ApprovalRequired);
-        }
-        if destructive && !scope.admits(version.as_str()) {
-            return Err(ApplyError::ApprovalNotScoped {
-                version: version.as_str().to_string(),
-            });
-        }
-        let already = self
-            .applied(cfg)
-            .await
-            .map_err(ApplyError::Journal)?
-            .into_iter()
-            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
-            .any(|e| e.version == version.as_str());
-        if already {
-            return Ok(false);
-        }
-        run_dml_transactional_mysql(
-            self,
-            cfg,
-            version.as_str(),
-            name,
-            template,
-            binds,
-            owner_app,
-            applied_by,
-        )
-        .await?;
-        Ok(true)
+        // The parameterized-DML step executor (op.* §2.3.2) is a later MySQL cut.
+        // Fail closed rather than silently skip the DML.
+        Err(ApplyError::Backend(format!(
+            "mysql backend: parameterized DML step '{name}' is not yet implemented on \
+             MySQL in v1"
+        )))
     }
 
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
+        // No online expand-contract harness on MySQL in v1 (the differ emits no
+        // renames for MySQL, so `renames` is empty — no online path is reached).
         None
     }
 
     fn shadow(&self) -> Option<&dyn ShadowDryRun> {
+        // No shadow dry-run harness on MySQL in v1 — `dry_run` surfaces
+        // `DryRunError::ShadowUnsupported` (the honest gap).
+        None
+    }
+
+    fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
+        // No cross-deploy pending-contract partition on MySQL in v1 (the online
+        // rename that opens obligations is unsupported here). `None` ⇒ reads are
+        // empty and writes are no-ops by construction.
         None
     }
 
     async fn baseline_one(
         &self,
         _cfg: &ExecutorConfig,
-        m: &Migration,
+        _m: &Migration,
         _applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError> {
-        Err(BaselineError::Backend(format!(
-            "mysql backend E1: baseline '{}' is not wired until Phase E2",
-            m.version.as_str()
-        )))
+        // Adoption baseline (record the live schema as the project baseline WITHOUT
+        // running the `up`) shares the guard + advisory-lock + record-not-run
+        // machinery that is PG-specific; the MySQL baseline is a later cut.
+        Err(BaselineError::Backend(
+            "mysql backend: schema baseline/adoption is not yet implemented on MySQL in v1"
+                .to_string(),
+        ))
     }
 }
 
-fn mysql_quote_ident(ident: &str) -> Result<String, crate::render::dml::IdentQuoteError> {
-    crate::render::dml::quote_ident_checked_for_dialect(ident, SqlDialect::Mysql)
-}
+/// UNIT / render tests for the MySQL backend (redesign step 4d).
+///
+/// These assert the **generated MySQL SQL** — `GET_LOCK`/`RELEASE_LOCK` for the
+/// project lock, MySQL journal DDL (`AUTO_INCREMENT`, `CURRENT_TIMESTAMP(6)`,
+/// `CREATE DATABASE`, InnoDB, SIGNAL-based immutability triggers), and the `?`
+/// placeholder style on every journaled write — **WITHOUT a live MySQL server**.
+/// A host-shaped [`RecordingSession`] records the SQL + binds of every verb and
+/// returns canned rows for the reads (`GET_LOCK → 1`, trigger-existence → empty),
+/// so a full lock + `ensure_journal` + apply sweep runs generically over a
+/// non-compio driver and every emitted statement is inspected. The live-MySQL e2e
+/// is the separate cut 4e.
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags};
+    use crate::driver::{Bind, DbError, Row, Value};
+    use std::cell::RefCell;
 
-fn mysql_meta_table(cfg: &ExecutorConfig, table: &str) -> Result<String, JournalError> {
-    Ok(format!(
-        "{}.{}",
-        mysql_quote_ident(&cfg.pg.meta_schema)?,
-        mysql_quote_ident(table)?,
-    ))
-}
-
-async fn ensure_journal_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<(), JournalError> {
-    let meta = mysql_quote_ident(&cfg.pg.meta_schema)?;
-    if !mysql_schema_exists(backend, &cfg.pg.meta_schema).await? {
-        backend
-            .exec(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
-            .await
-            .map_err(journal_backend)?;
+    /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of
+    /// every verb and returns canned rows for the reads the MySQL apply path issues:
+    /// `GET_LOCK(...)` → a single `got=1` row (lock acquired); the
+    /// `information_schema.triggers` existence probe → empty (so `ensure_journal`
+    /// creates every trigger); the journal net-state reads → empty. This is the
+    /// MySQL analogue of the PG backend's in-crate `RecordingSession` genericity
+    /// proof.
+    struct RecordingSession {
+        log: RefCell<Vec<String>>,
+        binds: RefCell<Vec<Vec<Bind>>>,
     }
 
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations").await? {
-        backend
-            .exec(&format!(
-                "CREATE TABLE IF NOT EXISTS {migrations} (
-                event_seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                event_kind VARCHAR(32) NOT NULL,
-                version VARCHAR(128) NOT NULL,
-                name VARCHAR(255) NOT NULL,
-                checksum VARCHAR(128) NOT NULL,
-                `at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-                `by` VARCHAR(255) NOT NULL,
-                exec_ms BIGINT NULL,
-                phase VARCHAR(32) NULL,
-                outcome VARCHAR(255) NULL,
-                kind VARCHAR(32) NULL,
-                CHECK (event_kind IN ('applied','rolled_back')),
-                CHECK (phase IS NULL OR phase IN ('started','completed')),
-                CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable'))
-            )"
-            ))
-            .await
-            .map_err(journal_backend)?;
-    }
-
-    let supersedes = mysql_meta_table(cfg, "schema_migrations_supersedes")?;
-    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations_supersedes").await? {
-        backend
-            .exec(&format!(
-                "CREATE TABLE IF NOT EXISTS {supersedes} (
-                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                squash_version VARCHAR(128) NOT NULL,
-                superseded_version VARCHAR(128) NOT NULL,
-                recorded_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-            )"
-            ))
-            .await
-            .map_err(journal_backend)?;
-    }
-
-    let inflight = mysql_meta_table(cfg, "schema_migrations_inflight")?;
-    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations_inflight").await? {
-        backend
-            .exec(&format!(
-                "CREATE TABLE IF NOT EXISTS {inflight} (
-                version VARCHAR(128) NOT NULL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                checksum VARCHAR(128) NOT NULL,
-                started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-                applied_by VARCHAR(255) NOT NULL
-            )"
-            ))
-            .await
-            .map_err(journal_backend)?;
-    }
-
-    Ok(())
-}
-
-async fn mysql_schema_exists<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    schema: &str,
-) -> Result<bool, JournalError> {
-    let rows = backend
-        .query_json(
-            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
-            &[BindValue::Text(schema.to_string())],
-        )
-        .await
-        .map_err(journal_backend)?;
-    Ok(!rows.rows.is_empty())
-}
-
-async fn mysql_table_exists<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    schema: &str,
-    table: &str,
-) -> Result<bool, JournalError> {
-    let rows = backend
-        .query_json(
-            "SELECT TABLE_NAME FROM information_schema.TABLES
-              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-            &[
-                BindValue::Text(schema.to_string()),
-                BindValue::Text(table.to_string()),
-            ],
-        )
-        .await
-        .map_err(journal_backend)?;
-    Ok(!rows.rows.is_empty())
-}
-
-async fn record_started_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    version: &str,
-    name: &str,
-    checksum: &str,
-    applied_by: &str,
-) -> Result<(), JournalError> {
-    let inflight = mysql_meta_table(cfg, "schema_migrations_inflight")?;
-    backend
-        .exec_with_binds(
-            &format!(
-                "INSERT IGNORE INTO {inflight}
-                     (version, name, checksum, applied_by)
-                 VALUES (?, ?, ?, ?)"
-            ),
-            &[
-                BindValue::Text(version.to_string()),
-                BindValue::Text(name.to_string()),
-                BindValue::Text(checksum.to_string()),
-                BindValue::Text(applied_by.to_string()),
-            ],
-        )
-        .await
-        .map_err(journal_backend)
-}
-
-async fn record_completed_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    rec: journal::CompletedRecord<'_>,
-) -> Result<(), JournalError> {
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    backend
-        .exec_with_binds(
-            &format!(
-                "INSERT INTO {migrations}
-                     (event_kind, version, name, checksum, `by`, exec_ms, phase, outcome, kind)
-                 VALUES ('applied', ?, ?, ?, ?, ?, 'completed', 'success', ?)"
-            ),
-            &[
-                BindValue::Text(rec.version.to_string()),
-                BindValue::Text(rec.name.to_string()),
-                BindValue::Text(rec.checksum.to_string()),
-                BindValue::Text(rec.applied_by.to_string()),
-                BindValue::Int(rec.exec_ms),
-                BindValue::Text(rec.kind.to_string()),
-            ],
-        )
-        .await
-        .map_err(journal_backend)?;
-
-    let inflight = mysql_meta_table(cfg, "schema_migrations_inflight")?;
-    backend
-        .exec_with_binds(
-            &format!("DELETE FROM {inflight} WHERE version = ?"),
-            &[BindValue::Text(rec.version.to_string())],
-        )
-        .await
-        .map_err(journal_backend)
-}
-
-async fn run_dml_transactional_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    version: &str,
-    name: &str,
-    template: &str,
-    binds: &[BindValue],
-    owner_app: &str,
-    applied_by: &str,
-) -> Result<(), ApplyError> {
-    let started = Instant::now();
-    let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
-        up: template,
-        down: None,
-        flags: &crate::model::migration::MigrationFlags::default(),
-        owner_app,
-        depends_on: &[],
-        supersedes: &[],
-        preconditions: &[],
-    });
-
-    backend.begin_transaction().await.map_err(apply_db)?;
-    let result = async {
-        backend.exec_with_binds(template, binds).await.map_err(apply_db)?;
-        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        record_completed_mysql(
-            backend,
-            cfg,
-            journal::CompletedRecord {
-                version,
-                name,
-                checksum: checksum.as_str(),
-                applied_by,
-                exec_ms,
-                kind: "apply",
-            },
-        )
-        .await
-        .map_err(ApplyError::Journal)
-    }
-    .await;
-
-    match result {
-        Ok(()) => {
-            if let Err(e) = backend.commit().await {
-                let _ = backend.rollback().await;
-                return Err(apply_db(e));
+    impl RecordingSession {
+        fn new() -> Self {
+            Self {
+                log: RefCell::new(Vec::new()),
+                binds: RefCell::new(Vec::new()),
             }
+        }
+
+        /// Route a read to its canned rows by SQL shape. `GET_LOCK` returns a
+        /// single `got=1` row; everything else (trigger-existence probe, journal
+        /// net-state reads) returns empty — enough to drive the whole apply/journal
+        /// sweep end-to-end without a live server.
+        fn rows_for(&self, sql: &str) -> Vec<Row> {
+            if sql.contains("GET_LOCK") {
+                vec![Row::new(vec!["got".to_string()], vec![Value::Int(1)])]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    impl SqlSession for RecordingSession {
+        async fn batch(&self, sql: &str) -> Result<(), DbError> {
+            self.log.borrow_mut().push(format!("batch: {sql}"));
             Ok(())
         }
-        Err(e) => {
-            if let Err(rb) = backend.rollback().await {
-                tracing::warn!(error = %rb, version = %version, "zero-migrate: MySQL ROLLBACK failed after DML transaction error");
-            }
-            Err(e)
+        async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
+            self.log.borrow_mut().push(format!("exec: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
+            Ok(1)
+        }
+        async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
+            self.log.borrow_mut().push(format!("exec_text: {sql}"));
+            Ok(1)
+        }
+        async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
+            self.log.borrow_mut().push(format!("query: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
+            Ok(self.rows_for(sql))
+        }
+        async fn query_one(&self, sql: &str, params: &[Bind]) -> Result<Row, DbError> {
+            self.log.borrow_mut().push(format!("query_one: {sql}"));
+            self.binds.borrow_mut().push(params.to_vec());
+            self.rows_for(sql)
+                .into_iter()
+                .next()
+                .ok_or_else(|| DbError::message("query_one: no canned row"))
         }
     }
-}
 
-async fn record_rolled_back_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    version: &str,
-    name: &str,
-    checksum: &str,
-    rolled_back_by: &str,
-    exec_ms: i64,
-) -> Result<(), JournalError> {
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    backend
-        .exec_with_binds(
-            &format!(
-                "INSERT INTO {migrations}
-                     (event_kind, version, name, checksum, `by`, exec_ms)
-                 VALUES ('rolled_back', ?, ?, ?, ?, ?)"
-            ),
-            &[
-                BindValue::Text(version.to_string()),
-                BindValue::Text(name.to_string()),
-                BindValue::Text(checksum.to_string()),
-                BindValue::Text(rolled_back_by.to_string()),
-                BindValue::Int(exec_ms),
-            ],
-        )
-        .await
-        .map_err(journal_backend)
-}
-
-async fn insert_supersedes_edges_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-    squash_version: &str,
-    supersedes: &[&str],
-) -> Result<(), JournalError> {
-    let table = mysql_meta_table(cfg, "schema_migrations_supersedes")?;
-    for sup in supersedes {
-        backend
-            .exec_with_binds(
-                &format!(
-                    "INSERT INTO {table} (squash_version, superseded_version)
-                     VALUES (?, ?)"
-                ),
-                &[
-                    BindValue::Text(squash_version.to_string()),
-                    BindValue::Text((*sup).to_string()),
-                ],
-            )
-            .await
-            .map_err(journal_backend)?;
-    }
-    Ok(())
-}
-
-async fn applied_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<Vec<AppliedEntry>, JournalError> {
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    let inflight = mysql_meta_table(cfg, "schema_migrations_inflight")?;
-    let rows = backend
-        .query_json(
-            &format!(
-                "SELECT version, checksum, mig_kind, phase
-                   FROM (
-                     SELECT m.version, m.checksum, m.kind AS mig_kind, 'completed' AS phase
-                       FROM {migrations} m
-                       JOIN (
-                         SELECT version, MAX(event_seq) AS event_seq
-                           FROM {migrations}
-                          GROUP BY version
-                       ) latest
-                         ON latest.version = m.version AND latest.event_seq = m.event_seq
-                      WHERE m.event_kind = 'applied'
-                     UNION ALL
-                     SELECT i.version, i.checksum, NULL AS mig_kind, 'started' AS phase
-                       FROM {inflight} i
-                      WHERE NOT EXISTS (
-                          SELECT 1
-                            FROM {migrations} m
-                            JOIN (
-                              SELECT version, MAX(event_seq) AS event_seq
-                                FROM {migrations}
-                               GROUP BY version
-                            ) latest
-                              ON latest.version = m.version AND latest.event_seq = m.event_seq
-                           WHERE m.event_kind = 'applied' AND m.version = i.version
-                      )
-                   ) net_state
-                  ORDER BY BINARY version"
-            ),
-            &[],
-        )
-        .await
-        .map_err(journal_backend)?;
-
-    let mut out = Vec::with_capacity(rows.rows.len());
-    for row in rows.rows {
-        let version = required_row_string(&row, "version")?;
-        let checksum = required_row_string(&row, "checksum")?;
-        let phase_s = required_row_string(&row, "phase")?;
-        let phase = journal::Phase::parse(&phase_s).ok_or(JournalError::BadPhase(phase_s))?;
-        let kind = optional_row_string(&row, "mig_kind")
-            .map(|s| journal::JournaledKind::parse(&s).ok_or(JournalError::BadKind(s)))
-            .transpose()?;
-        out.push(AppliedEntry {
+    fn trivial_migration() -> Migration {
+        let flags = MigrationFlags::default();
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: "CREATE TABLE t (id INT)",
+            down: Some("DROP TABLE t"),
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
             version,
+            name: "create_t".into(),
+            up: "CREATE TABLE t (id INT)".into(),
+            down: Some("DROP TABLE t".into()),
             checksum,
-            phase,
-            kind,
-        });
-    }
-    Ok(out)
-}
-
-async fn superseded_versions_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<Vec<String>, JournalError> {
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    let supersedes = mysql_meta_table(cfg, "schema_migrations_supersedes")?;
-    let rows = backend
-        .query_json(
-            &format!(
-                "SELECT DISTINCT s.superseded_version AS v
-                   FROM {supersedes} s
-                   JOIN {migrations} m ON m.version = s.squash_version
-                   JOIN (
-                     SELECT version, MAX(event_seq) AS event_seq
-                       FROM {migrations}
-                      GROUP BY version
-                   ) latest
-                     ON latest.version = m.version AND latest.event_seq = m.event_seq
-                  WHERE m.event_kind = 'applied' AND m.kind = 'squash'
-                  ORDER BY BINARY s.superseded_version"
-            ),
-            &[],
-        )
-        .await
-        .map_err(journal_backend)?;
-    rows.rows
-        .iter()
-        .map(|row| required_row_string(row, "v"))
-        .collect()
-}
-
-async fn latest_completed_checksums_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<HashMap<String, String>, JournalError> {
-    let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    let rows = backend
-        .query_json(
-            &format!(
-                "SELECT m.version, m.checksum
-                   FROM {migrations} m
-                   JOIN (
-                     SELECT version, MAX(event_seq) AS event_seq
-                       FROM {migrations}
-                      WHERE event_kind = 'applied' AND kind = 'repeatable'
-                      GROUP BY version
-                   ) latest
-                     ON latest.version = m.version AND latest.event_seq = m.event_seq"
-            ),
-            &[],
-        )
-        .await
-        .map_err(journal_backend)?;
-    let mut out = HashMap::with_capacity(rows.rows.len());
-    for row in rows.rows {
-        out.insert(
-            required_row_string(&row, "version")?,
-            required_row_string(&row, "checksum")?,
-        );
-    }
-    Ok(out)
-}
-
-async fn snapshot_schema_mysql<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    cfg: &ExecutorConfig,
-) -> Result<SchemaSnapshot, DriftError> {
-    snapshot_schema_mysql_for_schema(backend, &cfg.project_schema).await
-}
-
-async fn snapshot_schema_mysql_for_schema<H: crate::runtime_host::JsDriverHost>(
-    backend: &MysqlBackend<H>,
-    schema: &str,
-) -> Result<SchemaSnapshot, DriftError> {
-    let schema_bind = [BindValue::Text(schema.to_string())];
-    let tables = backend
-        .query_json(
-            "SELECT TABLE_NAME, TABLE_COMMENT
-               FROM information_schema.TABLES
-              WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
-              ORDER BY TABLE_NAME",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let columns = backend
-        .query_json(
-            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE,
-                    COLUMN_COMMENT, ORDINAL_POSITION
-               FROM information_schema.COLUMNS
-              WHERE TABLE_SCHEMA = ?
-              ORDER BY TABLE_NAME, ORDINAL_POSITION",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let statistics = backend
-        .query_json(
-            "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-                    INDEX_TYPE, INDEX_COMMENT
-               FROM information_schema.STATISTICS
-              WHERE TABLE_SCHEMA = ?
-              ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let table_constraints = backend
-        .query_json(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, CONSTRAINT_TYPE
-               FROM information_schema.TABLE_CONSTRAINTS
-              WHERE TABLE_SCHEMA = ?
-              ORDER BY TABLE_NAME, CONSTRAINT_NAME",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let key_column_usage = backend
-        .query_json(
-            "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, ORDINAL_POSITION,
-                    REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-               FROM information_schema.KEY_COLUMN_USAGE
-              WHERE TABLE_SCHEMA = ?
-              ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let views = backend
-        .query_json(
-            "SELECT TABLE_NAME, VIEW_DEFINITION
-               FROM information_schema.VIEWS
-              WHERE TABLE_SCHEMA = ?
-              ORDER BY TABLE_NAME",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-    let referential_constraints = backend
-        .query_json(
-            "SELECT CONSTRAINT_NAME, TABLE_NAME, REFERENCED_TABLE_NAME,
-                    UPDATE_RULE, DELETE_RULE
-               FROM information_schema.REFERENTIAL_CONSTRAINTS
-              WHERE CONSTRAINT_SCHEMA = ?
-              ORDER BY CONSTRAINT_NAME",
-            &schema_bind,
-        )
-        .await
-        .map_err(drift_backend)?;
-
-    rowsets_to_schema_snapshot(
-        schema,
-        MysqlCatalogRowSets {
-            tables,
-            columns,
-            statistics,
-            table_constraints,
-            key_column_usage,
-            referential_constraints,
-            views,
-        },
-    )
-}
-
-fn mysql_drift_to_apply(error: DriftError) -> ApplyError {
-    match error {
-        DriftError::Db(db) => ApplyError::Db(db),
-        DriftError::Journal(journal) => ApplyError::Journal(journal),
-        DriftError::Snapshot(message) | DriftError::Backend(message) => {
-            ApplyError::Backend(message)
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
         }
     }
-}
 
-fn mysql_statement_fragments(sql: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    let mut start = 0usize;
-    let bytes = sql.as_bytes();
-    let mut i = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut line_comment = false;
-    let mut block_comment = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if line_comment {
-            if b == b'\n' {
-                line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        if block_comment {
-            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                block_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        if let Some(q) = quote {
-            if b == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if b == q {
-                if bytes.get(i + 1) == Some(&q) && q != b'`' {
-                    i += 2;
-                    continue;
-                }
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        match b {
-            b'\'' | b'"' | b'`' => {
-                quote = Some(b);
-                i += 1;
-            }
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                line_comment = true;
-                i += 2;
-            }
-            b'#' => {
-                line_comment = true;
-                i += 1;
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                block_comment = true;
-                i += 2;
-            }
-            b';' => {
-                let fragment = sql[start..i].trim();
-                if !fragment.is_empty() {
-                    fragments.push(fragment.to_string());
-                }
-                start = i + 1;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    let tail = sql[start..].trim();
-    if !tail.is_empty() {
-        fragments.push(tail.to_string());
-    }
-    fragments
-}
-
-fn required_row_string(
-    row: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Result<String, JournalError> {
-    optional_row_string(row, key).ok_or_else(|| {
-        JournalError::Backend(format!("mysql journal row missing required field {key}"))
-    })
-}
-
-fn optional_row_string(
-    row: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Option<String> {
-    value_to_string(row.get(key))
-}
-
-fn value_to_string(value: Option<&serde_json::Value>) -> Option<String> {
-    match value {
-        Some(serde_json::Value::String(s)) => Some(s.clone()),
-        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
-        Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
-        Some(serde_json::Value::Null) | None => None,
-        Some(other) => Some(other.to_string()),
-    }
-}
-
-fn apply_db(error: JsDriverError) -> ApplyError {
-    ApplyError::Db(transport::backend_error(error))
-}
-
-fn rollback_db(error: JsDriverError) -> RollbackError {
-    RollbackError::Db(transport::backend_error(error))
-}
-
-fn journal_backend(error: JsDriverError) -> JournalError {
-    JournalError::Db(transport::backend_error(error))
-}
-
-fn drift_backend(error: JsDriverError) -> DriftError {
-    DriftError::Db(transport::backend_error(error))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // NOTE (extraction Phase A): the echo-transport tests
-    // (`mysql_backend_compiles_against_unchanged_trait_and_uses_echo_transport`,
-    // `mysql_reset_role_best_effort_is_driver_noop`) MOVED to
-    // `crates/zero-migrate-runtime` — they need the concrete
-    // `ZeroMigrateHost` (the in-Rust-V8 `JsDriverHost` impl) to spin the echo
-    // isolate. This engine module keeps only the runtime-free unit tests below.
-
+    /// The backend reports the MySQL dialect, the `?` placeholder style, and
+    /// non-transactional DDL (auto-commit ⇒ two-phase path for every migration).
     #[test]
-    fn mysql_lock_name_hashes_long_project_id_to_mysql_limit() {
-        let long = format!("prj_{}", "tenant_with_a_very_long_project_identifier_".repeat(8));
-        let name = mysql_migration_lock_name(&long);
-        assert!(name.starts_with(MYSQL_LOCK_PREFIX), "lock name: {name}");
+    fn backend_reports_mysql_dialect_and_question_placeholders() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        assert_eq!(backend.dialect(), SqlDialect::Mysql);
+        assert_eq!(backend.placeholder_style(), PlaceholderStyle::Question);
         assert!(
-            name.len() <= 64,
-            "MySQL GET_LOCK names are capped at 64 chars, got {}: {name}",
-            name.len()
+            !backend.ddl_is_transactional(),
+            "MySQL DDL auto-commits — must report non-transactional (two-phase path)"
         );
+        // The `?` placeholder renders positionally regardless of index.
+        assert_eq!(backend.placeholder(1), "?");
+        assert_eq!(backend.placeholder(7), "?");
+    }
+
+    /// `project_lock_name` derives a `zero_migrate:`-prefixed lock name and folds a
+    /// too-long id to a deterministic 64-char SHA-256 hex (MySQL's lock-name cap).
+    #[test]
+    fn project_lock_name_prefixes_and_folds_to_64_chars() {
+        // Short id → prefixed verbatim.
         assert_eq!(
-            name.len(),
-            MYSQL_LOCK_PREFIX.len() + MYSQL_LOCK_HEX_CHARS,
-            "lock name should be fixed-width hashed, not raw project text"
+            session::project_lock_name("prj_abc"),
+            "zero_migrate:prj_abc"
         );
-        assert_ne!(
-            name,
-            mysql_migration_lock_name(&(long + "_other")),
-            "different project ids should hash to different lock names"
-        );
-    }
-
-    #[test]
-    fn mysql_migrator_account_user_hashes_project_id_to_mysql_limit() {
-        let long = format!("prj_{}", "tenant_with_a_very_long_project_identifier_".repeat(8));
-        let cases = ["", "prj_short", "prj_symbols_!@#$%^&*()", long.as_str()];
-
-        for project_id in cases {
-            let user = mysql_migrator_account_user(project_id);
-            assert!(
-                user.starts_with(MYSQL_MIGRATOR_USER_PREFIX),
-                "migrator user: {user}"
-            );
-            assert!(
-                user.len() <= MYSQL_MIGRATOR_USER_MAX_CHARS,
-                "MySQL user names are capped at 32 chars, got {}: {user}",
-                user.len()
-            );
-            assert_eq!(
-                user.len(),
-                MYSQL_MIGRATOR_USER_PREFIX.len() + MYSQL_MIGRATOR_USER_HEX_CHARS,
-                "migrator user should use its own 32-char cap, not the GET_LOCK cap"
-            );
-        }
-
-        assert_ne!(
-            mysql_migrator_account_user("project-a"),
-            mysql_migrator_account_user("project-b"),
-            "different project ids should hash to different account names"
-        );
-    }
-
-    #[test]
-    fn mysql_statement_fragments_ignore_semicolons_inside_literals() {
+        // A >64-char id folds to a stable 64-hex-char name; deterministic.
+        let long = "prj_".to_string() + &"x".repeat(200);
+        let folded = session::project_lock_name(&long);
+        assert_eq!(folded.len(), 64, "folded lock name is exactly 64 chars");
         assert_eq!(
-            mysql_statement_fragments(
-                "CREATE TABLE `t` (`v` VARCHAR(32) DEFAULT 'a;b');\n\
-                 CREATE INDEX `idx` ON `t` (`v`);"
-            ),
-            vec![
-                "CREATE TABLE `t` (`v` VARCHAR(32) DEFAULT 'a;b')".to_string(),
-                "CREATE INDEX `idx` ON `t` (`v`)".to_string(),
-            ]
+            folded,
+            session::project_lock_name(&long),
+            "the fold is deterministic"
+        );
+        assert!(
+            folded.bytes().all(|b| b.is_ascii_hexdigit()),
+            "the folded name is hex"
         );
     }
 
+    /// `quote_ident_mysql` backtick-quotes, doubles embedded backticks, and
+    /// fail-closes on empty / NUL identifiers.
     #[test]
-    fn mysql_journal_and_drift_driver_errors_remain_downcastable() {
-        let journal = journal_backend(JsDriverError::Remote {
-            code: 1146,
-            sqlstate: "42S02".to_string(),
-            message: "table does not exist".to_string(),
-        });
-        let JournalError::Db(journal_db) = journal else {
-            panic!("expected journal backend errors to route through JournalError::Db");
-        };
-        assert!(matches!(
-            journal_db.downcast_ref::<JsDriverError>(),
-            Some(JsDriverError::Remote {
-                code: 1146,
-                sqlstate,
-                ..
-            }) if sqlstate == "42S02"
-        ));
+    fn quote_ident_mysql_backticks_and_fails_closed() {
+        assert_eq!(journal_sql::quote_ident_mysql("t").unwrap(), "`t`");
+        assert_eq!(
+            journal_sql::quote_ident_mysql("we`ird").unwrap(),
+            "`we``ird`"
+        );
+        assert!(journal_sql::quote_ident_mysql("").is_err());
+        assert!(journal_sql::quote_ident_mysql("a\0b").is_err());
+    }
 
-        let drift = drift_backend(JsDriverError::Remote {
-            code: 1054,
-            sqlstate: "42S22".to_string(),
-            message: "unknown column".to_string(),
-        });
-        let DriftError::Db(drift_db) = drift else {
-            panic!("expected drift backend errors to route through DriftError::Db");
-        };
-        let apply = ApplyError::Db(drift_db);
-        let ApplyError::Db(apply_db) = apply else {
-            panic!("expected drift db error to map to ApplyError::Db");
-        };
-        assert!(matches!(
-            apply_db.downcast_ref::<JsDriverError>(),
-            Some(JsDriverError::Remote {
-                code: 1054,
-                sqlstate,
-                ..
-            }) if sqlstate == "42S22"
-        ));
+    /// The project lock rides `GET_LOCK(?, ?)` with the derived name bound (not
+    /// interpolated); release rides `RELEASE_LOCK(?)`.
+    #[compio::test]
+    async fn project_lock_uses_get_lock_release_lock_with_bound_name() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+
+        backend.acquire_project_lock(&cfg).await.expect("acquire GET_LOCK");
+        backend.release_project_lock(&cfg).await.expect("release RELEASE_LOCK");
+
+        let log = rec.log.borrow();
+        assert!(
+            log.iter().any(|s| s.contains("GET_LOCK(?, ?)")),
+            "acquire issues GET_LOCK with ? placeholders (not pg_advisory_lock): {log:?}"
+        );
+        assert!(
+            log.iter().any(|s| s.contains("RELEASE_LOCK(?)")),
+            "release issues RELEASE_LOCK with a ? placeholder: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|s| s.contains("pg_advisory")),
+            "no Postgres advisory-lock SQL leaks into the MySQL backend: {log:?}"
+        );
+        // The derived lock name crossed the seam as a bound Text, never interpolated.
+        assert!(
+            rec.binds
+                .borrow()
+                .iter()
+                .any(|b| b.iter().any(|v| matches!(v, Bind::Text(t) if t == "zero_migrate:prj_x"))),
+            "the project lock name is bound, not interpolated: {:?}",
+            rec.binds.borrow()
+        );
+    }
+
+    /// `ensure_journal` emits the MySQL journal DDL: `CREATE DATABASE IF NOT
+    /// EXISTS`, the `schema_migrations` table with `BIGINT AUTO_INCREMENT PRIMARY
+    /// KEY` + `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` + `ENGINE=InnoDB`, the
+    /// `_supersedes` + `_inflight` tables, and `SIGNAL SQLSTATE '45000'`
+    /// immutability triggers — never any Postgres-flavoured `GENERATED ALWAYS AS
+    /// IDENTITY` / `TIMESTAMPTZ` / plpgsql.
+    #[compio::test]
+    async fn ensure_journal_emits_mysql_dialect_ddl() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+
+        backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
+
+        let log = rec.log.borrow();
+        let all = log.join("\n");
+        assert!(
+            all.contains("CREATE DATABASE IF NOT EXISTS `proj_x_migrations`"),
+            "meta database DDL is CREATE DATABASE (MySQL), backtick-quoted: {all}"
+        );
+        assert!(
+            all.contains("schema_migrations")
+                && all.contains("BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"),
+            "the journal PK is BIGINT AUTO_INCREMENT (MySQL native total order): {all}"
+        );
+        assert!(
+            all.contains("TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
+            "timestamps are MySQL TIMESTAMP(6)/CURRENT_TIMESTAMP(6): {all}"
+        );
+        assert!(all.contains("ENGINE=InnoDB"), "tables are InnoDB: {all}");
+        assert!(
+            all.contains("schema_migrations_supersedes")
+                && all.contains("schema_migrations_inflight"),
+            "the supersedes + inflight side-tables are created: {all}"
+        );
+        assert!(
+            all.contains("SIGNAL SQLSTATE '45000'"),
+            "immutability triggers SIGNAL SQLSTATE '45000' (MySQL), not plpgsql RAISE: {all}"
+        );
+        assert!(
+            all.contains("BEFORE UPDATE") && all.contains("BEFORE DELETE"),
+            "both BEFORE UPDATE and BEFORE DELETE immutability triggers are created: {all}"
+        );
+        // No Postgres dialect leaks.
+        assert!(
+            !all.contains("GENERATED ALWAYS AS IDENTITY")
+                && !all.contains("TIMESTAMPTZ")
+                && !all.contains("plpgsql")
+                && !all.contains("CREATE SCHEMA"),
+            "no Postgres-flavoured DDL leaks into the MySQL journal: {all}"
+        );
+        // The trigger-existence probe ran (guarding re-bootstrap idempotency).
+        assert!(
+            all.contains("information_schema.triggers"),
+            "trigger creation is guarded on information_schema.triggers: {all}"
+        );
+    }
+
+    /// A full two-phase apply of one migration through the backend records the
+    /// journal writes with `?` placeholders (never `$N`): the `started`-marker
+    /// `INSERT IGNORE ... VALUES (?, ?, ?, ?)`, the creator `up` as a `batch`, the
+    /// `completed` `INSERT ... VALUES ('applied', ?, ?, ?, ?, ?, 'completed',
+    /// 'success', ?)`, and the inflight `DELETE ... WHERE version = ?`.
+    #[compio::test]
+    async fn two_phase_apply_writes_journal_with_question_placeholders() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let m = trivial_migration();
+
+        let recovered = backend
+            .apply_one(&cfg, &m, "tester", false, &[], "apply")
+            .await
+            .expect("two-phase apply runs");
+        assert!(!recovered, "a fresh apply recovered no inflight marker");
+
+        let log = rec.log.borrow();
+        let all = log.join("\n");
+        // Session budgets set with MySQL session vars (no search_path / SET ROLE).
+        assert!(
+            all.contains("SET SESSION max_execution_time")
+                && all.contains("innodb_lock_wait_timeout"),
+            "MySQL session budgets are max_execution_time + innodb_lock_wait_timeout: {all}"
+        );
+        assert!(
+            !all.contains("search_path") && !all.contains("SET LOCAL ROLE"),
+            "no Postgres search_path / SET ROLE on the MySQL apply path: {all}"
+        );
+        // The started marker uses INSERT IGNORE + ? placeholders.
+        assert!(
+            all.contains("INSERT IGNORE INTO `proj_x_migrations`.schema_migrations_inflight")
+                && all.contains("VALUES (?, ?, ?, ?)"),
+            "started marker is INSERT IGNORE with ? placeholders: {all}"
+        );
+        // The creator up ran as a batch.
+        assert!(
+            log.iter().any(|s| s == "batch: CREATE TABLE t (id INT)"),
+            "the creator up ran through batch: {log:?}"
+        );
+        // The completed row is an INSERT with the applied/completed/success literals
+        // and ? placeholders.
+        assert!(
+            all.contains("INSERT INTO `proj_x_migrations`.schema_migrations")
+                && all.contains("'applied', ?, ?, ?, ?, ?, 'completed', 'success', ?"),
+            "completed row is an INSERT with ? placeholders: {all}"
+        );
+        // The inflight marker is cleared with a ? placeholder.
+        assert!(
+            all.contains("DELETE FROM `proj_x_migrations`.schema_migrations_inflight WHERE version = ?"),
+            "inflight clear is a DELETE ... WHERE version = ?: {all}"
+        );
+        // No Postgres `$N` placeholders anywhere on the MySQL write path.
+        assert!(
+            !all.contains("$1") && !all.contains("$2") && !all.contains("$3"),
+            "no Postgres $N placeholders leak onto the MySQL apply path: {all}"
+        );
+    }
+
+    /// Rollback runs the `down` as a batch then appends a `rolled_back` event with
+    /// `?` placeholders and the NULL applied-only columns (only the 5 event fields).
+    #[compio::test]
+    async fn rollback_runs_down_then_appends_rolled_back_event() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let m = trivial_migration();
+
+        backend
+            .rollback_one_transactional(&cfg, &m, "tester")
+            .await
+            .expect("rollback runs");
+
+        let log = rec.log.borrow();
+        let all = log.join("\n");
+        assert!(
+            log.iter().any(|s| s == "batch: DROP TABLE t"),
+            "the down ran through batch: {log:?}"
+        );
+        assert!(
+            all.contains("INSERT INTO `proj_x_migrations`.schema_migrations")
+                && all.contains("'rolled_back', ?, ?, ?, ?, ?")
+                && all.contains("(event_kind, version, name, checksum, `by`, exec_ms)"),
+            "rolled_back event appends only the 5 event fields (applied-only cols NULL): {all}"
+        );
+    }
+
+    /// The capability gaps are fail-closed, not silent: introspection, preconditions,
+    /// backfill, DML-step, rebuild, baseline, and squash-record-not-run all surface a
+    /// clear error; online/shadow/pending-contracts report the capability absent.
+    #[compio::test]
+    async fn v1_capability_gaps_fail_closed() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let m = trivial_migration();
+
+        assert!(
+            backend.snapshot_schema(&cfg).await.is_err(),
+            "snapshot_schema fails closed (no fake empty snapshot)"
+        );
+        // A migration with NO preconditions applies normally (empty list ⇒ AllMet,
+        // no evaluator needed — the executor calls this for every migration).
+        assert_eq!(
+            backend.evaluate_preconditions(&cfg, &m).await.unwrap(),
+            crate::apply::executor::PreconditionVerdict::AllMet,
+            "an empty precondition list is AllMet, not the v1 capability gap",
+        );
+        // A migration that DECLARES a precondition fails closed (no MySQL evaluator).
+        let mut m_pc = trivial_migration();
+        m_pc.preconditions = vec![crate::model::precondition::PreconditionCheck::halt(
+            crate::model::precondition::Precondition::TableNotExists { table: "t".into() },
+        )];
+        assert!(
+            backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
+            "a DECLARED precondition fails closed on MySQL v1",
+        );
+        assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());
+        assert!(backend.record_squash(&cfg, &m, "t", &["v1"]).await.is_err());
+        assert!(backend.online().is_none(), "no online harness in v1");
+        assert!(backend.shadow().is_none(), "no shadow harness in v1");
+        assert!(
+            backend.pending_contracts().is_none(),
+            "no cross-deploy pending-contract partition in v1"
+        );
+    }
+
+    /// The checksum-drift gate runs the SAME dialect-agnostic comparison the PG /
+    /// SQLite backends use, over the MySQL journal read: an empty journal yields no
+    /// drift and no orphans for a fresh set.
+    #[compio::test]
+    async fn checksum_drift_gate_runs_over_mysql_journal_read() {
+        let rec = RecordingSession::new();
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let m = trivial_migration();
+
+        let report = backend
+            .check_checksum_drift(&cfg, std::slice::from_ref(&m))
+            .await
+            .expect("drift check runs over the MySQL journal read");
+        assert!(
+            report.checksum_drift.is_empty() && report.orphan_journal.is_empty(),
+            "empty MySQL journal ⇒ no drift, no orphans for a fresh set: {report:?}"
+        );
+        // The read used a window-function net-state query (MySQL 8), not PG DISTINCT ON.
+        let all = rec.log.borrow().join("\n");
+        assert!(
+            all.contains("ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC)"),
+            "the MySQL net-state read uses a window function, not DISTINCT ON: {all}"
+        );
     }
 }

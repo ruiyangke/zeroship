@@ -37,7 +37,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
@@ -195,7 +195,7 @@ impl SqliteBackend {
 
     /// Introspect the LIVE `main` (app file) schema into a dialect-agnostic
     /// [`SchemaSnapshot`] (§2.7) — the drift surface, the same shape the PG path
-    /// returns. Recovers inline `__zsmask:` / `zsenc:` sentinels from
+    /// returns. Recovers inline `zero-migrate:mask:` / `zero-migrate:enc:` sentinels from
     /// `sqlite_master.sql`.
     ///
     /// # Errors

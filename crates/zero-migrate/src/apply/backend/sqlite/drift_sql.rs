@@ -27,10 +27,10 @@
 //!
 //! # Sentinel recovery (§2.7)
 //!
-//! The SQLite emitter bakes the `/* __zsmask:… */` (and `/* zsenc:… */`) sentinels
+//! The SQLite emitter bakes the `/* zero-migrate:mask:… */` (and `/* zero-migrate:enc:… */`) sentinels
 //! INLINE in the `CREATE` text, which `sqlite_master.sql` preserves verbatim (SQLite
 //! keeps comments in the stored schema text, unlike PG which discards them at
-//! parse). [`recover_inline_sentinel`] pulls the `__zsmask:` / `zsenc:` body for a
+//! parse). [`recover_inline_sentinel`] pulls the `zero-migrate:mask:` / `zero-migrate:enc:` body for a
 //! given column out of that stored text into the snapshot's
 //! [`comment_sentinel`](crate::model::snapshot::ColumnSnapshot::comment_sentinel), so a
 //! masked/encrypted column round-trips faithfully rather than being silently
@@ -89,7 +89,7 @@ fn parse_fts5_index(name: &str, sql: &str) -> Option<Vec<String>> {
     if !name.ends_with("__fts") {
         return None;
     }
-    zero_migrate_schema::fts_sqlite::parse_fts5_columns(sql)
+    crate::schema::fts_sqlite::parse_fts5_columns(sql)
 }
 
 /// The parent collection of an FTS5 vtable named `<coll>__fts` (strip the
@@ -298,7 +298,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
 /// Columns via `PRAGMA table_info(<t>)`. Columns: cid, name, type, notnull,
 /// dflt_value, pk. We map `type` → `data_type` (normalised lowercase, the SQLite
 /// declared-type spelling), `notnull == 0` → nullable, and recover the inline
-/// `__zsmask:` / `zsenc:` sentinel for the column from the stored CREATE text.
+/// `zero-migrate:mask:` / `zero-migrate:enc:` sentinel for the column from the stored CREATE text.
 async fn introspect_columns(
     actor: &MigrationActor,
     table: &str,
@@ -766,11 +766,11 @@ async fn introspect_foreign_keys(
     Ok(())
 }
 
-/// Recover an inline `__zsmask:…` or `zsenc:…` sentinel for `column` from the
+/// Recover an inline `zero-migrate:mask:…` or `zero-migrate:enc:…` sentinel for `column` from the
 /// stored CREATE text (§2.7). The emitter writes the sentinel as an inline
-/// `/* __zsmask:… */` comment immediately after the relevant column's type;
+/// `/* zero-migrate:mask:… */` comment immediately after the relevant column's type;
 /// `sqlite_master.sql` preserves it verbatim. We find the column's clause and, if a
-/// `/* … */` comment on that clause carries a `__zsmask:` / `zsenc:` body, return
+/// `/* … */` comment on that clause carries a `zero-migrate:mask:` / `zero-migrate:enc:` body, return
 /// that body (the sentinel without the comment delimiters). `None` if the column
 /// carries no sentinel.
 ///
@@ -785,7 +785,7 @@ fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
     let open = clause.find("/*")?;
     let close_rel = clause[open + 2..].find("*/")?;
     let body = clause[open + 2..open + 2 + close_rel].trim();
-    if body.starts_with("__zsmask:") || body.starts_with("zsenc:") {
+    if body.starts_with("zero-migrate:mask:") || body.starts_with("zero-migrate:enc:") {
         Some(body.to_string())
     } else {
         None
@@ -803,8 +803,8 @@ fn recover_case_sensitive(create_sql: &str, column: &str) -> Option<bool> {
 
 fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str> {
     // The emitter quotes identifiers with double-quotes: `"<col>_masked" TEXT NOT
-    // NULL /* __zsmask:… */`. The masked SIBLING column carries the `__zsmask:`
-    // sentinel; an encrypted column carries `zsenc:` on the column itself. We scan
+    // NULL /* zero-migrate:mask:… */`. The masked SIBLING column carries the `zero-migrate:mask:`
+    // sentinel; an encrypted column carries `zero-migrate:enc:` on the column itself. We scan
     // for the column token, then the next `/* … */` up to the next comma/`)` at
     // depth 0.
     let needle_quoted = format!("\"{column}\"");
@@ -903,21 +903,21 @@ mod tests {
         let sql = "CREATE TABLE \"app\".\"users\" (\
             \"id\" TEXT PRIMARY KEY, \
             \"ssn\" BYTEA, \
-            \"ssn_masked\" TEXT /* __zsmask:kind=last4,classification=pii */)";
+            \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */)";
         assert_eq!(
             recover_inline_sentinel(sql, "ssn_masked").as_deref(),
-            Some("__zsmask:kind=last4,classification=pii")
+            Some("zero-migrate:mask:kind=last4,classification=pii")
         );
         // A plain column carries no sentinel.
         assert_eq!(recover_inline_sentinel(sql, "id"), None);
     }
 
     #[test]
-    fn recover_inline_zsenc_sentinel() {
-        let sql = "CREATE TABLE \"t\" (\"secret\" BYTEA /* zsenc:randomised:default:string */, \"x\" INTEGER)";
+    fn recover_inline_enc_sentinel() {
+        let sql = "CREATE TABLE \"t\" (\"secret\" BYTEA /* zero-migrate:enc:randomised:default:string */, \"x\" INTEGER)";
         assert_eq!(
             recover_inline_sentinel(sql, "secret").as_deref(),
-            Some("zsenc:randomised:default:string")
+            Some("zero-migrate:enc:randomised:default:string")
         );
         // The later column must NOT inherit the earlier column's sentinel.
         assert_eq!(recover_inline_sentinel(sql, "x"), None);

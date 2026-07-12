@@ -9,7 +9,7 @@
 //   add,sub,mul,div,concat}, unaryOp {not,isNull,isNotNull,isTrue,isFalse},
 //   case, fnCall {coalesce,nullif,lower,upper,trim,length,abs}, fnSynth
 //   {concatWs,splitPart,now,genRandomUuid}, cast.
-import { table, now, genRandomUuid, concatWs } from "@zeroship/migrate";
+import { table, now, genRandomUuid, concatWs } from "zero-migrate";
 
 export default {
   name: "fluent_dml",

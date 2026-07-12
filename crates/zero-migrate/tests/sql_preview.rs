@@ -28,7 +28,7 @@ use zero_migrate::render::sql_preview::{
 use zero_migrate::{
     resolve_create_table_policy, MigrationIr, PolicyProfile,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, an online rename).
@@ -509,65 +509,13 @@ fn malformed_ir_is_error() {
     assert!(err.is_err(), "malformed IR must be an error");
 }
 
-/// CLI SMOKE (no DB) — `plan --dir <fixture> --dialect pg` prints the preview and
-/// exits 0 WITHOUT a DSN. Proves the subcommand dispatch is offline (it returns
-/// BEFORE the DSN-bearing RunConfig is built).
-#[test]
-fn cli_plan_prints_and_exits_zero_offline() {
-    let representative = resolve_ir_json(REPRESENTATIVE_IR);
-    let dir = tempdir_with(&[("001_create.ir.json", &representative)]);
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_zero-migrate"))
-        .args(["plan", "--dir"])
-        .arg(&dir)
-        .args(["--dialect", "pg"])
-        // Deliberately NO --database-url and scrub the env DSN: a connect would fail.
-        .env_remove("DATABASE_URL")
-        .output()
-        .expect("spawn zero-migrate");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "plan must exit 0 offline; stderr:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("offline SQL preview") || stdout.contains("-- plan"), "stdout:\n{stdout}");
-    assert!(stdout.contains(RUNTIME_RESOLVED), "the rename must be labeled:\n{stdout}");
-    assert!(stdout.contains("CREATE TABLE"), "renderable DDL must be shown:\n{stdout}");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn cli_plan_mysql_engine_prints_and_exits_zero_offline() {
-    let mysql_feature = resolve_ir_json(MYSQL_FEATURE_IR);
-    let dir = tempdir_with(&[("001_create.ir.json", &mysql_feature)]);
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_zero-migrate"))
-        .args(["--engine", "mysql", "plan", "--dir"])
-        .arg(&dir)
-        .env_remove("DATABASE_URL")
-        .output()
-        .expect("spawn zero-migrate");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "plan must exit 0 offline; stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(stdout.contains("(dialect: mysql)"), "stdout:\n{stdout}");
-    assert!(stdout.contains("AUTO_INCREMENT"), "stdout:\n{stdout}");
-    assert!(stdout.contains("CREATE OR REPLACE VIEW"), "stdout:\n{stdout}");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// CLI SMOKE — a missing/empty dir is a non-zero exit (the operator's error signal).
-#[test]
-fn cli_plan_empty_dir_exits_nonzero() {
-    let dir = tempdir_with(&[]); // no artifacts
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_zero-migrate"))
-        .args(["plan", "--dir"])
-        .arg(&dir)
-        .args(["--dialect", "pg"])
-        .env_remove("DATABASE_URL")
-        .output()
-        .expect("spawn zero-migrate");
-    assert!(!out.status.success(), "an empty dir must be a non-zero refusal");
-    std::fs::remove_dir_all(&dir).ok();
-}
+// NOTE (redesign step 5c): the three offline `plan` CLI-smoke tests that shelled
+// the retired Rust `zero-migrate` binary (`CARGO_BIN_EXE_zero-migrate`) were removed
+// with the bin. The offline SQL-preview surface they exercised — `render_ir_json_sql`
+// / `render_set_sql` / `render_plan_sql` + the `-- [runtime-resolved]` labeling — is
+// still fully covered DB-free by the library tests above (goldens, faithfulness,
+// no-fabrication, `render_succeeds_without_a_dsn`). The command-line entry point is
+// now the `zero-migrate-engine` TS CLI (`sdks/engine/src/cli.ts`).
 
 /// Create a unique temp dir seeded with `(filename, contents)` files; caller removes.
 fn tempdir_with(files: &[(&str, &str)]) -> std::path::PathBuf {

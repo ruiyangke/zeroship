@@ -1,4 +1,4 @@
-import { countStar, view } from "@zeroship/migrate";
+import { countStar, view } from "zero-migrate";
 
 export default {
   up() {

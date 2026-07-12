@@ -1127,9 +1127,9 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     //    keeps the corpus and the engine's variant selection from drifting.
     for (kind, variant, op) in &corpus {
         assert_eq!(
-            &op.op_variant(),
+            &zero_migrate::model::op_support::op_variant(op),
             variant,
-            "corpus labels {kind}/{variant} but Op::op_variant() disagrees"
+            "corpus labels {kind}/{variant} but op_variant() disagrees"
         );
         assert_eq!(
             &op_tag(op).as_str(),
@@ -1179,7 +1179,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     assert_eq!(
         generated, sidecar,
         "generated dialect_table.rs drifted from dialect-support.toml — regenerate with \
-         `pnpm --filter @zeroship/migrate gen:dialect-table`"
+         `pnpm --filter zero-migrate gen:dialect-table`"
     );
 
     // TransparentDegradable is not a general escape hatch. It is currently

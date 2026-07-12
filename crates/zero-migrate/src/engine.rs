@@ -23,14 +23,12 @@
 //! if a caller hand-built a plan, the executor still independently denies the
 //! dangerous surface and confines execution. The engine never disables those.
 
-#[cfg(feature = "native-pg")]
-use compio_postgres::Client;
 
 pub use crate::approval::Approval;
 use crate::apply::backend::MigrationBackend;
 use crate::conn::ExecutorConfig;
 use crate::apply::executor::{
-    self, ApplyError, ApplyOutcome, LockMode, RollbackError, RollbackOutcome, RollbackRequest,
+    self, ApplyError, ApplyOutcome, LockMode, RollbackError,
 };
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
 use crate::model::migration::Migration;
@@ -46,7 +44,7 @@ use crate::render::step::{PlanStep, RenameStep};
 /// owns the obligation set, so the "refuse-if-any-outstanding" decision is made
 /// here, not at lower-time). It contains a NUL byte so it can never equal a real
 /// (parseable) table identifier.
-pub const TOUCHES_UNKNOWN: &str = "\0__zeroship_touches_unknown__";
+pub(crate) const TOUCHES_UNKNOWN: &str = "\0__zero_migrate_touches_unknown__";
 
 /// One linted migration in a [`MigrationPlan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,7 +389,7 @@ impl MigrationEngine {
         // P6a — the lock is acquired/released through the dialect seam
         // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
         // free-fns. For the PG backend this is byte-identical (`PostgresBackend`
-        // delegates straight to `executor::pg::acquire/release_project_lock`, i.e. the
+        // delegates straight to `backend::postgres::session::acquire/release_project_lock`, i.e. the
         // same `pg_advisory_lock(hashtext(project))`); for SQLite the lock is a no-op
         // (single-actor serialization is the lock). The single-acquire / single-release
         // H10 discipline is unchanged.
@@ -868,110 +866,6 @@ impl MigrationEngine {
         result
     }
 
-    /// PR9d MED — abort the same-deploy online-rename EXPANDs of a deploy whose
-    /// LATER file failed at apply, so a refused multi-file bundle leaves NO
-    /// half-renamed table.
-    ///
-    /// For each obligation in `obligations` that is STILL outstanding (read back
-    /// under the held lock — so an obligation already discharged by an earlier resume
-    /// attempt is skipped, making this idempotent on crash-resume), re-author the
-    /// SHARED abort DDL ([`crate::apply::backend::postgres::online::build_abort_steps`]: C1 drop
-    /// trigger+fn, then `DROP COLUMN IF EXISTS <to>` — both idempotent) and run it
-    /// through [`apply_plan_resolving`](Self::apply_plan_resolving), EXEMPTING the
-    /// obligation from the touched-table refusal (its drops ARE its resolution) and
-    /// APPENDING a `resolved='aborted'` row only on apply success (resolve-after-apply
-    /// inside the held lock is fail-closed). The pre-rename `from` column is left
-    /// intact.
-    ///
-    /// `lock_mode` is [`LockMode::AlreadyHeld`] when the control loop already owns the
-    /// whole-deploy project lock (the in-process leg) and [`LockMode::Acquire`] when a
-    /// standalone caller drives recovery.
-    ///
-    /// Returns the obligations it SUCCESSFULLY aborted. An abort-DDL failure (the DB
-    /// went unreachable mid-recovery) surfaces as `Err`: the obligation stays
-    /// outstanding + its recovery marker stays net-`in_progress`, so the NEXT same-app deploy
-    /// re-attempts the abort under the lock (the documented irreducible residue the
-    /// operator can also clear with `resolve-pending`). Fail-closed: never a silent
-    /// fail-open.
-    ///
-    /// # Errors
-    /// [`DeclarativeApplyError`] from the abort apply (a DB error, or a re-author
-    /// failure surfaced as [`EngineError`]).
-    ///
-    /// Online-rename obligations exist only on the PG online path (SQLite has no
-    /// online path — `online() == None`), and this re-authors the abort DDL via
-    /// the PG-only `build_abort_steps`, so it rides `native-pg`.
-    #[cfg(feature = "native-pg")]
-    pub async fn abort_same_deploy_expands<B: MigrationBackend>(
-        &self,
-        obligations: &[crate::apply::journal::PendingContract],
-        backend: &B,
-        exec_cfg: &ExecutorConfig,
-        applied_by: &str,
-        lock_mode: LockMode,
-    ) -> Result<Vec<crate::apply::journal::PendingContract>, DeclarativeApplyError> {
-        if obligations.is_empty() {
-            return Ok(Vec::new());
-        }
-        // Re-read the CURRENT outstanding set so a crash-resume that already aborted
-        // some obligations does not re-drive them (idempotent). Under the held lock
-        // (the in-process leg) this is consistent; on the standalone `Acquire` leg
-        // `apply_plan_resolving` takes the lock per obligation below.
-        let Some(pending_contracts) = backend.pending_contracts() else {
-            return Ok(Vec::new());
-        };
-        let outstanding = pending_contracts
-            .outstanding_pending_contracts(exec_cfg)
-            .await
-            .map_err(|e| {
-                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(e)))
-            })?;
-        let still_outstanding: std::collections::BTreeSet<&str> = outstanding
-            .iter()
-            .map(|pc| pc.pending_version.as_str())
-            .collect();
-
-        let mut aborted: Vec<crate::apply::journal::PendingContract> = Vec::new();
-        for pc in obligations {
-            if !still_outstanding.contains(pc.pending_version.as_str()) {
-                // Already discharged (a prior resume attempt aborted it, or a go-live
-                // applied it) — nothing to do. Idempotent.
-                continue;
-            }
-            let steps = crate::apply::backend::postgres::online::build_abort_steps(
-                &exec_cfg.project_schema,
-                pc,
-            )
-                .map_err(|e| {
-                    DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
-                        format!("re-author same-deploy abort: {e}"),
-                    )))
-                })?;
-            // The obligation is passed as the explicit-resolve so it is EXEMPTED from
-            // the touched-table refusal (its drops ARE its resolution) and APPENDED a
-            // `resolved='aborted'` row only on apply success. Blanket scope: an abort
-            // is the operator/recovery discharge of an already-opened obligation, not a
-            // co-bundled reviewed version set.
-            self.apply_plan_resolving(
-                &steps,
-                &[],
-                &[],
-                std::slice::from_ref(&(pc.clone(), crate::apply::journal::Resolution::Aborted)),
-                Approval::Approved,
-                &crate::approval::ApprovalScope::All,
-                backend,
-                exec_cfg,
-                applied_by,
-                lock_mode,
-                // An abort opens no new obligation (it discharges one), so no recovery
-                // marker is written here.
-                None,
-            )
-            .await?;
-            aborted.push(pc.clone());
-        }
-        Ok(aborted)
-    }
 
     /// The plan body, run with the project lock already held (either because the
     /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
@@ -1069,7 +963,7 @@ impl MigrationEngine {
         // whose Ddl steps actually RUN the real C1 (drop trigger+fn) + C2 (drop column)
         // un-gates the table. The author's `up` text is byte-stable and independent of
         // `owner_app` (it names table/trigger/column only), so an exact string compare
-        // is sound (it mirrors `command::runner`'s deterministic re-author).
+        // is sound (it mirrors the deterministic contract re-author).
         let ddl_up_by_version: std::collections::BTreeMap<&str, &str> = steps
             .iter()
             .filter_map(|s| match s {
@@ -1972,145 +1866,8 @@ impl MigrationEngine {
             .await
     }
 
-    /// Roll back applied migrations to a [`crate::apply::executor::RollbackTarget`] through the gate
-    /// (design §5).
-    ///
-    /// A `down` is privileged SQL that typically **reverses** schema (drops the
-    /// objects an `up` created), so rollback is treated as destructive: it
-    /// **requires [`Approval::Approved`]** — the AI never auto-rolls-back. Given
-    /// approval, it delegates to [`executor::rollback`](crate::apply::executor::rollback),
-    /// which **independently** runs every `down` through the guard and under the
-    /// least-privilege `migrator` role (defense in depth, identical to the up
-    /// path), refuses to cross an irreversible (`down: None`) migration unless
-    /// `request.options.force` + `request.options.backup_acknowledged`, and
-    /// journals each rollback as an append-only `rolled_back` event.
-    ///
-    /// `applied_by` is the actor recorded in the journal.
-    ///
-    /// # Errors
-    /// - [`RollbackEngineError::ApprovalRequired`] — `approval != Approved`.
-    /// - [`RollbackEngineError::Rollback`] — the executor's rollback failed
-    ///   (guard denial on a `down`, irreversible without force, checksum drift,
-    ///   missing-from-set, unknown target, or a mid-rollback DB error).
-    #[cfg(feature = "native-pg")]
-    pub async fn rollback(
-        &self,
-        migrations: &[Migration],
-        request: RollbackRequest,
-        approval: Approval,
-        conn: &Client,
-        exec_cfg: &ExecutorConfig,
-        applied_by: &str,
-    ) -> Result<RollbackOutcome, RollbackEngineError> {
-        // Gate: rollback is destructive ⇒ explicit approval required.
-        if approval != Approval::Approved {
-            return Err(RollbackEngineError::ApprovalRequired);
-        }
-        // Forward the approval decision: the executor re-runs its OWN approval
-        // gate (defense in depth — design §1.6), so the gate here is additional,
-        // not a replacement.
-        let outcome =
-            executor::rollback(conn, exec_cfg, migrations, request, approval, applied_by).await?;
-        Ok(outcome)
-    }
 
-    /// Orchestrate the EXPAND phase of an online expand-contract migration
-    /// (Plan 8 v1.3): apply the additive + dual-write steps, run the backfill,
-    /// then journal the backfill step's completion — in that order, so the
-    /// v1.2 gate's single source of truth (the journal) only shows the expand as
-    /// fully done **after the data is actually mirrored**.
-    ///
-    /// The sequence is deliberately NOT "apply all of `plan.expand` then
-    /// backfill": E3 (the backfill-marker migration) must be journaled **after**
-    /// [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) succeeds, never before —
-    /// otherwise the gate would let the destructive `DROP COLUMN` (which
-    /// `depends_on` E3) run while pre-existing rows are still un-mirrored, losing
-    /// data. So:
-    ///
-    /// 1. apply E1 (`ADD COLUMN`) + E2 (`CREATE FUNCTION`/`TRIGGER`) — the
-    ///    dual-write trigger is now live, so every concurrent write mirrors;
-    /// 2. [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill) mirrors the pre-existing rows (`<to> := <from>` paged
-    ///    on the PK), resumable, bounded — the trigger covers anything written
-    ///    during it;
-    /// 3. apply E3 (the no-op backfill marker) — this records the backfill's
-    ///    completion in the journal, so the gate now sees the expand complete.
-    ///
-    /// E1+E2 and E3 each go through [`apply`](crate::apply::executor::apply) (guard +
-    /// least-privilege role + journal), and the backfill goes through its own
-    /// guarded, role-bracketed batches. `approval` must be
-    /// [`Approval::Approved`] (the backfill mutates data).
-    ///
-    /// # Errors
-    /// - [`OnlineError::Approval`] — `approval != Approved`.
-    /// - [`OnlineError::Apply`] — applying E1/E2 or the E3 marker failed.
-    /// - [`OnlineError::Backfill`] — the backfill failed (E3 is NOT journaled, so
-    ///   the gate keeps the expand incomplete and the contract stays blocked; the
-    ///   backfill is resumable on a re-run).
-    #[cfg(feature = "native-pg")]
-    pub async fn run_expand(
-        &self,
-        plan: &crate::render::expand_contract::ExpandContractPlan,
-        approval: Approval,
-        conn: &Client,
-        exec_cfg: &ExecutorConfig,
-        applied_by: &str,
-    ) -> Result<ApplyOutcome, OnlineError> {
-        // Standalone caller: each E1+E2 / E3 apply takes the project lock itself.
-        self.run_expand_with_lock(plan, approval, conn, exec_cfg, applied_by, LockMode::Acquire)
-            .await
-    }
 
-    /// [`run_expand`](Self::run_expand) with an explicit [`LockMode`] (H10).
-    ///
-    /// `LockMode::Acquire` is the standalone path (each inner E1+E2 / E3 apply
-    /// takes + releases the project lock). `LockMode::AlreadyHeld` is the
-    /// declarative path: [`apply_declarative`](Self::apply_declarative) holds the
-    /// project advisory lock for the whole deploy, so each inner apply here must
-    /// NOT re-acquire/re-release it.
-    ///
-    /// The backfill ([`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill)) is
-    /// unaffected by the mode: it uses a per-batch **transaction-scoped**
-    /// `pg_advisory_xact_lock`, which is re-entrant within the session that
-    /// already holds the session-scoped project lock (it succeeds immediately and
-    /// auto-releases at each batch COMMIT), while a SECOND connection still blocks
-    /// on the held session lock. So the whole-deploy serialization is preserved
-    /// through the backfill too, without ever freeing the project lock.
-    #[cfg(feature = "native-pg")]
-    async fn run_expand_with_lock(
-        &self,
-        plan: &crate::render::expand_contract::ExpandContractPlan,
-        approval: Approval,
-        conn: &Client,
-        exec_cfg: &ExecutorConfig,
-        applied_by: &str,
-        lock_mode: LockMode,
-    ) -> Result<ApplyOutcome, OnlineError> {
-        // The E1+E2 → backfill → E3-journaled-LAST sequence lives in ONE place
-        // ([`run_expand_pg`](crate::apply::backend::postgres::online::run_expand_pg)) so the public
-        // `&Client` API here and the [`PgOnline`](crate::apply::backend::postgres::online::PgOnline)
-        // capability seam share byte-identical behavior (M3).
-        // The standalone `run_expand` is a TRUSTED single-actor surface (the same
-        // posture as the dev CLI `--yes` / rollback), so it passes
-        // [`ApprovalScope::All`] — the EXPAND's per-version scope is enforced
-        // (fail-closed) only on the new out-of-band approved-apply path, which drives
-        // the engine's declarative spine with an explicit `Versions` scope (PR9b).
-        crate::apply::backend::postgres::online::run_expand_pg(
-            conn,
-            &plan.expand,
-            &plan.backfill,
-            approval,
-            &crate::approval::ApprovalScope::All,
-            // PR9c LOW (i): the standalone trusted surface threads the plan's E2
-            // `trigger_version` so the now-unconditional scope gate resolves a key even
-            // if `plan.expand` is empty. Under `ApprovalScope::All` the gate is vacuously
-            // true; the version is consulted only by the `Versions` fail-closed arm.
-            &plan.trigger_version,
-            exec_cfg,
-            applied_by,
-            lock_mode,
-        )
-        .await
-    }
 }
 
 /// **PR9b L1 / PR9c — the SHARED contract-apply recognizer.** Decide whether a
@@ -2142,7 +1899,7 @@ pub fn recognizes_contract_apply(
         return false;
     }
     // Re-author deterministically from the obligation's stored identity facts (the
-    // SAME re-author `command::runner` does at `resolve-pending`). The
+    // SAME re-author the cross-deploy `resolve-pending` contract discharge does). The
     // `owner_app` does not affect the contract `up` text, so any stable value is
     // fine for the comparison.
     let author = crate::render::expand_contract::ExpandContractAuthor::new(

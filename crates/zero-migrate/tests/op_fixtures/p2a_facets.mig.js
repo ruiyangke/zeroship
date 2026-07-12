@@ -7,7 +7,7 @@
 //
 // A plain column (no facet) is unchanged on the wire — the fixture mixes facet
 // and non-facet columns so the byte-identity golden also covers the absent case.
-import { table, t } from "@zeroship/migrate";
+import { table, t } from "zero-migrate";
 
 export default {
   name: "p2a_facets",

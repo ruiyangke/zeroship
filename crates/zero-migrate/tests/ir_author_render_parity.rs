@@ -26,7 +26,7 @@ use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
     LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot, resolve_create_table_policy,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 /// A live `TableSnapshot` placeholder for an FK target — only its presence as a
 /// live key matters to the differ's inline-vs-defer decision.
@@ -264,10 +264,10 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
 #[test]
 fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     // The sentinel trap (§6.5): an encrypted column. Both paths MUST carry the
-    // byte-identical BYTEA type + the `/* zsenc:… */` inline sentinel + the
-    // `COMMENT ON COLUMN … 'zsenc:…'` side output + the encrypted default-mask
-    // `<col>_masked` sibling / `__zsmask` sentinel — built by the shared kernel
-    // (`zero_migrate_schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
+    // byte-identical BYTEA type + the `/* zero-migrate:enc:… */` inline sentinel + the
+    // `COMMENT ON COLUMN … 'zero-migrate:enc:…'` side output + the encrypted default-mask
+    // `<col>_masked` sibling / `zero-migrate:mask` sentinel — built by the shared kernel
+    // (`zero_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
     let desc = CollectionDescriptor {
         name: "vault".into(),
         owner_app: OWNER.into(),
@@ -312,7 +312,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     );
     // Sanity: the encryption sentinel (built by the shared kernel) is present.
     assert!(
-        decl.iter().any(|(up, _)| up.contains("zsenc:")),
+        decl.iter().any(|(up, _)| up.contains("zero-migrate:enc:")),
         "the encryption sentinel must be emitted (shared-kernel source, not re-spelled)"
     );
     assert!(
@@ -332,7 +332,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         "an encrypted nullable column's masked sibling must not render NOT NULL on PG"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
+        decl.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on both paths"
     );
 }
@@ -395,7 +395,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         "an explicit masked column must create its masked sibling on both paths"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
+        decl.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
         "the explicit mask sentinel must be emitted on both paths"
     );
 }
@@ -524,7 +524,7 @@ fn create_index_render_is_byte_identical_pg() {
 // §6.4 SQLite leg — the SAME byte-identity gate on the SQLite dialect.
 //
 // The task mandates the cross-path byte-identity golden on BOTH PG and SQLite.
-// The SQLite createTable routes through the SHARED `zero_migrate_schema::query`
+// The SQLite createTable routes through the SHARED `zero_migrate::schema::query`
 // emitter (the same call the differ's `render_create_table_sqlite` makes), fed
 // the SDK schema `Value` IrAuthor builds from the op descriptor via the same
 // `descriptor_to_sdk_schema` bridge. So the SQLite leg is byte-identical BY
@@ -1261,7 +1261,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         "SQLite encrypted createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains("zsenc:")),
+        ir.iter().any(|(up, _)| up.contains("zero-migrate:enc:")),
         "the encryption sentinel must be emitted on the SQLite leg too (shared-kernel source)"
     );
     assert!(
@@ -1269,7 +1269,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         "an encrypted column must create its masked sibling on the SQLite leg too"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* __zsmask:"#)),
+        ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* zero-migrate:mask:"#)),
         "an encrypted nullable column's masked sibling must render nullable on SQLite"
     );
     assert!(
@@ -1277,7 +1277,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         "an encrypted nullable column's masked sibling must not render NOT NULL on SQLite"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
+        ir.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on the SQLite leg too"
     );
 }
@@ -1340,7 +1340,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         "an explicit masked column must create its masked sibling on the SQLite leg"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
+        ir.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
         "the explicit mask sentinel must be emitted on the SQLite leg"
     );
 }

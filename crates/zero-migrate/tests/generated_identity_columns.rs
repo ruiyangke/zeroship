@@ -5,7 +5,7 @@ use zero_migrate::{
     CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION, resolve_create_table_policy,
     SchemaScope,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";

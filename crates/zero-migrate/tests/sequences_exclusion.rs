@@ -14,7 +14,7 @@ use zero_migrate::{
     SequenceRef, UnaryOp,
     SafeI64, SafeU64,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";

@@ -29,7 +29,7 @@
 //!   deleted.
 
 #[cfg(pg_seam)]
-use crate::apply::backend::postgres::PgSession;
+use crate::driver::SqlSession;
 
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
@@ -52,7 +52,7 @@ pub enum BaselineError {
     /// A database error outside a guarded/journaled step.
     #[error("db error: {0}")]
     #[cfg(pg_seam)]
-    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
+    Db(#[from] crate::driver::DbError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -133,7 +133,7 @@ pub enum BaselineError {
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
 #[cfg(pg_seam)]
-pub(crate) async fn baseline<D: PgSession>(
+pub(crate) async fn baseline<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     baseline_migration: &Migration,
@@ -151,14 +151,14 @@ pub(crate) async fn baseline<D: PgSession>(
 
     // Privileged: serialize against all migration activity (design §2.3 step 1),
     // exactly like apply. Held for the whole operation; released on every exit.
-    conn.execute(
+    conn.exec(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",
         &[(&cfg.project_id).into()],
     )
     .await?;
     let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
     let unlock = conn
-        .execute(
+        .exec(
             "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
             &[(&cfg.project_id).into()],
         )
@@ -171,7 +171,7 @@ pub(crate) async fn baseline<D: PgSession>(
 
 /// The baseline body, run while holding the project advisory lock.
 #[cfg(pg_seam)]
-async fn baseline_locked<D: PgSession>(
+async fn baseline_locked<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     baseline_migration: &Migration,
@@ -239,7 +239,7 @@ async fn baseline_locked<D: PgSession>(
 
 /// The version of the earliest recorded `kind='baseline'` event, if any.
 #[cfg(pg_seam)]
-async fn first_baseline_version<D: PgSession>(
+async fn first_baseline_version<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
@@ -259,5 +259,8 @@ async fn first_baseline_version<D: PgSession>(
             &[],
         )
         .await?;
-    Ok(rows.first().map(|r| r.get::<_, String>("version")))
+    Ok(rows
+        .first()
+        .map(|r| r.try_get::<_, String>("version"))
+        .transpose()?)
 }

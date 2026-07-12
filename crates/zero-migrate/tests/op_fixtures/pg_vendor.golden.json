@@ -15,44 +15,44 @@
     },
     {
       "op": "createSchema",
-      "name": "zeroship",
+      "name": "zero_migrate",
       "ifNotExists": true
     },
     {
       "op": "dropSchema",
-      "name": "zeroship",
+      "name": "zero_migrate",
       "ifExists": true,
       "cascade": true
     },
     {
       "op": "createRole",
-      "name": "zeroship_auth",
+      "name": "zero_migrate_auth",
       "login": true,
-      "password": "zeroship_auth",
+      "password": "zero_migrate_auth",
       "bypassRls": true,
       "setSearchPath": [
-        "zeroship",
+        "zero_migrate",
         "public"
       ],
       "ifNotExists": true
     },
     {
       "op": "alterRole",
-      "name": "zeroship_auth",
+      "name": "zero_migrate_auth",
       "setSearchPath": [
-        "zeroship",
+        "zero_migrate",
         "public"
       ]
     },
     {
       "op": "dropRole",
-      "name": "zeroship_auth",
+      "name": "zero_migrate_auth",
       "ifExists": true
     },
     {
       "op": "dropOwnedBy",
       "roles": [
-        "zeroship_auth"
+        "zero_migrate_auth"
       ]
     },
     {
@@ -68,10 +68,10 @@
         "names": [
           "users"
         ],
-        "schema": "zeroship"
+        "schema": "zero_migrate"
       },
       "to": [
-        "zeroship_auth"
+        "zero_migrate_auth"
       ]
     },
     {
@@ -86,7 +86,7 @@
         "names": [
           "audit_events"
         ],
-        "schema": "zeroship"
+        "schema": "zero_migrate"
       },
       "from": [
         "public"
@@ -111,12 +111,12 @@
           }
         ]
       },
-      "schema": "zeroship"
+      "schema": "zero_migrate"
     },
     {
       "op": "setRls",
       "table": "app_secrets",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "enabled": true,
       "forced": true
     },
@@ -124,7 +124,7 @@
       "op": "createPolicy",
       "name": "tenant_isolation",
       "table": "app_secrets",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "forCmd": "all",
       "using": {
         "node": "binOp",
@@ -141,7 +141,7 @@
             "args": [
               {
                 "node": "literal",
-                "value": "zeroship.tenant_app"
+                "value": "zero_migrate.tenant_app"
               },
               {
                 "node": "literal",
@@ -167,7 +167,7 @@
             "args": [
               {
                 "node": "literal",
-                "value": "zeroship.tenant_app"
+                "value": "zero_migrate.tenant_app"
               },
               {
                 "node": "literal",
@@ -183,20 +183,20 @@
       "op": "dropPolicy",
       "name": "tenant_isolation",
       "table": "app_secrets",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "ifExists": true
     },
     {
       "op": "setRls",
       "table": "app_secrets",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "enabled": false,
       "forced": false
     },
     {
       "op": "createFunction",
       "name": "audit_events_block_tamper",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "returns": "trigger",
       "language": "plpgsql",
       "replace": true,
@@ -206,7 +206,7 @@
       "op": "createTrigger",
       "name": "audit_events_block_update",
       "table": "audit_events",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "timing": "before",
       "events": [
         "update",
@@ -230,7 +230,7 @@
       "op": "createTrigger",
       "name": "audit_events_append_only",
       "table": "audit_events",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "timing": "before",
       "events": [
         "update"
@@ -252,18 +252,18 @@
       "op": "dropTrigger",
       "name": "audit_events_block_update",
       "table": "audit_events",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "ifExists": true
     },
     {
       "op": "dropFunction",
       "name": "audit_events_block_tamper",
-      "schema": "zeroship",
+      "schema": "zero_migrate",
       "ifExists": true
     },
     {
       "op": "pgRaw",
-      "sql": "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+      "sql": "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
       "reason": "set tenant app GUC for pg vendor fixture"
     }
   ],

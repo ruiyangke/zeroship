@@ -8,7 +8,7 @@ set -euo pipefail
 #   esbuild: 0.28.0
 #
 # Runtime contract:
-#   - `node:*` imports stay external and bind to zeroship-runtime's native
+#   - `node:*` imports stay external and bind to the runtime host's native
 #     SyntheticModules (`node:net`, `node:tls`, `node:buffer`, ...).
 #   - Bare ambient Node modules that mysql2 references during bundling are
 #     shimmed here; the mysql2 package source is not patched.

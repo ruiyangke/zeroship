@@ -21,9 +21,14 @@ const watchdog = setTimeout(() => {
   process.exit(1);
 }, 10000);
 
-const statusJson = await addon.status(hostDriver, 'prj_js', 'proj_js', '[]');
+// Typed verb boundary (redesign step 5a): `status` takes a `StatusRequest` object
+// and RESOLVES a typed `StatusReply` — no JSON string, `currentVersion` camelCase.
+const status = await addon.status(hostDriver, {
+  projectId: 'prj_js',
+  projectSchema: 'proj_js',
+  migrations: [],
+});
 clearTimeout(watchdog);
-const status = JSON.parse(statusJson);
 
 let ok = true;
 function check(cond, msg) { if (!cond) { console.error('FAIL:', msg); ok = false; } }
@@ -33,7 +38,7 @@ check(
   recorded.some(s => s.includes('schema_migrations') || s.includes('union_all')),
   'journal read never reached the host driver'
 );
-check(status.current_version === null, `expected null current_version on empty journal, got ${status.current_version}`);
+check(status.currentVersion === null || status.currentVersion === undefined, `expected null currentVersion on empty journal, got ${status.currentVersion}`);
 check(Array.isArray(status.applied) && status.applied.length === 0, 'applied should be empty on empty journal');
 
 if (!ok) { console.error('recorded:', recorded); process.exit(1); }

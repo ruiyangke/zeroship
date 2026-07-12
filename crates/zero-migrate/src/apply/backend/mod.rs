@@ -37,15 +37,19 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-#[cfg(feature = "v8-host")]
-pub mod mysql;
 // The PG backend module compiles on the whole PG seam (`native-pg` OR `host-pg`):
-// its generic core (`PostgresBackend<D>` + the `PgSession` trait + the neutral
+// its generic core (`PostgresBackend<D>` + the `SqlSession` trait + the neutral
 // seam types) names no compio type. The compio-concrete pieces inside it
-// (`impl PgSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
+// (`impl SqlSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
 // `#[cfg(feature = "native-pg")]` internally.
 #[cfg(pg_seam)]
 pub mod postgres;
+// The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres (only its
+// dialect SQL differs), so it compiles on the seam cfg (`pg_seam`, emitted by
+// build.rs from `host-pg`). SQLite, by contrast, is in-process (`rusqlite`) and is
+// always present.
+#[cfg(pg_seam)]
+pub mod mysql;
 pub mod sqlite;
 
 pub use capability::{
@@ -53,16 +57,9 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 #[cfg(pg_seam)]
+pub use mysql::MysqlBackend;
+#[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
-#[cfg(all(test, feature = "v8-host"))]
-pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
-#[cfg(feature = "v8-host")]
-pub use mysql::{
-    deprovision_mysql_migrator_account, mysql_migration_lock_name,
-    provision_mysql_migrator_account, provision_mysql_migrator_account_with_password,
-    JsDriverConn, JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
-    MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
-};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -76,7 +73,7 @@ use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
 /// settings never leak onto the pooled/long-lived connection (H2).
@@ -92,6 +89,41 @@ pub struct PgSessionSnapshot {
     pub lock_timeout: String,
     /// PG `search_path` GUC text.
     pub search_path: String,
+}
+
+/// How a backend renders a positional bind placeholder in the SQL it issues.
+///
+/// The lock/journal/DML SQL a backend owns is Postgres-flavoured `$N` today
+/// ([`Numbered`](PlaceholderStyle::Numbered)). A MySQL backend renders the
+/// anonymous `?` ([`Question`](PlaceholderStyle::Question)) — the placeholder
+/// style is a **backend concern**, consulted BEFORE any SQL crosses the
+/// [`SqlSession`](crate::driver::SqlSession) seam, so the generic executor never
+/// bakes a dialect's placeholder into shared SQL.
+///
+/// Exposed via [`MigrationBackend::placeholder_style`] +
+/// [`MigrationBackend::placeholder`]; each backend's own leaves render their SQL
+/// with their native style directly (PG session leaves write `$1` literally),
+/// and a cross-dialect helper can render positionally through this hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceholderStyle {
+    /// Postgres: the 1-based numbered form `$1`, `$2`, … (also SQLite's `?1`
+    /// numbered form is rendered elsewhere via `render::dml`).
+    Numbered,
+    /// MySQL: the anonymous positional `?` (order-of-appearance binding).
+    Question,
+}
+
+impl PlaceholderStyle {
+    /// Render the `n`-th (1-based) positional bind placeholder in this style.
+    /// `$n` for [`Numbered`](Self::Numbered); `?` for [`Question`](Self::Question)
+    /// (MySQL binds positionally, so the index is implicit).
+    #[must_use]
+    pub fn render(self, n: usize) -> String {
+        match self {
+            Self::Numbered => format!("${n}"),
+            Self::Question => "?".to_string(),
+        }
+    }
 }
 
 pub type JournalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, JournalError>> + 'a>>;
@@ -181,6 +213,25 @@ pub trait MigrationBackend {
     /// The SQL dialect this backend targets. Drives the dialect-boundary rejects
     /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
     fn dialect(&self) -> SqlDialect;
+
+    /// The positional bind placeholder style this backend's SQL uses (`$N` on
+    /// Postgres, `?` on MySQL). Placeholder style is a **backend concern** so no
+    /// dialect placeholder is ever baked into the shared executor's SQL — a
+    /// backend renders its lock/journal/DML binds in its own style before the SQL
+    /// crosses the [`SqlSession`](crate::driver::SqlSession) seam. Postgres backends
+    /// keep the numbered `$N` form; a MySQL backend overrides to
+    /// [`PlaceholderStyle::Question`].
+    fn placeholder_style(&self) -> PlaceholderStyle {
+        PlaceholderStyle::Numbered
+    }
+
+    /// Render the `n`-th (1-based) positional placeholder in this backend's
+    /// [`placeholder_style`](Self::placeholder_style). Convenience over
+    /// [`PlaceholderStyle::render`] so a cross-dialect SQL builder can ask the
+    /// backend directly.
+    fn placeholder(&self, n: usize) -> String {
+        self.placeholder_style().render(n)
+    }
 
     /// Whether this backend can commit DDL atomically with its journal row inside
     /// one transaction. Postgres/SQLite return true; auto-commit DDL dialects

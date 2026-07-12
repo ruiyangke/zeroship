@@ -55,7 +55,7 @@ use crate::model::snapshot::{
 };
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
 /// [`LoweredUnit`]s (a `Migration` + its structural statement list); an online
@@ -222,7 +222,7 @@ pub struct LiveSchema {
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
     /// [`crate::render::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
-    /// the renamed field key) through the shared `zero_migrate_schema::query` emitter,
+    /// the renamed field key) through the shared `crate::schema::query` emitter,
     /// so the rebuilt table is byte-identical to what the declarative diff would
     /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
     pub sqlite_schemas: std::collections::BTreeMap<String, serde_json::Value>,
@@ -1904,7 +1904,7 @@ impl IrAuthor {
                 // top-level `primary_key` field above; validation owns any policy
                 // decision about author primary keys.
                 self.fold_create_table_specs(name, &eff_schema, &mut snap, constraints, indexes)?;
-                // The SQLite CREATE routes through the shared `zero_migrate_schema`
+                // The SQLite CREATE routes through the shared `crate::schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
                 // differ's `desired_snapshot_for_dialect` uses, so the §6.4
@@ -1965,7 +1965,7 @@ impl IrAuthor {
             } => {
                 // **#173 / #174** — thread the carried facets (vector metric / standalone
                 // mask) so a vector ADD COLUMN renders the metric opclass and a masked ADD
-                // COLUMN emits the `__zsmask` sentinel. The sibling `<col>_masked` is a
+                // COLUMN emits the `zero-migrate:mask` sentinel. The sibling `<col>_masked` is a
                 // SEPARATE physical column the shared builder injects for a masked column —
                 // capture it so the ADD path lowers it too (otherwise the runtime mask
                 // read-pass has no sibling to write to; the bug the PG round-trip caught).
@@ -3684,7 +3684,7 @@ impl IrAuthor {
             default: default.cloned(),
             // **#173** — `id_prefix` stays `None` (an added column is never the system
             // PK); the vector metric + standalone mask ARE carried so the snapshot
-            // renders the metric opclass / `__zsmask` sentinel.
+            // renders the metric opclass / `zero-migrate:mask` sentinel.
             unique: None,
             id_prefix: None,
             vector_metric,
@@ -4852,7 +4852,7 @@ fn render_sqlite_trigger_stmt(
                 }
                 let vals: Result<Vec<_>, _> = row
                     .iter()
-                    .map(|v| crate::render::dml::render_value_inline(v, zero_migrate_schema::query::SqlDialect::Sqlite))
+                    .map(|v| crate::render::dml::render_value_inline(v, crate::schema::query::SqlDialect::Sqlite))
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
@@ -4996,7 +4996,7 @@ fn enforce_vendor_capability_at_lower(
     op: &Op,
     scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), IrLowerError> {
-    let capabilities = op.vendor_capabilities();
+    let capabilities = crate::model::op_support::vendor_capabilities(op);
     if capabilities.is_empty() {
         return Ok(());
     }
@@ -5330,7 +5330,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         ty = "id".to_string();
     }
     // An ENCRYPTED column carries the inner token as `ty` PLUS the `encrypted`
-    // facet — the shared builder reads the facet to pick BYTEA + the `zsenc`
+    // facet — the shared builder reads the facet to pick BYTEA + the `zero-migrate:enc`
     // sentinel (built by the shared kernel, never re-spelled here, §6.5).
     //
     // **Migration-first P2b (§6 keystone, HIGH-1 fix).** The op.* `ColType::Encrypted`
@@ -5340,7 +5340,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // (`{ mode: "randomised", keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
     // AUTO-MASK (`{ kind: "full", classification: "pii" }`) — BYTE-IDENTICAL to what
     // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the
-    // runtime recovers from the `zsenc`/`__zsmask` sentinels (`introspect_schema.rs`).
+    // runtime recovers from the `zero-migrate:enc`/`zero-migrate:mask` sentinels (`introspect_schema.rs`).
     // A bare `{}` would DROP both, drifting the keystone (the prior HIGH-1 bug).
     let (encrypted, encrypted_mask) = match &c.ty {
         ColType::Encrypted { of } => {
@@ -5392,7 +5392,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         // Precedence: an EXPLICIT standalone `.mask()` carried on the IrColumn WINS;
         // for an encrypted column with NO explicit mask, fall back to the fail-safe
         // auto-mask `{ full, pii }` (`encrypted_mask`). A plaintext column with no mask
-        // stays `None`. This makes a standalone-masked column emit the `__zsmask`
+        // stays `None`. This makes a standalone-masked column emit the `zero-migrate:mask`
         // sentinel + `_masked` sibling via `field_to_sdk_def`/`mask_sentinel_for_field`
         // — closing both the gen-types type gap and the runtime masking gap.
         mask: c.mask.map(IrMask::to_sdk_json).or(encrypted_mask),
@@ -5911,11 +5911,11 @@ mod tests {
 
     fn platform_guard() -> GuardConfig {
         let cap = crate::model::capability::OperatorCapability::for_test();
-        GuardConfig::platform(&cap, vec!["zeroship".into(), "public".into()], vec![])
+        GuardConfig::platform(&cap, vec!["zero_migrate".into(), "public".into()], vec![])
     }
 
     fn platform_author(owner: &str, guard: &GuardConfig) -> IrAuthor {
-        IrAuthor::new("zeroship", owner, SqlDialect::Postgres)
+        IrAuthor::new("zero_migrate", owner, SqlDialect::Postgres)
             .with_schema_scope(guard.schema_scope().expect("platform guard has a schema scope"))
     }
 
@@ -7948,32 +7948,32 @@ mod tests {
     #[test]
     fn load_and_lower_guarded_platform_table_with_same_file_attachments() {
         let bytes = r#"{"ir_version":1,"name":"platform_attach","ops":[
-            {"op":"createTable","name":"platform_apps","schema":"zeroship","columns":[
+            {"op":"createTable","name":"platform_apps","schema":"zero_migrate","columns":[
                 {"name":"id","type":"text","nullable":false}
             ],"primaryKey":["id"],"constraints":[],"indexes":[]},
-            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+            {"op":"createTable","name":"platform_registry","schema":"zero_migrate","columns":[
                 {"name":"app_id","type":"text","nullable":false},
                 {"name":"route","type":"text","nullable":false},
                 {"name":"target","type":"text","nullable":false}
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]},
-            {"op":"addConstraint","table":"platform_registry","schema":"zeroship",
+            {"op":"addConstraint","table":"platform_registry","schema":"zero_migrate",
                 "constraint":{"name":"platform_registry_app_fk",
                     "kind":{"kind":"fk","columns":["app_id"],
                         "referencesTable":"platform_apps","referencesColumns":["id"]}}},
-            {"op":"createIndex","table":"platform_registry","schema":"zeroship",
+            {"op":"createIndex","table":"platform_registry","schema":"zero_migrate",
                 "name":"platform_registry_target_idx",
                 "columns":[{"kind":"column","name":"target"}]},
-            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true,"forced":true},
+            {"op":"setRls","table":"platform_registry","schema":"zero_migrate","enabled":true,"forced":true},
             {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
-                "schema":"zeroship","forCmd":"all",
+                "schema":"zero_migrate","forCmd":"all",
                 "using":{"node":"literal","value":true}},
-            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+            {"op":"comment","target":{"kind":"table","schema":"zero_migrate",
                 "name":"platform_registry"},"comment":"Platform route registry"},
-            {"op":"createFunction","name":"platform_registry_touch","schema":"zeroship",
+            {"op":"createFunction","name":"platform_registry_touch","schema":"zero_migrate",
                 "returns":"trigger","language":"plpgsql","replace":true,
                 "body":"BEGIN RETURN NEW; END;"},
             {"op":"createTrigger","name":"platform_registry_touch_trg",
-                "table":"platform_registry","schema":"zeroship","timing":"before",
+                "table":"platform_registry","schema":"zero_migrate","timing":"before",
                 "events":["update"],"forEach":"row",
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]}"#;
@@ -7995,7 +7995,7 @@ mod tests {
             "created table reporting must use the same helper as ownership registration"
         );
         let sql = out.migrations().iter().map(|m| m.up.as_str()).collect::<Vec<_>>().join(";\n");
-        assert!(sql.contains("CREATE TABLE \"zeroship\".\"platform_registry\""), "{sql}");
+        assert!(sql.contains("CREATE TABLE \"zero_migrate\".\"platform_registry\""), "{sql}");
         assert!(sql.contains("PRIMARY KEY (app_id, route)"), "{sql}");
         assert!(sql.contains("ADD CONSTRAINT"), "{sql}");
         assert!(sql.contains("\"platform_registry_app_fk\""), "{sql}");
@@ -8005,7 +8005,7 @@ mod tests {
         assert!(sql.contains("FORCE ROW LEVEL SECURITY"), "{sql}");
         assert!(sql.contains("CREATE POLICY"), "{sql}");
         assert!(sql.contains("\"tenant_isolation\""), "{sql}");
-        assert!(sql.contains("COMMENT ON TABLE \"zeroship\".\"platform_registry\""), "{sql}");
+        assert!(sql.contains("COMMENT ON TABLE \"zero_migrate\".\"platform_registry\""), "{sql}");
         assert!(sql.contains("CREATE TRIGGER"), "{sql}");
         assert!(sql.contains("\"platform_registry_touch_trg\""), "{sql}");
     }
@@ -8013,7 +8013,7 @@ mod tests {
     #[test]
     fn platform_exact_create_table_preserves_author_column_order_pg() {
         let bytes = r#"{"ir_version":1,"name":"platform_column_order","ops":[
-            {"op":"createTable","name":"platform_column_order","schema":"zeroship","columns":[
+            {"op":"createTable","name":"platform_column_order","schema":"zero_migrate","columns":[
                 {"name":"zeta","type":"text","nullable":false},
                 {"name":"alpha","type":"text","nullable":false},
                 {"name":"middle","type":"text","nullable":false}
@@ -8037,7 +8037,7 @@ mod tests {
             .find(|m| m.up.contains("CREATE TABLE"))
             .expect("create table migration");
         let expected = concat!(
-            "CREATE TABLE \"zeroship\".\"platform_column_order\" (",
+            "CREATE TABLE \"zero_migrate\".\"platform_column_order\" (",
             "\"zeta\" text NOT NULL, ",
             "\"alpha\" text NOT NULL, ",
             "\"middle\" text NOT NULL)"
@@ -8052,15 +8052,15 @@ mod tests {
     #[test]
     fn load_and_lower_guarded_cross_file_attach_uses_created_table_registry_update() {
         let create = r#"{"ir_version":1,"name":"platform_create","ops":[
-            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+            {"op":"createTable","name":"platform_registry","schema":"zero_migrate","columns":[
                 {"name":"app_id","type":"text","nullable":false},
                 {"name":"route","type":"text","nullable":false},
                 {"name":"target","type":"text","nullable":false}
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]}
         ]}"#;
         let attach = r#"{"ir_version":1,"name":"platform_attach_later","ops":[
-            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true},
-            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+            {"op":"setRls","table":"platform_registry","schema":"zero_migrate","enabled":true},
+            {"op":"comment","target":{"kind":"table","schema":"zero_migrate",
                 "name":"platform_registry"},"comment":"Platform route registry"}
         ]}"#;
         let guard = platform_guard();

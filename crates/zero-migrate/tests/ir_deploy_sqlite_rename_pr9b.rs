@@ -12,7 +12,7 @@
 //!
 //! - the seeded row SURVIVES with its value moved to the renamed `full_name` column;
 //! - the old `name` column is GONE;
-//! - the UNRELATED `secret` ENCRYPTED column's facet (the inline `zsenc:` sentinel +
+//! - the UNRELATED `secret` ENCRYPTED column's facet (the inline `zero-migrate:enc:` sentinel +
 //!   BLOB affinity) is PRESERVED on the rebuilt table — the rebuild did not drop it;
 //! - the journal records the rebuild migration version.
 //!
@@ -128,7 +128,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     .await
     .expect("createTable users(name, secret encrypted) must succeed");
 
-    // Sanity: the live table is name(text) + secret(BLOB + inline zsenc sentinel).
+    // Sanity: the live table is name(text) + secret(BLOB + inline zero-migrate:enc sentinel).
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     let create_sql = be
         .actor()
@@ -137,18 +137,18 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
         .expect("read create sql");
     let create_text = create_sql[0][0].clone().unwrap_or_default();
     assert!(
-        create_text.to_lowercase().contains("secret") && create_text.contains("zsenc:"),
-        "deploy #1 must create `secret` as an encrypted column with a zsenc sentinel: {create_text}"
+        create_text.to_lowercase().contains("secret") && create_text.contains("zero-migrate:enc:"),
+        "deploy #1 must create `secret` as an encrypted column with a zero-migrate:enc sentinel: {create_text}"
     );
 
     // Seed a row with BOTH columns set — `secret` carries a NON-NULL encrypted BLOB
-    // (a `zsenc:`-tagged ciphertext blob, the shape plugin-db writes at runtime). PR9b
+    // (a `zero-migrate:enc:`-tagged ciphertext blob, the shape plugin-db writes at runtime). PR9b
     // LOW (iii): the prior seed left `secret` NULL, so the rebuild's encrypted-column
     // VALUE-COPY was never exercised with a real blob (copying NULL→NULL is vacuous).
     // We seed a concrete blob so the rebuild's `INSERT … SELECT` must carry the bytes
     // across the renamed table, and assert below it reads back BYTE-IDENTICAL.
     //
-    // The blob is the literal AEAD-on-disk shape: the `zsenc:v1:` tag prefix + raw
+    // The blob is the literal AEAD-on-disk shape: the `zero-migrate:enc:v1:` tag prefix + raw
     // ciphertext bytes. We write it as a SQLite blob literal (X'…') so the stored bytes
     // are deterministic and the post-rebuild assertion can compare them exactly.
     be.actor()
@@ -229,7 +229,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     );
 
     // The UNRELATED `secret` ENCRYPTED facet is PRESERVED on the rebuilt table: the
-    // rebuilt CREATE still carries the `zsenc:` sentinel + the BLOB affinity for it.
+    // rebuilt CREATE still carries the `zero-migrate:enc:` sentinel + the BLOB affinity for it.
     let rebuilt_sql = be
         .actor()
         .query("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='users'")
@@ -237,7 +237,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
         .expect("read rebuilt create sql");
     let rebuilt_text = rebuilt_sql[0][0].clone().unwrap_or_default();
     assert!(
-        rebuilt_text.contains("zsenc:"),
+        rebuilt_text.contains("zero-migrate:enc:"),
         "the rebuilt table must PRESERVE the `secret` encryption sentinel (facet sourced \
          from the descriptor, not dropped by the rebuild): {rebuilt_text}"
     );

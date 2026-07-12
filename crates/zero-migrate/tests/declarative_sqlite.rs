@@ -1,7 +1,7 @@
 //! PHASE 4 — descriptor → engine-generated SQLite `up` → applied through the
 //! hardened `SqliteBackend` → drift round-trip. Real temp-file SQLite throughout
 //! (the faithful path: the actual `DeclarativeAuthor` emitter routes through the
-//! shared `zero_migrate_schema` emitter, and the real backend authorizer applies the
+//! shared `zero_migrate::schema` emitter, and the real backend authorizer applies the
 //! unqualified DDL into `main` = the app file).
 //!
 //! Also: the TrustProfile-SQLite wiring (Confined SQLite accepts descriptor-
@@ -17,7 +17,7 @@ use zero_migrate::{
     GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot,
     SqliteBackend, SqlGuard,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -112,13 +112,13 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
     );
     // Mask + encryption sentinels ride inline (the SQLite wire).
     assert!(
-        create.up.contains(r#""ssn_masked" TEXT /* __zsmask:"#),
+        create.up.contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
         "mask sentinel must ride inline: {}",
         create.up
     );
     assert!(
-        create.up.contains("BLOB") && create.up.contains("/* zsenc:"),
-        "encrypted column must be BLOB + inline zsenc sentinel: {}",
+        create.up.contains("BLOB") && create.up.contains("/* zero-migrate:enc:"),
+        "encrypted column must be BLOB + inline zero-migrate:enc sentinel: {}",
         create.up
     );
 
@@ -158,8 +158,8 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         .get("accounts")
         .expect("accounts in drift snapshot");
 
-    // The encrypted column's `zsenc:` sentinel round-trips. The SQLite drift path
-    // (P5, §2.7) recovers BOTH inline `__zsmask:` and `zsenc:` sentinels from
+    // The encrypted column's `zero-migrate:enc:` sentinel round-trips. The SQLite drift path
+    // (P5, §2.7) recovers BOTH inline `zero-migrate:mask:` and `zero-migrate:enc:` sentinels from
     // `sqlite_master.sql` into the single `comment_sentinel` slot (PG splits them
     // across `encryption_sentinel`/`comment_sentinel`; SQLite uses one recovery
     // slot). What matters is that the sentinel body survives emit→apply→snapshot.
@@ -173,11 +173,11 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         .as_deref()
         .or(secret.encryption_sentinel.as_deref());
     assert!(
-        secret_sentinel.map(|s| s.contains("zsenc:")).unwrap_or(false),
-        "encryption `zsenc:` sentinel must round-trip through the drift snapshot: {secret:?}"
+        secret_sentinel.map(|s| s.contains("zero-migrate:enc:")).unwrap_or(false),
+        "encryption `zero-migrate:enc:` sentinel must round-trip through the drift snapshot: {secret:?}"
     );
 
-    // The masked sibling column is recovered WITH its `__zsmask:` mask sentinel.
+    // The masked sibling column is recovered WITH its `zero-migrate:mask:` mask sentinel.
     let masked = t
         .columns
         .iter()
@@ -187,9 +187,9 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         masked
             .comment_sentinel
             .as_deref()
-            .map(|s| s.contains("__zsmask:"))
+            .map(|s| s.contains("zero-migrate:mask:"))
             .unwrap_or(false),
-        "mask `__zsmask:` sentinel must round-trip through the drift snapshot: {masked:?}"
+        "mask `zero-migrate:mask:` sentinel must round-trip through the drift snapshot: {masked:?}"
     );
 }
 
@@ -598,7 +598,7 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
     assert!(
         rb.spec
             .new_table_create
-            .contains("\"accounts__zsrebuild\""),
+            .contains("\"accounts__zero_migrate_rebuild\""),
         "the new CREATE must target the temp name: {}",
         rb.spec.new_table_create
     );
@@ -884,7 +884,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 // FK, index). They are the explicit byte bar for the P1 `DdlEmitter` extraction:
 // it is code-motion only, so these MUST stay green and UNCHANGED across it.
 //
-// Note the create-table `up` is the SHARED `zero_migrate_schema` emitter's output
+// Note the create-table `up` is the SHARED `zero_migrate::schema` emitter's output
 // (routed, out of P1 scope) — pinned here so we'd notice an unrelated drift; the
 // add-column / index / drop paths are the engine's OWN render methods (the P1
 // extraction targets).
@@ -972,7 +972,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT /* __zsmask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zsenc:randomised:k1:string */,\n  \"secret_masked\" TEXT /* __zsmask:kind=full,classification=pii */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id)\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
+        "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zero-migrate:enc:randomised:k1:string */,\n  \"secret_masked\" TEXT /* zero-migrate:mask:kind=full,classification=pii */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id)\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
     );
     assert_eq!(accounts_mig.down.as_deref(), Some(r#"DROP TABLE "accounts""#));
 
@@ -1030,22 +1030,22 @@ async fn golden_sqlite_add_column() {
     assert_eq!(note.up, r#"ALTER TABLE "accounts" ADD COLUMN "note" text"#);
     assert_eq!(note.down.as_deref(), Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#));
 
-    // encrypted — inline `/* zsenc:… */`, lowercase `bytea`, no COMMENT tail.
+    // encrypted — inline `/* zero-migrate:enc:… */`, lowercase `bytea`, no COMMENT tail.
     let secret = golden_find(&migs, "add_column_accounts_secret");
     assert_eq!(
         secret.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "secret" bytea /* zsenc:randomised:k1:string */"#,
+        r#"ALTER TABLE "accounts" ADD COLUMN "secret" bytea /* zero-migrate:enc:randomised:k1:string */"#,
     );
     assert_eq!(
         secret.down.as_deref(),
         Some(r#"ALTER TABLE "accounts" DROP COLUMN "secret""#),
     );
 
-    // mask sibling — inline `/* __zsmask:… */` (no COMMENT ON COLUMN on SQLite).
+    // mask sibling — inline `/* zero-migrate:mask:… */` (no COMMENT ON COLUMN on SQLite).
     let masked = golden_find(&migs, "add_column_accounts_ssn_masked");
     assert_eq!(
         masked.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" text /* __zsmask:kind=last4,classification=pii */"#,
+        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" text /* zero-migrate:mask:kind=last4,classification=pii */"#,
     );
     assert_eq!(
         masked.down.as_deref(),

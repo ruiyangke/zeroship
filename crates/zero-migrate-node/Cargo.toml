@@ -1,14 +1,14 @@
-# This crate is EXCLUDED from the root workspace (root Cargo.toml `exclude`) so a
-# plain `cargo build` never pulls the napi toolchain. An empty `[workspace]` table
-# makes it its OWN standalone workspace, so `cargo`/`napi build` resolve it with its
-# own napi/futures deps without touching the root lockfile.
-[workspace]
-
+# This crate is a full member of the root workspace (redesign step 3d): it inherits
+# the shared `[workspace.package]` metadata + `[workspace.lints]` and resolves against
+# the single root lockfile. The root keeps it OUT of the default build/test flow via
+# `default-members`, so a plain `cargo build`/`cargo test` never pulls the napi
+# toolchain path; `cargo build -p zero-migrate-node` (or `napi build`) compiles it.
 [package]
 name = "zero-migrate-node"
-version = "0.1.0"
-edition = "2021"
-description = "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the driver-neutral PgSession seam, zero tokio, zero io_uring, cross-platform .node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the dialect-neutral driver::SqlSession seam, zero tokio, zero io_uring, cross-platform .node"
 publish = false
 
 # A `cdylib` is terminal (no Rust crate can depend on it) → this is necessarily a
@@ -33,29 +33,35 @@ napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 # The core engine, host-callback path ONLY: NO compio (→ no io_uring → the .node
-# is cross-platform), NO V8/zsv8. SQLite stays native (rusqlite bundled) inside
+# is cross-platform), NO V8/addon-host. SQLite stays native (rusqlite bundled) inside
 # the core; the host supplies PG/MySQL over the seam.
 zero-migrate = { path = "../zero-migrate", default-features = false, features = ["host-pg"] }
 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
 # ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the
 # ThreadsafeFunction; `napi5` supplies `Env::create_function_from_closure`
-# (the per-call `done` JS closure capturing the oneshot Sender, §B.3) + Deferred.
-# Node/Bun both implement N-API ≥5. NO "async", NO "tokio_rt" — the `cargo tree`
-# gate asserts zero tokio in the leaf.
-napi = { version = "3", default-features = false, features = ["napi4", "napi5"], optional = true }
+# (the per-call `done` JS closure capturing the oneshot Sender, §B.3) + Deferred;
+# `napi6` (redesign step 5a) supplies the BigInt bindings so the exact-integer
+# domain (verb row counts, journal `event_seq`) crosses as a JS `bigint` — ending
+# the `row_count: Option<f64>` vs `intStr`-string incoherence. `serde-json` lets a
+# typed verb envelope carry the IR `ops` AST + a lowered `Migration` as a REAL JS
+# value (not a re-serialized `*_json` string), so every verb request/response is a
+# typed `#[napi(object)]` (`wire.rs`) — no more `Promise<string>`. Node/Bun both
+# implement N-API ≥6. NO "async", NO "tokio_rt" — the `cargo tree` gate asserts zero
+# tokio in the leaf.
+napi = { version = "3", default-features = false, features = ["napi6", "serde-json"], optional = true }
 napi-derive = { version = "3", optional = true }
 
 # The tokio-free executor: `futures::executor::block_on` on a spawned std::thread
 # per apply call, parked on a `oneshot::Receiver` fired cross-thread by the host
 # `done` callback (§B.3 / §C.4). futures-channel = oneshot; futures-executor =
-# block_on.
-futures = "0.3"
+# block_on. Workspace-pinned (0.3).
+futures = { workspace = true }
 
 # JSON marshaling for plan/generate/load-verify results returned as strings across
-# the napi boundary (DB-free, sync entrypoints — §C.5).
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# the napi boundary (DB-free, sync entrypoints — §C.5). Workspace-pinned.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 # `napi_build::setup()` only emits cdylib link args (allow-undefined for the Node
@@ -63,6 +69,9 @@ serde_json = "1"
 # time, so it is safe to run for both `napi build` and a plain `cargo test`.
 napi-build = "2"
 
-[profile.release]
-lto = true
-strip = "symbols"
+# The `release`-profile settings for the shipped `.node` (`lto`, symbol strip) live
+# in the ROOT workspace Cargo.toml `[profile.release]` — profile tables in a
+# non-root workspace member are ignored by cargo, so they cannot live here.
+
+[lints]
+workspace = true

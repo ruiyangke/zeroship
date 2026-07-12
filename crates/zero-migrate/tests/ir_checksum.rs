@@ -134,7 +134,7 @@ fn checksum_of_ir_byte_stable_golden() {
             schema: None,
         },
         Op::PgRaw {
-            sql: "SELECT set_config('zeroship.tenant_app', 'app_golden', false)".into(),
+            sql: "SELECT set_config('zero_migrate.tenant_app', 'app_golden', false)".into(),
             reason: "pin pgRaw reason in checksum golden".into(),
         },
     ];
@@ -148,7 +148,7 @@ fn checksum_of_ir_byte_stable_golden() {
     // anchor) reuses this same Rust serialization, so there is no separate JS
     // serializer to bump.
     const EXPECTED: &str =
-        "85bd498472cfe81ed364a6577cd1f0fe60449656b425b83e0347e7567b1ef4a3";
+        "be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),

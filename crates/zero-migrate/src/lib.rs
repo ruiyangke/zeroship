@@ -1,10 +1,11 @@
 //! `zero-migrate` — a versioned DB migration engine for **creator
 //! project databases** (design `docs/proposals/2026-06-16-db-migration-engine-design.md`).
 //!
-//! The crate also carries the JS-first authoring front-end under [`frontend`]:
-//! V8-backed schema evaluation, op.* recording, type generation, and the
-//! `zero-migrate-js` authoring CLI. The deploy/apply fast path still runs
-//! through the native compio-postgres backend.
+//! The engine is runtime-free and V8-free. Authoring (the JS DSL to op-IR
+//! envelope) and live Postgres/MySQL execution run in the Node host and reach
+//! the engine through the `zero-migrate-node` napi bridge; the Postgres apply
+//! path is the driver-neutral [`SqlSession`] seam. In-process SQLite is the one
+//! backend the engine drives directly.
 //!
 //! This crate implements the **security core** + the **migration unit** (the
 //! migration data types §2.1 and the parse-time SQL security guard §1.4
@@ -64,35 +65,21 @@
 //! so it is plain synchronous logic — no tokio/compio — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// Dead-code / unused-import allowance for the two PG-partial build shapes:
-//
-//  * `--no-default-features` (neither `native-pg` nor `host-pg`): the WHOLE PG
-//    apply path is gated out, so its dialect-neutral helpers read as dead.
-//  * `--features host-pg` (no `native-pg`): the GENERIC apply path compiles, but
-//    the compio-CONCRETE legs stay `native-pg`-only — the CLI `runner`, the
-//    `ir_apply`-postgres entries, standalone `rollback`/`run_expand`, role
-//    provisioning helpers, and the shadow harness. The helpers those legs are the
-//    sole callers of are unreachable in the addon build (they are Phase-C /
-//    out-of-v1 surface), so they read as dead there too.
-//
-// Both are `not(feature = "native-pg")`. The DEFAULT (`native-pg`-on) build has
-// every path reachable, so it stays strict and warning-clean — the allowance
-// never relaxes the platform build.
-#![cfg_attr(not(feature = "native-pg"), allow(dead_code, unused_imports))]
-
-pub mod analysis;
+// The SQL security layer (`analysis` + `guard`) moved to the `zero-migrate-guard`
+// crate (redesign step 3b). Re-export its modules under their historical
+// `crate::{analysis,guard}` paths so the engine's ~dozens of
+// `crate::guard::…` / `crate::analysis::…` references keep resolving unchanged.
+pub use zero_migrate_guard::{analysis, guard};
 pub mod apply;
 pub mod approval;
-pub mod command;
 pub mod conn;
 pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
-#[cfg(feature = "v8-host")]
-pub mod frontend;
-pub mod guard;
-pub mod id;
+// The typed-id (base62/UUIDv7) machinery moved to the `zero-migrate-ir` leaf crate
+// (redesign step 3a); re-export it under its historical `crate::id` path.
+pub use zero_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
 // byte-identically from the upstream bundle layer (extraction Phase B) so the build
 // front-end emits bundle entries without a the upstream bundle layer normal-graph dep.
@@ -105,41 +92,26 @@ pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;
-// The V8-host seam (extraction Phase A). UNGATED — the traits name no
-// the V8 host runtime / `v8` type, so they compile with zero runtime dep. Only the
-// *consumers* (`frontend/`, `apply/backend/mysql/`) are `v8-host`-gated.
-pub mod runtime_host;
-// PG integration-test helpers (all consumers are `*_pg.rs` suites that connect to
-// a live PG at :5440). PG-only, so gated with `native-pg`.
-#[cfg(feature = "native-pg")]
-#[doc(hidden)]
-pub mod test_support;
+// The dialect-neutral network driver seam (`SqlSession`) — the ONE injected
+// runtime dependency the network-dialect backends (`PostgresBackend`, and the
+// forthcoming `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
+// in-process rusqlite actor). Gated on `pg_seam` (its only current implementor is
+// the compio PG adapter, lit by the `host-pg` feature); a `--no-default-features`
+// build keeps a lean core.
+#[cfg(pg_seam)]
+pub mod driver;
+// The schema-authority core (DDL builders, diff classifier, sentinel codec,
+// schema-shape descriptors) — dissolved in from the former `zero-migrate-schema`
+// leaf crate (redesign step 3c). The data-plane query language that used to ride
+// along there had zero engine callers and was deleted; only the write/diff/describe
+// layer the engine uses survives here.
+pub mod schema;
 
-/// Default/server builds do not link the raw standalone apply convenience.
-///
-/// ```compile_fail
-/// let _raw = zero_migrate::apply_standalone;
-/// ```
-///
-/// The standalone Trusted runner profile is likewise absent from default/server
-/// builds.
-///
-/// ```compile_fail
-/// let _trusted = zero_migrate::command::runner::RunProfile::Trusted;
-/// ```
-///
-/// ```compile_fail
-/// let _trusted_guard = zero_migrate::guard::GuardConfig::trusted;
-/// ```
-#[cfg(all(doctest, not(feature = "standalone-cli")))]
-pub struct StandaloneCliFeatureAbsent;
-
-// The V8-host seam types (extraction Phase A) — UNGATED. Runtime adapters impl
-// these; the engine names only them (never a the V8 host runtime type).
-pub use runtime_host::{
-    AuthoringHost, GlobalsProfile, HostEvalError, HostPort, JsDriverHost, JsDriverTimeout,
-    ModuleEntry, NetPolicy, RecorderPlatform, ReviewedAllowlist,
-};
+// The guard behaviour-lock suite (moved in from `zero-migrate-guard`'s
+// `guard/mod.rs` at redesign step 3b) — an in-crate test module so it can drive
+// the guard through the engine's `render::lower` / `conn` internals.
+#[cfg(test)]
+mod guard_vendor_lower_tests;
 
 pub use analysis::{analyze, classify};
 
@@ -149,8 +121,6 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-#[cfg(all(test, feature = "v8-host"))]
-pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 // V8-free, driver-neutral re-exports (consumed by plugin-db / migrated per the
 // decoupling design §7). Name no compio type and back the SQLite path too — ungated.
 pub use apply::backend::{
@@ -159,37 +129,19 @@ pub use apply::backend::{
 };
 // PG-seam re-exports (consumer-based gate: `PgSessionSnapshot` is a pure-`String`
 // struct, but its only consumers are the PG session leaves). Behind the PG seam
-// (`native-pg` OR `host-pg`) — the generic `PostgresBackend<D>` compiles on both.
+// (`host-pg`) — the generic `PostgresBackend<D>` compiles there.
 #[cfg(pg_seam)]
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
-// The driver-neutral `PgSession` seam types (§A). Public so a host (napi) driver
-// can construct return values / binds, and so error consumers read the neutral
-// `SeamError` (SQLSTATE in `.code`) instead of downcasting to the concrete
-// `compio_postgres::Error`. On the whole PG seam — the addon (`host-pg`) is the
-// primary consumer of these neutral types.
+// The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
+// module). Public so a host (napi) driver can construct return values / binds,
+// and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). On
+// the whole PG seam — the addon (`host-pg`) is the primary consumer of these
+// neutral types. MySQL will ride the same seam; SQLite does NOT (in-process
+// rusqlite).
 #[cfg(pg_seam)]
-pub use apply::backend::postgres::seam::{FromSeam, SeamBind, SeamError, SeamRow, SeamValue};
-#[cfg(pg_seam)]
-pub use apply::backend::postgres::session::PgSession;
-// MySQL backend re-exports (the V8-coupled live-MySQL surface — gated behind `zsv8`).
-#[cfg(feature = "v8-host")]
-pub use apply::backend::{
-    deprovision_mysql_migrator_account, mysql_migration_lock_name,
-    provision_mysql_migrator_account, provision_mysql_migrator_account_with_password, JsDriverConn,
-    JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
-    MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
-};
+pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
-#[cfg(feature = "native-pg")]
-pub use apply::backend::postgres::online::PgOnline;
-#[cfg(feature = "native-pg")]
-pub use apply::backend::postgres::shadow::PgShadow;
 pub use apply::baseline::{BaselineError, BaselineOutcome};
-#[cfg(feature = "native-pg")]
-pub use apply::backend::postgres::backfill::{
-    backfill_progress, ensure_backfill_progress, list_backfills, run_backfill,
-    run_backfill_bounded, BackfillProgress,
-};
 pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
@@ -211,13 +163,11 @@ pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
 pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
-#[cfg(feature = "native-pg")]
-pub use conn::connect;
 pub use apply::drift::{
     diff_snapshots, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
-// `check_checksum_drift` reads the journal over a `&D: PgSession`; `snapshot_schema`
+// `check_checksum_drift` reads the journal over a `&D: SqlSession`; `snapshot_schema`
 // introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
 // On the whole PG seam.
 #[cfg(pg_seam)]
@@ -226,12 +176,10 @@ pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
-// `apply` is generic over the `PgSession` seam (§C.5 holdout 1) — on the whole PG
+// `apply` is generic over the `SqlSession` seam (§C.5 holdout 1) — on the whole PG
 // seam. `rollback` is still `&Client`-typed (out of v1 scope) — native-pg only.
 #[cfg(pg_seam)]
 pub use apply::executor::apply;
-#[cfg(feature = "native-pg")]
-pub use apply::executor::rollback;
 // **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
@@ -256,13 +204,13 @@ pub use model::profile::{
 pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
 // The deploy-target dialect (§2.4.1) — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new` without depending on `zero-migrate-schema`.
-pub use zero_migrate_schema::query::SqlDialect;
+pub use schema::query::SqlDialect;
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
 };
-// The PG journal free functions (each takes a `&D: PgSession` connection). The
+// The PG journal free functions (each takes a `&D: SqlSession` connection). The
 // SQLite backend has its own `sqlite/journal_sql.rs` peers. On the whole PG seam.
 #[cfg(pg_seam)]
 pub use apply::journal::{
@@ -285,13 +233,11 @@ pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-// `history` / `status` are generic over the `PgSession` seam (§C.5 holdout 3) —
+// `history` / `status` are generic over the `SqlSession` seam (§C.5 holdout 3) —
 // on the whole PG seam so a host driver can drive the pending-migrations flow.
 #[cfg(pg_seam)]
 pub use ops::status::{history, status};
 // The confined submit path is PG-only (§4.5); gated with `mod ops::submit`.
-#[cfg(feature = "native-pg")]
-pub use ops::submit::{submit_migration, Submission, SubmissionOutcome, SubmitError};
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
@@ -331,18 +277,12 @@ pub use model::load::{
 // bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
-pub use command::ir_apply::{
+pub use apply::ir_apply::{
     apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, discover_ir_files,
     IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
     SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
 };
 // The PG `.ir.json` apply entry points take `&PostgresBackend<'_>` — PG-only.
-#[cfg(feature = "native-pg")]
-pub use command::ir_apply::{
-    apply_bundle_ir_postgres, apply_one_ir_file_postgres, apply_sealed, postgres_ir_apply_state,
-};
-#[cfg(all(feature = "standalone-cli", feature = "native-pg"))]
-pub use command::ir_apply::apply_standalone;
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
@@ -390,12 +330,3 @@ pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 // `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
 // error enum); the provisioning fns run over a PG `admin: &Client` — PG-only.
 pub use apply::role::{migrator_role_name, RoleError};
-#[cfg(feature = "native-pg")]
-pub use apply::role::{deprovision_migrator, provision_migrator};
-#[cfg(feature = "native-pg")]
-pub use apply::backend::postgres::shadow::{
-    dry_run, dry_run_declarative, dry_run_incremental, sweep_leaked_shadows,
-};
-#[cfg(feature = "native-pg")]
-#[doc(hidden)]
-pub use apply::backend::postgres::shadow::arm_panic_after_provision;

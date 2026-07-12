@@ -72,7 +72,7 @@
 use std::collections::BTreeMap;
 
 use crate::render::renderer::{Capability, DialectSupports};
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 use crate::model::expr::{
     AggFunc, BinaryOp, Duration, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
@@ -255,7 +255,7 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// `quote_ident` / `render::lower` / `apply::backend::sqlite`) or via the fail-closed engine
 /// wrapper [`quote_ident_checked`] (every **engine-supplied** identifier render
 /// seam — project schema, migrator role, meta schema, recovery index name — in
-/// `conn` / `executor` / `precondition` / `baseline` / `command::runner` /
+/// `conn` / `executor` / `precondition` / `baseline` /
 /// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
 /// seam byte-identical and makes the "no remaining bare escape seam" claim
 /// *structurally* true — enforced by [`no_bare_escape_seam_outside_dml`] below.
@@ -1556,17 +1556,10 @@ mod tests {
         let canonical = quote_ident_checked(schema).unwrap();
         // author (infallible-on-valid wrapper) — maps to its own error on failure.
         assert_eq!(crate::plan::author::quote_ident_for_test(schema).unwrap(), canonical);
-        #[cfg(feature = "native-pg")]
-        assert_eq!(
-            crate::apply::backend::postgres::backfill::quote_ident_for_test(schema).unwrap(),
-            canonical
-        );
         assert_eq!(crate::apply::role::quote_ident_for_test(schema).unwrap(), canonical);
         assert_eq!(crate::apply::journal::quote_ident_for_test(schema).unwrap(), canonical);
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
-        #[cfg(feature = "native-pg")]
-        assert!(crate::apply::backend::postgres::backfill::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());
     }
@@ -1580,7 +1573,7 @@ mod tests {
     /// engine-identifier surfaces).
     ///
     /// RED before this fix: 15+ render sites across `executor` / `precondition` /
-    /// `baseline` / `command::runner` / `expand_contract` / `shadow` /
+    /// `baseline` / `expand_contract` / `shadow` /
     /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` carried their own
     /// inline `replace('"', "\"\"")`, so this scan would have found bare seams
     /// outside `dml.rs` and FAILED. After the fix only `dml.rs` (the helper + this
@@ -1611,6 +1604,17 @@ mod tests {
                 if path.file_name().and_then(|n| n.to_str()) == Some("dml.rs") {
                     continue;
                 }
+                // The `schema/` module tree (dissolved in from the former
+                // `zero-migrate-schema` crate, redesign step 3c) is the
+                // schema-authority DDL layer with its OWN identifier-quoting
+                // primitive (`schema::query::quote_ident`). That escape lives one
+                // crate-boundary removed from this engine's render seam — the
+                // structural invariant this test enforces is about the RENDER
+                // layer (`render::*` / `apply::*` / `command::*`), not the
+                // relocated schema kernel — so the `schema/` subtree is exempt.
+                if path.components().any(|c| c.as_os_str() == "schema") {
+                    continue;
+                }
                 let body = std::fs::read_to_string(&path).expect("read src file");
                 if body.contains(&needle) {
                     offenders.push(path.strip_prefix(&src_root).unwrap().display().to_string());
@@ -1638,7 +1642,7 @@ mod tests {
     ///
     /// RED before PR13: `precondition.rs` (project_schema + role), `executor.rs`
     /// (role + meta_schema ×4 + project_schema + recovery index),
-    /// `baseline.rs` (meta_schema), `command::runner.rs` (meta_schema), and
+    /// `baseline.rs` (meta_schema), and
     /// `db.rs::search_path_clause` (project/platform/extension schemas) all fed an
     /// engine identifier to `escape_quote_ident`, so this scan would have FAILED.
     ///

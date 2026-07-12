@@ -205,7 +205,7 @@ async fn checksum_drift_detected_over_journal() {
 
 // ---------------------------------------------------------------------------
 // Sentinel recovery: an applied table whose CREATE text carries an inline
-// `/* __zsmask:... */` sentinel (the emitter's SQLite-side wire) is recovered
+// `/* zero-migrate:mask:... */` sentinel (the emitter's SQLite-side wire) is recovered
 // into the snapshot's comment_sentinel — not silently dropped.
 // ---------------------------------------------------------------------------
 #[compio::test]
@@ -214,14 +214,14 @@ async fn mask_sentinel_recovered_from_sqlite_master() {
     let be = backend(&p);
     // The emitter writes the masked sibling column with an inline mask sentinel;
     // sqlite_master.sql preserves the comment verbatim. We hand-author the exact
-    // shape the emitter produces (a nullable `<col>_masked TEXT /* __zsmask:... */`).
+    // shape the emitter produces (a nullable `<col>_masked TEXT /* zero-migrate:mask:... */`).
     be.apply_one_additive(
         &mig(
             "with_mask",
             "CREATE TABLE accounts (\
                 id INTEGER PRIMARY KEY, \
                 ssn BLOB, \
-                ssn_masked TEXT /* __zsmask:kind=last4,classification=pii */);",
+                ssn_masked TEXT /* zero-migrate:mask:kind=last4,classification=pii */);",
         ),
         "d",
     )
@@ -237,7 +237,7 @@ async fn mask_sentinel_recovered_from_sqlite_master() {
         .expect("masked sibling column present");
     assert_eq!(
         masked.comment_sentinel.as_deref(),
-        Some("__zsmask:kind=last4,classification=pii"),
+        Some("zero-migrate:mask:kind=last4,classification=pii"),
         "the inline mask sentinel must be recovered from sqlite_master.sql"
     );
     // A plain column carries no sentinel.

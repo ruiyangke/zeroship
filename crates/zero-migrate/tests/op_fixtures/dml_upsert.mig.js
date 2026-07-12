@@ -6,7 +6,7 @@
 // renders on target_dialect=Postgres but is a HARD reject at LOWER on
 // target_dialect=Sqlite. Exercised end-to-end in `crates/zero-migrate/tests/
 // ir_dml_*` (PG render + SQLite lower reject).
-import { table } from "@zeroship/migrate";
+import { table } from "zero-migrate";
 
 export const name = "dml_upsert";
 

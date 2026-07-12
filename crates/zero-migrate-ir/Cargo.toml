@@ -1,0 +1,37 @@
+[package]
+name = "zero-migrate-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The zero-migrate wire contract: MigrationIr, the closed Op enum, the closed Expr AST, IrScalar, typed-id + precondition vocabulary, the STRUCTURAL (policy-free) validator, the canonical checksum, the fail-closed IR load gate, and the schemars emit of op-ir.schema.json. A true LEAF: pure data, zero I/O, no compio, no pg_query, no dependency on the engine. Consumed alone by CI TS-codegen and by hosts that validate/checksum envelopes without applying."
+
+[features]
+# Exposes the `OperatorCapability::for_test` mint seam so the guard-crate and
+# engine-crate test suites can construct the operator-gated profiles across the
+# crate boundary. Enabled ONLY by those crates' `[dev-dependencies]`; never in a
+# production build.
+test-support = []
+
+[dependencies]
+# The IR document, the closed Op enum, the closed Expr AST, IrScalar, and every
+# precondition/migration type serialize to/from the `.ir.json` wire envelope.
+serde = { workspace = true }
+# The structured authoring-error envelope (`AuthoringError::to_json`) + the IR
+# load gate build JSON values directly.
+serde_json = { workspace = true }
+# JSON Schema derive for the `op.*` IR types (MigrationIr + the closed Op enum).
+# Emits `op-ir.schema.json` (the discriminated union the JS builder targets) via
+# `schemars::schema_for!`. Sync + leaf.
+schemars = { workspace = true }
+# Strict base64 decode + canonical encode for `IrScalar::Bytes` (§2.5).
+base64 = { workspace = true }
+# The canonical IR checksum (`Checksum::of_ir`) is SHA-256 over the domain-tagged
+# canonical byte encoding; typed-id encodes the migration UUID.
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+# UUIDv7-shaped migration ids (base62-encoded via the vendored typed-id module).
+uuid = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,415 +1,1332 @@
-//! The `PgSession` in-session Postgres driver seam.
+//! Postgres dialect SQL leaves for [`PostgresBackend`](super::PostgresBackend).
 //!
-//! The migrate apply path (`PostgresBackend` + its `journal`/`drift`/`baseline`/
-//! `precondition`/`backfill` collaborators and the executor PG leaves) is generic
-//! over this trait rather than threading a concrete `&compio_postgres::Client`.
+//! These are the Postgres-specific session/lock/txn/journal/DML/rollback
+//! operations the [`PostgresBackend`](super::PostgresBackend)
+//! [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl drives. They
+//! were relocated here **verbatim** from the generic `apply::executor` so the
+//! generic executor issues NO dialect-specific SQL (C1 structural fix): the
+//! `pg_advisory_lock`/`pg_advisory_unlock` project lock, the GUC
+//! snapshot/restore + unconditional `RESET ROLE` session hygiene, the
+//! `SET LOCAL search_path`/`statement_timeout`/`lock_timeout` + `SET [LOCAL] ROLE`
+//! confinement clauses, the transactional/non-transactional/DML apply paths, the
+//! crash-recovery drop-of-INVALID-index residue, the fresh-path squash
+//! supersession-edge writes, and the transactional rollback — every one of them
+//! Postgres-flavoured (`$N` placeholders, `hashtext`, `pg_index`), so they live
+//! in the Postgres backend, not the shared executor.
 //!
-//! The trait is typed in DRIVER-NEUTRAL types ([`SeamBind`]/[`SeamRow`]/
-//! [`SeamError`], see [`seam`](super::seam)), NOT `compio_postgres::{Row, Error,
-//! types::ToSql}` (design §A). Those compio types have private constructors, so a
-//! host (napi) driver could neither be *called* (it cannot extract cells from
-//! `&[&dyn ToSql]`) nor *return* rows/errors. The neutral types close both sides.
-//!
-//! The native (`native-pg`) impl below is the FIRST producer of every neutral
-//! type: it maps `SeamBind → ToSql` on the way in, and `compio_postgres::Row →
-//! SeamRow` / `compio_postgres::Error → SeamError` on the way out. It is the ONLY
-//! place still touching `compio_postgres::{types::ToSql, types::FromSql, Row,
-//! Error}`. The mapping forwards the exact same wire operations, so the default
-//! build's SQL, txn boundaries, journal/lock ordering, and decoded domain values
-//! are byte-for-byte unchanged — only the intermediate Rust representation becomes
-//! neutral.
-//!
-//! Connect / lifecycle is a per-impl free function (`crate::conn::connect`), NOT
-//! part of this trait: the compio impl detaches a run-loop `JoinHandle`; a Node
-//! impl has no run-loop. Transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`),
-//! advisory locks (`pg_advisory_lock`), and confinement `SET`s are SQL strings
-//! issued through `batch_execute`/`execute` — they are engine logic, not driver
-//! methods, so the trait carries no transaction-object or lock abstraction.
+//! The generic orchestration (partition, drift gate, `order_pending`, the
+//! two-pass apply loop, the repeatable phase, rollback selection) stays in
+//! [`crate::apply::executor`] and reaches every one of these through the
+//! [`MigrationBackend`](crate::apply::backend::MigrationBackend) trait — never by
+//! naming a leaf below directly.
 
-use super::seam::{SeamBind, SeamError, SeamRow, SeamValue};
+use std::time::Instant;
 
-/// The in-session Postgres driver surface the migrate apply path is generic over.
+use pg_query::protobuf::node::Node as NodeEnum;
+
+use crate::apply::backend::PgSessionSnapshot;
+use crate::apply::executor::{ApplyError, RollbackError};
+use crate::apply::journal::{self, JournalError};
+use crate::conn::ExecutorConfig;
+use crate::model::migration::Migration;
+use crate::driver::SqlSession;
+
+/// A stable i64 advisory-lock key from the project id, mirroring the
+/// `hashtext(project_id)` design intent: we run `pg_advisory_lock(hashtext($1))`
+/// server-side so the key is computed by Postgres exactly as the design states
+/// (`hashtext` is the canonical PG text hash; deterministic per cluster).
 ///
-/// Exactly the five in-session verbs the engine issues on a live session:
-/// `batch_execute` (DDL / txn control / multi-statement session setup), `execute`
-/// / `execute_text_params` (parameterized DML → rows affected), and `query` /
-/// `query_one` (catalog / journal introspection → rows).
+/// Holding it for the whole apply serializes concurrent deploys for the same
+/// project (design §2.3 step 1); a second apply waits, then sees the first's
+/// committed journal and no-ops.
 ///
-/// Every verb's error is the neutral [`SeamError`] (§A.8: uniform across all 5).
-/// The bind params are neutral [`SeamBind`] on `execute`/`query`/`query_one` (3 of
-/// 5); `execute_text_params` keeps its already-neutral `&[Option<String>]` shape
-/// (PG refuses concrete-OID binary for `text → timestamptz`); `batch_execute`
-/// takes no params.
-#[allow(async_fn_in_trait)] // !Send is by design on the single-thread compio runtime
-pub trait PgSession {
-    /// DDL / txn control / multi-statement session setup. Simple-query protocol:
-    /// one `&str`, may contain `;`-separated statements, no params, no rows.
-    async fn batch_execute(&self, sql: &str) -> Result<(), SeamError>;
-
-    /// Parameterized DML → rows affected.
-    async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError>;
-
-    /// Schema-blind op.* DML: text-format params with server-inferred types.
-    /// (Distinct from [`PgSession::execute`]: a concrete-OID binary bind would make
-    /// PG refuse `text → timestamptz`; the assembler needs text-format coercion.
-    /// Its BIND side is already neutral (`&[Option<String>]`), but its ERROR side
-    /// widens to [`SeamError`] uniformly with the other four verbs — a host impl
-    /// cannot construct a `compio_postgres::Error`.)
-    async fn execute_text_params(
-        &self,
-        sql: &str,
-        params: &[Option<String>],
-    ) -> Result<u64, SeamError>;
-
-    /// Parameterized SELECT → all rows.
-    async fn query(&self, sql: &str, params: &[SeamBind]) -> Result<Vec<SeamRow>, SeamError>;
-
-    /// Parameterized SELECT → exactly one row (errors otherwise).
-    async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError>;
-}
-
-// ---------------------------------------------------------------------------
-// The native, compio-postgres impl — the FIRST producer of every neutral type.
-// `native-pg`-only: it is the ONLY place still touching `compio_postgres::{types::
-// ToSql, types::FromSql, Row, Error}`. The `PgSession` trait above is neutral, so
-// it compiles on the whole PG seam; a `host-pg`-only build gets the trait but no
-// compio adapter (the addon supplies its own host `PgSession` in Phase C, and the
-// in-crate recording driver proves genericity in the meantime).
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "native-pg")]
-use compio_postgres::types::{Kind, ToSql, Type};
-#[cfg(feature = "native-pg")]
-use compio_postgres::{Error as PgError, Row as PgRow};
-
-/// `compio_postgres::Error → SeamError`. The consumer census treats the error
-/// opaquely (wrap as `#[source]`/`Display`), so `Display` + an optional SQLSTATE
-/// is a faithful, lossless-enough projection.
-#[cfg(feature = "native-pg")]
-impl From<PgError> for SeamError {
-    fn from(e: PgError) -> Self {
-        let code = e.code().map(|c| c.code().to_string());
-        // `compio_postgres::Error`'s own `Display` is the opaque "db error"; the
-        // human-meaningful text lives on the underlying `DbError` (the primary
-        // message, e.g. "updated partition constraint … would be violated").
-        // Project that into `SeamError.message` so the neutral error carries the
-        // same diagnostic the concrete error chain used to — otherwise every seam
-        // error degrades to "db error" and detail-matching consumers regress.
-        let message = e
-            .as_db_error()
-            .map_or_else(|| e.to_string(), |db| db.message().to_string());
-        SeamError { message, code }
-    }
-}
-
-/// A borrowed `ToSql`-holder produced from a [`SeamBind`], so the compio `Client`'s
-/// `&[&(dyn ToSql + Sync)]` slice can borrow into it for the duration of the call.
-///
-/// `Decimal` maps to a text bind (the IR carries decimals as strings; PG infers
-/// the target type from context) — no bind site binds `Decimal`/`Bool`/`Null`
-/// today, so those arms are exercised only by the enum-completeness test.
-#[cfg(feature = "native-pg")]
-enum ToSqlHolder {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Text(String),
-}
-
-#[cfg(feature = "native-pg")]
-impl ToSqlHolder {
-    fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
-        match self {
-            // A typed NULL: `Option::<&str>::None` renders as a text NULL bind.
-            ToSqlHolder::Null => &Option::<&str>::None,
-            ToSqlHolder::Bool(b) => b,
-            ToSqlHolder::Int(n) => n,
-            ToSqlHolder::Text(s) => s,
-        }
-    }
-}
-
-#[cfg(feature = "native-pg")]
-fn to_holder(bind: &SeamBind) -> ToSqlHolder {
-    match bind {
-        SeamBind::Null => ToSqlHolder::Null,
-        SeamBind::Bool(b) => ToSqlHolder::Bool(*b),
-        SeamBind::Int(n) => ToSqlHolder::Int(*n),
-        // Decimal carried as text — PG infers the numeric target from context.
-        SeamBind::Decimal(s) => ToSqlHolder::Text(s.clone()),
-        SeamBind::Text(s) => ToSqlHolder::Text(s.clone()),
-    }
-}
-
-/// Map a neutral bind slice into a compio-accepted `&[&(dyn ToSql + Sync)]`. The
-/// holders own the values; the returned refs borrow from `holders`, so both live
-/// to the end of the call.
-#[cfg(feature = "native-pg")]
-fn bind_params(params: &[SeamBind]) -> Vec<ToSqlHolder> {
-    params.iter().map(to_holder).collect()
-}
-
-#[cfg(feature = "native-pg")]
-fn holder_refs(holders: &[ToSqlHolder]) -> Vec<&(dyn ToSql + Sync)> {
-    holders.iter().map(ToSqlHolder::as_to_sql).collect()
-}
-
-/// Decode ONE `compio_postgres::Row` cell into a neutral [`SeamValue`].
-///
-/// This is the only surviving `FromSql` touch-point. It funnels the seam's value
-/// union (§A.2) — `text`/`name`/`varchar`/`bpchar`/`"char"`/`to_char`-timestamps →
-/// `Text`; `int2`/`int4`/`int8`/`oid` → `Int`; `bool` → `Bool`; `text[]` →
-/// `TextArray` (element-NULLs preserved); SQL NULL → `Null` — reproducing exactly
-/// what today's `FromSql` decode + `.unwrap_or_default()`/`.ok().flatten()` idioms
-/// yield (§A.8), so the native path stays byte-identical.
-#[cfg(feature = "native-pg")]
-fn cell_to_seam(row: &PgRow, idx: usize, ty: &Type) -> Result<SeamValue, SeamError> {
-    // `information_schema` columns (data_type/udt_name = `sql_identifier`,
-    // character_maximum_length = `cardinal_number`, is_nullable = `yes_or_no`,
-    // …) are DOMAINS over a base type; a raw `match *ty` on the base constants
-    // would miss them and mis-route the cell. Resolve any domain to its base
-    // first, exactly as `FromSql::accepts` does, so an `int4` domain still decodes
-    // as an integer (byte-identical to the pre-seam `r.get`).
-    let base = resolve_domain(ty);
-
-    // Arrays first: `text[]` (and any `Kind::Array` whose element is text-family)
-    // → `TextArray`. This also catches `information_schema` array domains.
-    if let Kind::Array(elem) = base.kind() {
-        if is_text_family(resolve_domain(elem)) {
-            return match row.try_get::<_, Option<Vec<Option<String>>>>(idx)? {
-                Some(v) => Ok(SeamValue::TextArray(v)),
-                None => Ok(SeamValue::Null),
-            };
-        }
-    }
-
-    // NULL is uniform across types: a `None`-decoding of the column's own type.
-    match *base {
-        Type::BOOL => match row.try_get::<_, Option<bool>>(idx)? {
-            Some(b) => Ok(SeamValue::Bool(b)),
-            None => Ok(SeamValue::Null),
-        },
-        Type::INT8 => match row.try_get::<_, Option<i64>>(idx)? {
-            Some(n) => Ok(SeamValue::Int(n)),
-            None => Ok(SeamValue::Null),
-        },
-        Type::INT4 | Type::OID => match row.try_get::<_, Option<i32>>(idx)? {
-            Some(n) => Ok(SeamValue::Int(i64::from(n))),
-            None => Ok(SeamValue::Null),
-        },
-        Type::INT2 => match row.try_get::<_, Option<i16>>(idx)? {
-            Some(n) => Ok(SeamValue::Int(i64::from(n))),
-            None => Ok(SeamValue::Null),
-        },
-        // PG `"char"` (oid 18): decode the raw `i8` and normalise to a 1-char
-        // `Text`, so `FromSeam for i8`/`char` reads it back the same as native.
-        Type::CHAR => match row.try_get::<_, Option<i8>>(idx)? {
-            Some(c) => {
-                let byte = u8::try_from(c).map_err(|_| {
-                    SeamError::message(format!("\"char\" byte {c} out of ASCII range"))
-                })?;
-                Ok(SeamValue::Text((byte as char).to_string()))
-            }
-            None => Ok(SeamValue::Null),
-        },
-        // text/name/varchar/bpchar and any other text-family type the SQL casts to.
-        _ => match row.try_get::<_, Option<String>>(idx)? {
-            Some(s) => Ok(SeamValue::Text(s)),
-            None => Ok(SeamValue::Null),
-        },
-    }
-}
-
-/// Resolve a `Kind::Domain(base)` chain down to its concrete base type, so an
-/// `information_schema` domain (`cardinal_number` over `int4`, `sql_identifier`
-/// over `name`, `yes_or_no` over `varchar`) routes to the right decode arm.
-#[cfg(feature = "native-pg")]
-fn resolve_domain(ty: &Type) -> &Type {
-    let mut cur = ty;
-    while let Kind::Domain(inner) = cur.kind() {
-        cur = inner;
-    }
-    cur
-}
-
-/// A text-family base type — decoded as `String`/`TextArray` element.
-#[cfg(feature = "native-pg")]
-fn is_text_family(ty: &Type) -> bool {
-    matches!(
-        *ty,
-        Type::TEXT | Type::NAME | Type::VARCHAR | Type::BPCHAR | Type::UNKNOWN
+/// M2 (known limitation): `hashtext` yields a 32-bit hash, so two *unrelated*
+/// project ids can collide onto the same advisory-lock key. The consequence is
+/// liveness-only — two unrelated projects would serialize against each other
+/// (one waits for the other's apply) — never a correctness/cross-tenant defect,
+/// since each apply still operates strictly within its own meta + project
+/// schema. Acceptable for v1. Revisit at scale with a 64-bit key
+/// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
+#[cfg(pg_seam)]
+pub(crate) async fn acquire_project_lock<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<(), ApplyError> {
+    conn.exec(
+        "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+        &[project_id.into()],
     )
+    .await?;
+    Ok(())
 }
 
-/// `compio_postgres::Row → SeamRow` — iterate columns, decode each cell.
-#[cfg(feature = "native-pg")]
-fn row_to_seam(row: &PgRow) -> Result<SeamRow, SeamError> {
-    let cols = row.columns();
-    let mut names = Vec::with_capacity(cols.len());
-    let mut values = Vec::with_capacity(cols.len());
-    for (idx, col) in cols.iter().enumerate() {
-        names.push(col.name().to_string());
-        values.push(cell_to_seam(row, idx, col.type_())?);
-    }
-    Ok(SeamRow::new(names, values))
+#[cfg(pg_seam)]
+pub(crate) async fn release_project_lock<D: SqlSession>(
+    conn: &D,
+    project_id: &str,
+) -> Result<(), ApplyError> {
+    conn.exec(
+        "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+        &[project_id.into()],
+    )
+    .await?;
+    Ok(())
 }
 
-/// The native, compio-postgres [`PgSession`] impl — one forward per verb (mapping
-/// binds/rows/errors through the neutral seam), so the default build's SQL, txn
-/// boundaries, and behavior are identical to pre-seam.
-#[cfg(feature = "native-pg")]
-impl PgSession for compio_postgres::Client {
-    async fn batch_execute(&self, sql: &str) -> Result<(), SeamError> {
-        compio_postgres::Client::batch_execute(self, sql)
-            .await
-            .map_err(SeamError::from)
+/// Read the session GUCs we are about to override, so they can be restored when
+/// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
+/// round-trips).
+#[cfg(pg_seam)]
+pub(crate) async fn snapshot_session<D: SqlSession>(
+    conn: &D,
+) -> Result<PgSessionSnapshot, ApplyError> {
+    let row = conn
+        .query_one(
+            "SELECT current_setting('statement_timeout') AS st, \
+                    current_setting('lock_timeout')      AS lt, \
+                    current_setting('search_path')       AS sp",
+            &[],
+        )
+        .await?;
+    Ok(PgSessionSnapshot {
+        statement_timeout: row.try_get("st")?,
+        lock_timeout: row.try_get("lt")?,
+        search_path: row.try_get("sp")?,
+    })
+}
+
+/// Restore the GUCs captured by [`snapshot_session`]. Uses `set_config(name,
+/// value, false)` so the *value* is a bound literal, not interpolated SQL
+/// (the snapshot strings are server-provided, but we keep the parameterized
+/// path regardless).
+#[cfg(pg_seam)]
+pub(crate) async fn restore_session<D: SqlSession>(
+    conn: &D,
+    snap: &PgSessionSnapshot,
+) -> Result<(), ApplyError> {
+    // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
+    // `RESET ROLE` (L1). The non-txn path's `SET ROLE` mutates the session, so
+    // drop back to the admin role before anything else, ensuring the executor's
+    // least-privilege confinement never leaks onto the pooled/long-lived
+    // connection after `apply` returns (H2). Harmless no-op when no SET ROLE ran
+    // (txn-only applies use SET LOCAL ROLE, auto-reverted at COMMIT).
+    conn.batch("RESET ROLE").await?;
+    conn.exec(
+        "SELECT set_config('statement_timeout', $1, false), \
+                set_config('lock_timeout', $2, false), \
+                set_config('search_path', $3, false)",
+        &[
+            (&snap.statement_timeout).into(),
+            (&snap.lock_timeout).into(),
+            (&snap.search_path).into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// The effective `statement_timeout` for a migration: its per-migration
+/// override ([`crate::model::migration::MigrationFlags::timeout_ms`], H3) if set, else
+/// the executor-wide default.
+fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
+    m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
+}
+
+/// The effective `lock_timeout` for a migration: its per-migration override
+/// ([`crate::model::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
+/// SHORT executor-wide default (the lock-safety envelope, 3s). This is the
+/// per-deploy maintenance-window knob that makes the doc on
+/// [`crate::conn::PgConfinement::lock_timeout`] honest: a single planned migration
+/// can legitimately raise ITS OWN lock-acquisition budget (run during a quiet
+/// window), while every other migration keeps the conservative fail-fast
+/// default. It mirrors [`effective_timeout_ms`] exactly.
+fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
+    m.flags.lock_timeout_ms.unwrap_or_else(|| cfg.lock_timeout_ms())
+}
+
+/// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
+/// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
+/// project `search_path` (project schema **only** — the meta schema is
+/// deliberately OFF the migration-time path so an unqualified name in the `up`
+/// can never resolve to the journal, C1 defense-in-depth) and the mandatory
+/// timeouts (§1.5), with the per-migration timeout override applied (H3).
+///
+/// This intentionally does **not** switch role: the role scoping is done
+/// explicitly in [`apply_transactional`] so that `SET LOCAL ROLE migrator`
+/// brackets ONLY the `<up>` and is `RESET` (back to admin) before the journal
+/// INSERT — the migrator can no longer write the journal (its grant is revoked;
+/// C1 fix), so the journal write must run as the admin, atomically in the SAME
+/// transaction as the `up`.
+fn set_local_session_sql(
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<String, crate::render::dml::IdentQuoteError> {
+    Ok(format!(
+        "SET LOCAL search_path TO {}; \
+         SET LOCAL statement_timeout = {}; \
+         SET LOCAL lock_timeout = {};",
+        cfg.search_path_clause()?,
+        effective_timeout_ms(cfg, m),
+        effective_lock_timeout_ms(cfg, m),
+    ))
+}
+
+/// `SET LOCAL ROLE "<migrator>"` for the txn path, or empty when no migrator role
+/// is configured (tests / single-tenant dev). Brackets ONLY the `<up>`; the
+/// caller `RESET ROLE`s before the journal write (C1).
+///
+/// The migrator role is an engine-supplied identifier, so it is quoted through
+/// the ONE shared engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed
+/// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
+/// every real role.
+fn set_local_role_sql(
+    cfg: &ExecutorConfig,
+) -> Result<Option<String>, crate::render::dml::IdentQuoteError> {
+    cfg.pg
+        .migrator_role
+        .as_ref()
+        .map(|role| Ok(format!("SET LOCAL ROLE {}", crate::render::dml::quote_ident_checked(role)?)))
+        .transpose()
+}
+
+/// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
+/// These DO mutate the session, but [`apply`] restores the original GUCs on exit
+/// via [`restore_session`] so they never leak (H2). Per-migration timeout
+/// override applied (H3).
+///
+/// Runs as the **admin** role (no `SET ROLE` here): the non-txn journal I/O
+/// (`record_started` / `record_completed` / `clear_inflight`) runs as admin, and
+/// only the `<up>` is bracketed by an explicit `SET ROLE migrator` / `RESET ROLE`
+/// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
+/// **only** — the meta schema is off the migration-time path so an unqualified
+/// name in the `up` can never resolve to the journal.
+#[cfg(pg_seam)]
+pub(crate) async fn configure_session_non_txn<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<(), ApplyError> {
+    let stmt = format!(
+        "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
+        cfg.search_path_clause()?,
+        effective_timeout_ms(cfg, m),
+        effective_lock_timeout_ms(cfg, m),
+    );
+    conn.batch(&stmt).await?;
+    Ok(())
+}
+
+/// Validate that a non-transactional migration's `up` is **idempotent** (C1/C2).
+///
+/// The two-phase non-txn recovery path re-runs `<up>` verbatim after a crash, so
+/// every statement that cannot run in a transaction must tolerate already having
+/// run. We enforce this statically, before any execution:
+///
+/// - `CREATE INDEX CONCURRENTLY …` MUST be `CREATE INDEX CONCURRENTLY IF NOT
+///   EXISTS …`.
+/// - `ALTER TYPE … ADD VALUE …` MUST be `… ADD VALUE IF NOT EXISTS …`.
+///
+/// (Other non-txn ops the classifier recognizes — `DROP INDEX CONCURRENTLY`,
+/// `VACUUM` — are themselves naturally re-runnable.)
+///
+/// Bare DML — `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `TRUNCATE` — is
+/// **forbidden** on the non-txn path. The guard admits DML (it is safe data
+/// access), and `transaction:false` will happily route a pure-DML `up` onto the
+/// two-phase path; but recovery re-runs the `up` VERBATIM, and a bare
+/// `INSERT`/`UPDATE`/`DELETE`/`MERGE` is NOT re-runnable — a success-then-crash
+/// (the op committed, the `completed` row did not) double-applies it on recovery.
+/// `TRUNCATE` is technically re-runnable, but it cannot run on the non-txn path
+/// at all (recovery would have to re-run it AFTER the real op, wiping a table the
+/// migration itself may have repopulated), so it is forbidden alongside the rest.
+/// DML belongs in a transactional migration (the default), where a crash rolls
+/// the whole `up` back atomically and re-apply is clean. There is no idempotent
+/// form we can mechanically assert for arbitrary DML, so it is rejected
+/// outright; an author who genuinely needs a non-txn data step must wrap it in an
+/// idempotent guard (e.g. `INSERT … ON CONFLICT DO NOTHING` driven from a DDL op)
+/// rather than a bare statement.
+///
+/// A violation is rejected with [`ApplyError::NonIdempotentNonTxn`].
+pub(crate) fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyError> {
+    let parsed = pg_query::parse(&m.up).map_err(|e| ApplyError::NonIdempotentNonTxn {
+        version: m.version.as_str().to_string(),
+        reason: format!("could not parse `up` SQL: {e}"),
+    })?;
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        match node {
+            NodeEnum::IndexStmt(idx) if idx.concurrent && !idx.if_not_exists => {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`CREATE INDEX CONCURRENTLY {}` lacks `IF NOT EXISTS`",
+                        if idx.idxname.is_empty() { "<unnamed>" } else { &idx.idxname }
+                    ),
+                });
+            }
+            NodeEnum::AlterEnumStmt(e)
+                if !e.new_val.is_empty() && !e.skip_if_new_val_exists =>
+            {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`ALTER TYPE … ADD VALUE '{}'` lacks `IF NOT EXISTS`",
+                        e.new_val
+                    ),
+                });
+            }
+            // Bare DML re-applies on success-then-crash recovery (the up is
+            // re-run verbatim). Forbid it on the non-txn path — DML belongs in a
+            // transactional migration where a crash rolls it back atomically.
+            NodeEnum::InsertStmt(_)
+            | NodeEnum::UpdateStmt(_)
+            | NodeEnum::DeleteStmt(_)
+            | NodeEnum::MergeStmt(_)
+            | NodeEnum::TruncateStmt(_) => {
+                return Err(ApplyError::NonIdempotentNonTxn {
+                    version: m.version.as_str().to_string(),
+                    reason: format!(
+                        "`{}` is data-manipulation (DML), which crash-recovery would re-run \
+                         verbatim and double-apply. Run DML in a transactional migration \
+                         (do not set `transaction:false`).",
+                        dml_keyword(node)
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The SQL keyword for a DML node, for the `NonIdempotentNonTxn` reason message.
+const fn dml_keyword(node: &NodeEnum) -> &'static str {
+    match node {
+        NodeEnum::InsertStmt(_) => "INSERT",
+        NodeEnum::UpdateStmt(_) => "UPDATE",
+        NodeEnum::DeleteStmt(_) => "DELETE",
+        NodeEnum::MergeStmt(_) => "MERGE",
+        NodeEnum::TruncateStmt(_) => "TRUNCATE",
+        _ => "DML",
+    }
+}
+
+/// Transactional apply (design §2.3): `BEGIN; <up>; INSERT journal; COMMIT`.
+/// DDL + journal are atomic — a failure rolls back leaving no partial DDL and
+/// no journal row.
+///
+/// `kind` is the journaled `kind` to stamp on the `completed` event: `'apply'` for
+/// an ordinary once-only migration, `'squash'` for a fresh-path squash (non-empty
+/// `supersedes`), or `'repeatable'` for a re-applied repeatable (v3 Plan E). The
+/// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
+/// never inferred from anything the migration set supplies at apply time. A debug
+/// assertion ties `'squash'` ⇔ non-empty `supersedes`.
+#[cfg(pg_seam)]
+pub(crate) async fn apply_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+    supersedes: &[&str],
+    kind: &str,
+) -> Result<(), ApplyError> {
+    let started = Instant::now();
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`.
+    // These are pure functions of `cfg`/`m` with no dependency on the open txn, so
+    // computing them up front means a fail-closed `IdentQuoteError` returns before
+    // any transaction is opened — no dangling txn left behind on the `?` path. The
+    // rendered SQL still EXECUTES inside the txn below, exactly as before.
+    let session_sql = set_local_session_sql(cfg, m)?;
+    let role_sql = set_local_role_sql(cfg)?;
+
+    // `transaction()` needs `&mut Client`; the apply flow owns the connection,
+    // so we take a short-lived mutable borrow via a raw pointer-free path:
+    // callers pass `&Client`, so we cannot call `transaction()` directly. We
+    // instead drive BEGIN/COMMIT/ROLLBACK explicitly over the shared `&Client`
+    // (still one physical session, still atomic) — this avoids requiring
+    // `&mut` plumbing through the whole apply loop.
+    conn.batch("BEGIN").await?;
+
+    // Pin search_path + the mandatory timeouts (per-migration override applied)
+    // with SET LOCAL so they are scoped to THIS transaction and vanish at
+    // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
+    // the admin (always permitted); the role switch is applied separately around
+    // the `<up>` only.
+    if let Err(e) = conn.batch(&session_sql).await {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(ApplyError::Db(e.into()));
     }
 
-    async fn execute(&self, sql: &str, params: &[SeamBind]) -> Result<u64, SeamError> {
-        let holders = bind_params(params);
-        let refs = holder_refs(&holders);
-        compio_postgres::Client::execute(self, sql, &refs)
-            .await
-            .map_err(SeamError::from)
+    // **PR10 Part B — existence-guard catalog probe (no TOCTOU).** If this migration
+    // carries an existence-guard probe, read the LIVE catalog as the ADMIN
+    // (`snapshot_schema` is a privileged catalog read; the migrator role is assumed
+    // only AFTER the decision) inside THIS already-open transaction, under the
+    // project advisory lock the whole plan already holds — so no lock is acquired or
+    // released across probe→decide→act and there is no window for the catalog to
+    // change between the verdict and the action. `decide` is pure Rust over the
+    // snapshot — never a SQL-level conditional.
+    //
+    // - `RunBare`       → fall through: SET LOCAL ROLE + run `up` + journal (normal).
+    // - `SatisfiedNoop` → SKIP the `up` AND the role switch, but STILL journal the
+    //                     `completed` row so the version LANDS (a re-deploy sees it
+    //                     net-applied and skips it via pending computation).
+    // - `FailDrift`     → ROLLBACK + a typed `ExistenceGuardDrift` error (never a
+    //                     silent skip over a divergence).
+    let mut skip_up = false;
+    if let Some(probe) = &m.existence_guard {
+        let live = match crate::apply::drift::snapshot_schema(conn, probe.schema()).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = conn.batch("ROLLBACK").await;
+                // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
+                return Err(match e {
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
+        match crate::render::existence_probe::decide(
+            probe,
+            &live,
+            crate::schema::query::SqlDialect::Postgres,
+        ) {
+            crate::render::existence_probe::GuardVerdict::RunBare => { /* fall through */ }
+            crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
+                // Skip the `up` + the role switch; the journal block below still runs
+                // so the version lands as net-applied.
+                skip_up = true;
+            }
+            crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
+                if let Err(rb) = conn.batch("ROLLBACK").await {
+                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift (M4)");
+                }
+                return Err(ApplyError::ExistenceGuardDrift {
+                    version: m.version.as_str().to_string(),
+                    object: d.object,
+                    field: d.field,
+                    expected: d.expected,
+                    actual: d.actual,
+                });
+            }
+        }
     }
 
-    async fn execute_text_params(
-        &self,
-        sql: &str,
-        params: &[Option<String>],
-    ) -> Result<u64, SeamError> {
-        compio_postgres::Client::execute_text_params(self, sql, params)
-            .await
-            .map_err(SeamError::from)
+    // C1: drop to the least-privilege migrator role for the duration of the
+    // `<up>` ONLY. `SET LOCAL ROLE` is transaction-scoped, so the role switch is
+    // confined to this txn; we explicitly `RESET ROLE` (below) before the journal
+    // INSERT so the journal write runs as the admin — the migrator's journal
+    // grant is revoked (role.rs), so it could not write the journal even if it
+    // tried. The up's DDL is thereby confined to line-2 privileges (design §1.3)
+    // while the journal stays unforgeable by the migration.
+    // On a `SatisfiedNoop` verdict (`skip_up`) the role switch + `<up>` + RESET ROLE
+    // are all skipped — the object already has the declared shape (ifNotExists) or is
+    // already absent (ifExists), so there is nothing to run; only the journal row
+    // below lands so the version is recorded net-applied.
+    if !skip_up {
+        if let Some(set_role) = &role_sql {
+            if let Err(e) = conn.batch(set_role.as_str()).await {
+                let _ = conn.batch("ROLLBACK").await;
+                return Err(ApplyError::Db(e.into()));
+            }
+        }
+
+        // Run the migration's up SQL (as the migrator, if a role is configured).
+        if let Err(e) = conn.batch(&m.up).await {
+            // Roll back; report the failure. No journal row was written.
+            if let Err(rb) = conn.batch("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error (M4)");
+            }
+            return Err(ApplyError::MigrationFailed {
+                version: m.version.as_str().to_string(),
+                source: e.into(),
+            });
+        }
+
+        // C1: RESET ROLE back to the admin — still INSIDE the transaction — so the
+        // journal INSERT below runs as the admin (the migrator cannot write the
+        // journal). `RESET ROLE` mid-transaction is supported and does not end the
+        // txn, so atomicity of `<up>` + journal is preserved.
+        if cfg.pg.migrator_role.is_some() {
+            if let Err(e) = conn.batch("RESET ROLE").await {
+                let _ = conn.batch("ROLLBACK").await;
+                return Err(ApplyError::Db(e.into()));
+            }
+        }
     }
 
-    async fn query(&self, sql: &str, params: &[SeamBind]) -> Result<Vec<SeamRow>, SeamError> {
-        let holders = bind_params(params);
-        let refs = holder_refs(&holders);
-        let rows = compio_postgres::Client::query(self, sql, &refs)
-            .await
-            .map_err(SeamError::from)?;
-        rows.iter().map(row_to_seam).collect()
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+    // Journal the completed row in the SAME transaction, as the admin. The `kind`
+    // is passed by the caller (the journaled kind is the tamper anchor — never
+    // inferred from the supplied set): `'apply'` for an ordinary migration,
+    // `'squash'` for a fresh-path squash (non-empty `supersedes`, so its
+    // supersession edges are honored by `journal::superseded_versions` — #4 filters
+    // on `kind='squash'`), `'repeatable'` for a re-applied repeatable (v3 Plan E).
+    debug_assert_eq!(
+        kind == "squash",
+        !supersedes.is_empty(),
+        "kind='squash' iff supersedes is non-empty"
+    );
+    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    if let Err(e) = conn
+        .exec(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', $6)",
+                applied = journal::EventKind::Applied.as_str()
+            ),
+            &[
+                m.version.as_str().into(),
+                (&m.name).into(),
+                m.checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
+                kind.into(),
+            ],
+        )
+        .await
+    {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error (M4)");
+        }
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
 
-    async fn query_one(&self, sql: &str, params: &[SeamBind]) -> Result<SeamRow, SeamError> {
-        let holders = bind_params(params);
-        let refs = holder_refs(&holders);
-        let row = compio_postgres::Client::query_one(self, sql, &refs)
-            .await
-            .map_err(SeamError::from)?;
-        row_to_seam(&row)
+    // #2 fix: write the fresh-DB squash supersession edges in the SAME transaction
+    // as the `completed` row above (admin). Edges-last-but-same-txn — so `S`'s
+    // net-applied state and its full edge set commit atomically. A failure here
+    // rolls back the entire apply (no `completed` row, no edges).
+    if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error (M4)");
+        }
+        return Err(ApplyError::Journal(e));
+    }
+
+    conn.batch("COMMIT").await?;
+    Ok(())
+}
+
+/// Transactional apply of a single **parameterized DML** step (`op.*` DSL §2.3.2)
+/// — the PG executor behind
+/// [`MigrationBackend::run_dml_step`](crate::apply::backend::MigrationBackend::run_dml_step).
+///
+/// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL …; SET LOCAL ROLE; <stmt>;
+/// RESET ROLE; INSERT journal; COMMIT` discipline, but the statement is the DML
+/// `template` executed with `binds` bound **natively** as `$n` parameters (never
+/// interpolated). The step journals a `completed` event under `version`/`name`
+/// with a checksum over the template, so a re-run is a net-applied-skip
+/// (idempotency is the caller's `applied()` pre-check). DDL + journal are atomic.
+///
+/// # Errors
+/// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
+/// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
+/// failure.
+#[cfg(pg_seam)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_dml_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+    name: &str,
+    template: &str,
+    binds: &[crate::render::step::BindValue],
+    owner_app: &str,
+    applied_by: &str,
+) -> Result<(), ApplyError> {
+    let started = Instant::now();
+    // Materialize each typed bind to its **text representation** for NULL-aware,
+    // text-format binding (§2.3.2). Every value is sent in PG text format with a
+    // server-INFERRED parameter type (no fixed OID), so it implicit-casts to the
+    // target COLUMN type exactly as a quoted literal would — `'2026-01-01'` →
+    // `timestamptz`, `'1.5'` → `numeric`, `'t'`/`'f'`/`'true'` → `boolean`, a uuid
+    // string → `uuid`. This is the schema-blind coercion model the op.* assembler
+    // (names-are-strings, §3.3) needs: a concrete-typed binary bind (`text`/`int8`/
+    // `bool` OID) would make PG REFUSE a value against a different column type
+    // ("cannot bind text → timestamptz"). The value is STILL a native bind — never
+    // interpolated into the SQL — so the bind-safety property holds (a metacharacter
+    // value cannot alter the statement shape). `Null` → SQL NULL (no bytes).
+    let params: Vec<Option<String>> = binds
+        .iter()
+        .map(|b| match b {
+            crate::render::step::BindValue::Null => None,
+            crate::render::step::BindValue::Bool(v) => Some(if *v { "true".to_string() } else { "false".to_string() }),
+            crate::render::step::BindValue::Int(v) => Some(v.to_string()),
+            crate::render::step::BindValue::Decimal(s) => Some(s.clone()),
+            crate::render::step::BindValue::Text(s) => Some(s.clone()),
+        })
+        .collect();
+
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // so a fail-closed `IdentQuoteError` returns before any transaction is opened
+    // (no dangling txn). Both are pure functions of `cfg` — no dependency on the
+    // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
+    // `set_local` is built from cfg directly (a DML step has no per-migration
+    // timeout override slot in PR0).
+    let set_local = format!(
+        "SET LOCAL search_path TO {}; \
+         SET LOCAL statement_timeout = {}; \
+         SET LOCAL lock_timeout = {};",
+        cfg.search_path_clause()?,
+        cfg.statement_timeout_ms(),
+        cfg.lock_timeout_ms(),
+    );
+    let role_sql = set_local_role_sql(cfg)?;
+
+    conn.batch("BEGIN").await?;
+    // SET LOCAL search_path + the mandatory timeouts, txn-scoped (vanish at
+    // COMMIT/ROLLBACK).
+    if let Err(e) = conn.batch(&set_local).await {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(ApplyError::Db(e.into()));
+    }
+    // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
+    // before the journal write so the journal stays unforgeable by the step.
+    if let Some(set_role) = &role_sql {
+        if let Err(e) = conn.batch(set_role.as_str()).await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(ApplyError::Db(e.into()));
+        }
+    }
+    if let Err(e) = conn.exec_text(template, &params).await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
+        }
+        return Err(ApplyError::MigrationFailed {
+            version: version.to_string(),
+            source: e.into(),
+        });
+    }
+    if cfg.pg.migrator_role.is_some() {
+        if let Err(e) = conn.batch("RESET ROLE").await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(ApplyError::Db(e.into()));
+        }
+    }
+    // Fault seam (test-only): a simulated crash AFTER the DML statement ran but
+    // BEFORE the journal row — the open txn rolls back the data write too, so the
+    // step left NOTHING (resume re-applies cleanly).
+    if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL) {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(e);
+    }
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    // The journal checksum is over the PARAMETERIZED template (binds fold into the
+    // plan checksum, not the journal row — §2.3.2). Use the migration checksum
+    // discipline over (template, None).
+    // The journal checksum binds the DECLARING app's identity (§2.0.1): two DML
+    // steps with an identical `(template, binds)` authored by different
+    // `owner_app`s hash to DIFFERENT checksums, so the journal row's owner
+    // attribution is correct for multi-tenant DML (PR6a's creator-DML assembler).
+    let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
+        up: template,
+        down: None,
+        flags: &crate::model::migration::MigrationFlags::default(),
+        owner_app,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    if let Err(e) = conn
+        .exec(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind)
+                 VALUES ('{applied}', $1, $2, $3, $4, $5, 'completed', 'success', 'apply')",
+                applied = journal::EventKind::Applied.as_str()
+            ),
+            &[
+                version.into(),
+                name.into(),
+                checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
+            ],
+        )
+        .await
+    {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML journal-insert error");
+        }
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
+    }
+    // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
+    // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
+    // with the data write; the step still left NOTHING (resume re-applies).
+    if let Err(e) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT) {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(e);
+    }
+    conn.batch("COMMIT").await?;
+    Ok(())
+}
+
+/// Insert the `S → v_i` supersession edges for a squash whose `up` RAN this batch
+/// (Plan 9 B fresh path). Each `conn.execute` participates in whatever transaction
+/// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
+/// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
+/// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
+#[cfg(pg_seam)]
+async fn insert_supersedes_edges<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    squash_version: &str,
+    supersedes: &[&str],
+) -> Result<(), JournalError> {
+    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    for sup in supersedes {
+        conn.exec(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_supersedes
+                     (squash_version, superseded_version)
+                 VALUES ($1, $2)"
+            ),
+            &[squash_version.into(), sup.into()],
+        )
+        .await
+        .map_err(|e| JournalError::Db(e.into()))?;
+    }
+    Ok(())
+}
+
+/// Non-transactional apply (design §2.3 / §2.4): two-phase with a `started`
+/// marker, plus the idempotent recovery path.
+///
+/// Returns `true` if this was a recovery (a prior `started` marker existed).
+#[cfg(pg_seam)]
+pub(crate) async fn apply_non_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+    had_inflight: bool,
+    supersedes: &[&str],
+) -> Result<bool, ApplyError> {
+    let version = m.version.as_str();
+
+    // Existence-guard catalog probe, under the held project lock. The no-TOCTOU
+    // guarantee comes from the plan lock, not from being inside the transactional
+    // apply path, so the two-phase path honors the same probe before it writes an
+    // inflight marker or runs the bare `up`.
+    if let Some(probe) = &m.existence_guard {
+        let probe_started = Instant::now();
+        let live = match crate::apply::drift::snapshot_schema(conn, probe.schema()).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(match e {
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
+        match crate::render::existence_probe::decide(
+            probe,
+            &live,
+            crate::schema::query::SqlDialect::Postgres,
+        ) {
+            crate::render::existence_probe::GuardVerdict::RunBare => { /* continue below */ }
+            crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
+                let exec_ms =
+                    i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+                if supersedes.is_empty() {
+                    journal::record_completed(
+                        conn,
+                        cfg,
+                        journal::CompletedRecord {
+                            version,
+                            name: &m.name,
+                            checksum: m.checksum.as_str(),
+                            applied_by,
+                            exec_ms,
+                            kind: "apply",
+                        },
+                    )
+                    .await?;
+                } else {
+                    conn.batch("BEGIN").await?;
+                    let finalize = async {
+                        journal::record_completed(
+                            conn,
+                            cfg,
+                            journal::CompletedRecord {
+                                version,
+                                name: &m.name,
+                                checksum: m.checksum.as_str(),
+                                applied_by,
+                                exec_ms,
+                                kind: "squash",
+                            },
+                        )
+                        .await?;
+                        insert_supersedes_edges(conn, cfg, version, supersedes).await
+                    }
+                    .await;
+                    if let Err(e) = finalize {
+                        if let Err(rb) = conn.batch("ROLLBACK").await {
+                            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a guarded non-txn satisfied-noop finalize error");
+                        }
+                        return Err(ApplyError::Journal(e));
+                    }
+                    conn.batch("COMMIT").await?;
+                }
+                return Ok(false);
+            }
+            crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
+                return Err(ApplyError::ExistenceGuardDrift {
+                    version: version.to_string(),
+                    object: d.object,
+                    field: d.field,
+                    expected: d.expected,
+                    actual: d.actual,
+                });
+            }
+        }
+    }
+
+    // Journal / inflight I/O runs as the ADMIN (C1): the migrator's grant on the
+    // meta schema is revoked, so `record_started` / `recover_non_transactional`
+    // (which clears the marker) / `record_completed` must NOT run under
+    // `SET ROLE migrator`. Only the `<up>` (and the recovery `DROP INDEX`, which
+    // the migrator owns) runs as the migrator.
+    if had_inflight {
+        // Recovery path: a prior run wrote `started` then crashed before
+        // `completed`. Inspect the real state and make the apply idempotent.
+        // `recover_non_transactional` runs entirely as the ADMIN (it is called
+        // BEFORE the `<up>`'s `SET ROLE`): both the INVALID-index DROP and the
+        // inflight `clear` run as admin (the admin is privileged over the project
+        // schema, so it can DROP the index without the migrator role). See
+        // `recover_non_transactional`. It CLEARS the inflight marker; the
+        // `record_started` below then RE-ARMS it before the `<up>` re-runs.
+        recover_non_transactional(conn, cfg, m).await?;
+    }
+    // Write (fresh path) or RE-WRITE (post-recovery, M2) the `started` marker
+    // BEFORE the `<up>` runs. The re-arm matters on the recovery path:
+    // `recover_non_transactional` cleared the marker, but the re-run below can
+    // itself crash before `record_completed`. Without a fresh `started` marker a
+    // SECOND crash would observe `had_inflight = false` and treat the next attempt
+    // as a FRESH apply — skipping the INVALID-index cleanup, so an interrupted
+    // `CREATE INDEX CONCURRENTLY` left INVALID would satisfy `IF NOT EXISTS` and
+    // never be rebuilt. Re-writing `started` here keeps every subsequent crash
+    // re-entering recovery until a `completed` row lands. Runs as admin (still
+    // before the `SET ROLE`). `record_started` is `ON CONFLICT DO NOTHING`, so on
+    // the fresh path (where recovery did not run) it is the original single write.
+    journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by).await?;
+
+    let started = Instant::now();
+    // C1: bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
+    // runs under line-2 confinement, but the journal writes above/below run as
+    // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
+    // the role never leaks onto the session even if the `<up>` fails — and
+    // `apply`'s `restore_session` is an unconditional backstop (L1).
+    if let Some(role) = &cfg.pg.migrator_role {
+        let role_q = crate::render::dml::quote_ident_checked(role)?;
+        conn.batch(&format!("SET ROLE {role_q}"))
+            .await?;
+    }
+    let up_result = conn.batch(&m.up).await;
+    if cfg.pg.migrator_role.is_some() {
+        // RESET ROLE regardless of the up's success, so the journal writes below
+        // run as admin and no role leaks onto the session.
+        if let Err(e) = conn.batch("RESET ROLE").await {
+            // If RESET ROLE itself fails, surface it (apply's restore_session is
+            // the L1 backstop). Prefer surfacing the up's error if it failed.
+            if up_result.is_ok() {
+                return Err(ApplyError::Db(e.into()));
+            }
+        }
+    }
+    up_result.map_err(|e| ApplyError::MigrationFailed {
+        version: version.to_string(),
+        source: e.into(),
+    })?;
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+    // Phase 2: immutable completed row + clear the marker (as admin). #2 fix: for a
+    // fresh-DB squash, the supersession edges must commit ATOMICALLY with the
+    // `completed` row, else a crash between leaves `S` net-applied with edges missing
+    // → `v1..vN` re-enter pending and re-run on top of `S` (double-apply). The non-txn
+    // `<up>` already committed (that is the nature of a non-txn migration), but the
+    // JOURNAL writes — the completed row, the inflight clear, and the edges — are
+    // bracketed in one transaction so they land together. No surrounding txn for a
+    // non-squash: keep the original single-statement finalize.
+    if supersedes.is_empty() {
+        journal::record_completed(
+            conn,
+            cfg,
+            journal::CompletedRecord {
+                version,
+                name: &m.name,
+                checksum: m.checksum.as_str(),
+                applied_by,
+                exec_ms,
+                kind: "apply",
+            },
+        )
+        .await?;
+    } else {
+        conn.batch("BEGIN").await?;
+        let finalize = async {
+            // A fresh-path squash is stamped `kind='squash'` so its edges are honored
+            // by `superseded_versions` (#4 filters on `kind='squash'`).
+            journal::record_completed(
+                conn,
+                cfg,
+                journal::CompletedRecord {
+                    version,
+                    name: &m.name,
+                    checksum: m.checksum.as_str(),
+                    applied_by,
+                    exec_ms,
+                    kind: "squash",
+                },
+            )
+            .await?;
+            insert_supersedes_edges(conn, cfg, version, supersedes).await
+        }
+        .await;
+        if let Err(e) = finalize {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
+                tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a non-txn squash finalize error");
+            }
+            return Err(ApplyError::Journal(e));
+        }
+        conn.batch("COMMIT").await?;
+    }
+
+    Ok(had_inflight)
+}
+
+/// Idempotent recovery for a crashed non-transactional migration (design §2.4,
+/// C1/C2).
+///
+/// A `started` marker with no `completed` row means the prior attempt may have
+/// (a) failed mid-DDL, or (b) **succeeded then crashed** before recording
+/// `completed`. The old recovery reasoned per-op-type and blindly re-ran a
+/// possibly-non-idempotent `<up>`, which permanently wedged case (b)
+/// (`CREATE INDEX CONCURRENTLY` → `already exists`; `ALTER TYPE … ADD VALUE` →
+/// `label already exists`).
+///
+/// The robust model: non-txn `up`s are **required to be idempotent**
+/// (enforced up-front by [`validate_non_txn_idempotent`] — every non-txn
+/// statement uses `IF NOT EXISTS`), so recovery does not need per-op reasoning.
+/// It performs ONE cleanup that `IF NOT EXISTS` cannot itself do — dropping the
+/// `INVALID` index residue of an interrupted CONCURRENTLY build (an INVALID
+/// index satisfies `IF NOT EXISTS`, so it would otherwise never be rebuilt) —
+/// then clears the marker. The caller then **re-runs the idempotent `<up>`**,
+/// which is safe in both case (a) and case (b).
+///
+/// Runs as the **admin** (C1): it is called BEFORE the `<up>`'s `SET ROLE` and
+/// clears the inflight marker (`clear_inflight`), which is meta-schema I/O the
+/// migrator has no grant for. The admin owns the meta schema and is privileged
+/// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
+/// without needing the migrator role.
+#[cfg(pg_seam)]
+async fn recover_non_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+) -> Result<(), ApplyError> {
+    // Drop the INVALID residue of an interrupted CONCURRENTLY build — but ONLY
+    // the index(es) this migration's `up` names (v1.x scope fix). An INVALID
+    // index satisfies `IF NOT EXISTS`, so the caller's re-run of `<up>` would
+    // never rebuild it; we must drop it first. We parse the `CREATE INDEX … name`
+    // out of the `up` and drop *that* name (if it is currently invalid), rather
+    // than every invalid index in the schema.
+    //
+    // Why scoped: an OUT-OF-BAND invalid index (a manual CONCURRENTLY build the
+    // operator is running elsewhere in the project schema) must NOT be collateral
+    // damage of recovering an unrelated migration. The per-project advisory lock
+    // serializes the engine's own applies, but it does not stop a human's manual
+    // session, so scoping is the correct fix.
+    for idx in index_names_in_up(&m.up) {
+        // Only drop it if it is currently INVALID — a valid index named here means
+        // the prior attempt actually succeeded (case (b): completed then crashed
+        // before journaling), and the re-run of the idempotent `up`'s
+        // `IF NOT EXISTS` will correctly no-op over it. Dropping a valid index
+        // would needlessly rebuild it.
+        let is_invalid: bool = conn
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM pg_index x
+                       JOIN pg_class c ON c.oid = x.indexrelid
+                       JOIN pg_namespace n ON n.oid = c.relnamespace
+                      WHERE n.nspname = $1 AND c.relname = $2 AND x.indisvalid = false
+                 ) AS invalid",
+                &[(&cfg.project_schema).into(), (&idx).into()],
+            )
+            .await?
+            .try_get("invalid")?;
+        if is_invalid {
+            let stmt = format!(
+                "DROP INDEX IF EXISTS {}.{}",
+                crate::render::dml::quote_ident_checked(&cfg.project_schema)?,
+                crate::render::dml::quote_ident_checked(&idx)?,
+            );
+            conn.batch(&stmt).await?;
+        }
+    }
+
+    // Clear the stale marker; the caller re-runs `<up>` and re-records.
+    journal::clear_inflight(conn, cfg, m.version.as_str()).await?;
+    Ok(())
+}
+
+/// Parse the index name(s) created by `CREATE INDEX … name … ON …` statements in
+/// a migration's `up`, via the real Postgres parser (so syntax we cannot parse
+/// simply yields no names — recovery then drops nothing, which is the safe
+/// default). Unnamed `CREATE INDEX` (no explicit name) is skipped: Postgres
+/// derives the name, and recovery cannot target a name it does not know — the
+/// non-txn idempotency rule already forbids unnamed `CONCURRENTLY` indirectly
+/// (the author always emits a name; raw SQL must too to be re-runnable).
+fn index_names_in_up(up: &str) -> Vec<String> {
+    let Ok(parsed) = pg_query::parse(up) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        if let Some(NodeEnum::IndexStmt(idx)) =
+            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        {
+            if !idx.idxname.is_empty() {
+                names.push(idx.idxname.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Roll back ONE migration transactionally: `BEGIN; SET LOCAL …; SET LOCAL ROLE
+/// migrator; <down>; RESET ROLE; INSERT rolled_back (as admin); COMMIT`.
+///
+/// Atomic: the `down` + its `rolled_back` journal append commit together, so a
+/// crash leaves either both (rolled back + recorded) or neither. The `down` runs
+/// under the migrator role; the journal append runs as admin (the migrator has no
+/// meta grant — C1), exactly mirroring [`apply_transactional`].
+#[cfg(pg_seam)]
+pub(crate) async fn rollback_one_transactional<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<(), RollbackError> {
+    let down = m
+        .down
+        .as_deref()
+        .expect("rollback_one_transactional is only called for RollbackStep::Down (down is Some)");
+    let started = Instant::now();
+    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // so a fail-closed `IdentQuoteError` returns before any transaction is opened
+    // (no dangling txn). Both are pure functions of `cfg`/`m` — no dependency on
+    // the open txn. The rendered SQL still EXECUTES inside the txn below, as before.
+    let session_sql = set_local_session_sql(cfg, m)?;
+    let role_sql = set_local_role_sql(cfg)?;
+
+    conn.batch("BEGIN").await?;
+
+    // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
+    if let Err(e) = conn.batch(&session_sql).await {
+        let _ = conn.batch("ROLLBACK").await;
+        return Err(RollbackError::Db(e.into()));
+    }
+    // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
+    // ROLE before the journal append so the admin writes the rolled_back event.
+    if let Some(set_role) = &role_sql {
+        if let Err(e) = conn.batch(set_role.as_str()).await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(RollbackError::Db(e.into()));
+        }
+    }
+    // Run the `<down>` as the migrator.
+    if let Err(e) = conn.batch(down).await {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a down error");
+        }
+        return Err(RollbackError::DownFailed {
+            version: m.version.as_str().to_string(),
+            source: e.into(),
+        });
+    }
+    // RESET ROLE back to admin — still inside the txn — so the journal append runs
+    // as the admin (the migrator cannot write the journal).
+    if cfg.pg.migrator_role.is_some() {
+        if let Err(e) = conn.batch("RESET ROLE").await {
+            let _ = conn.batch("ROLLBACK").await;
+            return Err(RollbackError::Db(e.into()));
+        }
+    }
+    let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+    // Append the immutable `rolled_back` event in the SAME transaction, as admin.
+    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    if let Err(e) = conn
+        .exec(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations
+                     (event_kind, version, name, checksum, \"by\", exec_ms)
+                 VALUES ('{rolled_back}', $1, $2, $3, $4, $5)",
+                rolled_back = journal::EventKind::RolledBack.as_str()
+            ),
+            &[
+                m.version.as_str().into(),
+                (&m.name).into(),
+                m.checksum.as_str().into(),
+                applied_by.into(),
+                exec_ms.into(),
+            ],
+        )
+        .await
+    {
+        if let Err(rb) = conn.batch("ROLLBACK").await {
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a rolled_back-insert error");
+        }
+        return Err(RollbackError::Journal(JournalError::Db(e.into())));
+    }
+
+    conn.batch("COMMIT").await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod pg_confinement_shape_tests {
+    //! Pins the M2 confinement refactor: the **PG** apply leaf still emits its
+    //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
+    //! and `SET LOCAL lock_timeout` bracket from the
+    //! [`PgConfinement`](crate::conn::PgConfinement) block (now grouped under
+    //! `cfg.pg`, not flat on the neutral config), and a default (SQLite-shaped
+    //! construction reuses this same `new`) carries the INERT PG confinement —
+    //! never PG role/cross-schema confinement of its own.
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
+
+    fn trivial_migration() -> Migration {
+        let flags = MigrationFlags::default();
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: "CREATE TABLE t (id int)",
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up: "CREATE TABLE t (id int)".into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        }
+    }
+
+    /// PG confinement bracket is emitted from the grouped `cfg.pg` block,
+    /// byte-identically to the pre-M2 flat shape: search_path = project schema
+    /// (+ extension schema), and the mandatory timeouts in ms.
+    ///
+    /// This also pins the **lock-safety envelope** default: the DEFAULT
+    /// `lock_timeout` (3000 ms) is SHORT and SEPARATE from the long-running
+    /// `statement_timeout` (60000 ms). A regression that folded the two together
+    /// (or restored the old long 30000 ms lock_timeout) flips this assertion RED.
+    #[test]
+    fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x").with_migrator_role("migrator_proj_x");
+        let m = trivial_migration();
+
+        let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
+        // search_path is the project schema, then the `public` extension schema
+        // (the `new()` default) — pinned for confined resolution. The
+        // statement_timeout is the long RUNNING budget (60s); the lock_timeout is
+        // the SHORT lock-ACQUISITION budget (3s) — split by construction.
+        assert_eq!(
+            session,
+            "SET LOCAL search_path TO \"proj_x\", \"public\"; \
+             SET LOCAL statement_timeout = 60000; \
+             SET LOCAL lock_timeout = 3000;",
+            "PG SET LOCAL session bracket must come from cfg.pg byte-identically, \
+             with a SHORT default lock_timeout split from the long statement_timeout"
+        );
+
+        // The lock-safety split is real: the short lock-acquisition budget must
+        // be strictly shorter than the long running-statement budget — never the
+        // same value (which would mean a blocking DDL waits the full statement
+        // budget to acquire its lock, the outage this envelope prevents).
+        assert!(
+            cfg.lock_timeout_ms() < cfg.statement_timeout_ms(),
+            "default lock_timeout ({} ms) must be strictly shorter than \
+             statement_timeout ({} ms) — the lock-safety envelope",
+            cfg.lock_timeout_ms(),
+            cfg.statement_timeout_ms(),
+        );
+
+        // The migrator role bracket comes from cfg.pg.migrator_role.
+        let role = set_local_role_sql(&cfg)
+            .expect("role ident quotable")
+            .expect("migrator role set");
+        assert_eq!(role, "SET LOCAL ROLE \"migrator_proj_x\"");
+    }
+
+    /// The per-migration `lock_timeout_ms` override (the maintenance-window knob,
+    /// mirroring `timeout_ms`) is honoured by the txn-path session render: a
+    /// migration that sets its OWN lock budget renders THAT value, not the
+    /// executor-wide default — while a migration that sets none falls back to the
+    /// SHORT default. RED pre-change (the field did not exist and the render used
+    /// `cfg.lock_timeout_ms()` unconditionally).
+    #[test]
+    fn per_migration_lock_timeout_override_renders_over_default() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        // Default budget (3000 ms) when the migration sets no override.
+        let default_m = trivial_migration();
+        let default_session =
+            set_local_session_sql(&cfg, &default_m).expect("session sql renders");
+        assert!(
+            default_session.contains("SET LOCAL lock_timeout = 3000;"),
+            "no override ⇒ the SHORT executor default (3000 ms); got: {default_session}"
+        );
+
+        // An explicit per-migration override raises ONLY this migration's budget.
+        let mut override_m = trivial_migration();
+        override_m.flags.lock_timeout_ms = Some(7000);
+        let override_session =
+            set_local_session_sql(&cfg, &override_m).expect("session sql renders");
+        assert!(
+            override_session.contains("SET LOCAL lock_timeout = 7000;"),
+            "the per-migration lock_timeout_ms override (7000 ms) must win over the \
+             3000 ms default; got: {override_session}"
+        );
+        // The statement_timeout is untouched by the lock override.
+        assert!(
+            override_session.contains("SET LOCAL statement_timeout = 60000;"),
+            "the lock_timeout override must not perturb statement_timeout; got: {override_session}"
+        );
+    }
+
+    /// A default-constructed config (the SHAPE the SQLite engine builds via
+    /// `ExecutorConfig::new(app_id, app_id)`) carries NO migrator role — its
+    /// PG confinement is inert; SQLite confines via its runtime authorizer
+    /// mode-flip, never these PG params (M2).
+    #[test]
+    fn sqlite_shaped_config_carries_no_pg_role_confinement() {
+        // Exactly what crates/plugin-db sqlite_engine.rs constructs.
+        let cfg = ExecutorConfig::new("app_test", "app_test");
+        assert!(
+            cfg.pg.migrator_role.is_none(),
+            "a SQLite-shaped config must carry no PG migrator role (SET ROLE) — \
+             it confines via the runtime authorizer mode-flip, not the PG bracket"
+        );
+        // And the PG-only role bracket is therefore absent.
+        assert!(
+            set_local_role_sql(&cfg)
+                .expect("role ident quotable")
+                .is_none(),
+            "no SET LOCAL ROLE is emitted when the PG confinement carries no role"
+        );
+        // The neutral identity fields ARE populated (engine-agnostic).
+        assert_eq!(cfg.project_id, "app_test");
+        assert_eq!(cfg.project_schema, "app_test");
     }
 }
 
 #[cfg(test)]
-mod element_null_parity {
-    //! §A.8 dual-adapter parity: a synthetic element-NULL `reloptions`-shaped
-    //! `text[]` yields the LEGACY `[]` outcome through BOTH the compio adapter and
-    //! a canned host `SeamRow`. Pins parity on the one raw, nullable, unfiltered
-    //! catalog array cell so native and host stay interchangeable.
+mod non_txn_idempotency_tests {
+    use super::*;
+    use crate::model::migration::{Checksum, MigrationFlags, MigrationId};
 
-    use super::super::seam::{SeamRow, SeamValue};
-
-    /// A canned host row carrying a `text[]` with an element-NULL, exactly as a
-    /// napi `pg` driver would build it (JS `null` inside the array).
-    fn host_row_with_element_null() -> SeamRow {
-        SeamRow::new(
-            vec!["reloptions".to_string()],
-            vec![SeamValue::TextArray(vec![
-                Some("fillfactor=90".to_string()),
-                None, // a SQL NULL element
-            ])],
-        )
-    }
-
-    #[test]
-    fn host_element_null_reloptions_coerces_to_empty_via_unwrap_or_default() {
-        let row = host_row_with_element_null();
-        // The `.unwrap_or_default()` idiom (drift.rs:899/900/902/1114 shape): a
-        // NULL element makes the Vec<String> decode err, coerced to [].
-        let cols: Vec<String> = row.try_get::<_, Vec<String>>("reloptions").unwrap_or_default();
-        assert!(cols.is_empty(), "element-NULL text[] must coerce to [] on host adapter");
-    }
-
-    #[test]
-    fn host_element_null_reloptions_coerces_to_none_via_ok_flatten() {
-        let row = host_row_with_element_null();
-        // The `.ok().flatten()` idiom (drift.rs:901 reloptions shape): a NULL
-        // element makes the inner Vec<String> decode err → None.
-        let opt: Option<Vec<String>> = row
-            .try_get::<_, Option<Vec<String>>>("reloptions")
-            .ok()
-            .flatten();
-        assert!(opt.is_none(), "element-NULL text[] must coerce to None on host adapter");
-    }
-
-    /// The compio-adapter half of the parity check: drive a real element-NULL
-    /// `text[]` through the live `Row → SeamRow` adapter and assert it reaches the
-    /// SAME `[]` / `None` outcome as the canned host row above. Requires a live PG
-    /// (skips when `MIGRATE_TEST_DB` is unset unless `MIGRATE_REQUIRE_DB=1`).
-    #[cfg(feature = "native-pg")]
-    #[compio::test]
-    async fn compio_and_host_agree_on_element_null_reloptions() {
-        let Some(url) = std::env::var("MIGRATE_TEST_DB").ok() else {
-            if std::env::var("MIGRATE_REQUIRE_DB").as_deref() == Ok("1") {
-                panic!("MIGRATE_REQUIRE_DB=1 but MIGRATE_TEST_DB unset");
-            }
-            eprintln!("skipping compio element-NULL parity: MIGRATE_TEST_DB unset");
-            return;
+    /// Build a non-transactional migration whose `up` is `sql`.
+    fn nontxn(sql: &str) -> Migration {
+        let flags = MigrationFlags {
+            transactional: false,
+            ..MigrationFlags::default()
         };
-        // `crate::conn::connect` returns a `Client` whose driver loop is already
-        // spawned+detached on the compio runtime (the crate-wide pattern).
-        let client = crate::conn::connect(&url).await.expect("connect");
-
-        // A text[] literal with an element-NULL, shaped like a raw `reloptions`.
-        let rows = super::PgSession::query(
-            &client,
-            "SELECT ARRAY['fillfactor=90', NULL]::text[] AS reloptions",
-            &[],
-        )
-        .await
-        .expect("query element-null array");
-        let row = &rows[0];
-
-        // The SeamValue must PRESERVE the element-NULL (a None element)...
-        match row.try_get::<_, Option<Vec<String>>>("reloptions") {
-            Ok(_) | Err(_) => {}
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: sql,
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        Migration {
+            version,
+            name: "n".into(),
+            up: sql.into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
         }
-        // ...and the legacy `.unwrap_or_default()` / `.ok().flatten()` idioms must
-        // both coerce it to the empty outcome, identical to the host row.
-        let via_default: Vec<String> =
-            row.try_get::<_, Vec<String>>("reloptions").unwrap_or_default();
-        let via_flatten: Option<Vec<String>> = row
-            .try_get::<_, Option<Vec<String>>>("reloptions")
-            .ok()
-            .flatten();
-
-        let host = host_row_with_element_null();
-        let host_default: Vec<String> =
-            host.try_get::<_, Vec<String>>("reloptions").unwrap_or_default();
-        let host_flatten: Option<Vec<String>> = host
-            .try_get::<_, Option<Vec<String>>>("reloptions")
-            .ok()
-            .flatten();
-
-        assert_eq!(via_default, host_default, "compio vs host: unwrap_or_default outcome");
-        assert_eq!(via_flatten, host_flatten, "compio vs host: ok().flatten() outcome");
-        assert!(via_default.is_empty(), "element-NULL → [] on compio adapter");
-        assert!(via_flatten.is_none(), "element-NULL → None on compio adapter");
     }
 
-    /// Enum-completeness for the dormant `SeamBind` arms (Bool/Null/Decimal never
-    /// reach the wire today, §A.1): they must map to a `ToSqlHolder` without panic.
-    #[cfg(feature = "native-pg")]
+    // REGRESSION (nontxn-dml-recovery-double-apply): a bare INSERT/UPDATE/
+    // DELETE/MERGE/TRUNCATE on the non-txn two-phase path would be re-run
+    // VERBATIM by crash recovery and double-apply on a success-then-crash.
+    // Validation must reject every bare-DML non-txn `up`. Pre-fix these passed
+    // (only CONCURRENTLY / ALTER TYPE ADD VALUE were fenced).
     #[test]
-    fn seambind_all_arms_map_to_holder() {
-        use super::super::seam::SeamBind;
-        use super::to_holder;
-        let _ = to_holder(&SeamBind::Null);
-        let _ = to_holder(&SeamBind::Bool(true));
-        let _ = to_holder(&SeamBind::Int(7));
-        let _ = to_holder(&SeamBind::Decimal("1.5".to_string()));
-        let _ = to_holder(&SeamBind::Text("x".to_string()));
+    fn bare_dml_on_non_txn_path_is_rejected() {
+        for sql in [
+            "INSERT INTO t (id) VALUES (1)",
+            "UPDATE t SET x = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id = 1",
+            "TRUNCATE t",
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DO NOTHING",
+        ] {
+            let m = nontxn(sql);
+            let err = validate_non_txn_idempotent(&m)
+                .expect_err(&format!("bare DML must be rejected on non-txn path: {sql}"));
+            assert!(
+                matches!(err, ApplyError::NonIdempotentNonTxn { .. }),
+                "expected NonIdempotentNonTxn for `{sql}`, got {err:?}"
+            );
+        }
+    }
+
+    // A DML statement mixed in among DDL on the non-txn path is still caught.
+    #[test]
+    fn dml_mixed_with_ddl_on_non_txn_path_is_rejected() {
+        let m = nontxn(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (x);\n\
+             INSERT INTO t (id) VALUES (1);",
+        );
+        let err = validate_non_txn_idempotent(&m).expect_err("DML among DDL must be rejected");
+        assert!(matches!(err, ApplyError::NonIdempotentNonTxn { .. }), "got {err:?}");
+    }
+
+    // The legitimate non-txn ops (idempotent CONCURRENTLY / ADD VALUE IF NOT
+    // EXISTS, naturally-rerunnable DROP INDEX CONCURRENTLY / VACUUM) still pass —
+    // the DML fence must not over-reject inherently-non-txn DDL.
+    #[test]
+    fn idempotent_non_txn_ddl_still_passes() {
+        for sql in [
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON t (x)",
+            "DROP INDEX CONCURRENTLY IF EXISTS i",
+            "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'excited'",
+            "VACUUM ANALYZE t",
+        ] {
+            let m = nontxn(sql);
+            assert!(
+                validate_non_txn_idempotent(&m).is_ok(),
+                "idempotent non-txn op must pass: {sql}"
+            );
+        }
     }
 }

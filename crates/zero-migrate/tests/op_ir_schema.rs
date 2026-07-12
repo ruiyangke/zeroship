@@ -119,7 +119,7 @@ fn op_variant_names_from_schema() {
         "dropSequence",
         "createTrigger",
         "dropTrigger",
-        // VENDOR (`@zeroship/migrate`) — the Postgres-only privileged primitives.
+        // VENDOR (`zero-migrate`) — the Postgres-only privileged primitives.
         "createSchema",
         "dropSchema",
         "createExtension",

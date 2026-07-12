@@ -1,4 +1,4 @@
-// op.* VENDOR fixture (`@zeroship/migrate`) — the variant-exhaustiveness +
+// op.* VENDOR fixture (`zero-migrate`) — the variant-exhaustiveness +
 // cross-impl round-trip gate for the privileged Postgres primitives (vendor spec
 // §4.5). Exercises EVERY vendor Op variant at least once, modelled on the
 // platform's own 0025_roles_rls / 0001_extensions_schemas / 0002_auth constructs,
@@ -16,7 +16,7 @@ import {
   revoke,
   role,
   schema,
-} from "@zeroship/migrate";
+} from "zero-migrate";
 
 export const name = "pg_vendor";
 
@@ -24,48 +24,48 @@ export function up() {
   // ── extensions + schemas (0001) ──
   extension("citext").create({ ifNotExists: true });
   extension("citext").drop({ ifExists: true });
-  schema("zeroship").create({ ifNotExists: true });
-  schema("zeroship").drop({ ifExists: true, cascade: true });
+  schema("zero_migrate").create({ ifNotExists: true });
+  schema("zero_migrate").drop({ ifExists: true, cascade: true });
 
   // ── roles (0025) ──
-  role("zeroship_auth").create({
+  role("zero_migrate_auth").create({
     login: true,
-    password: "zeroship_auth",
+    password: "zero_migrate_auth",
     bypassRls: true,
-    setSearchPath: ["zeroship", "public"],
+    setSearchPath: ["zero_migrate", "public"],
     ifNotExists: true,
   });
-  role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
-  role("zeroship_auth").drop({ ifExists: true });
-  dropOwnedBy({ roles: ["zeroship_auth"] });
+  role("zero_migrate_auth").setOptions({ setSearchPath: ["zero_migrate", "public"] });
+  role("zero_migrate_auth").drop({ ifExists: true });
+  dropOwnedBy({ roles: ["zero_migrate_auth"] });
 
   // ── grants / revokes (0025 / 0004) ──
   grant({
     privileges: ["select", "insert", "update", "delete"],
-    on: { kind: "table", names: ["users"], schema: "zeroship" },
-    to: ["zeroship_auth"],
+    on: { kind: "table", names: ["users"], schema: "zero_migrate" },
+    to: ["zero_migrate_auth"],
   });
   revoke({
     privileges: ["update", "delete", "truncate"],
-    on: { kind: "table", names: ["audit_events"], schema: "zeroship" },
+    on: { kind: "table", names: ["audit_events"], schema: "zero_migrate" },
     from: ["public"],
   });
 
   // ── partition attach (PG vendor; distinct from createPartition) ──
-  table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+  table("events", { schema: "zero_migrate" }).partition("events_2026_11").attach({
     from: ["2026-11-01T00:00:00Z"],
     to: ["2026-12-01T00:00:00Z"],
   });
 
   // ── RLS + policies (0025) ──
-  const secrets = table("app_secrets", { schema: "zeroship" });
+  const secrets = table("app_secrets", { schema: "zero_migrate" });
   secrets.setRls({ enabled: true, forced: true });
   secrets.policy("tenant_isolation").create({
     for: "all",
     using: (col) =>
-      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+      col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
     withCheck: (col) =>
-      col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+      col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
   secrets.policy("tenant_isolation").drop({ ifExists: true });
   secrets.setRls({ enabled: false, forced: false });
@@ -73,7 +73,7 @@ export function up() {
   // ── functions (0002 tamper trigger) ──
   createFunction({
     name: "audit_events_block_tamper",
-    schema: "zeroship",
+    schema: "zero_migrate",
     returns: "trigger",
     language: "plpgsql",
     replace: true,
@@ -81,7 +81,7 @@ export function up() {
   });
 
   // ── triggers (0002 + A2) ──
-  const audit = table("audit_events", { schema: "zeroship" });
+  const audit = table("audit_events", { schema: "zero_migrate" });
   audit.trigger("audit_events_block_update").create({
     timing: "before",
     events: ["update", "delete"],
@@ -99,13 +99,13 @@ export function up() {
 
   dropFunction({
     name: "audit_events_block_tamper",
-    schema: "zeroship",
+    schema: "zero_migrate",
     ifExists: true,
   });
 
   // ── the gated raw escape (vendor spec §2.11) ──
   raw({
-    sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+    sql: "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
     reason: "set tenant app GUC for pg vendor fixture",
   });
 }

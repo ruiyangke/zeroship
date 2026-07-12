@@ -8,8 +8,6 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "native-pg")]
-use compio_postgres::{Client, NoTls};
 
 /// Error opening a migrator connection.
 ///
@@ -18,10 +16,6 @@ use compio_postgres::{Client, NoTls};
 /// connect path exists to construct it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
-    /// The underlying compio-postgres driver failed to connect.
-    #[cfg(feature = "native-pg")]
-    #[error("connect: {0}")]
-    Connect(#[from] compio_postgres::Error),
 }
 
 /// The **Postgres confinement parameters** — the per-engine apply-confinement
@@ -179,7 +173,7 @@ pub struct ExecutorConfig {
     /// executor into a privileged profile.
     pub(crate) trust: crate::model::policy::TrustProfile,
     /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
-    /// references to (e.g. `zeroship` / `public`). Empty for
+    /// references to (e.g. `zero_migrate` / `public`). Empty for
     /// Confined (the `project_schema` is the sole permitted schema there) and for
     /// Trusted (no cross-schema confinement at all).
     pub(crate) platform_schemas: Vec<String>,
@@ -243,7 +237,7 @@ impl ExecutorConfig {
                 self.platform_schemas.clone(),
                 self.platform_exts.clone(),
             ),
-            #[cfg(any(test, feature = "standalone-cli"))]
+            #[cfg(test)]
             (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
                 crate::guard::GuardConfig::trusted(cap)
             }
@@ -255,15 +249,18 @@ impl ExecutorConfig {
 
     /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, mintable
-    /// only inside `command::runner`, so neither the control plane
+    /// only through named in-crate seams, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
     /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
     /// the `CREATE EXTENSION` allowlist.
     ///
-    /// The real caller is the operator-side `command::runner` (the CLI,
-    /// Phase 3); the token is the in-crate enforcement primitive.
+    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI was retired into
+    /// the `zero-migrate-engine` TS CLI (redesign step 5c), and production Platform
+    /// applies flow through the napi host path. The token stays the in-crate
+    /// enforcement primitive.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn platform(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
@@ -282,23 +279,24 @@ impl ExecutorConfig {
     /// Build a **Trusted** executor config — the public dbmate-like posture
     /// (Track A). REQUIRES an
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, EXACTLY
-    /// like [`ExecutorConfig::platform`], mintable only inside
-    /// `command::runner`. So neither the control plane (external; cannot
+    /// like [`ExecutorConfig::platform`], mintable only through named in-crate
+    /// seams. So neither the control plane (external; cannot
     /// name `Trusted` nor mint the token) nor any in-crate creator-path module
     /// (`submit`/`engine`; cannot mint the token) can flip the executor into
-    /// Trusted — only the operator-side runner can.
+    /// Trusted.
     ///
     /// Trusted runs as the **connecting role** (`migrator_role = None`, like
     /// Platform's admin), with **no schema confinement** and **no deny-list**
     /// (the executor's [`guard_config`](Self::guard_config) returns the Trusted
     /// guard, whose `check()` skips the deny-list/cross-schema/body walks). The
-    /// destructive flags are still derived, so the CLI's `--yes` gate still
-    /// applies.
+    /// destructive flags are still derived, so a caller's `--yes`-style approval
+    /// gate still applies.
     ///
-    /// The real caller is the operator-side `command::runner` (the public
-    /// CLI, Phase A2); the token is the in-crate enforcement primitive.
+    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
+    /// sole Trusted producer was retired into the `zero-migrate-engine` TS CLI
+    /// (redesign step 5c). The token stays the in-crate enforcement primitive.
     #[must_use]
-    #[cfg(any(test, feature = "standalone-cli"))]
+    #[cfg(test)]
     pub(crate) fn trusted(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
@@ -329,7 +327,7 @@ impl ExecutorConfig {
     ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
     ///   unqualified `up` name can never resolve to the journal — C1).
     /// - **Platform** ⇒ the full configured schema allowlist (e.g.
-    ///   `"zeroship", "public"`). A multi-schema changelog relies on
+    ///   `"zero_migrate", "public"`). A multi-schema changelog relies on
     ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
     ///   must resolve a creation target (`public`) — and at that point the
     ///   project schema does not yet exist, so a project-schema-only path would
@@ -397,48 +395,4 @@ impl ExecutorConfig {
     }
 }
 
-/// Open a migrator connection and spawn its driver loop on the compio runtime.
-///
-/// Mirrors the `connect` + `spawn(conn.run()).detach()` pattern used across
-/// `crates/control` and `crates/auth`: the `Connection` half must be driven
-/// for the [`Client`] to make progress, and on compio it runs as a detached
-/// task on the current runtime.
-///
-/// # Errors
-/// [`ConnectError::Connect`] if the driver cannot establish the session.
-#[cfg(feature = "native-pg")]
-pub async fn connect(dsn: &str) -> Result<Client, ConnectError> {
-    let (client, handle) = connect_with_handle(dsn).await?;
-    // Run-loop ownership not needed by this caller: detach it (background).
-    handle.detach();
-    Ok(client)
-}
 
-/// Open a migrator connection, returning BOTH the [`Client`] and the
-/// [`JoinHandle`](compio::runtime::JoinHandle) for its detached driver loop.
-///
-/// Unlike [`connect`] (which detaches the run-loop), this hands the run-loop
-/// handle back to the caller so it can be **deterministically closed** before a
-/// destructive admin op. The shadow-DB dry-run uses this so it can `cancel()`
-/// the shadow session's run-loop after dropping the client and BEFORE
-/// `DROP DATABASE … WITH (FORCE)` — leaving the FORCE drop nothing to fight (a
-/// still-registered backend would otherwise be a race; H2 fix). A plain
-/// [`connect`] caller that does not need that control keeps detaching.
-///
-/// The returned handle is `#[must_use]`: drop it to cancel the run-loop, call
-/// `.detach()` to background it, or `.cancel().await` to close it deterministically.
-///
-/// # Errors
-/// [`ConnectError::Connect`] if the driver cannot establish the session.
-#[cfg(feature = "native-pg")]
-pub async fn connect_with_handle(
-    dsn: &str,
-) -> Result<(Client, compio::runtime::JoinHandle<()>), ConnectError> {
-    let (client, connection) = compio_postgres::connect(dsn, NoTls).await?;
-    let handle = compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            tracing::error!(error = %e, "zero-migrate: pg connection loop ended with error");
-        }
-    });
-    Ok((client, handle))
-}

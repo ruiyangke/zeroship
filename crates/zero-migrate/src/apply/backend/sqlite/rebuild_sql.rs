@@ -6,7 +6,7 @@
 //! requires the canonical SQLite table-rebuild: create a new table with the desired
 //! shape under a temp name, copy the mapped rows in, drop the old table, rename the
 //! new one into place, and recreate the table's indexes / triggers / dependent
-//! views. The new table's CREATE comes from the shared `zero-migrate-schema`
+//! views. The new table's CREATE comes from the shared `crate::schema`
 //! Sqlite/MainUnqualified emitter (so it carries the inline mask/enc goodie
 //! sentinels and FKs); the index/trigger/view DDL is captured verbatim from the
 //! LIVE `sqlite_master` **at execution time, here in the backend** (this is the
@@ -335,7 +335,7 @@ async fn run_rebuild_steps(
 
     // (a0) H2 — Drop any stale temp table FIRST. The shared emitter renders the temp
     //      CREATE as `CREATE TABLE IF NOT EXISTS <tmp>`; a creator who pre-created
-    //      `<t>__zsrebuild` in a prior CreatorUp migration would otherwise have the
+    //      `<t>__zero_migrate_rebuild` in a prior CreatorUp migration would otherwise have the
     //      `IF NOT EXISTS` SILENTLY REUSE their polluted table — we'd INSERT…SELECT
     //      into the stale shape and RENAME the pollution into place. This engine-
     //      controlled DROP (under CreatorUp, on `main`) clears any such pollution so
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {
-        assert_eq!(SqliteRebuildSpec::tmp_name("users"), "users__zsrebuild");
+        assert_eq!(SqliteRebuildSpec::tmp_name("users"), "users__zero_migrate_rebuild");
     }
 
     #[test]

@@ -25,7 +25,7 @@ use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
     Migration, RebuildError, SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -428,8 +428,8 @@ async fn goodie_sentinels_survive_rebuild() {
     // The new CREATE carries the inline goodie sentinels (it came from the shared
     // emitter), so they survive the rebuild by construction.
     assert!(
-        rb.spec.new_table_create.contains("/* __zsmask:")
-            && rb.spec.new_table_create.contains("/* zsenc:"),
+        rb.spec.new_table_create.contains("/* zero-migrate:mask:")
+            && rb.spec.new_table_create.contains("/* zero-migrate:enc:"),
         "the rebuilt CREATE must carry the inline mask + enc sentinels: {}",
         rb.spec.new_table_create
     );
@@ -447,7 +447,7 @@ async fn goodie_sentinels_survive_rebuild() {
             .comment_sentinel
             .as_deref()
             .or(secret.encryption_sentinel.as_deref())
-            .map(|s| s.contains("zsenc:"))
+            .map(|s| s.contains("zero-migrate:enc:"))
             .unwrap_or(false),
         "encryption sentinel must survive the rebuild + recover via drift: {secret:?}"
     );
@@ -460,7 +460,7 @@ async fn goodie_sentinels_survive_rebuild() {
         masked
             .comment_sentinel
             .as_deref()
-            .map(|s| s.contains("__zsmask:"))
+            .map(|s| s.contains("zero-migrate:mask:"))
             .unwrap_or(false),
         "mask sentinel must survive the rebuild + recover via drift: {masked:?}"
     );
@@ -537,7 +537,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
     let spec = SqliteRebuildSpec {
         table: "child".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("child"),
-        new_table_create: "CREATE TABLE \"child__zsrebuild\" (\
+        new_table_create: "CREATE TABLE \"child__zero_migrate_rebuild\" (\
             \"id\" TEXT PRIMARY KEY, \
             \"parent_id\" TEXT REFERENCES \"parent\" (\"id\"))"
             .into(),
@@ -579,7 +579,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
         .actor()
         .query(
             "SELECT name FROM main.sqlite_master WHERE type='table' \
-             AND name='child__zsrebuild'",
+             AND name='child__zero_migrate_rebuild'",
         )
         .await
         .expect("query tmp");
@@ -706,7 +706,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
     let spec = SqliteRebuildSpec {
         table: "t".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("t"),
-        new_table_create: "CREATE TABLE \"t__zsrebuild\" (\"id\" TEXT PRIMARY KEY, \"v\" TEXT)"
+        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY, \"v\" TEXT)"
             .into(),
         copy_columns: vec![("id".into(), "id".into()), ("v".into(), "v".into())],
         // A bogus index over a column that does not exist → CREATE INDEX errors.
@@ -729,7 +729,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
     assert_eq!(count[0][0].as_deref(), Some("1"), "original row intact");
     let tmp = be
         .actor()
-        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='t__zsrebuild'")
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='t__zero_migrate_rebuild'")
         .await
         .expect("query tmp");
     assert!(tmp.is_empty(), "temp table rolled back");
@@ -902,7 +902,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
     let spec = SqliteRebuildSpec {
         table: "t".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("t"),
-        new_table_create: "CREATE TABLE \"t__zsrebuild\" (\"id\" TEXT PRIMARY KEY)".into(),
+        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY)".into(),
         copy_columns: vec![("id".into(), "id".into())],
         recreate_objects: vec![],
         // EMPTY on purpose: a DIRECT-spec caller that does not declare the dropped
@@ -995,7 +995,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
     let spec = SqliteRebuildSpec {
         table: "parent".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("parent"),
-        new_table_create: "CREATE TABLE \"parent__zsrebuild\" (\
+        new_table_create: "CREATE TABLE \"parent__zero_migrate_rebuild\" (\
             \"id\" TEXT PRIMARY KEY, \"label\" TEXT)"
             .into(),
         // copy_columns empty would copy nothing; we need a filtered copy, so we
@@ -1050,7 +1050,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
     );
     let tmp = be
         .actor()
-        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='parent__zsrebuild'")
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='parent__zero_migrate_rebuild'")
         .await
         .expect("query tmp");
     assert!(tmp.is_empty(), "the temp table must be rolled back");
@@ -1058,7 +1058,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
 }
 
 // ---------------------------------------------------------------------------
-// (H2) A creator-pre-created `<t>__zsrebuild` temp table does NOT pollute the
+// (H2) A creator-pre-created `<t>__zero_migrate_rebuild` temp table does NOT pollute the
 //      rebuild. Pre-fix the shared CREATE's `IF NOT EXISTS` silently REUSED the
 //      stale temp (junk column + junk row), then RENAMEd the pollution into place.
 //      The fix DROPs the stale temp first. Asserts: post-rebuild `t` has the NEW
@@ -1096,15 +1096,15 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
     // A creator pre-creates the engine's temp name with JUNK shape + a JUNK row, as a
     // prior CreatorUp migration would. (One txn flipping to CreatorUp for the DDL.)
     let tmp_name = SqliteRebuildSpec::tmp_name("gadgets");
-    assert_eq!(tmp_name, "gadgets__zsrebuild");
+    assert_eq!(tmp_name, "gadgets__zero_migrate_rebuild");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
     be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
     be.actor()
-        .exec("CREATE TABLE \"gadgets__zsrebuild\" (junk TEXT)")
+        .exec("CREATE TABLE \"gadgets__zero_migrate_rebuild\" (junk TEXT)")
         .await
         .expect("pre-create junk temp");
     be.actor()
-        .exec("INSERT INTO \"gadgets__zsrebuild\" (junk) VALUES ('POLLUTION')")
+        .exec("INSERT INTO \"gadgets__zero_migrate_rebuild\" (junk) VALUES ('POLLUTION')")
         .await
         .expect("seed junk");
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");

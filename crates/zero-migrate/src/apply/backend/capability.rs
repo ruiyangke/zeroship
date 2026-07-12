@@ -31,10 +31,6 @@ pub struct BackfillOutcome {
 /// Error from a backend backfill executor.
 #[derive(Debug, thiserror::Error)]
 pub enum BackfillError {
-    /// A database error outside a guarded/progress step.
-    #[cfg(feature = "native-pg")]
-    #[error("db error: {0}")]
-    Db(#[from] crate::apply::backend::postgres::seam::SeamError),
     /// A progress / journal-schema operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -80,16 +76,6 @@ pub enum BackfillError {
     CursorColumnMutated {
         /// The cursor column the transform illegally assigns.
         cursor_column: String,
-    },
-    /// A batch's `UPDATE` failed at execution.
-    #[cfg(feature = "native-pg")]
-    #[error("backfill batch failed at cursor {at_cursor:?}: {source}")]
-    BatchFailed {
-        /// The last committed cursor when the failing batch started.
-        at_cursor: Option<String>,
-        /// The DB error from the failed batch.
-        #[source]
-        source: crate::apply::backend::postgres::seam::SeamError,
     },
     /// SQLite analog of [`BackfillError::BatchFailed`].
     #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
@@ -166,10 +152,6 @@ pub struct DryRunReport {
 /// A failure of the dry-run harness itself.
 #[derive(Debug, thiserror::Error)]
 pub enum DryRunError {
-    /// `CREATE DATABASE` / `DROP DATABASE` or another admin-connection op failed.
-    #[cfg(feature = "native-pg")]
-    #[error("shadow admin db error: {0}")]
-    Admin(#[source] compio_postgres::Error),
     /// Opening the second shadow session failed.
     #[error("connect to shadow db: {0}")]
     Connect(#[from] ConnectError),

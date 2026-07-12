@@ -1,0 +1,38 @@
+[package]
+name = "zero-migrate-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The zero-migrate SQL security layer: the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification, and operational advisories. Owns the ONLY C dependency on the non-SQLite path (libpg_query). Depends on the zero-migrate-ir wire contract (including its SqlDialect deploy-target enum); does NOT depend on the engine."
+
+[features]
+# Enables the `OperatorCapability::for_test` mint seam (via the ir leaf) so the
+# guard's OWN in-crate test suite can construct the operator-gated
+# Platform/Trusted profiles. Never enabled in a production build.
+test-support = ["zero-migrate-ir/test-support"]
+
+[dependencies]
+# Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
+# guard sees exactly what Postgres would execute. A deny-list must not misparse
+# or miss a dangerous statement; a pure-Rust parser (sqlparser-rs) is incomplete
+# for exotic PG syntax, which is a security gap. pg_query carries a C build dep
+# (libpg_query) — this crate is the ONLY owner of that C dep on the non-SQLite
+# path.
+pg_query = "6"
+# The guard walks the serialized `pg_query` parse tree and builds structured
+# advisory/classification values as JSON-ish data.
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The wire contract: the closed `Op`/`MigrationIr` types the IR-shape data-security
+# checks read, the policy vocabulary (`TrustProfile`/`SchemaScope`/
+# `VendorCapabilities`/`OperatorCapability`/`DestructiveOps`), and the
+# `SqlDialect` deploy-target enum the guard keys dialect behaviour on.
+zero-migrate-ir = { workspace = true }
+
+[dev-dependencies]
+# The guard's in-crate tests mint operator-gated profiles.
+zero-migrate-ir = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

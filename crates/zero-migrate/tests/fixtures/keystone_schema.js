@@ -3,7 +3,7 @@
 // round-trip LOSSLESSLY: type matrix, ref (Id brand), vector + metric, encrypted,
 // and id-prefix. CHECK-borne enum/min/max facets are P1 once the Expr->SQL
 // renderer lands.
-import { t } from "@zeroship/db";
+import { t } from "zero-migrate";
 
 const users = {
   // Typed-id with an explicit prefix — a DECLARED-ONLY facet (idPrefix) that DB

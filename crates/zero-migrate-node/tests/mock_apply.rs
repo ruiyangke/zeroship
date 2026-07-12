@@ -1,9 +1,9 @@
 //! Behavioral integration test (design §C gate + §B.6): drive ONE real
 //! `executor::apply` through the addon's [`NapiHostSession`] over a MOCK
-//! [`VerbDispatch`] that answers with canned `SeamRow`s — NO Node host, NO DB.
+//! [`VerbDispatch`] that answers with canned `driver::Row`s — NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
-//! (`crates/zeroship-migrate/src/apply/backend/postgres.rs`), but exercised through
+//! (`crates/zero_migrate-migrate/src/apply/backend/postgres.rs`), but exercised through
 //! the *addon's* bridge types (`NapiHostSession` + `VerbDispatch`), so it proves:
 //!
 //! 1. `executor::apply::<NapiHostSession<MockDispatch>>` monomorphizes and runs the
@@ -66,7 +66,7 @@ impl VerbDispatch for MockDispatch {
         let rows = self.rows_for(&req.sql);
         Ok(JsReply {
             rows,
-            row_count: Some(1.0),
+            row_count: Some(1),
         })
     }
 }

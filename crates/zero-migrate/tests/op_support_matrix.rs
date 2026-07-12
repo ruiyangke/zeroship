@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use zero_migrate::model::capability::VendorCapability;
+use zero_migrate::model::op_support;
 use zero_migrate::model::ir::{
     ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
     IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
@@ -195,7 +196,7 @@ fn assert_decision_well_formed(decision: SupportDecision, label: &str) {
 }
 
 fn assert_current_cell_matches(op: &Op, dialect: Dialect) {
-    let support = op.support();
+    let support = op_support::support(op);
     let decision = support.decision(dialect);
     let label = format!("{} {dialect:?}", op_tag(op));
 
@@ -260,7 +261,7 @@ fn support_declarations_cover_every_op_and_dialect() {
 
     for op in &ops {
         let tag = op_tag(op);
-        let support = op.support();
+        let support = op_support::support(op);
         assert_eq!(
             support.supported_dialects().is_empty(),
             DIALECTS
@@ -284,7 +285,7 @@ fn support_declarations_cover_every_op_and_dialect() {
 
         match support.tier {
             SupportTier::Core => {
-                let caps = op.vendor_capabilities();
+                let caps = op_support::vendor_capabilities(op);
                 let raw_view_body_exception = matches!(
                     op,
                     Op::CreateView {
@@ -302,7 +303,7 @@ fn support_declarations_cover_every_op_and_dialect() {
                 assert!(!caps.is_empty(), "{tag}: vendor tier must name capabilities");
                 assert_eq!(
                     caps,
-                    op.vendor_capabilities().as_slice(),
+                    op_support::vendor_capabilities(op).as_slice(),
                     "{tag}: support tier capabilities must match Op::vendor_capabilities"
                 );
                 assert!(
@@ -546,7 +547,7 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
             continue;
         }
         let tag = op_tag(&op);
-        let support = op.support();
+        let support = op_support::support(&op);
         for dialect in DIALECTS {
             let decision_supported = support.decision(dialect).is_supported();
             let validates = validate_current(&op, dialect);
@@ -590,7 +591,7 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
 fn identity_always_support_decision_matches_validate_and_is_pg_only() {
     for op in identity_always_ops() {
         let tag = op_tag(&op);
-        let support = op.support();
+        let support = op_support::support(&op);
         for dialect in DIALECTS {
             let decision_supported = support.decision(dialect).is_supported();
             let validates = validate_current(&op, dialect);
@@ -611,7 +612,7 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
 fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
     for op in nextval_default_ops() {
         let tag = op_tag(&op);
-        let support = op.support();
+        let support = op_support::support(&op);
         for dialect in DIALECTS {
             let decision_supported = support.decision(dialect).is_supported();
             let validates = validate_current(&op, dialect);

@@ -32,7 +32,7 @@ use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::{resolve_create_table_policy, PolicyProfile, SqliteBackend};
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 use std::path::PathBuf;
 use tempfile::TempDir;
 

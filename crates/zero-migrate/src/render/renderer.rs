@@ -1,4 +1,4 @@
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 use crate::render::dml::{self, DmlError};
 use crate::model::expr::CastTarget;
@@ -464,7 +464,7 @@ impl DmlRenderer for SqliteDmlRenderer {
 
 impl DmlRenderer for MysqlDmlRenderer {
     fn quote_ident(&self, ident: &str) -> String {
-        zero_migrate_schema::query::mysql_quote_ident(ident)
+        crate::schema::query::mysql_quote_ident(ident)
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
