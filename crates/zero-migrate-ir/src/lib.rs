@@ -29,6 +29,7 @@
 //!   helpers of the load gate stay here in [`load`].
 
 pub mod capability;
+pub mod dialect;
 pub mod expr;
 pub mod id;
 pub mod ir;

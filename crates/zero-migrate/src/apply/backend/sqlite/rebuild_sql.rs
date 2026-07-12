@@ -6,7 +6,7 @@
 //! requires the canonical SQLite table-rebuild: create a new table with the desired
 //! shape under a temp name, copy the mapped rows in, drop the old table, rename the
 //! new one into place, and recreate the table's indexes / triggers / dependent
-//! views. The new table's CREATE comes from the shared `zero-migrate-schema`
+//! views. The new table's CREATE comes from the shared `crate::schema`
 //! Sqlite/MainUnqualified emitter (so it carries the inline mask/enc goodie
 //! sentinels and FKs); the index/trigger/view DDL is captured verbatim from the
 //! LIVE `sqlite_master` **at execution time, here in the backend** (this is the

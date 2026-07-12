@@ -89,7 +89,7 @@ fn parse_fts5_index(name: &str, sql: &str) -> Option<Vec<String>> {
     if !name.ends_with("__fts") {
         return None;
     }
-    zero_migrate_schema::fts_sqlite::parse_fts5_columns(sql)
+    crate::schema::fts_sqlite::parse_fts5_columns(sql)
 }
 
 /// The parent collection of an FTS5 vtable named `<coll>__fts` (strip the

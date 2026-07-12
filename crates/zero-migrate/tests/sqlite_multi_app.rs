@@ -31,7 +31,7 @@ use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
     SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 

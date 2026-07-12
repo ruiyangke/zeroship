@@ -1879,7 +1879,6 @@ dependencies = [
  "uuid",
  "zero-migrate-guard",
  "zero-migrate-ir",
- "zero-migrate-schema",
 ]
 
 [[package]]
@@ -1891,7 +1890,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "zero-migrate-ir",
- "zero-migrate-schema",
 ]
 
 [[package]]
@@ -1919,14 +1917,6 @@ dependencies = [
  "serde",
  "serde_json",
  "zero-migrate",
-]
-
-[[package]]
-name = "zero-migrate-schema"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "sha2",
 ]
 
 [[package]]

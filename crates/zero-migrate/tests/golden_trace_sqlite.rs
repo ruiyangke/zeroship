@@ -27,7 +27,7 @@ use zero_migrate::{
     ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint,
     SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";

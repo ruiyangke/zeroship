@@ -33,7 +33,7 @@
 //! attached database as the trigger. So the body always references `"<coll>__fts"`
 //! unqualified, even when the header is qualified.
 
-use crate::query::quote_ident;
+use crate::schema::query::quote_ident;
 
 /// The fixed suffix of the FTS5 virtual table for a collection (`<coll>__fts`).
 #[must_use]

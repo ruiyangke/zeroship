@@ -28,7 +28,7 @@ use zero_migrate::render::sql_preview::{
 use zero_migrate::{
     resolve_create_table_policy, MigrationIr, PolicyProfile,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, an online rename).

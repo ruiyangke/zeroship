@@ -93,6 +93,12 @@ pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;
+// The schema-authority core (DDL builders, diff classifier, sentinel codec,
+// schema-shape descriptors) — dissolved in from the former `zero-migrate-schema`
+// leaf crate (redesign step 3c). The data-plane query language that used to ride
+// along there had zero engine callers and was deleted; only the write/diff/describe
+// layer the engine uses survives here.
+pub mod schema;
 
 // The guard behaviour-lock suite (moved in from `zero-migrate-guard`'s
 // `guard/mod.rs` at redesign step 3b) — an in-crate test module so it can drive
@@ -191,7 +197,7 @@ pub use model::profile::{
 pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
 // The deploy-target dialect (§2.4.1) — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new` without depending on `zero-migrate-schema`.
-pub use zero_migrate_schema::query::SqlDialect;
+pub use schema::query::SqlDialect;
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,

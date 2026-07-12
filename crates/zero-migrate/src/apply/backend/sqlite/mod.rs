@@ -37,7 +37,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;

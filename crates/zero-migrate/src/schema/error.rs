@@ -11,7 +11,7 @@
 //! SQLSTATE-derived `.code` the SDK sees stay byte-identical to before the extraction.
 
 /// Error from the live-schema introspection helpers
-/// ([`crate::diff::read_live_schema`], [`crate::diff::estimate_row_count`]).
+/// ([`crate::schema::diff::read_live_schema`], [`crate::schema::diff::estimate_row_count`]).
 ///
 /// Carries the per-call-site context phrase (e.g. `"read columns failed"`)
 /// plus the underlying `compio_postgres::Error`. plugin-db's
@@ -29,7 +29,7 @@ pub struct SchemaError {
     /// The module-local context phrase (no `"diff: "` prefix — plugin-db
     /// adds that when mapping to `DbError` so the operator-facing message
     /// is `"diff: <context>: <driver-msg>"`, identical to the pre-extraction
-    /// `crate::diff::coded_sql` shape).
+    /// `crate::schema::diff::coded_sql` shape).
     pub context: String,
     /// The underlying driver error — carried verbatim so the SQLSTATE-driven
     /// classification stays the single source of truth.
@@ -63,7 +63,7 @@ impl std::error::Error for SchemaError {
 }
 
 /// Error from parsing a `zero-migrate:mask:` sentinel string
-/// ([`crate::mask_codec::parse_mask_sentinel`]).
+/// ([`crate::schema::mask_codec::parse_mask_sentinel`]).
 ///
 /// Carries the human-readable rejection message. plugin-db's
 /// `From<MaskSentinelError> for DbError` re-creates the exact

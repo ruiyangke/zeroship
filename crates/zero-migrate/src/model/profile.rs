@@ -1577,7 +1577,7 @@ mod tests {
     use crate::model::capability::VendorCapabilities;
     use crate::model::policy::TrustProfile;
     use crate::render::declarative::{build_table_snapshot, CollectionDescriptor};
-    use zero_migrate_schema::query::SqlDialect;
+    use crate::schema::query::SqlDialect;
 
     const KEY: &[u8] = b"stage-1 test key for sealed migrate policy";
     const ISSUED_AT: u64 = 1_719_792_000;
@@ -2392,7 +2392,7 @@ mod tests {
         let author = crate::render::lower::IrAuthor::new(
             "zero_migrate",
             "app_corpus",
-            zero_migrate_schema::query::SqlDialect::Postgres,
+            crate::schema::query::SqlDialect::Postgres,
         )
         .with_schema_scope(
             guard_cfg

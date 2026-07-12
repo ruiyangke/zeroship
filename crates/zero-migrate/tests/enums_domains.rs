@@ -4,7 +4,7 @@ use zero_migrate::{
 };
 use zero_migrate::{GuardDir, GuardProbe};
 use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";

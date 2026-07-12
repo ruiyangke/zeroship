@@ -37,7 +37,7 @@ use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
 use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate_ir::dialect::SqlDialect;
 use denylist::rule;
 use serde_json::Value;
 

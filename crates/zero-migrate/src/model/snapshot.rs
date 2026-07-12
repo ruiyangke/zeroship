@@ -71,7 +71,7 @@ pub struct ColumnSnapshot {
     /// attribute (introspection's `snapshot_schema` leaves it `None`; only
     /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
     /// `Eq` / `Hash`. The sentinel is built by the shared
-    /// [`zero_migrate_schema::query`] kernel — never re-spelled here.
+    /// [`crate::schema::query`] kernel — never re-spelled here.
     pub encryption_sentinel: Option<String>,
     /// **P4 HALF A** — the body of a `COMMENT ON COLUMN` sentinel to attach to
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
@@ -82,7 +82,7 @@ pub struct ColumnSnapshot {
     ///     the inline `/* zero-migrate:enc */` comment at parse time, so plugin-db recovers
     ///     the encryption metadata from `pg_description` at runtime.
     ///
-    /// Built by the shared codecs ([`zero_migrate_schema::mask_codec`]) — never
+    /// Built by the shared codecs ([`crate::schema::mask_codec`]) — never
     /// re-spelled here. EXCLUDED from `PartialEq` / `Eq` / `Hash`: desired
     /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
     /// classifies matching catalog comments back into this field instead of the

@@ -4,7 +4,7 @@
 //! These were relocated verbatim out of the original data-plane `backend`
 //! module (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
 //! pure *shape* descriptors — no DB round-trip, no crypto, no runtime —
-//! and the DDL builders in [`crate::query`] consume them. The data plane's
+//! and the DDL builders in [`crate::schema::query`] consume them. The data plane's
 //! `backend` module re-exports them so existing `crate::backend::…`
 //! references keep resolving (the data-plane crypto/spatial impls that
 //! name them are unchanged).

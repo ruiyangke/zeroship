@@ -544,7 +544,7 @@ async fn reports_sqlite_dialect() {
     let be = backend(&p);
     assert_eq!(
         MigrationBackend::dialect(&be),
-        zero_migrate_schema::query::SqlDialect::Sqlite
+        zero_migrate::schema::query::SqlDialect::Sqlite
     );
     // ensure_journal through the trait works and applied() is empty initially.
     let c = cfg();

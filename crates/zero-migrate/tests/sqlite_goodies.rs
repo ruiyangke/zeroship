@@ -18,7 +18,7 @@
 //!     plugin-db per `docs/reference/sqlite-divergences.md`).
 //!   - an `.fts()` field → an FTS5 **virtual table** (`<coll>__fts`) over the
 //!     source columns + AFTER sync triggers, emitted via the SHARED
-//!     `zero_migrate_schema::fts_sqlite` builders (the SAME structure plugin-db's
+//!     `zero_migrate::schema::fts_sqlite` builders (the SAME structure plugin-db's
 //!     runtime `ensure_fts_index` builds). This is the SQLite FTS shape — there is
 //!     NO PG `__fts` tsvector column and NO GIN index (`tsvector` has no SQLite
 //!     spelling). The SQLite-dialect `desired_snapshot_for_dialect` models it as an
@@ -36,7 +36,7 @@ use zero_migrate::{
     desired_snapshot, desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor,
     FieldDescriptor, SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -265,7 +265,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
 // ===========================================================================
 // FTS — an `.fts()` field applies on SQLite as an FTS5 external-content VIRTUAL
 // TABLE (`<coll>__fts`) + AFTER sync triggers (the SAME structure plugin-db's
-// runtime `ensure_fts_index` builds, via the shared `zero_migrate_schema::fts_sqlite`
+// runtime `ensure_fts_index` builds, via the shared `zero_migrate::schema::fts_sqlite`
 // builders), NOT the PG `__fts` tsvector column + GIN index (`tsvector` has no
 // SQLite spelling). The SQLite-dialect `desired_snapshot_for_dialect` models it as
 // an `IndexSnapshot { access_method: "fts5" }`; the SQLite emitter emits the
@@ -348,7 +348,7 @@ async fn fts_field_applies_cleanly_on_sqlite() {
     // (a) the vtable + triggers exist, and (b) the structure round-trips zero-drift.
     // The end-to-end MATCH-finds-the-mirrored-row queryability is exercised against
     // the runtime backend in `plugin-db/tests/sqlite_integration.rs` (the data-plane
-    // connection, which shares these exact FTS5 builders via `zero_migrate_schema`).
+    // connection, which shares these exact FTS5 builders via `zero_migrate::schema`).
 
     // A re-diff against the REAL introspected live snapshot → ZERO drift (the FTS5
     // vtable is recognised as the fts5 IndexSnapshot; its shadow tables are excluded;

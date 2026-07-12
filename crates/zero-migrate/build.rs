@@ -13,6 +13,16 @@ fn main() {
     // `--no-default-features` build does not warn on the `cfg(pg_seam)` gates.
     println!("cargo::rustc-check-cfg=cfg(pg_seam)");
 
+    // The `schema` module tree (dissolved in from the former `zero-migrate-schema`
+    // crate, redesign step 3c) carries the live-catalog introspection-EXECUTION
+    // helpers (`schema::diff::read_live_schema` / `estimate_row_count`, the
+    // `SchemaError` driver wrapper) behind a never-declared `introspect` feature:
+    // they name `compio_postgres` (a driver out of scope for this standalone — the
+    // engine does its own introspection over the `PgSession` seam) and are
+    // permanently-off dead code. Declaring the cfg here keeps the build free of
+    // `unexpected_cfgs` warnings without resurrecting the feature or the PG driver.
+    println!("cargo::rustc-check-cfg=cfg(feature, values(\"introspect\"))");
+
     let host_pg = std::env::var_os("CARGO_FEATURE_HOST_PG").is_some();
     if host_pg {
         println!("cargo::rustc-cfg=pg_seam");

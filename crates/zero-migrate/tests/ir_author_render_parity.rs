@@ -26,7 +26,7 @@ use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
     LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot, resolve_create_table_policy,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 /// A live `TableSnapshot` placeholder for an FK target — only its presence as a
 /// live key matters to the differ's inline-vs-defer decision.
@@ -267,7 +267,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     // byte-identical BYTEA type + the `/* zero-migrate:enc:… */` inline sentinel + the
     // `COMMENT ON COLUMN … 'zero-migrate:enc:…'` side output + the encrypted default-mask
     // `<col>_masked` sibling / `zero-migrate:mask` sentinel — built by the shared kernel
-    // (`zero_migrate_schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
+    // (`zero_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
     let desc = CollectionDescriptor {
         name: "vault".into(),
         owner_app: OWNER.into(),
@@ -524,7 +524,7 @@ fn create_index_render_is_byte_identical_pg() {
 // §6.4 SQLite leg — the SAME byte-identity gate on the SQLite dialect.
 //
 // The task mandates the cross-path byte-identity golden on BOTH PG and SQLite.
-// The SQLite createTable routes through the SHARED `zero_migrate_schema::query`
+// The SQLite createTable routes through the SHARED `zero_migrate::schema::query`
 // emitter (the same call the differ's `render_create_table_sqlite` makes), fed
 // the SDK schema `Value` IrAuthor builds from the op descriptor via the same
 // `descriptor_to_sdk_schema` bridge. So the SQLite leg is byte-identical BY

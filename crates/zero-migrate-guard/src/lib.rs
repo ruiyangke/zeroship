@@ -10,8 +10,8 @@
 //!
 //! - Depends on [`zero_migrate_ir`] (the wire contract: `Op`, `MigrationIr`, the
 //!   policy vocabulary `TrustProfile`/`SchemaScope`/`VendorCapabilities`/
-//!   `OperatorCapability`/`DestructiveOps`) and [`zero_migrate_schema`] (the
-//!   `SqlDialect` deploy-target enum).
+//!   `OperatorCapability`/`DestructiveOps`, and the `SqlDialect` deploy-target
+//!   enum).
 //! - Does **not** depend on the engine (`zero-migrate`). The engine depends on
 //!   THIS crate and re-exports the surface it needs (`SqlGuard`, `GuardConfig`,
 //!   `analyze`, `classify`, `Advisory`, `Severity`, …).

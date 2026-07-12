@@ -759,13 +759,13 @@ struct OfflineArtifacts {
     has_sql: bool,
 }
 
-const fn preview_dialect(chosen: Option<EngineArg>) -> zero_migrate_schema::query::SqlDialect {
+const fn preview_dialect(chosen: Option<EngineArg>) -> zero_migrate::schema::query::SqlDialect {
     match chosen {
-        Some(EngineArg::Sqlite) => zero_migrate_schema::query::SqlDialect::Sqlite,
-        Some(EngineArg::Mysql) => zero_migrate_schema::query::SqlDialect::Mysql,
+        Some(EngineArg::Sqlite) => zero_migrate::schema::query::SqlDialect::Sqlite,
+        Some(EngineArg::Mysql) => zero_migrate::schema::query::SqlDialect::Mysql,
         // `--dialect pg`, `--engine pg`, or unset all render/analyze the PG leg
         // (the default operator target). NO DSN probe.
-        _ => zero_migrate_schema::query::SqlDialect::Postgres,
+        _ => zero_migrate::schema::query::SqlDialect::Postgres,
     }
 }
 
@@ -908,7 +908,7 @@ fn run_lint_command(
 
 fn lint_offline_artifacts(
     dir: &Path,
-    dialect: zero_migrate_schema::query::SqlDialect,
+    dialect: zero_migrate::schema::query::SqlDialect,
     opts: &zero_migrate::PreviewOpts,
 ) -> Result<Vec<(String, Vec<zero_migrate::Advisory>)>, String> {
     let artifacts = discover_offline_artifacts(dir, "lint")?;

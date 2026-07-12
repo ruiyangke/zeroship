@@ -55,7 +55,7 @@ use crate::model::snapshot::{
 };
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
 /// [`LoweredUnit`]s (a `Migration` + its structural statement list); an online
@@ -222,7 +222,7 @@ pub struct LiveSchema {
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
     /// [`crate::render::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
-    /// the renamed field key) through the shared `zero_migrate_schema::query` emitter,
+    /// the renamed field key) through the shared `crate::schema::query` emitter,
     /// so the rebuilt table is byte-identical to what the declarative diff would
     /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
     pub sqlite_schemas: std::collections::BTreeMap<String, serde_json::Value>,
@@ -1904,7 +1904,7 @@ impl IrAuthor {
                 // top-level `primary_key` field above; validation owns any policy
                 // decision about author primary keys.
                 self.fold_create_table_specs(name, &eff_schema, &mut snap, constraints, indexes)?;
-                // The SQLite CREATE routes through the shared `zero_migrate_schema`
+                // The SQLite CREATE routes through the shared `crate::schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
                 // the SAME descriptor bridge (`descriptor_to_sdk_schema`) the
                 // differ's `desired_snapshot_for_dialect` uses, so the §6.4
@@ -4852,7 +4852,7 @@ fn render_sqlite_trigger_stmt(
                 }
                 let vals: Result<Vec<_>, _> = row
                     .iter()
-                    .map(|v| crate::render::dml::render_value_inline(v, zero_migrate_schema::query::SqlDialect::Sqlite))
+                    .map(|v| crate::render::dml::render_value_inline(v, crate::schema::query::SqlDialect::Sqlite))
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }

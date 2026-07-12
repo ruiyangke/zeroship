@@ -54,10 +54,10 @@ use crate::render::expand_contract::{
 };
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
-use zero_migrate_schema::query::{SqlDialect, SqliteEmitScope};
+use crate::schema::query::{SqlDialect, SqliteEmitScope};
 
 fn mysql_quote_ident(ident: &str) -> String {
-    zero_migrate_schema::query::mysql_quote_ident(ident)
+    crate::schema::query::mysql_quote_ident(ident)
 }
 
 fn mysql_qualified(schema: &str, object: &str) -> String {
@@ -654,10 +654,10 @@ pub struct FieldDescriptor {
 
     // -----------------------------------------------------------------------
     // Schema-authority P2 — the FULL-capability facets, reached by adopting the
-    // shared `zero-migrate-schema` DDL/type kernel. Before P2 the engine's v1-subset
+    // shared `crate::schema` DDL/type kernel. Before P2 the engine's v1-subset
     // differ REJECTED these as `UnsupportedType`; now the column TYPE + DDL
     // (vector index, encrypted BYTEA + sentinel, mask sibling, geoPoint geography
-    // + GiST) are resolved through `zero_migrate_schema::query`. Each facet mirrors
+    // + GiST) are resolved through `crate::schema::query`. Each facet mirrors
     // the SDK `FieldDef` sub-object verbatim so the engine builds the same `def`
     // JSON the SDK emits and the shared kernel maps it identically.
     /// `t.vector(dims, …)` — vector dimensionality. `Some(N)` ⇒ the column is
@@ -814,7 +814,7 @@ struct ResolvedRename {
 // DSL-type → information_schema.data_type mapping.
 //
 // Schema-authority P2: the engine's own v1-SUBSET type table was DELETED and the
-// column-type resolution now DELEGATES to the shared `zero-migrate-schema` kernel
+// column-type resolution now DELEGATES to the shared `crate::schema` kernel
 // (`query::def_to_column_type_for_dialect`). That is what gives the differ FULL
 // capability — `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
 // (encrypted) / `literal`-primitive are now first-class, where the v1 subset
@@ -860,7 +860,7 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
 }
 
 /// Build the SDK `FieldDef` JSON (`{ type, encrypted?, vectorDims?, vectorMetric?,
-/// mask?, literalValue? }`) the shared `zero-migrate-schema` kernel consumes, from the
+/// mask?, literalValue? }`) the shared `crate::schema` kernel consumes, from the
 /// engine's [`FieldDescriptor`]. This is the bridge that lets the engine reuse the
 /// shared DDL/type map (full capability) without adopting the SDK's untyped JSON
 /// as its public authoring surface: the engine keeps its typed descriptor, the
@@ -914,7 +914,7 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
 }
 
 /// PHASE 4 — reconstruct the FULL SDK schema `Value` (`{ <field>: { type, … } }`)
-/// the shared `zero_migrate_schema::query` CREATE-TABLE emitter consumes, from a
+/// the shared `crate::schema::query` CREATE-TABLE emitter consumes, from a
 /// [`CollectionDescriptor`]. This is the descriptor→`Value` bridge the **Confined
 /// SQLite** path routes through: the engine keeps its typed descriptor as its
 /// authoring surface and hands the shared emitter exactly the JSON shape the SDK's
@@ -1071,16 +1071,16 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     serde_json::Value::Object(schema)
 }
 
-/// **P4 HALF A** — build the shared [`zero_migrate_schema::diff::EncryptionMeta`] for
+/// **P4 HALF A** — build the shared [`crate::schema::diff::EncryptionMeta`] for
 /// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
 /// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
 /// the inline sentinel emitter (`mode = randomised`, `keyId = default`,
 /// `wraps = string`).
-fn encryption_meta_for_field(def: &serde_json::Value) -> Option<zero_migrate_schema::diff::EncryptionMeta> {
-    use zero_migrate_schema::descriptors::EncryptionMode;
-    use zero_migrate_schema::diff::{EncryptionMeta, WrappedType};
+fn encryption_meta_for_field(def: &serde_json::Value) -> Option<crate::schema::diff::EncryptionMeta> {
+    use crate::schema::descriptors::EncryptionMode;
+    use crate::schema::diff::{EncryptionMeta, WrappedType};
     let enc = def.get("encrypted").and_then(|v| v.as_object())?;
     let mode_str = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
     let mode = match mode_str {
@@ -1103,15 +1103,15 @@ fn encryption_meta_for_field(def: &serde_json::Value) -> Option<zero_migrate_sch
 
 /// The hidden `<col>_masked` sibling column a field's `.mask({...})` declaration
 /// requires, or `None` for an unmasked field / `kind: "none"` opt-out. Delegates
-/// to the shared kernel ([`zero_migrate_schema::query::mask_sibling_column_for_field`])
+/// to the shared kernel ([`crate::schema::query::mask_sibling_column_for_field`])
 /// so the engine and plugin-db agree on exactly which fields get a sibling.
 fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
-    zero_migrate_schema::query::mask_sibling_column_for_field(&f.name, &field_to_sdk_def(f))
+    crate::schema::query::mask_sibling_column_for_field(&f.name, &field_to_sdk_def(f))
 }
 
 /// Resolve a field's column data type in the `information_schema.data_type`
 /// spelling the snapshot stores, by routing through the shared kernel's
-/// [`zero_migrate_schema::query::def_to_column_type_for_dialect`] (the FULL type map,
+/// [`crate::schema::query::def_to_column_type_for_dialect`] (the FULL type map,
 /// P2) and translating its DDL spelling to the `information_schema` form.
 ///
 /// A bare/unknown token still fails closed: the shared map's plain-type fallback
@@ -1120,7 +1120,7 @@ fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
 /// the `TEXT` fallback (and which is not one of the engine's own text-spelled
 /// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
 fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
-    use zero_migrate_schema::query::{def_to_column_type_for_dialect, SqlDialect};
+    use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
 
     // A bare `literal` with no value is malformed — the SDK never emits it, and
     // the shared map would degrade it to TEXT. Keep the engine's explicit error.
@@ -1232,7 +1232,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// # Source of truth
 ///
 /// The five target tokens are exactly the SQLite column types the shared emitter
-/// ([`zero_migrate_schema::query::def_to_column_type_for_dialect`] with
+/// ([`crate::schema::query::def_to_column_type_for_dialect`] with
 /// `SqlDialect::Sqlite`) produces — `TEXT` / `REAL` / `INTEGER` / `NUMERIC` /
 /// `BLOB` — so emit and compare agree. Each arm below maps a PG `data_type`
 /// spelling (LHS) to the SQLite type the emitter would have written for the SAME
@@ -1246,7 +1246,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
 /// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
 /// tokens and IS detected.
 pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
-    zero_migrate_schema::query::sqlite_canonical_type(data_type)
+    crate::schema::query::sqlite_canonical_type(data_type)
 }
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
@@ -1524,9 +1524,9 @@ fn column_snapshot_for_field(
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let data_type = field_data_type(f)?;
     let sdk_def = field_to_sdk_def(f);
-    let encryption_sentinel = zero_migrate_schema::query::encryption_sentinel_for_field(&sdk_def);
+    let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel =
-        encryption_meta_for_field(&sdk_def).map(|m| zero_migrate_schema::mask_codec::build_encryption_sentinel(&m));
+        encryption_meta_for_field(&sdk_def).map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
     let case_sensitive = if matches!(f.case_sensitive, Some(false)) && !matches!(dialect, SqlDialect::Mysql) {
         Some(false)
     } else {
@@ -1661,7 +1661,7 @@ pub struct DesiredSchema {
     /// PHASE 4 — `table name → full SDK schema `Value`` (the
     /// [`descriptor_to_sdk_schema`] reconstruction), kept alongside the snapshot so
     /// the **Confined SQLite** path can route a new-table CREATE through the shared
-    /// `zero_migrate_schema::query` emitter (which is `Value`-driven). The keys match
+    /// `crate::schema::query` emitter (which is `Value`-driven). The keys match
     /// `snapshot.tables`. The PG path never reads this map (it renders from the
     /// snapshot), so it is inert on PG. It does NOT participate in drift — drift is
     /// the snapshot's job — so it is excluded from `PartialEq` (see the manual impl).
@@ -1783,7 +1783,7 @@ pub fn desired_snapshot(
 /// - **SQLite** — a `.fts()` field folds into an FTS5 **virtual table**
 ///   (`<coll>__fts`) over the source columns, mirrored by AFTER triggers — the same
 ///   structure plugin-db's runtime `ensure_fts_index` builds and the shared
-///   `zero_migrate_schema::fts_sqlite` builders emit. NO `__fts` column, NO GIN index
+///   `crate::schema::fts_sqlite` builders emit. NO `__fts` column, NO GIN index
 ///   (`tsvector` has no SQLite spelling).
 ///
 /// Modelling the FTS index as what the per-dialect emitter actually produces is
@@ -2058,7 +2058,7 @@ fn build_table_snapshot_impl(
         // read-pass is now EMITTED into the generated DDL: it rides on the
         // sibling column's `mask_sentinel`, which `render_create_table` /
         // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
-        // by the SHARED codec (`zero_migrate_schema::query::mask_sentinel_for_field`
+        // by the SHARED codec (`crate::schema::query::mask_sentinel_for_field`
         // → `build_mask_sentinel`) so it is byte-identical to the one
         // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
         // so the sentinel is not a snapshot drift attribute (excluded from
@@ -2066,7 +2066,7 @@ fn build_table_snapshot_impl(
         // a plain nullable TEXT column.
         if mask_sibling_for_field(f).is_some() {
             let comment_sentinel =
-                zero_migrate_schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
+                crate::schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
             columns.push(ColumnSnapshot {
                 name: format!("{}_masked", f.name),
                 data_type: "text".into(),
@@ -2103,7 +2103,7 @@ fn build_table_snapshot_impl(
         // pgvector ANN index (`USING ivfflat` with the metric-appropriate
         // opclass). The live snapshot carries it as `access_method =
         // 'ivfflat'`, so the desired snapshot must model it identically or it
-        // phantom-drops; routed through the shared `zero-migrate-schema` kernel so
+        // phantom-drops; routed through the shared `crate::schema` kernel so
         // the opclass + name match plugin-db's runtime form byte-for-byte.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
@@ -2185,7 +2185,7 @@ fn build_table_snapshot_impl(
     //   column and NO GIN index. Instead the FTS index is an FTS5 **virtual
     //   table** (`<coll>__fts`) over the source columns + AFTER triggers — the
     //   SAME structure plugin-db's runtime `ensure_fts_index` and the shared
-    //   `zero_migrate_schema::fts_sqlite` builders produce. It is modelled as an
+    //   `crate::schema::fts_sqlite` builders produce. It is modelled as an
     //   `IndexSnapshot` with `access_method = "fts5"` over the SOURCE columns so
     //   the SQLite emitter emits the vtable+triggers and a live re-diff (the
     //   drift introspector recognises the vtable) round-trips ZERO-drift.
@@ -2407,7 +2407,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
 // invisible). Modeling them in the DESIRED snapshot both stops the drop AND
 // makes the engine the authority that EMITS them (the schema-authority cutover
 // intent). The PG access-method names (`ivfflat`, `gin`) and the deterministic
-// index/column names match the shared `zero-migrate-schema` kernel + the data
+// index/column names match the shared `crate::schema` kernel + the data
 // plane's runtime contract byte-for-byte, so an engine-created object round-trips clean.
 // ---------------------------------------------------------------------------
 
@@ -2433,7 +2433,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         return None;
     }
     Some(IndexSnapshot {
-        // `<table>_<col>_idx`, matching `zero_migrate_schema::query::index_name`
+        // `<table>_<col>_idx`, matching `crate::schema::query::index_name`
         // (= plugin-db `ensure_vector_index`'s name).
         name: non_unique_index_name(table, &f.name),
         unique: false,
@@ -2457,7 +2457,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
 /// `access_method = 'gist'`, so the desired snapshot must model it identically or
 /// the runtime-created GiST index phantom-drops (and spatial `ST_DWithin` search
 /// falls back to a full table scan). The index name is the same
-/// `<table>_<col>_idx` `non_unique_index_name` / `zero_migrate_schema::query::index_name`
+/// `<table>_<col>_idx` `non_unique_index_name` / `crate::schema::query::index_name`
 /// produce; no opclass and no storage params (`render_create_index` spells the
 /// bare `USING gist ("col")`).
 fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
@@ -2492,7 +2492,7 @@ fn fts_index_name(table: &str) -> String {
 
 /// The tsvector configuration (language) for a collection's FTS index: the first
 /// non-empty `ftsLanguage` declared on any `.fts()` field, else `english` (the
-/// SDK default). Mirrors `zero_migrate_schema::query::build_create_indexes`'s
+/// SDK default). Mirrors `crate::schema::query::build_create_indexes`'s
 /// first-non-empty-wins rule.
 fn fts_language(fields: &[FieldDescriptor]) -> String {
     fields
@@ -2577,13 +2577,13 @@ fn fts_objects_pg(
 pub(crate) const SQLITE_FTS5_ACCESS_METHOD: &str = "fts5";
 
 /// The name of the SQLite FTS5 virtual table for a collection (`<coll>__fts`).
-/// Matches [`zero_migrate_schema::fts_sqlite::fts_vtable_name`] and plugin-db's runtime
+/// Matches [`crate::schema::fts_sqlite::fts_vtable_name`] and plugin-db's runtime
 /// `ensure_fts_index` contract, so an engine-emitted vtable and a runtime-built one
 /// are interchangeable. NOTE: this is DELIBERATELY the bare `<coll>__fts` (the
 /// vtable name), NOT the PG `<coll>__fts_idx` index name — on SQLite the FTS index
 /// *is* the vtable, and the drift introspector reads the vtable's name back.
 fn sqlite_fts_vtable_name(table: &str) -> String {
-    zero_migrate_schema::fts_sqlite::fts_vtable_name(table)
+    crate::schema::fts_sqlite::fts_vtable_name(table)
 }
 
 /// **SQLite FTS** — model a collection's `.fts()` fields as the FTS5 virtual-table
@@ -2625,18 +2625,18 @@ fn fts_index_snapshot_sqlite(
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
 ///
 /// Schema-authority P2: DELEGATES to the shared kernel's
-/// [`zero_migrate_schema::query::validate_id_prefix`] (the single source of truth for
+/// [`crate::schema::query::validate_id_prefix`] (the single source of truth for
 /// the `^[a-z][a-z0-9_]*$` rule + the `RESERVED_ID_PREFIXES` fence — the engine's
 /// own copy of both is deleted). The shared check returns its `QueryError`; this
 /// thin wrapper maps a failure to the engine's [`DeclarativeError::Invalid`] so
 /// the author-boundary error type is unchanged.
 fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
-    zero_migrate_schema::query::validate_id_prefix(prefix)
+    crate::schema::query::validate_id_prefix(prefix)
         .map_err(|e| DeclarativeError::Invalid(e.to_string()))
 }
 
 fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'static str {
-    zero_migrate_schema::query::normalize_fk_action_for_dialect(s, dialect)
+    crate::schema::query::normalize_fk_action_for_dialect(s, dialect)
 }
 
 /// Build a FOREIGN KEY definition body in the dialect's canonical catalog
@@ -3266,7 +3266,7 @@ pub struct DeclarativeAuthor {
     ///   BYTE-IDENTICAL to before this field existed.
     /// - `Sqlite` (via [`Self::new_for_dialect`]) — the Confined SQLite path
     ///   (design §2.5.3): the new-table CREATE is ROUTED THROUGH the shared
-    ///   `zero_migrate_schema::query` emitter with [`SqliteEmitScope::MainUnqualified`],
+    ///   `crate::schema::query` emitter with [`SqliteEmitScope::MainUnqualified`],
     ///   producing UNqualified DDL that lands in `main` (= the app file) under the
     ///   `SqliteBackend`'s hardened authorizer. No second SQLite emitter is written
     ///   here — the engine routes to the single shared one.
@@ -3289,7 +3289,7 @@ impl DeclarativeAuthor {
     /// Construct a declarative author for an explicit target `dialect` (PHASE 4).
     ///
     /// `SqlDialect::Sqlite` selects the Confined SQLite path: the new-table CREATE
-    /// `up` is routed through the shared `zero_migrate_schema::query` emitter
+    /// `up` is routed through the shared `crate::schema::query` emitter
     /// ([`SqliteEmitScope::MainUnqualified`]) so the DDL is unqualified and lands
     /// in the app file's `main` namespace. The PG dialect is the original path.
     #[must_use]
@@ -3577,7 +3577,7 @@ impl DeclarativeAuthor {
             }
 
             // PHASE 4 — the Confined SQLite path ROUTES the new-table CREATE through
-            // the shared `zero_migrate_schema::query` emitter (unqualified, `main` = the
+            // the shared `crate::schema::query` emitter (unqualified, `main` = the
             // app file); the PG path keeps its snapshot-rendered DDL. No second
             // SQLite emitter exists in this crate.
             let (up, down) = match self.dialect {
@@ -4169,7 +4169,7 @@ impl DeclarativeAuthor {
     }
 
     /// PHASE 4 — render the SQLite `CREATE TABLE` `up` for a NEW table by ROUTING
-    /// THROUGH the shared `zero_migrate_schema::query` emitter with
+    /// THROUGH the shared `crate::schema::query` emitter with
     /// [`SqliteEmitScope::MainUnqualified`]. No second SQLite DDL emitter lives in
     /// this crate: the engine reconstructs the SDK schema `Value`
     /// ([`descriptor_to_sdk_schema`], stashed on [`DesiredSchema::sqlite_schemas`])
@@ -4222,7 +4222,7 @@ impl DeclarativeAuthor {
     /// `lower_create_table` builds the SAME `Value` from the op's descriptor via
     /// [`descriptor_to_sdk_schema`] (the same call `desired_snapshot_for_dialect`
     /// makes) and routes here — so BOTH paths render through the identical shared
-    /// `zero_migrate_schema::query` emitter and the §6.4 byte-identity holds on SQLite.
+    /// `crate::schema::query` emitter and the §6.4 byte-identity holds on SQLite.
     pub(crate) fn render_create_table_sqlite_value(
         &self,
         table: &str,
@@ -4244,11 +4244,11 @@ impl DeclarativeAuthor {
         // `app_id` here is the project schema; on the `MainUnqualified` SQLite arm it
         // is NOT emitted (the qualifier is dropped), but it is still validated by the
         // shared emitter, so pass the real project schema.
-        zero_migrate_schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
+        crate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
             &self.project_schema,
             table,
             schema,
-            &zero_migrate_schema::query::FkEmission::Inline,
+            &crate::schema::query::FkEmission::Inline,
             SqlDialect::Sqlite,
             SqliteEmitScope::MainUnqualified,
         )
@@ -4783,7 +4783,7 @@ impl DeclarativeAuthor {
             // equality the snapshot-path `RenameHintTypeMismatch` guard enforces
             // (SQLite collapses `data_type` to affinity), failing closed on divergence
             // instead of emitting a silent shape skew.
-            use zero_migrate_schema::query::{def_to_column_type_for_dialect, SqlDialect};
+            use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
             let Some(live_from) = live_snapshot.columns.iter().find(|c| c.name == from) else {
                 // `found` above already proved `from` is present; defensive.
                 return Err(DeclarativeError::Invalid(format!(
@@ -6009,7 +6009,7 @@ impl DeclarativeAuthor {
 //
 // NOT extracted (out of P1 scope, see the design): `render_create_table` (PG,
 // snapshot-rendered) and `render_create_table_sqlite` (routes to the shared
-// `zero_migrate_schema` emitter) — different input shapes, no shared byte bar.
+// `crate::schema` emitter) — different input shapes, no shared byte bar.
 trait DdlEmitter {
     /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
     /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
@@ -6206,7 +6206,7 @@ impl DdlEmitter for PgEmitter {
 /// **SQLite FTS5** — build the `(up, down)` for a collection's FTS5 index, an
 /// external-content virtual table + AFTER triggers (the same structure plugin-db's
 /// runtime `ensure_fts_index` builds, via the SHARED
-/// [`zero_migrate_schema::fts_sqlite`] builders in their UNqualified `main` form).
+/// [`crate::schema::fts_sqlite`] builders in their UNqualified `main` form).
 ///
 /// `up` (one multi-statement batch, run under EngineJournal — see the
 /// `engine_goodie_ddl` flag): CREATE VIRTUAL TABLE → initial population →
@@ -6214,7 +6214,7 @@ impl DdlEmitter for PgEmitter {
 /// vtable (CreatorUp-allowed: a plain `DROP TABLE`/`DROP TRIGGER` on `main`). The
 /// vtable's drop cascades its FTS5 shadow tables (`_data`/`_idx`/…).
 fn sqlite_fts5_create_teardown(table: &str, source_columns: &[String]) -> (String, String) {
-    use zero_migrate_schema::fts_sqlite as fts;
+    use crate::schema::fts_sqlite as fts;
     let cols = source_columns.to_vec();
     // UNqualified `main` form (`schema = None`) — the confined SQLite engine opens
     // the per-app file directly as `main`.
@@ -6372,7 +6372,7 @@ impl DdlEmitter for SqliteEmitter {
         // on SQLite the FTS index is an FTS5 external-content VIRTUAL TABLE
         // (`<coll>__fts`) over the source columns, mirrored by three AFTER triggers.
         // Emit the SAME structure plugin-db's runtime `ensure_fts_index` builds, via
-        // the shared `zero_migrate_schema::fts_sqlite` builders (UNqualified `main`
+        // the shared `crate::schema::fts_sqlite` builders (UNqualified `main`
         // form). This replaces the broken PG-shaped `__fts`-column GIN index that
         // would otherwise be emitted over a column the SQLite create-table never
         // materialises (`no such column: "__fts"`).
@@ -6846,7 +6846,7 @@ mod snapshot_builder_refactor_safety_tests {
         build_resolved_table_snapshot, build_table_snapshot, CollectionDescriptor,
         DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
     };
-    use zero_migrate_schema::query::SqlDialect;
+    use crate::schema::query::SqlDialect;
 
     fn rich_descriptor() -> CollectionDescriptor {
         CollectionDescriptor {

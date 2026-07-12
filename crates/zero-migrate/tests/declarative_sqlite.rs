@@ -1,7 +1,7 @@
 //! PHASE 4 — descriptor → engine-generated SQLite `up` → applied through the
 //! hardened `SqliteBackend` → drift round-trip. Real temp-file SQLite throughout
 //! (the faithful path: the actual `DeclarativeAuthor` emitter routes through the
-//! shared `zero_migrate_schema` emitter, and the real backend authorizer applies the
+//! shared `zero_migrate::schema` emitter, and the real backend authorizer applies the
 //! unqualified DDL into `main` = the app file).
 //!
 //! Also: the TrustProfile-SQLite wiring (Confined SQLite accepts descriptor-
@@ -17,7 +17,7 @@ use zero_migrate::{
     GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot,
     SqliteBackend, SqlGuard,
 };
-use zero_migrate_schema::query::SqlDialect;
+use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -884,7 +884,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 // FK, index). They are the explicit byte bar for the P1 `DdlEmitter` extraction:
 // it is code-motion only, so these MUST stay green and UNCHANGED across it.
 //
-// Note the create-table `up` is the SHARED `zero_migrate_schema` emitter's output
+// Note the create-table `up` is the SHARED `zero_migrate::schema` emitter's output
 // (routed, out of P1 scope) — pinned here so we'd notice an unrelated drift; the
 // add-column / index / drop paths are the engine's OWN render methods (the P1
 // extraction targets).

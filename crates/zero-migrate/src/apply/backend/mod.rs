@@ -65,7 +65,7 @@ use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
 /// settings never leak onto the pooled/long-lived connection (H2).

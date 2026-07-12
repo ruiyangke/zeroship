@@ -75,15 +75,6 @@ serde_json = { workspace = true }
 # (the keystone parity compares serialized FieldDef maps, so a sorted-vs-declared
 # order would false-mismatch). An insertion-ordered map is the clean carrier.
 indexmap = { workspace = true }
-# Schema-authority P2: the engine ADOPTS the shared schema core for its
-# schema-DESCRIPTION layer (the DSL→SQL type map + the DDL-shape vocabulary +
-# sentinel codec + shape enums), replacing its own v1-SUBSET re-implementation.
-# This is what gives the declarative differ FULL type capability
-# (vector/encrypted/mask/geoPoint/literal) by reuse — the engine builds an SDK
-# `def` from its FieldDescriptor and delegates the type/DDL spelling to this
-# crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
-# snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
-zero-migrate-schema = { workspace = true }
 # The wire contract (redesign step 3a): MigrationIr, the closed Op enum, the
 # closed Expr AST, IrScalar, the precondition/probe vocabulary, the typed-id
 # machinery, the canonical checksum, the fail-closed load gate's policy-free half,

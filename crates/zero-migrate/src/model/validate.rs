@@ -3098,7 +3098,7 @@ fn validate_default_expr(
 ///
 /// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
 ///    charset rule + reserved-prefix deny-list (`usr`, …) the runtime enforces via
-///    [`zero_migrate_schema::query::validate_id_prefix`] (the SINGLE source of truth,
+///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth,
 ///    mirroring `crates/core/src/typed_id.rs` + `system_fields_pass`'s
 ///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
 ///    hand-authored prefix keeps the compact `<prefix>_<22 base62>` typed-id shape.
@@ -3230,7 +3230,7 @@ fn validate_column_facets(
 
     if let Some(prefix) = &col.id_prefix {
         // Charset + reserved deny-list — the runtime's single source of truth.
-        if let Err(e) = zero_migrate_schema::query::validate_id_prefix(prefix) {
+        if let Err(e) = crate::schema::query::validate_id_prefix(prefix) {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(

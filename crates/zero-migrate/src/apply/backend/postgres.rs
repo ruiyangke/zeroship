@@ -20,7 +20,7 @@ use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///

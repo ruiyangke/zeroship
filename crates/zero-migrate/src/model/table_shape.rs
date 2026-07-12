@@ -229,7 +229,7 @@ fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), Table
         });
     }
     if let Some(prefix) = &column.id_prefix {
-        zero_migrate_schema::query::validate_id_prefix(prefix).map_err(|e| {
+        crate::schema::query::validate_id_prefix(prefix).map_err(|e| {
             TableShapeError::InvalidIdPrefix {
                 table: table.to_string(),
                 prefix: prefix.clone(),

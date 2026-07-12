@@ -30,7 +30,7 @@ use compio_postgres::Pool;
 use serde_json::Value;
 
 #[cfg(feature = "introspect")]
-use crate::error::SchemaError;
+use crate::schema::error::SchemaError;
 
 /// Wrap a `compio_postgres::Error` in [`SchemaError`] with a context
 /// phrase so operators see *what* the introspection layer was doing
@@ -335,8 +335,8 @@ pub struct EncryptionMeta {
     /// Encryption mode declared by the SDK.
     /// `Randomised` (default, fail-safe) or `Deterministic` (enables
     /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `crate::descriptors::EncryptionMode`.
-    pub mode: crate::descriptors::EncryptionMode,
+    /// leak). See `crate::schema::descriptors::EncryptionMode`.
+    pub mode: crate::schema::descriptors::EncryptionMode,
     /// Key id selecting the per-platform root from
     /// a per-key env var (`COLUMN_KEY_<KEYID>`) / a `<admin>.column_keys` table.
     /// Defaults to `"default"` when the SDK caller omits the field.
@@ -574,7 +574,7 @@ pub struct ForeignKeyInfo {
 }
 
 fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String> {
-    let mut columns: std::collections::HashSet<String> = crate::query::SYSTEM_FIELD_NAMES
+    let mut columns: std::collections::HashSet<String> = crate::schema::query::SYSTEM_FIELD_NAMES
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -584,7 +584,7 @@ fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String>
     };
 
     for (field, def) in obj {
-        if crate::query::is_schema_metadata_key(field) {
+        if crate::schema::query::is_schema_metadata_key(field) {
             continue;
         }
         columns.insert(field.clone());
@@ -682,7 +682,7 @@ SELECT c.relname AS table_name,
             if comment.starts_with("zero-migrate:mask:") && column.ends_with("_masked") {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
             } else if comment.starts_with("zero-migrate:enc:") {
-                match crate::mask_codec::parse_encryption_sentinel(comment) {
+                match crate::schema::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
                         // A malformed encryption sentinel is treated like a
@@ -735,7 +735,7 @@ SELECT c.relname AS table_name,
             continue;
         };
         let (kind, classification) =
-            match crate::mask_codec::parse_mask_sentinel(&sentinel) {
+            match crate::schema::mask_codec::parse_mask_sentinel(&sentinel) {
                 Ok(p) => p,
                 Err(e) => {
                     // Surface a malformed sentinel as a tracing::warn —
@@ -920,7 +920,7 @@ pub fn compute_diff(
     collection: &str,
     schema: &Value,
     create_table_sql: &str,
-    declared_indexes: &[crate::query::IndexSpec],
+    declared_indexes: &[crate::schema::query::IndexSpec],
 ) -> Vec<DiffOp> {
     let mut ops = Vec::new();
 
@@ -951,7 +951,7 @@ pub fn compute_diff(
             // are NOT column declarations and must not reach the
             // `field_name` validator (which now reserves the `_`
             // prefix for synthetic-result columns).
-            if crate::query::is_schema_metadata_key(field) {
+            if crate::schema::query::is_schema_metadata_key(field) {
                 continue;
             }
             if table_missing {
@@ -965,7 +965,7 @@ pub fn compute_diff(
             // Build the ALTER. Note: build_add_column emits IF NOT EXISTS,
             // making the operation idempotent even if the live snapshot
             // is briefly stale.
-            let sql = crate::query::build_add_column(app_id, collection, field, def)
+            let sql = crate::schema::query::build_add_column(app_id, collection, field, def)
                 .ok()
                 .map(|s| s.to_string());
             ops.push(DiffOp {
@@ -1072,7 +1072,7 @@ pub fn compute_diff(
                     // emit AddForeignKey as a separate op so the
                     // orchestrator can run ALTER TABLE ADD CONSTRAINT
                     // after the column is created.
-                    let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                    let sql = crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
                         .ok()
                         .map(|s| s.to_string());
                     ops.push(DiffOp {
@@ -1099,7 +1099,7 @@ pub fn compute_diff(
             // Column exists. Need to attach the FK if not present, or
             // detect a policy mismatch.
             if live_fk.is_none() {
-                let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                let sql = crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
                     .ok()
                     .map(|s| s.to_string());
                 ops.push(DiffOp {
@@ -1119,10 +1119,10 @@ pub fn compute_diff(
                 });
             } else if let Some(fk) = live_fk {
                 // Detect policy mismatch — surfaced as paired DROP+ADD.
-                let declared_on_delete = crate::query::normalize_fk_action(
+                let declared_on_delete = crate::schema::query::normalize_fk_action(
                     def.get("onDelete").and_then(|v| v.as_str()),
                 );
-                let declared_on_update = crate::query::normalize_fk_action(
+                let declared_on_update = crate::schema::query::normalize_fk_action(
                     def.get("onUpdate").and_then(|v| v.as_str()),
                 );
                 let declared_deferrable = def
@@ -1139,7 +1139,7 @@ pub fn compute_diff(
                         collection: collection.to_string(),
                         change_kind: ChangeKind::DropForeignKey,
                         class: ChangeClass::Compatible,
-                        sql: crate::query::build_drop_foreign_key(app_id, collection, &fk.constraint_name).ok(),
+                        sql: crate::schema::query::build_drop_foreign_key(app_id, collection, &fk.constraint_name).ok(),
                         details: serde_json::json!({
                             "kind": "drop_foreign_key",
                             "field": field,
@@ -1151,7 +1151,7 @@ pub fn compute_diff(
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddForeignKey,
                         class: ChangeClass::Compatible,
-                        sql: crate::query::build_add_foreign_key(app_id, collection, field, def).ok(),
+                        sql: crate::schema::query::build_add_foreign_key(app_id, collection, field, def).ok(),
                         details: serde_json::json!({
                             "kind": "add_foreign_key",
                             "field": field,
@@ -1192,7 +1192,7 @@ pub fn compute_diff(
     // changed reach this loop.
     if let (Some(live_cols), Some(schema_obj)) = (live_cols, schema.as_object()) {
         for (field, def) in schema_obj {
-            if crate::query::is_schema_metadata_key(field) {
+            if crate::schema::query::is_schema_metadata_key(field) {
                 continue;
             }
             let Some(live_col) = live_cols.get(field) else {
@@ -1219,20 +1219,20 @@ pub fn compute_diff(
                     let sibling = format!("{field}_masked");
                     let mut add_stmts = vec![format!(
                         "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-                        crate::query::quote_ident(app_id),
-                        crate::query::quote_ident(collection),
-                        crate::query::quote_ident(&sibling),
+                        crate::schema::query::quote_ident(app_id),
+                        crate::schema::query::quote_ident(collection),
+                        crate::schema::query::quote_ident(&sibling),
                     )];
-                    let sentinel = crate::mask_codec::build_mask_sentinel(
+                    let sentinel = crate::schema::mask_codec::build_mask_sentinel(
                         new_meta.kind,
                         new_meta.classification,
                     );
                     let escaped = sentinel.replace('\'', "''");
                     add_stmts.push(format!(
                         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-                        crate::query::quote_ident(app_id),
-                        crate::query::quote_ident(collection),
-                        crate::query::quote_ident(&sibling),
+                        crate::schema::query::quote_ident(app_id),
+                        crate::schema::query::quote_ident(collection),
+                        crate::schema::query::quote_ident(&sibling),
                         escaped,
                     ));
                     let add_sql = Some(add_stmts.join(";\n"));
@@ -1359,7 +1359,7 @@ pub fn compute_diff(
     // this op today.
     if let (Some(live_cols), Some(schema_obj)) = (live_cols, schema.as_object()) {
         for (field, def) in schema_obj {
-            if crate::query::is_schema_metadata_key(field) {
+            if crate::schema::query::is_schema_metadata_key(field) {
                 continue;
             }
             let Some(live_col) = live_cols.get(field) else {
@@ -1376,9 +1376,9 @@ pub fn compute_diff(
                 continue;
             }
 
-            let to_type = crate::query::def_to_column_type_for_dialect(
+            let to_type = crate::schema::query::def_to_column_type_for_dialect(
                 def,
-                crate::query::SqlDialect::Postgres,
+                crate::schema::query::SqlDialect::Postgres,
             );
             // The live side's spelling as introspected (e.g. "text",
             // "bytea"). We surface it verbatim so the audit row / authoring
@@ -1649,7 +1649,7 @@ mod tests {
             pg_type: "bytea".into(),
             not_null: false,
             encryption: Some(EncryptionMeta {
-                mode: crate::descriptors::EncryptionMode::Randomised,
+                mode: crate::schema::descriptors::EncryptionMode::Randomised,
                 key_id: "default".into(),
                 wraps: WrappedType::String,
             }),
@@ -1789,7 +1789,7 @@ mod tests {
         // undeclared user columns to drop.
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
-        for name in crate::query::SYSTEM_FIELD_NAMES {
+        for name in crate::schema::query::SYSTEM_FIELD_NAMES {
             cols.insert(
                 (*name).to_string(),
                 ColumnInfo {

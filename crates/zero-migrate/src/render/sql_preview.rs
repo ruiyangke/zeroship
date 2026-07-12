@@ -46,7 +46,7 @@ use crate::model::ir::{CommentTarget, ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The label prefix every runtime-resolved line carries — the single sentinel the
 /// no-fabrication tests assert on. If you change this, change the tests.

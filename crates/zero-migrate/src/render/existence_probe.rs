@@ -72,7 +72,7 @@
 
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
-use zero_migrate_schema::query::{renderer as schema_renderer, SqlDialect};
+use crate::schema::query::{renderer as schema_renderer, SqlDialect};
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
 // (the type moved into the leaf wire-contract crate — an inherent `impl` here would

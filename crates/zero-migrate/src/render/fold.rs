@@ -73,7 +73,7 @@ use crate::render::lower::{
     render_json_default_for_data_type,
     render_ir_default, render_ir_default_for_type, IrLowerError, NamedTypeRegistry,
 };
-use zero_migrate_schema::query::SqlDialect;
+use crate::schema::query::SqlDialect;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
 /// drift-irrelevant — it never enters `SchemaSnapshot` equality (the snapshot only
