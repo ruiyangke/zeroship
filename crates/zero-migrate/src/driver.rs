@@ -34,6 +34,14 @@
 //! non-compio driver) proves the generic PG apply path is genuinely
 //! driver-neutral before any dialect-specific SQL crosses the seam.
 
+/// The driver-neutral [`SqlSession`] conformance suite — the FIRST external
+/// consumer of the seam. A host driver (or the in-crate `PgDevSession`) runs
+/// [`conformance::run`] against a live session to prove it honours the seam
+/// invariants (session pinning, transaction visibility, `exec_text` semantics,
+/// error/SQLSTATE mapping) the engine relies on but never re-checks.
+#[path = "driver/conformance.rs"]
+pub mod conformance;
+
 use std::error::Error as StdError;
 use std::fmt;
 

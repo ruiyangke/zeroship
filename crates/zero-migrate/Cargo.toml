@@ -144,6 +144,23 @@ tempfile = { workspace = true }
 # step 3b) mint the operator-gated Platform/Trusted profiles via
 # `OperatorCapability::for_test`, which the ir leaf exposes behind `test-support`.
 zero-migrate-ir = { workspace = true, features = ["test-support"] }
+# TEST-ONLY live-Postgres driver (redesign step 6a). The blocking `postgres` crate
+# backs `PgDevSession`, a `driver::SqlSession` impl that drives the SHIPPED generic
+# PostgresBackend/executor/journal/drift path against a live PG (:5440) in-crate, so
+# the host-PG apply path finally has in-crate live-DB regression coverage (closes
+# C4). It is a `[dev-dependency]` ONLY — it pulls `tokio` TRANSITIVELY (the blocking
+# `postgres` client wraps `tokio-postgres` on a private runtime), which is ACCEPTABLE
+# because it NEVER ships: `cargo tree -p zero-migrate -e normal` stays tokio-free.
+# The shipped engine's PG path is the dialect-neutral `driver::SqlSession` seam (fed
+# by the napi/Node `pg` host in production); this dev driver is the in-crate test
+# producer. Pinned to the `postgres` sync client (the `Client::batch_execute` /
+# `Client::query` blocking API `PgDevSession` forwards each verb to).
+postgres = "0.19"
+# TEST-ONLY (with `postgres`, above): the `exec_text` text-format param wrapper
+# (`TextParam`) implements `postgres::types::ToSql`, whose `to_sql` writes into a
+# `bytes::BytesMut`. Pinned to the version `tokio-postgres` already resolves, so the
+# buffer type matches exactly. Dev-dependency only — never ships.
+bytes = "1"
 
 [lints]
 workspace = true
