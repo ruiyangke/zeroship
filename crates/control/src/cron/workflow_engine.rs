@@ -595,20 +595,32 @@ pub(crate) async fn cascade_cancel_children_for_app<C>(
 where
     C: GenericClient + Sync,
 {
-    let sql = journal_sql(
-        tables,
-        "UPDATE zeroship.workflow_runs \
-            SET cancel_requested = true, wake_at = now() \
-          WHERE parent_run_id = $1 \
-            AND parent_cascade \
-            AND state NOT IN ('completed','failed','cancelled','stalled') \
-          RETURNING id",
-    );
+    let sql = cascade_cancel_children_sql(tables);
     let rows = conn
         .query(&sql, &[&parent_run_id])
         .await
-        .map_err(RegistryError::from)?;
+        .map_err(|e| workflow_error_to_registry(WorkflowError::from(e)))?;
     Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+fn cascade_cancel_children_sql(tables: &WorkflowTables) -> String {
+    journal_sql(
+        tables,
+        "WITH locked_children AS MATERIALIZED ( \
+             SELECT id \
+               FROM zeroship.workflow_runs \
+              WHERE parent_run_id = $1 \
+                AND parent_cascade \
+                AND state NOT IN ('completed','failed','cancelled','stalled') \
+              ORDER BY id \
+              FOR UPDATE \
+         ) \
+         UPDATE zeroship.workflow_runs AS r \
+            SET cancel_requested = true, wake_at = now() \
+           FROM locked_children \
+          WHERE r.id = locked_children.id \
+          RETURNING r.id",
+    )
 }
 
 pub(crate) async fn cascade_cancel_children<C>(
@@ -1362,6 +1374,36 @@ mod tests {
                 signal_type: "approved".to_string(),
                 max_signal_age_ms: Some(60_000)
             }
+        );
+    }
+
+    #[test]
+    fn cascade_cancel_children_sql_orders_child_locks_before_update() {
+        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let sql = cascade_cancel_children_sql(&tables);
+        let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Durable workflow scheduler design section 5.2 requires every run-family
+        // co-lock to acquire row locks in globally ascending run_id order.
+        let lock_pos = normalized
+            .find("ORDER BY id FOR UPDATE")
+            .expect("cascade SQL must lock children in run_id order");
+        let update_pos = normalized
+            .find("UPDATE")
+            .expect("cascade SQL must update locked children");
+        assert!(
+            lock_pos < update_pos,
+            "child rows must be locked in order before mutation: {normalized}"
+        );
+        assert!(
+            normalized.contains("WITH locked_children AS MATERIALIZED"),
+            "ordered lock pass must be materialized before update: {normalized}"
+        );
+        assert!(
+            normalized.contains("parent_run_id = $1")
+                && normalized.contains("state NOT IN ('completed','failed','cancelled','stalled')")
+                && normalized.contains("SET cancel_requested = true"),
+            "cascade predicate and mutation semantics changed unexpectedly: {normalized}"
         );
     }
 

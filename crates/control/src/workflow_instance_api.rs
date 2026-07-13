@@ -297,6 +297,18 @@ impl From<WorkflowError> for WorkflowApiError {
     }
 }
 
+fn workflow_pg_error(error: compio_postgres::Error) -> WorkflowApiError {
+    workflow_pg_error_from_parts(error.code(), error.to_string())
+}
+
+fn workflow_pg_error_from_parts(code: Option<&SqlState>, message: String) -> WorkflowApiError {
+    if code == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
+        WorkflowApiError::Database(format!("retryable deadlock: {message}"))
+    } else {
+        WorkflowApiError::Database(message)
+    }
+}
+
 fn infrastructure_error_response(
     context: &'static str,
     detail: impl std::fmt::Display,
@@ -698,7 +710,7 @@ where
             &[app_id],
         )
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     let Some(row) = rows.first() else {
         return Err(WorkflowApiError::BadRequest(
             "app has no active deploy".to_string(),
@@ -1098,7 +1110,7 @@ where
         ],
     )
     .await
-    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    .map_err(workflow_pg_error)?;
     Ok(())
 }
 
@@ -1140,7 +1152,7 @@ where
             ],
         )
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     Ok(rows.first().map(|row| row.get("id")))
 }
 
@@ -1164,7 +1176,7 @@ where
     let rows = conn
         .query(&sql, &[app_id, &workflow_name, &dedup_key])
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     Ok(rows.first().map(|row| row.get("id")))
 }
 
@@ -1292,7 +1304,7 @@ async fn create_run_inner(
     let tx = conn
         .transaction()
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
 
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
@@ -1376,7 +1388,7 @@ async fn create_run_inner(
                     &[&app_id, &workflow_name, key],
                 )
                 .await
-                .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+                .map_err(workflow_pg_error)?;
                 for row in cancelled {
                     let cancelled_run_id: String = row.get("id");
                     cascade_run_ids.extend(
@@ -1437,7 +1449,7 @@ async fn create_run_inner(
 
     tx.commit()
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     workflow_engine::register_run_timer(state, &run_id)
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -1472,7 +1484,7 @@ async fn start_many_inner(
     let tx = conn
         .transaction()
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
@@ -1572,7 +1584,7 @@ async fn start_many_inner(
                         &[&app_id, &workflow_name, key],
                     )
                     .await
-                    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+                    .map_err(workflow_pg_error)?;
                     for row in cancelled {
                         let cancelled_run_id: String = row.get("id");
                         cascade_run_ids.extend(
@@ -1637,7 +1649,7 @@ async fn start_many_inner(
 
     tx.commit()
         .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        .map_err(workflow_pg_error)?;
     for run_id in run_ids {
         workflow_engine::register_run_timer(state, &run_id)
             .await
@@ -1993,7 +2005,7 @@ pub async fn signal_run(
     };
     let tx = match conn.transaction().await {
         Ok(tx) => tx,
-        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+        Err(e) => return workflow_pg_error(e).response(),
     };
     let tables = match provision_workflow_journal(&tx, &app_id).await {
         Ok(tables) => tables,
@@ -2018,7 +2030,7 @@ pub async fn signal_run(
         .await
     {
         Ok(rows) => rows,
-        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+        Err(e) => return workflow_pg_error(e).response(),
     };
     let Some(row) = rows.first() else {
         let _ = tx.commit().await;
@@ -2917,7 +2929,7 @@ async fn control_transition(
                     &[&run_id, &app_id],
                 )
                 .await
-                .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                .map_err(workflow_pg_error)
             }
         }
         "resume" => {
@@ -2948,7 +2960,7 @@ async fn control_transition(
                 );
                 tx.query(&sql, &[&run_id, &app_id])
                     .await
-                    .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                    .map_err(workflow_pg_error)
             }
         }
         "cancel" => {
@@ -2980,7 +2992,7 @@ async fn control_transition(
                     .await
                 {
                     Ok(row) => row,
-                    Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+                    Err(e) => return workflow_pg_error(e).response(),
                 };
                 let pending = pending_row.get::<_, i64>("n");
                 if pending > 0 {
@@ -2999,7 +3011,7 @@ async fn control_transition(
                         .await
                     {
                         Ok(row) => row,
-                        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+                        Err(e) => return workflow_pg_error(e).response(),
                     };
                     let error = json!({
                         "type": "ChildCancelledError",
@@ -3036,7 +3048,7 @@ async fn control_transition(
                         &[&run_id, &app_id, &error],
                     )
                     .await
-                    .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                    .map_err(workflow_pg_error)
                 } else {
                     tx.query(
                         &format!("UPDATE {runs} \
@@ -3060,7 +3072,7 @@ async fn control_transition(
                         &[&run_id, &app_id],
                     )
                     .await
-                    .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                    .map_err(workflow_pg_error)
                 }
             } else {
                 tx.query(
@@ -3085,7 +3097,7 @@ async fn control_transition(
                     &[&run_id, &app_id],
                 )
                 .await
-                .map_err(|e| WorkflowApiError::Database(e.to_string()))
+                .map_err(workflow_pg_error)
             }
         }
         _ => unreachable!(),
@@ -3113,7 +3125,7 @@ async fn control_transition(
         }
     }
     if let Err(e) = tx.commit().await {
-        return WorkflowApiError::Database(e.to_string()).response();
+        return workflow_pg_error(e).response();
     }
     if let Err(e) = workflow_engine::register_run_timer(&state, &run_id).await {
         return WorkflowApiError::Database(e.to_string()).response();
@@ -3333,6 +3345,19 @@ mod tests {
         assert_eq!(resolve_ingress_signal_type(&claims, None).unwrap(), "go");
         assert!(resolve_ingress_signal_type(&claims, Some("stop".to_string())).is_err());
         assert!(resolve_ingress_signal_type(&claims, Some("__zs.stop".to_string())).is_err());
+    }
+
+    #[test]
+    fn workflow_pg_error_marks_deadlocks_retryable() {
+        let error = workflow_pg_error_from_parts(
+            Some(&SqlState::T_R_DEADLOCK_DETECTED),
+            "deadlock detected".to_string(),
+        );
+        assert!(matches!(
+            error,
+            WorkflowApiError::Database(msg)
+                if msg.starts_with("retryable deadlock:") && msg.contains("deadlock detected")
+        ));
     }
 
     #[test]
