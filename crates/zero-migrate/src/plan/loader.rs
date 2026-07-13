@@ -284,7 +284,7 @@ pub fn suggest_migration_name(name: &str) -> String {
 }
 
 // =============================================================================
-// dbmate-native format (Track A, Phase A2)
+// dbmate-native format
 // =============================================================================
 //
 // dbmate's on-disk format is ONE timestamped file per migration carrying both
@@ -1171,7 +1171,7 @@ mod tests {
         assert!(load_dir_migrations(&dir).unwrap().is_empty());
     }
 
-    // ----- dbmate-native format (Phase A2) -----
+    // ----- dbmate-native format -----
 
     #[test]
     fn parse_dbmate_filename_accepts_14_digit_timestamp() {
@@ -1402,7 +1402,7 @@ mod tests {
         assert!(!is_flyway_filename("20240617123000_create_users.sql"));
     }
 
-    // ----- the `new` helper (Phase A2; A3 CLI consumes it) -----
+    // ----- the `new` helper (the CLI consumes it) -----
 
     #[test]
     fn new_dbmate_migration_is_deterministic() {

@@ -135,7 +135,7 @@ fn trivial_migration() -> Migration {
 #[test]
 fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     // A compio-free single-thread block_on is enough to drive the engine future
-    // because the mock answers every verb inline (§C.4).
+    // because the mock answers every verb inline.
     let outcome = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);

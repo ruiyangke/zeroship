@@ -450,8 +450,8 @@ pub struct IrAuthor {
     /// [`IrAuthor::with_default_schema`].
     default_schema: Option<String>,
     /// the schema-confinement scope this author's
-    /// [`default_schema`](Self::default_schema) is validated against at lower time
-    ///. The friendly cross-schema VALIDATE gate
+    /// [`default_schema`](Self::default_schema) is validated against at lower time.
+    /// The friendly cross-schema VALIDATE gate
     /// ([`crate::model::validate::validate_op_schema_and_guard`]) inspects ONLY the op's own
     /// `schema()` qualifier — it never sees the connection
     /// [`default_schema`](Self::default_schema). So a `default_schema` pointing at a
@@ -769,8 +769,8 @@ pub struct GuardedFragment {
     pub advisories: Vec<Advisory>,
 }
 
-/// A guard DENIAL attributed to the exact op that produced the denied fragment
-///. The human message leads with the op-index + kind so an author/AI
+/// A guard DENIAL attributed to the exact op that produced the denied fragment.
+/// The human message leads with the op-index + kind so an author/AI
 /// sees *which* op the guard refused, not a bare "statement denied".
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -1192,8 +1192,8 @@ impl IrAuthor {
     }
 
     /// widen the schema-confinement [`scope`](Self::scope)
-    /// the connection [`default_schema`](Self::default_schema) is validated against
-    ///. The default scope is the Confined `Single(project_schema)`; a
+    /// the connection [`default_schema`](Self::default_schema) is validated against.
+    /// The default scope is the Confined `Single(project_schema)`; a
     /// Platform/Trusted CLI that sets a multi-schema or foreign-search-path default
     /// calls this with the matching [`crate::model::policy::SchemaScope`] (typically
     /// [`crate::guard::GuardConfig::schema_scope`]) so the default it then binds is
@@ -1529,8 +1529,8 @@ impl IrAuthor {
             .collect())
     }
 
-    /// Lower a validated [`MigrationIr`]'s ops to their ordered [`PlanStep`] list
-    ///. This is the full lowering: DDL ops become [`PlanStep::Ddl`]; an
+    /// Lower a validated [`MigrationIr`]'s ops to their ordered [`PlanStep`] list.
+    /// This is the full lowering: DDL ops become [`PlanStep::Ddl`]; an
     /// online `renameColumn` becomes ONE [`PlanStep::OnlineRename`] carrying the
     /// dialect-chosen [`RenameStep`] (PG expand-contract / SQLite rebuild).
     ///
@@ -2443,12 +2443,12 @@ impl IrAuthor {
                 vec![decl.lower_drop_column_default(table, column)]
             }
             Op::RenameColumn { table, from, to, ty, .. } => {
-                // ONE online-rename plan step, dialect-chosen at lower
-                //. The neutral→PG / neutral→SQLite-affinity translation
+                // ONE online-rename plan step, dialect-chosen at lower.
+                // The neutral→PG / neutral→SQLite-affinity translation
                 // lives in `lower_rename`; the destination authors (the
                 // expand-contract author on PG, the rebuild planner on SQLite) are
-                // REUSED verbatim, so the IR path inherits their version-stable ids
-                //. A rename never advances the working live-table set.
+                // REUSED verbatim, so the IR path inherits their version-stable ids.
+                // A rename never advances the working live-table set.
                 //
                 // renameColumn `ifExists` is REFUSED fail-closed.
                 // The online-rename plan step is a MULTI-migration shape (PG

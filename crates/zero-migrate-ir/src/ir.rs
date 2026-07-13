@@ -222,8 +222,8 @@ impl JsonSchema for SafeU64 {
 
     fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // Hand-written (NOT the transparent `u64` derive) so the emitted schema
-        // carries the SAME `< 2^53` upper bound the Deserialize impl enforces
-        //. The derive would emit only `{type:integer, format:uint64,
+        // carries the SAME `< 2^53` upper bound the Deserialize impl enforces.
+        // The derive would emit only `{type:integer, format:uint64,
         // minimum:0}`, and a schema-driven JS hint would then accept a `2^53`
         // count the Rust loader rejects — a schema/loader divergence on the very
         // cross-impl determinism boundary `SafeU64` exists for. `maximum` mirrors
@@ -406,8 +406,8 @@ impl MigrationIr {
     }
 }
 
-/// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR
-///. An absent key and an explicit `null` both mean "no override" here;
+/// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR.
+/// An absent key and an explicit `null` both mean "no override" here;
 /// the derive-then-override MERGE happens elsewhere, NOT this type's job.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -3131,8 +3131,8 @@ pub enum Op {
     },
 
     // ──────────────────────────────────────────────────────────────────────
-    // VENDOR (`zero-migrate/pg`) — Postgres-ONLY privileged primitives
-    //. Each is REFUSED fail-closed under a Confined capability
+    // VENDOR (`zero-migrate/pg`) — Postgres-ONLY privileged primitives.
+    // Each is REFUSED fail-closed under a Confined capability
     // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
     // rendered SQL hits the Confined deny-list). All are `dialect_scope = PgOnly`:
     // a SQLite deploy of any of them is hard-rejected at load. `password`,

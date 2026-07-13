@@ -2,7 +2,7 @@
   "name": "zero-migrate-node",
   "version": "0.1.0",
   "private": true,
-  "description": "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the dialect-neutral seam::SqlSession seam. Zero tokio, zero io_uring, cross-platform.",
+  "description": "Node/Bun N-API addon for zero-migrate: host-driven (pg/mysql2) apply over the dialect-neutral driver::SqlSession seam. Zero tokio, zero io_uring, cross-platform.",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {

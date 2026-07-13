@@ -1999,8 +1999,8 @@ mod tests {
     //
     // SCOPE NOTE: CHECK-constraint evolution (extending the
     // discriminator's IN-list, adding per-variant integrity CHECKs)
-    // is NOT yet diffed — the proposal section §C2 calls it out as
-    // additive-by-construction. Re-running registerModel today does
+    // is NOT yet diffed — it is additive-by-construction, so skipping it
+    // is safe. Re-running registerModel today does
     // not amend existing CHECK constraints. This is a known follow-up.
     // -----------------------------------------------------------------
 

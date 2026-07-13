@@ -1,5 +1,5 @@
-//! The SQL security guard — parse-time deny-list + cross-schema confinement
-//!. **The security heart of the engine.**
+//! The SQL security guard — parse-time deny-list + cross-schema confinement.
+//! **The security heart of the engine.**
 //!
 //! Migrations are privileged arbitrary-SQL authored by untrusted creators AND a
 //! prompt-injectable AI. This guard is the *first* line of defense-in-depth: it
@@ -476,8 +476,8 @@ pub enum GuardError {
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     /// PHASE 4 — a raw SQL string was presented to [`SqlGuard::check`] on the
-    /// Confined **SQLite** path, which accepts ONLY descriptor-diff-generated DDL
-    ///. `libpg_query` cannot vet SQLite, so there is no line-1
+    /// Confined **SQLite** path, which accepts ONLY descriptor-diff-generated DDL.
+    /// `libpg_query` cannot vet SQLite, so there is no line-1
     /// parse guard for raw SQLite SQL; the only safe SQLite DDL comes from the
     /// engine's descriptor emitter (validated at the author boundary, line-2
     /// enforced by the `SqliteBackend` authorizer). A hand-written / untrusted
