@@ -1,7 +1,7 @@
 //! The portable `op.*` migration **IR**.
 //!
 //! A migration authored in the JS `op.*` DSL is compiled (in the JS builder) to
-//! a small, dialect-NEUTRAL JSON document — the **`.ir.json`** — whose Rust
+//! a small, dialect-NEUTRAL JSON document — the **IR envelope** — whose Rust
 //! mirror is [`MigrationIr`]. The engine loads it, lowers each [`Op`] to dialect
 //! SQL, and checksums the canonical op-list
 //! ([`crate::migration::Checksum::of_ir`]).
@@ -24,7 +24,7 @@
 //! - **[`IrScalar`] enforces the constrained numeric domain at DESERIALIZE
 //!   time**: a fractional / exponential JS number, or an integer with
 //!   magnitude ≥ 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
-//!   any checksum runs — so a hand-crafted malicious `.ir.json` cannot smuggle a
+//!   any checksum runs — so a hand-crafted malicious IR envelope cannot smuggle a
 //!   lossy float past the loader.
 //! - **An absent optional is OMITTED on the wire, NEVER `"field":null`** — every
 //!   `Option` field carries `#[serde(skip_serializing_if = "Option::is_none")]`.
@@ -36,7 +36,7 @@
 //!   must produce the SAME omitted-key image — otherwise the identical logical
 //!   migration would hash differently on the two sides. Deserialize still ACCEPTS
 //!   an explicit `null` for an optional (a tolerant input), and it canonicalizes
-//!   back to the omitted form, so a null-bearing `.ir.json` and an omitted one
+//!   back to the omitted form, so a null-bearing IR envelope and an omitted one
 //!   yield the same checksum.
 //!
 //! Scope: the data types + the closed `Op` enum + the numeric scalar +
@@ -84,7 +84,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 
 /// The CURRENT IR wire-format version this engine build emits and accepts.
 /// The IR shape evolves by BUMPING this; the loader rejects an
-/// unknown FUTURE `ir_version` fail-closed (a `.ir.json` authored by a newer
+/// unknown FUTURE `ir_version` fail-closed (an IR envelope authored by a newer
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts.
@@ -157,12 +157,12 @@ where
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
 /// understand — a FUTURE version `> CURRENT_IR_VERSION`.
-/// The loader's `.ir.json` branch raises this BEFORE checksum/lower, fail-closed:
+/// The loader's IR envelope branch raises this BEFORE checksum/lower, fail-closed:
 /// a newer-engine artifact is never silently mis-interpreted by an older engine.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "unsupported IR wire-format version {found}: this engine understands ir_version \
-     up to {current} (a newer engine authored this .ir.json; upgrade the migration \
+     up to {current} (a newer engine authored this IR envelope; upgrade the migration \
      engine or re-author against ir_version <= {current})"
 )]
 pub struct IrVersionError {
@@ -188,7 +188,7 @@ pub struct IrVersionError {
     doc = "different typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))"
 )]
 /// on the two sides. Bounding them here closes that cross-impl divergence — and
-/// rejects a hostile `.ir.json` that smuggles an out-of-range count past the
+/// rejects a hostile IR envelope that smuggles an out-of-range count past the
 /// loader BEFORE any checksum runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -335,7 +335,7 @@ impl<'de> Deserialize<'de> for SafeI64 {
     }
 }
 
-/// The portable migration IR document (`.ir.json`).
+/// The portable migration IR document (IR envelope).
 ///
 /// Deserialized from the JS builder's output. `owner_app` is a HINT — the server
 /// overrides it at submit time (per-table ownership is server-authoritative) —
@@ -375,7 +375,7 @@ pub struct MigrationIr {
     /// hint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is
     /// excluded from the hint domain) — folding the artifact's own checksum into
     /// the artifact's checksum would be circular. `deny_unknown_fields` would
-    /// otherwise reject a `.ir.json` carrying this advisory hint at
+    /// otherwise reject an IR envelope carrying this advisory hint at
     /// deserialize, so the field is modelled explicitly here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
@@ -384,7 +384,7 @@ pub struct MigrationIr {
 impl MigrationIr {
     /// Fail-closed `ir_version` bound check: reject a
     /// FUTURE `ir_version` (`> CURRENT_IR_VERSION`) this engine build cannot
-    /// faithfully interpret. The loader's `.ir.json` branch MUST call this AFTER
+    /// faithfully interpret. The loader's IR envelope branch MUST call this AFTER
     /// deserialize and BEFORE [`Checksum::of_ir`](crate::migration::Checksum::of_ir)
     /// and `IrAuthor::lower` — a newer-engine artifact is never silently
     /// mis-applied by an older engine.
@@ -867,7 +867,7 @@ impl JsonSchema for IrDefault {
 /// column carries one of these; it drives the ivfflat/hnsw operator class
 /// (`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like
 /// every other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE
-/// (a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the
+/// (a hand-crafted IR envelope cannot smuggle an arbitrary metric string into the
 /// opclass render seam). Camel-cased on the wire (`"cosine"`, `"l2"`,
 /// `"innerProduct"`), matching the SDK `vectorMetric` spelling
 /// (`declarative::vector_opclass`).
@@ -905,7 +905,7 @@ impl VectorMetric {
 /// SDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff
 /// `zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum — like every other IR
 /// token-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
-/// `.ir.json` cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`
+/// IR envelope cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`
 /// sentinel render seam).
 ///
 /// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the
@@ -1098,7 +1098,7 @@ pub struct IrColumn {
         not(doc),
         doc = "at validate-time ([`crate::validate`]) to the `typed_id` charset/length + the"
     )]
-    /// reserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).
+    /// reserved-prefix deny-list (a hand-crafted IR envelope is the threat model).
     ///
     /// Camel-cased on the wire (`"idPrefix"`) — the op-region nested-field
     /// convention (`ir_wire_contract`, asserted by
@@ -1152,7 +1152,7 @@ pub struct IrColumn {
 /// The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
 /// `ON UPDATE` clause. A CLOSED enum so the schema enumerates
 /// exactly the supported actions and serde REJECTS any out-of-set token at
-/// DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /
+/// DESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /
 /// injection-shaped action string into the FK render seam. Camel-cased on the
 /// wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
 /// (`SET NULL`, `NO ACTION`, …) is the render seam's job via
@@ -1424,7 +1424,7 @@ pub struct SequenceOwnedBy {
 }
 
 /// The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
-/// so a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped
+/// so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
 /// method string into an unvalidated position that would reach the render seam.
 /// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
 /// the SQLite FTS5 virtual-table path (per-dialect lowering is the render seam's job).
@@ -1726,7 +1726,7 @@ impl CommentTarget {
 /// raw SQL string (property A). **PostgreSQL-only** — the lowering renders it on
 /// PG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a
 /// distinct IR type so the wire shape is closed + schemars-expressible and a
-/// hand-crafted `.ir.json` cannot smuggle an arbitrary clause.
+/// hand-crafted IR envelope cannot smuggle an arbitrary clause.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IrOnConflict {
@@ -1767,7 +1767,7 @@ pub enum ExistenceGuard {
 
 /// **VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for
 /// `Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an
-/// out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
+/// out-of-set token at DESERIALIZE — a hand-crafted IR envelope cannot smuggle an
 /// injection-shaped privilege string into the GRANT render seam (the
 /// `RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest
 /// render their SQL keyword. Camel/lower-cased on the wire.
@@ -3726,7 +3726,7 @@ impl MigrationIr {
 ///
 /// The numeric domain is the security-relevant part: on DESERIALIZE this type
 /// REJECTS a fractional / exponential JSON number and any integer with magnitude
-/// ≥ 2^53, so a malicious `.ir.json` cannot smuggle a lossy float through the
+/// ≥ 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
 /// loader. Exact integers `|v| < 2^53` become [`IrScalar::Int`]; arbitrary-
 /// precision numbers must be sent as `{ "decimal": "…" }` strings.
 #[derive(Debug, Clone, PartialEq)]
@@ -4490,7 +4490,7 @@ mod tests {
     }
 
     // ---- the advisory `checksum` hint deserializes + is NOT folded ----
-    // `MigrationIr` carries `deny_unknown_fields`, so a `.ir.json` bearing the
+    // `MigrationIr` carries `deny_unknown_fields`, so an IR envelope bearing the
     // an advisory `checksum` hint was REJECTED at deserialize before
     // the field was modelled. It must now (a) deserialize, and (b) NOT participate
     // in `Checksum::of_ir` (it is excluded like `owner_app` point 2). RED
@@ -4499,7 +4499,7 @@ mod tests {
     // ---- ir_version fail-closed ----
     // The loader MUST reject a FUTURE ir_version it cannot interpret, BEFORE any
     // checksum/lower runs. Before this fix nothing validated `ir_version`: a
-    // `.ir.json` with `ir_version: 999` deserialized successfully and the field
+    // IR envelope with `ir_version: 999` deserialized successfully and the field
     // gave a false impression of a guard that did not exist.
 
     #[test]
@@ -4719,7 +4719,7 @@ mod tests {
     // ---- schema qualifier + existence guard (wire shape) ----
 
     /// The legacy native `if_exists` field is GONE (folded into `existence_guard`).
-    /// `deny_unknown_fields` rejects a `.ir.json` still carrying it — the intentional
+    /// `deny_unknown_fields` rejects an IR envelope still carrying it — the intentional
     /// wire break. RED before the field removal (it deserialized fine before the field existed).
     #[test]
     fn legacy_if_exists_field_is_rejected() {

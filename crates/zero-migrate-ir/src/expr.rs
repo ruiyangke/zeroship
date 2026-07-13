@@ -3,7 +3,7 @@
 //! Every expression position in the `op.*` IR — a DML `set` value, a `where`,
 //! an `addCheck` body, a partial-index `where:` — is a node of this **closed**
 //! AST, constructed in JS by the fluent `(c) => Expr` builder and serialized to
-//! the `.ir.json` as data. **It is NEVER parsed from text** — there is no lexer,
+//! the IR envelope as data. **It is NEVER parsed from text** — there is no lexer,
 //! no Pratt parser, no `libpg_query`, and therefore no Rust-vs-JS parser drift
 //! and no differential fuzzer. Validation is a
 //! purely STRUCTURAL allow-list check over this enum ([`crate::model::validate`]).
@@ -19,7 +19,7 @@
 //! - schemars derives the discriminated-union JSON Schema the JS builder targets
 //!   (one `$defs/Expr` `oneOf`, each branch pinning `properties.node.const`).
 //! - serde deserialize REJECTS any node tag outside the closed set — a
-//!   hand-crafted `.ir.json` carrying an unknown node simply fails to parse
+//!   hand-crafted IR envelope carrying an unknown node simply fails to parse
 //!   (`UNSUPPORTED { kind: "expr" }` at load), there is no "unknown function"
 //!   parse path because there is no text to parse.
 //! - The numeric domain of a [`Literal`](Expr::Literal) is the constrained

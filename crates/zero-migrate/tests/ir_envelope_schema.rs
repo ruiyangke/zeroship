@@ -1,10 +1,10 @@
-//! Golden-file gate for `op-ir.schema.json`.
+//! Golden-file gate for `ir-envelope.schema.json`.
 //!
 //! The JSON Schema of [`MigrationIr`] is the contract the JS `op.*` builder
 //! targets. This test emits it (`schemars::schema_for!`) and gates the on-disk
 //! file against the freshly generated one:
 //!
-//! - `UPDATE_SCHEMA=1 cargo test … --test op_ir_schema` REWRITES the file
+//! - `UPDATE_SCHEMA=1 cargo test … --test ir_envelope_schema` REWRITES the file
 //!   (regenerate after an intentional IR shape change), then commit it.
 //! - the default run ASSERTS the on-disk file equals the generated schema, so a
 //!   silent IR-shape drift (a new/removed `Op` variant, a renamed field) fails
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use zero_migrate::MigrationIr;
 
 fn schema_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("op-ir.schema.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
 }
 
 fn generated_schema() -> String {
@@ -26,24 +26,24 @@ fn generated_schema() -> String {
 }
 
 #[test]
-fn emit_op_ir_schema() {
+fn emit_ir_envelope_schema() {
     let path = schema_path();
     let generated = generated_schema();
     if std::env::var("UPDATE_SCHEMA").is_ok() {
-        std::fs::write(&path, generated.as_bytes()).expect("write op-ir.schema.json");
+        std::fs::write(&path, generated.as_bytes()).expect("write ir-envelope.schema.json");
         return;
     }
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
-            "op-ir.schema.json missing or unreadable at {}: {e}. \
-             Run `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test op_ir_schema` to generate it.",
+            "ir-envelope.schema.json missing or unreadable at {}: {e}. \
+             Run `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test ir_envelope_schema` to generate it.",
             path.display()
         )
     });
     assert_eq!(
         on_disk, generated,
-        "op-ir.schema.json is stale. Regenerate with \
-         `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test op_ir_schema` and commit it."
+        "ir-envelope.schema.json is stale. Regenerate with \
+         `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test ir_envelope_schema` and commit it."
     );
 }
 
@@ -144,6 +144,6 @@ fn op_variant_names_from_schema() {
 
     assert_eq!(
         found, expected,
-        "the op-ir.schema.json Op discriminant set must equal the closed Op variant set"
+        "the ir-envelope.schema.json Op discriminant set must equal the closed Op variant set"
     );
 }

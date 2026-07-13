@@ -3,7 +3,7 @@
 //!
 //! Earlier the SQLite IR rename was engine-proven but never deploy-wired (no path
 //! constructed a SQLite-dialect `LiveSchema` with the `sqlite_schemas` SDK `Value`s
-//! the rebuild needs). This test proves the wiring: a `renameColumn` `.ir.json`
+//! the rebuild needs). This test proves the wiring: a `renameColumn` IR envelope
 //! deployed through `apply_bundle_ir_sqlite` applies as a 12-step REBUILD on a real
 //! temp-file SQLite DB — rows mirrored, old column gone, journal records the rebuild
 //! — using ONLY the app's descriptor set to build the live facts (the production/dev
@@ -89,7 +89,7 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
     let p = paths("rename_golive");
     let be = backend(&p);
 
-    // Deploy #1: createTable people(nickname) via an .ir.json — the live table the
+    // Deploy #1: createTable people(nickname) via an IR envelope — the live table the
     // rename rebuilds. The descriptor set is the v1 schema.
     let v1 = [descriptor("people", "nickname")];
     let create = r#"{"ir_version":1,"name":"create_people","ops":[
@@ -489,7 +489,7 @@ fn descriptor3(table: &str, a: &str, b: &str, c: &str) -> CollectionDescriptor {
 // EVIDENCE (SQLite leg) — the headline "op.* replaces raw-SQL authoring" proof on
 // SQLite, through the REAL deploy entry point `apply_bundle_ir_sqlite`: the hero
 // DDL+backfill (addColumn first_name/last_name + a splitPart backfill + dropColumn
-// name) authored ENTIRELY as op.* `.ir.json`, NO raw `.sql` anywhere, applies on real
+// name) authored ENTIRELY as op.* IR envelope, NO raw `.sql` anywhere, applies on real
 // SQLite and produces the split columns. The peer of the PG `deploy_migrate_no_raw_
 // sql_hero_ddl_backfill_applies_pg` evidence test.
 #[compio::test]

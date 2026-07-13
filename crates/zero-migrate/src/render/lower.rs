@@ -446,7 +446,7 @@ pub struct IrAuthor {
     /// when an op omits its own `schema` qualifier. `None` ⇒ the dialect
     /// default (the `project_schema`). A `deployment` fact (mirrors how
     /// `project_schema`/`search_path` live on [`crate::conn::ExecutorConfig`], not on
-    /// the authored `.ir.json`), threaded in by the CLI/connection via
+    /// the authored IR envelope), threaded in by the CLI/connection via
     /// [`IrAuthor::with_default_schema`].
     default_schema: Option<String>,
     /// the schema-confinement scope this author's
@@ -1044,7 +1044,7 @@ pub(crate) fn render_domain_check(
 /// fail-closed LOAD GATE refused the artifact, or LOWERING a validated op failed.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadAndLowerError {
-    /// The `.ir.json` LOAD GATE refused the artifact (deserialize / ir_version /
+    /// The IR envelope LOAD GATE refused the artifact (deserialize / ir_version /
     /// structural validate / ownership / checksum-hint).
     #[error(transparent)]
     Load(#[from] crate::model::load::IrLoadError),
@@ -1057,11 +1057,11 @@ pub enum LoadAndLowerError {
 /// ([`IrAuthor::load_and_lower_guarded`]): the fail-closed LOAD GATE refused the
 /// artifact, OR the guard-per-fragment lower failed/denied a rendered fragment
 /// (carrying the op-index attribution). This is the error the PRODUCTION
-/// `.ir.json` deploy path surfaces, so a guard denial reaches the creator with the
+/// IR envelope deploy path surfaces, so a guard denial reaches the creator with the
 /// exact offending op index + kind — not buried in a whole-`up` denial.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadAndLowerGuardedError {
-    /// The `.ir.json` LOAD GATE refused the artifact.
+    /// The IR envelope LOAD GATE refused the artifact.
     #[error(transparent)]
     Load(#[from] crate::model::load::IrLoadError),
     /// The guard-per-fragment lower failed, denied a fragment (op-index
@@ -1074,12 +1074,12 @@ pub enum LoadAndLowerGuardedError {
 /// migrations + the per-op guarded fragments (DX attribution) + the set of tables
 /// this artifact CREATES (its `createTable` ops). The deploy loop folds
 /// `created_tables` into the ownership registry + FK-inline live-set BEFORE the
-/// next `.ir.json` file, so a same-deploy migration that touches an earlier file's
+/// next IR envelope file, so a same-deploy migration that touches an earlier file's
 /// table resolves ownership / inlines FKs correctly (cross-file correctness).
 #[derive(Debug)]
 pub struct LoweredArtifact {
     /// The lowered artifact as a single ordered [`AppliedPlan`]:
-    /// one `.ir.json` → ONE plan, whose `Ddl` steps are the lowered, guard-checked
+    /// one IR envelope → ONE plan, whose `Ddl` steps are the lowered, guard-checked
     /// migrations (their `up` is provably the reassembly of the guarded fragments)
     /// and whose `checksum` is the dialect-neutral
     /// [`crate::model::migration::Checksum::of_ir`] over
@@ -1102,7 +1102,7 @@ pub struct LoweredArtifact {
     /// `addColumn`s or `update`s a table with an outstanding pending contract is
     /// fail-closed refused.
     pub touched_tables: Vec<String>,
-    /// **Plan deps** — the artifact's plan-level `depends_on` versions (the `.ir.json`
+    /// **Plan deps** — the artifact's plan-level `depends_on` versions (the IR envelope
     /// `depends_on`, each a dependency PLAN's plan-group version). The deploy loop
     /// threads these into the engine's cross-plan dependency block
     /// ([`MigrationEngine::apply_plan_with_touched_and_depends`](crate::engine::MigrationEngine::apply_plan_with_touched_and_depends)):
@@ -1238,10 +1238,10 @@ impl IrAuthor {
         }
     }
 
-    /// The loader's IR branch: run the fail-closed `.ir.json` LOAD GATE
+    /// The loader's IR branch: run the fail-closed IR envelope LOAD GATE
     /// (deserialize → `ir_version` → `validate_ir` → server-stamped ownership →
     /// advisory checksum-hint compare) and then LOWER the validated, owned IR to
-    /// migrations. This is the single creator-facing entry the `.ir.json` deploy
+    /// migrations. This is the single creator-facing entry the IR envelope deploy
     /// path calls — the peer of the platform `.sql` Flyway loader
     /// ([`crate::plan::loader::load_dir`]), which never routes IR.
     ///
@@ -1290,7 +1290,7 @@ impl IrAuthor {
         self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
     }
 
-    /// The PRODUCTION `.ir.json` deploy entry: run the fail-closed
+    /// The PRODUCTION IR envelope deploy entry: run the fail-closed
     /// LOAD GATE, then lower with **guard-per-fragment attribution**
     /// ([`Self::lower_guarded`]) so a guard denial carries the exact op-index + kind to
     /// the creator (the 422), not a bare whole-`up` denial. Returns the lowered
@@ -1339,7 +1339,7 @@ impl IrAuthor {
         )
         .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
-        // cross-file registry + live-set before the next `.ir.json`.
+        // cross-file registry + live-set before the next IR envelope.
         let created_tables: Vec<String> = ir
             .ops
             .iter()
@@ -1353,7 +1353,7 @@ impl IrAuthor {
         // STAMP that same anchor onto every DDL step's journaled `Migration.checksum`
         //: the drift anchor that enters the journal is the
         // canonical op list, NOT the per-dialect rendered SQL. So a re-deploy of
-        // the SAME `.ir.json` on EITHER backend re-derives the SAME anchor (no
+        // the SAME IR envelope on EITHER backend re-derives the SAME anchor (no
         // false drift), while editing the authoring `.ts` (⇒ a different op list)
         // shifts the anchor and the executor's net-applied drift gate aborts.
         // the authoritative DDL/DML touched-set over EVERY op variant,
@@ -7832,7 +7832,7 @@ mod tests {
         );
     }
 
-    // The loader's IR branch end-to-end: a well-formed `.ir.json`
+    // The loader's IR branch end-to-end: a well-formed IR envelope
     // createTable by its declarer loads (fail-closed gate passes) AND lowers to a
     // CREATE TABLE migration.
     #[test]
@@ -7884,7 +7884,7 @@ mod tests {
         }
     }
 
-    // Regression: the PRODUCTION `.ir.json` deploy entry
+    // Regression: the PRODUCTION IR envelope deploy entry
     // (`load_and_lower_guarded`, wired into `apply_bundle_ir_migrations`) carries
     // the op-index attribution on a guard denial — proving the attribution
     // reaches the REAL deploy path, not only the `lower_guarded` unit tests. We
@@ -8153,7 +8153,7 @@ mod tests {
         assert!(steps >= 1, "the createTable lowers to at least one Ddl step");
     }
 
-    // Regression: the op-list drift anchor is DIALECT-NEUTRAL — the SAME `.ir.json`
+    // Regression: the op-list drift anchor is DIALECT-NEUTRAL — the SAME IR envelope
     // lowered for PG and for SQLite journals the SAME checksum (so a re-deploy on
     // either backend compares against one anchor; the single-checksum
     // invariant). Pre-fix the anchor was the per-dialect rendered SQL, which

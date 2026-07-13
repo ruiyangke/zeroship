@@ -263,7 +263,7 @@ pub use model::ir::{
     TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
-// The fail-closed `.ir.json` load gate: deserialize →
+// The fail-closed IR envelope load gate: deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
 // compare. The loader's IR branch ([`render::lower::IrAuthor::load_and_lower`]) runs
 // this gate and then lowers the validated, owned IR to migrations.
@@ -272,7 +272,7 @@ pub use model::load::{
     recompute_hint_domain_checksum, IrLoadError,
 };
 // Online-rename go-live (SQLite leg): the deploy/dev entry point that applies a
-// bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
+// bundle's IR envelope set against a SQLite backend, building the SQLite-dialect
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
 pub use apply::ir_apply::{
@@ -280,7 +280,7 @@ pub use apply::ir_apply::{
     IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
     SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
 };
-// The PG `.ir.json` apply entry points take `&PostgresBackend<'_>` — PG-only.
+// The PG IR envelope apply entry points take `&PostgresBackend<'_>` — PG-only.
 // The IR-path DDL Lower phase: compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.

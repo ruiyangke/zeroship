@@ -1,15 +1,15 @@
-//! Host-authoring lower — turn a pure-JS `.ir.json` ENVELOPE into the
+//! Host-authoring lower — turn a pure-JS IR envelope into the
 //! `Vec<Migration>` the engine's `executor::apply` consumes, **folding the single
 //! authoritative `Checksum::of_ir` in Rust** (never in JS).
 //!
 //! ## Why the addon lowers (not the facade)
 //! The async entrypoints (`apply`/`status`/`history`) take a pre-lowered
 //! `Vec<Migration>` (SQL `up` + folded checksum). But the pure-JS host recorder
-//! can only produce the dialect-neutral `.ir.json` op ENVELOPE — the
+//! can only produce the dialect-neutral IR op envelope — the
 //! ops→SQL LOWER (`IrAuthor::load_and_lower`) is a Rust-only engine step (it routes
 //! every op through the shared snapshot-builder + DDL emitter, `render/lower.rs`). So
 //! the facade hands the envelope + provenance here; this module runs the SAME
-//! fail-closed LOAD GATE + LOWER the `.ir.json` deploy path runs
+//! fail-closed LOAD GATE + LOWER the IR envelope deploy path runs
 //! (`IrAuthor::new(schema, app, dialect).load_and_lower(bytes, app, &registry, &live,
 //! None)`), and the resulting `Migration.checksum` is `Checksum::of_ir` folded by
 //! Rust over the canonical op list + the server-stamped `owner_app`. The JS side emits
@@ -46,10 +46,10 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
     }
 }
 
-/// Run the fail-closed `.ir.json` LOAD GATE + LOWER over an envelope, returning the
+/// Run the fail-closed IR envelope LOAD GATE + LOWER over an envelope, returning the
 /// lowered `Vec<Migration>` (with `Checksum::of_ir` folded by Rust).
 ///
-/// - `envelope_json` — the pure-JS `.ir.json` envelope bytes (`{ ir_version, name,
+/// - `envelope_json` — the pure-JS IR envelope bytes (`{ ir_version, name,
 ///   ops }`). The envelope MUST NOT carry `owner_app` (a provenance field the
 ///   builder can't be trusted to set); it is stamped from `owner_app` here.
 /// - `owner_app` — the deploying app id (`app_…`); the ownership check + the
@@ -79,7 +79,7 @@ pub fn lower_envelope_to_migrations(
     // pure-JS host recorder drains ONLY the author-declared columns — the
     // platform-managed system fields (`id`/`created_at`/`updated_at`/`version`/…)
     // + the `["id"]` PRIMARY KEY are injected by `resolve_create_table_policy` under
-    // the **Confined creator profile**, NOT by the JS DSL. The native `.ir.json` on
+    // the **Confined creator profile**, NOT by the JS DSL. The native IR envelope on
     // disk is post-fold (the recorder folds before writing); the host path folds
     // here so the addon lowers the SAME resolved shape — otherwise the confined
     // table-shape guard rejects a createTable missing its system columns
@@ -95,7 +95,7 @@ pub fn lower_envelope_to_migrations(
 
     let author = IrAuthor::new(project_schema, owner_app, dialect);
 
-    // Use the GUARDED lower — the SAME entry the `.ir.json` deploy path uses
+    // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
     // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
     // IDENTITY: `load_and_lower_guarded` assembles an `AppliedPlan` and stamps the
     // dialect-neutral `authoritative_ir_checksum` (the `Checksum::of_ir` ANCHOR)

@@ -212,7 +212,7 @@ const EC_STEP_C2: u8 = 5;
 /// every fact that identifies the logical rename — `schema`, `owner`, `table`,
 /// `from`, `to`, `ty`. Length-prefixing each field makes the encoding injective
 /// (so `("a","bc")` and `("ab","c")` never collide). NOTHING per-run is folded
-/// (no time, no random), so re-lowering the identical `.ir.json` reproduces the
+/// (no time, no random), so re-lowering the identical IR envelope reproduces the
 /// SAME seed → the SAME E1..C2 ids. A semantically different rename (different
 /// `to`/`ty`) produces a different seed → fresh ids.
 fn rename_id_seed(
@@ -378,7 +378,7 @@ impl ExpandContractAuthor {
         let e1_down = Some(format!("ALTER TABLE {tbl_q} DROP COLUMN {to_q}"));
         // The rename's STABLE identity seed. Every E1..C2 sub-step id is
         // `MigrationId::derive("ec", seed || step_index)`, so a re-lower of the
-        // identical `.ir.json` (the production path re-lowers on EVERY deploy,
+        // identical IR envelope (the production path re-lowers on EVERY deploy,
         // `deploy_migrate.rs`) reproduces byte-identical ids. The seed folds the
         // schema + owner + table + from + to + ty — every fact that identifies the
         // logical rename — and NOTHING per-run (no time, no random). A changed
@@ -860,7 +860,7 @@ mod tests {
         // per run. Because the checksum folds `depends_on` and `depends_on` now
         // holds deterministic sibling ids, the FULL checksum is stable too — the
         // pre-fix "dependency-free only" carve-out is gone. This is the property a
-        // re-lower of the identical `.ir.json` on every deploy relies on.
+        // re-lower of the identical IR envelope on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
         assert_eq!(p1.trigger_version, p2.trigger_version, "E2 obligation key is deterministic");

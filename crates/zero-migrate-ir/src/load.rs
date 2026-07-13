@@ -1,6 +1,6 @@
-//! The fail-closed **`.ir.json` load gate**.
+//! The fail-closed **IR envelope load gate**.
 //!
-//! This is the SINGLE production seam every creator-authored `.ir.json` passes
+//! This is the SINGLE production seam every creator-authored IR envelope passes
 //! through before the engine lowers it (`IrAuthor::lower`, the per-dialect DDL
 //! compiler — a later wave) or checksums it. The gate is fail-closed and ordered
 //! so a hostile / newer-engine / cross-tenant artifact is rejected BEFORE any
@@ -37,7 +37,7 @@ use crate::ir::{IrVersionError, MigrationIr, Op};
 use crate::migration::{Checksum, MigrationFlags};
 use crate::validate::AuthoringError;
 
-/// A failure of the `.ir.json` load gate. Each variant maps to one ordered
+/// A failure of the IR envelope load gate. Each variant maps to one ordered
 /// fail-closed step.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IrLoadError {
@@ -46,7 +46,7 @@ pub enum IrLoadError {
     /// numeric scalar, or a non-nullary synth default. Carries the
     /// serde message (which embeds the structured code, e.g.
     /// [`EXPR_INVALID_NUMERIC`](crate::ir::EXPR_INVALID_NUMERIC), for matching).
-    #[error("malformed .ir.json: {0}")]
+    #[error("malformed IR envelope: {0}")]
     Deserialize(String),
     /// The artifact declared a FUTURE `ir_version` this engine cannot interpret.
     /// Fail-closed.
@@ -76,7 +76,7 @@ pub enum IrLoadError {
     /// The artifact's advisory `checksum` hint did not match the engine's
     /// recomputed hint-domain checksum — genuine drift / tamper.
     #[error(
-        "checksum hint mismatch: the .ir.json advisory hint {hint:?} does not match the \
+        "checksum hint mismatch: the IR envelope advisory hint {hint:?} does not match the \
          engine-recomputed hint-domain checksum {recomputed:?} (the op list / flags / deps \
          changed since the hint was stamped, or the artifact was tampered with)"
     )]
@@ -97,7 +97,7 @@ pub enum IrLoadError {
     /// false-accept tampering of the un-folded fields). Authoring those fields
     /// WITHOUT a hint is unaffected.
     #[error(
-        "checksum hint not yet computable: the .ir.json carries an advisory checksum hint \
+        "checksum hint not yet computable: the IR envelope carries an advisory checksum hint \
          alongside {field} ({detail}), which this engine build cannot fold into the hint \
          domain yet (the flags/deps merge is a later wave). Drop the advisory hint, or omit \
          {field}, until the merge lands — the engine refuses to validate a hint against a \
@@ -351,7 +351,7 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// **Why this is the drift anchor and the rendered SQL is NOT.** The anchor is
 /// the checksum over the canonical op list — one plan checksum over the canonical
 /// op list, not the rendered SQL. Because the op list
-/// is dialect-NEUTRAL, the SAME `.ir.json` re-deployed on PG or SQLite re-derives
+/// is dialect-NEUTRAL, the SAME IR envelope re-deployed on PG or SQLite re-derives
 /// the SAME anchor — so a re-deploy detects drift against the logical artifact, not
 /// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
 /// changes this checksum ⇒ the executor's net-applied drift gate aborts

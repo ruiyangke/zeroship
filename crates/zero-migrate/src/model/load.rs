@@ -1,4 +1,4 @@
-//! The fail-closed `.ir.json` load gate (the POLICY-bound half).
+//! The fail-closed IR envelope load gate (the POLICY-bound half).
 //!
 //! The policy-free pieces of the load gate — [`IrLoadError`], the ownership
 //! checker [`enforce_ir_ownership`], the checksum helpers, and the table-collection
@@ -21,7 +21,7 @@ use crate::model::validate::Dialect;
 // checksum helpers, etc. unchanged.
 pub use zero_migrate_ir::load::*;
 
-/// Load + GATE a `.ir.json` document (the fail-closed chain). Returns the
+/// Load + GATE an IR envelope document (the fail-closed chain). Returns the
 /// validated, ownership-checked [`MigrationIr`] with its `owner_app` STAMPED to
 /// `deploying_app` (a spoofed/absent value in the artifact is discarded) — ready
 /// for `IrAuthor::lower`.
@@ -147,7 +147,7 @@ mod tests {
     }
 
     // ── validate_ir wired as the loader's gate ──────────────────────────────
-    // A hostile .ir.json driven through the REAL loader (not the validator unit
+    // A hostile IR envelope driven through the REAL loader (not the validator unit
     // test) must have the structural gate FIRE on the production path.
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
     fn load_refuses_bare_name_drop_index_fail_closed() {
         // fail-closed: a bare-name DropIndex (`table: None`) has no
         // ownership-checkable target, so the ownership pass `continue`d over it —
-        // letting a hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}`
+        // letting a hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}`
         // (no table hint) DROP another app's index cross-tenant. The fix refuses a
         // bare-name DropIndex at validate time (no name→owner registry resolver
         // exists), so the bypass is closed. An intruder targeting another app's
@@ -522,7 +522,7 @@ mod tests {
 
     /// FROZEN-HEX hint golden: pin the hint-domain
     /// checksum for a FIXED IR to a hard-coded literal, then drive the loader
-    /// with that literal embedded in the `.ir.json` bytes. This breaks the
+    /// with that literal embedded in the IR envelope bytes. This breaks the
     /// self-reference of [`load_accepts_a_correct_checksum_hint`] (which computes
     /// the "correct" hint with the very function under test): here the accepted
     /// value is an INDEPENDENT literal captured once, so a drift in EITHER

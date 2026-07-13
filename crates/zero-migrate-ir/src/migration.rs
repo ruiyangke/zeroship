@@ -57,7 +57,7 @@ impl MigrationId {
     /// `PlanStep` sub-version (`step_id = uuidv7_derive(plan.version, step_index)`):
     /// the `ExpandContractAuthor`'s E1..C2 ids are derived from the rename's stable
     /// identity (`schema + owner + table + from + to + ty`) plus the step index, so
-    /// **re-lowering the identical `.ir.json` reproduces byte-identical ids** — the
+    /// **re-lowering the identical IR envelope reproduces byte-identical ids** — the
     /// property the cross-deploy obligation key, the idempotent re-run skip, the
     /// auto-discharge recognition, and the self-EXPAND exemption all depend on. A
     /// fresh `generate()` per lower (the bug this replaces) gives each deploy a

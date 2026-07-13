@@ -44,7 +44,7 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 # JSON Schema derive for the `op.*` IR types (MigrationIr + the closed Op enum).
-# Emits `op-ir.schema.json` (the discriminated union the JS builder targets) via
+# Emits `ir-envelope.schema.json` (the discriminated union the JS builder targets) via
 # `schemars::schema_for!`. Sync + leaf — zero tokio; does not widen the trust
 # domain (it only describes the IR shape, it does not parse untrusted SQL).
 schemars = { workspace = true }

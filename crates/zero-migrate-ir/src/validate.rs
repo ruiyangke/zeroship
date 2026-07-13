@@ -80,7 +80,7 @@ pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
 /// A `t.id({prefix})` `id_prefix` that is not a
 /// valid typed-id prefix (charset / length) or is in the reserved-prefix
-/// deny-list (`usr`, …). The IR's threat model is a hand-crafted `.ir.json`, so a
+/// deny-list (`usr`, …). The IR's threat model is a hand-crafted IR envelope, so a
 /// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time
 /// surprise (it would otherwise mint ids colliding with platform `usr_…` ids).
 pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
@@ -570,7 +570,7 @@ pub fn validate_no_aggregate_expr_context(
 /// `serde_json`'s compile-time `recursion_limit` (~128) at deserialize: a future
 /// switch to a streaming/custom deserializer, or a raised serde limit, would
 /// otherwise silently expose a stack-overflow on a deeply-nested hostile
-/// `.ir.json`. `128` is comfortably below any realistic legitimate nesting and
+/// IR envelope. `128` is comfortably below any realistic legitimate nesting and
 /// matches serde's own default so it never narrows the accepted set in practice.
 pub const MAX_EXPR_DEPTH: u32 = 128;
 
@@ -852,7 +852,7 @@ impl Ctx<'_> {
     /// Rule (b): the `FnSynth` arity/shape backstop. Each synth helper has a
     /// pinned argument shape; an out-of-shape call is rejected STRUCTURALLY here
     /// — independent of the (per-dialect) render seam — so a hostile/buggy
-    /// `.ir.json` carrying e.g. `FnSynth{fn:now, args:[…]}` or a zero-arg
+    /// IR envelope carrying e.g. `FnSynth{fn:now, args:[…]}` or a zero-arg
     /// `concatWs` cannot pass the structural gate and defer the blow-up to
     /// rendering. After the shape check each variant recurses into its args.
     fn check_synth(&self, f: SynthFn, args: &[Expr], depth: u32) -> Result<(), AuthoringError> {

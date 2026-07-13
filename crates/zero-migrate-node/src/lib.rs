@@ -39,7 +39,7 @@ pub mod session;
 /// JSON strings, callable directly or through the napi entrypoints.
 pub mod api;
 
-/// Host-authoring lower: turn a pure-JS `.ir.json` envelope into the
+/// Host-authoring lower: turn a pure-JS IR envelope into the
 /// `Vec<Migration>` the engine consumes, folding the authoritative
 /// `Checksum::of_ir` in Rust. Pure functions (no napi); the `applyIr`/`statusIr`
 /// bridge entrypoints wrap them.

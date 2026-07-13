@@ -96,12 +96,12 @@ pub fn ir_version() -> u32 {
 /// typed [`LoadVerifyReply`]; never throws for a malformed document.
 #[napi(js_name = "loadVerify")]
 pub fn load_verify(
-    ir_json: String,
+    envelope_json: String,
     deploying_app: String,
     dialect: String,
     registry: std::collections::HashMap<String, String>,
 ) -> LoadVerifyReply {
-    api::load_verify(&ir_json, &deploying_app, &dialect, &registry)
+    api::load_verify(&envelope_json, &deploying_app, &dialect, &registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 // The typed verbs — each is a thin `run_verb` closure over the engine.
 // ---------------------------------------------------------------------------
 
-/// `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS `.ir.json`
+/// `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS IR envelope
 /// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
 /// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
 /// authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then

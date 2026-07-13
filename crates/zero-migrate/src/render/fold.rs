@@ -28,7 +28,7 @@
 //!
 //! An incoherent op stream (add-column-to-missing-table, drop-absent-column,
 //! duplicate-create-table, rename-to-existing, …) is a structured [`FoldError`] —
-//! never a silently-wrong snapshot. A real `.ir.json` set the
+//! never a silently-wrong snapshot. A real IR envelope set the
 //! engine already applied is internally consistent, so the fold agrees with apply.
 //!
 //! # DML is a schema no-op

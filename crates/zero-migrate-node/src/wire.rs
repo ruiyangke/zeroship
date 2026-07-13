@@ -153,7 +153,7 @@ pub struct ApplyRequest {
     /// The project's `{ table: owner_app }` ownership registry. Empty on a
     /// fresh single-app project.
     pub registry: std::collections::HashMap<String, String>,
-    /// The pure-JS `.ir.json` envelope `{ ir_version, name, ops }` as a JS value.
+    /// The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value.
     pub envelope: JsonValue,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,

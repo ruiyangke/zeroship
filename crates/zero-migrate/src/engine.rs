@@ -685,7 +685,7 @@ impl MigrationEngine {
     /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but ALSO
     /// threads the artifact's plan-level **`depends_on`** versions so the
     /// cross-plan dependency block fires at APPLY (not only in `status`). The IR
-    /// deploy path passes its `.ir.json` `depends_on` here: if any referenced
+    /// deploy path passes its IR envelope `depends_on` here: if any referenced
     /// dependency is an online rename whose contract is still OUTSTANDING, the
     /// deploy is fail-closed refused with `DEPENDENCY_PENDING_CONTRACT` — even when
     /// the dependent plan touches a DIFFERENT table than the pending one (the case
@@ -1082,7 +1082,7 @@ impl MigrationEngine {
             // `resolve-pending` key.
             //
             // The `depends_on` set is the UNION of the caller-supplied plan-level
-            // `depends_on` (the `.ir.json` `depends_on`, threaded via
+            // `depends_on` (the IR envelope `depends_on`, threaded via
             // `apply_plan_with_touched_and_depends`) and every step `Migration`'s
             // own `depends_on` (e.g. the EXPAND chain's interior edges), so the
             // block holds whether the dependency is declared at the artifact level

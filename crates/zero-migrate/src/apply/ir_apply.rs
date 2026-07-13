@@ -1,6 +1,6 @@
 //! **Online-rename go-live SEAM — SQLite leg (engine-wired, deploy-handler
 //! deferred; NOT an end-to-end production path).** The library entry point that
-//! applies a bundle's `.ir.json` creator artifacts against a **SQLite** backend —
+//! applies a bundle's IR envelope creator artifacts against a **SQLite** backend —
 //! the SQLite peer of control's PG `apply_bundle_ir_migrations`
 //! (`crates/control/src/deploy_migrate.rs`).
 //!
@@ -47,7 +47,7 @@
 //! desired descriptor set. Until wired, this surface is test-only (no production
 //! caller; pinned by the control interlock regression test).
 //!
-//! Every `.ir.json` runs through the SAME fail-closed load + guard-per-fragment
+//! Every IR envelope runs through the SAME fail-closed load + guard-per-fragment
 //! lower gate (`IrAuthor::load_and_lower_guarded`) the PG path uses, then is applied
 //! through the single shared `apply_plan` — so the SQLite leg inherits the IR-load
 //! ownership/version/checksum-hint defenses and the per-op guard, identically.
@@ -116,7 +116,7 @@ pub enum IrDiscoveryError {
     },
 }
 
-/// Mutable live facts the PG `.ir.json` apply loop advances between files.
+/// Mutable live facts the PG IR envelope apply loop advances between files.
 #[derive(Debug, Clone)]
 pub struct PostgresIrApplyState {
     /// Table ownership registry consumed by the fail-closed IR load gate.
@@ -141,10 +141,10 @@ pub struct PostgresIrApplyOutcome {
 }
 
 
-/// A failure applying a bundle's `.ir.json` set against a Postgres backend.
+/// A failure applying a bundle's IR envelope set against a Postgres backend.
 #[derive(Debug, thiserror::Error)]
 pub enum PostgresIrApplyError {
-    /// Reading the migrations directory / a `.ir.json` file failed.
+    /// Reading the migrations directory / an IR envelope file failed.
     #[error("read IR file ({file}): {message}")]
     Read {
         /// The path/filename.
@@ -155,10 +155,10 @@ pub enum PostgresIrApplyError {
     /// Introspecting the live schema failed.
     #[error("read Postgres catalog for live facts: {0}")]
     Snapshot(#[from] DriftError),
-    /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
+    /// An IR envelope failed the fail-closed LOAD GATE or guarded lower.
     #[error("IR load/guarded-lower ({file}): {source}")]
     Ir {
-        /// The `.ir.json` filename.
+        /// The IR envelope filename.
         file: String,
         /// The fail-closed gate / guard error.
         #[source]
@@ -245,10 +245,10 @@ pub struct SqliteIrApplyOutcome {
     pub skipped: Vec<String>,
 }
 
-/// A failure applying a bundle's `.ir.json` set against a SQLite backend.
+/// A failure applying a bundle's IR envelope set against a SQLite backend.
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteIrApplyError {
-    /// Reading the migrations directory / a `.ir.json` file failed.
+    /// Reading the migrations directory / an IR envelope file failed.
     #[error("read IR file ({file}): {message}")]
     Read {
         /// The path/filename.
@@ -265,12 +265,12 @@ pub enum SqliteIrApplyError {
     /// ([`apply_bundle_ir_sqlite_catalog`] via [`LiveSchema::from_sqlite_catalog`]).
     #[error("read SQLite catalog for live facts: {0}")]
     Catalog(#[source] crate::DriftError),
-    /// A `.ir.json` failed the fail-closed LOAD GATE or its guard-per-fragment lower
+    /// An IR envelope failed the fail-closed LOAD GATE or its guard-per-fragment lower
     /// (malformed, future `ir_version`, ownership / structural reject, a guard-denied
     /// fragment with op-index attribution). A creator fault.
     #[error("IR load/guarded-lower ({file}): {source}")]
     Ir {
-        /// The `.ir.json` filename.
+        /// The IR envelope filename.
         file: String,
         /// The fail-closed gate / guard error.
         #[source]
@@ -283,7 +283,7 @@ pub enum SqliteIrApplyError {
     Apply(#[source] DeclarativeApplyError),
 }
 
-/// Apply a bundle's `.ir.json` creator artifacts against a **SQLite** backend
+/// Apply a bundle's IR envelope creator artifacts against a **SQLite** backend
 /// Discovers `*.ir.json` files in `migrations_dir`
 /// (version-ordered by filename), builds the SQLite-dialect [`LiveSchema`] from the
 /// app's `descriptors`, then for each file runs the fail-closed load + guard lower

@@ -5,7 +5,7 @@
 //! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
 //! [`loader::load_dir`](crate::plan::loader::load_dir) for a `.sql` artifact, or from
 //! [`IrAuthor::lower_plan`](crate::render::lower::IrAuthor::lower_plan) for an
-//! `.ir.json`), it walks the steps and prints the SQL strings already held in each
+//! IR envelope), it walks the steps and prints the SQL strings already held in each
 //! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It NEVER renders SQL
 //! itself.
 //!
@@ -82,7 +82,7 @@ fn dialect_label(d: SqlDialect) -> &'static str {
 }
 
 /// How a plan's body relates to the requested `--dialect` — drives the HONEST header
-/// caption. The `.ir.json` leg is genuinely per-dialect LOWERED, so its
+/// caption. The IR envelope leg is genuinely per-dialect LOWERED, so its
 /// header may claim the dialect. The raw `.sql` (Flyway, operator-authored) leg is
 /// printed VERBATIM — it is NOT dialect-transformed — so captioning it with a
 /// `(dialect: sqlite)` claim would mislead an operator reviewing a SQLite go-live
@@ -179,7 +179,7 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &Previe
     out
 }
 
-/// Load + lower an `.ir.json` artifact's bytes OFFLINE (no DB — an EMPTY
+/// Load + lower an IR envelope artifact's bytes OFFLINE (no DB — an EMPTY
 /// [`LiveSchema`]) for the target dialect, then render the preview. DB-state-
 /// dependent ops that cannot lower against the empty live schema (SQLite rename /
 /// rebuild-only) are caught PER-OP and emitted as `[runtime-resolved]` labels
@@ -218,7 +218,7 @@ pub fn render_ir_json_sql(
     Ok(out)
 }
 
-/// Load + lower an `.ir.json` artifact through the SAME tolerant path used by
+/// Load + lower an IR envelope artifact through the SAME tolerant path used by
 /// [`render_ir_json_sql`], returning only executable statement text.
 ///
 /// This is the DB-free lint seam: callers can feed these statements to the
@@ -254,14 +254,14 @@ fn render_ir_json_rendered(
     // server ownership and consults a cross-app registry which has no meaning
     // offline. The structural validator is enough to refuse a malformed artifact.
     let ir: MigrationIr = serde_json::from_str(bytes)
-        .map_err(|e| format!("parse .ir.json: {e}"))?;
+        .map_err(|e| format!("parse IR envelope: {e}"))?;
     let target = match dialect {
         SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
         SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
         SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
     };
     crate::model::validate::validate_ir(&ir, target, &[])
-        .map_err(|e| format!("validate .ir.json: {e}"))?;
+        .map_err(|e| format!("validate IR envelope: {e}"))?;
 
     // The general/Trusted operator preview renders into the chosen default schema:
     // bind it as the author's project schema, so an op with NO qualifier (or one
@@ -276,7 +276,7 @@ fn render_ir_json_rendered(
     Ok((ir.name, rendered))
 }
 
-/// Per-op lowering for the `.ir.json` path: lower each op in isolation so a single
+/// Per-op lowering for the IR envelope path: lower each op in isolation so a single
 /// DB-state-dependent op (SQLite rename / rebuild-only) degrades to a label instead
 /// of aborting the whole preview. Mirrors the per-op iteration `lower_steps` does,
 /// but tolerant: a `lower_plan` error on a one-op IR ⇒ a runtime-resolved label.
@@ -336,7 +336,7 @@ fn render_plan_steps(plan: &AppliedPlan) -> Vec<Rendered> {
     out
 }
 
-/// Render one step WITH its originating op (the `.ir.json` path), so existence
+/// Render one step WITH its originating op (the IR envelope path), so existence
 /// guards and online renames are labeled with the op's subject.
 fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mut Vec<Rendered>) {
     match step {
@@ -661,7 +661,7 @@ fn indent_sql(sql: &str) -> String {
 }
 
 /// Write the per-plan header block. `caption` decides whether the parenthetical is a
-/// dialect claim (lowered `.ir.json`) or a verbatim-raw-`.sql` disclaimer.
+/// dialect claim (lowered IR envelope) or a verbatim-raw-`.sql` disclaimer.
 fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCaption) {
     let _ = writeln!(out, "-- ============================================================");
     let _ = writeln!(

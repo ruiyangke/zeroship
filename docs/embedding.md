@@ -123,7 +123,7 @@ Identity is threaded per `apply` call, distinct from the config:
 | `exec_cfg: &ExecutorConfig` | Project id/schema, migrator role, timeouts. |
 | `applied_by: &str` | The audit label recorded in the journal. |
 
-For the `.ir.json` **load gate**, ownership identity is threaded through
+For the IR envelope **load gate**, ownership identity is threaded through
 `load_ir_document` / `enforce_ir_ownership`: the deploying app id is
 server-stamped as `owner_app`, and a `{ live table → owning app }` registry is
 supplied so a partial-union deploy cannot mass-drop another tenant's tables

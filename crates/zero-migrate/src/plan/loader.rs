@@ -549,13 +549,13 @@ pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<crate::render::plan::Applie
     // `load_dir` is the platform **Flyway** loader: it returns `Vec<AppliedPlan>`,
     // a `.sql` file lowering to a **single-step plan** via the
     // `AppliedPlan::single_step()` facade (one `Ddl` step), preserving the
-    // order-by-version contract. The creator `.ir.json` path is a SEPARATE seam —
+    // order-by-version contract. The creator IR envelope path is a SEPARATE seam —
     // the fail-closed load gate [`crate::model::load::load_ir_document`] (deserialize →
     // `ir_version` → `validate_ir` → server-stamped ownership → advisory
     // checksum-hint compare), threaded with the deploy-target dialect — feeding
     // `IrAuthor::lower` (the per-dialect DDL compiler). That branch is exposed as
     // [`crate::render::lower::IrAuthor::load_and_lower`] (load gate → lower), the peer
-    // of THIS Flyway loader. A `.sql` platform file never carries an `.ir.json`, so
+    // of THIS Flyway loader. A `.sql` platform file never carries an IR envelope, so
     // this Flyway path stays a one-step plan and does not route IR.
     let migrations = load_dir_migrations(dir)?;
     Ok(migrations
@@ -613,10 +613,10 @@ fn classify_filenames(paths: &[PathBuf]) -> Result<Classified, LoaderError> {
 
     for path in paths {
         let name = file_name_of(path);
-        // `.ir.json` creator artifacts are a SEPARATE seam (the op.* DSL IR-load
+        // IR envelope creator artifacts are a SEPARATE seam (the op.* DSL IR-load
         // gate + `IrAuthor::lower`, routed by `apply_bundle_ir_migrations`), NOT
         // Flyway `.sql`. The platform/Flyway loader skips them so a `.zship`
-        // carrying BOTH `.sql` and `.ir.json` loads its `.sql` set cleanly and the
+        // carrying BOTH `.sql` and IR envelope loads its `.sql` set cleanly and the
         // IR files flow through their own gated entry. (`load_ir_document` is the
         // peer loader; this Flyway path never routes IR.)
         if name.ends_with(".ir.json") {
@@ -1473,8 +1473,8 @@ mod tests {
 
     #[test]
     fn loader_skips_ir_json_artifacts() {
-        // A `.zship` may carry BOTH `.sql` and `.ir.json`. The Flyway loader must
-        // SKIP the `.ir.json` (a SEPARATE seam) — not hard-error UnrecognizedFile —
+        // A `.zship` may carry BOTH `.sql` and IR envelope. The Flyway loader must
+        // SKIP the IR envelope (a SEPARATE seam) — not hard-error UnrecognizedFile —
         // so the `.sql` set loads cleanly and the IR file flows through its own
         // gated entry (`apply_bundle_ir_migrations`). A regression that would fail
         // pre-fix (when any non-`.sql` filename was a hard LoaderError).
@@ -1485,7 +1485,7 @@ mod tests {
             "0002_create_u.ir.json",
             r#"{"ir_version":1,"name":"m","ops":[]}"#,
         );
-        let migs = load_dir_migrations(&dir).expect("the .sql loads; the .ir.json is skipped");
+        let migs = load_dir_migrations(&dir).expect("the .sql loads; the IR envelope is skipped");
         assert_eq!(migs.len(), 1, "only the .sql migration is loaded by the Flyway path");
         assert!(migs[0].up.contains("CREATE TABLE t"));
         std::fs::remove_dir_all(&dir).ok();

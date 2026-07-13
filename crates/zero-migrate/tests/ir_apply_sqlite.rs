@@ -1,9 +1,9 @@
-//! Faithful e2e for the creator `.ir.json` path on the SQLite leg,
+//! Faithful e2e for the creator IR envelope path on the SQLite leg,
 //! driven through the REAL fail-closed LOAD GATE + lower (`IrAuthor::load_and_lower`)
 //! and APPLIED on a real temp-file SQLite backend via the engine.
 //!
 //! This is the SQLite peer of the PG deploy e2e:
-//! a valid `.ir.json` lowers + applies (the table exists, the migration journals),
+//! a valid IR envelope lowers + applies (the table exists, the migration journals),
 //! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
 //! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
 //! any apply. No shims, no PG-gating: the real SQLite runtime.
@@ -53,7 +53,7 @@ fn resolved_ir_json(raw: &str) -> String {
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
-// Happy path: a valid `.ir.json` createTable is gated (SQLite dialect), lowered,
+// Happy path: a valid IR envelope createTable is gated (SQLite dialect), lowered,
 // and APPLIED on a real SQLite backend — the table exists + journals.
 #[compio::test]
 async fn ir_json_lowers_and_applies_on_sqlite() {
@@ -71,7 +71,7 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
-        .expect("a valid .ir.json must lower on SQLite");
+        .expect("a valid IR envelope must lower on SQLite");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
     // Apply through the engine on the real SQLite backend (Confined SQLite guard).

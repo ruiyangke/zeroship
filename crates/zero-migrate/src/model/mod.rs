@@ -1,6 +1,6 @@
 pub mod backfill;
 pub mod dialect_table;
-// The fail-closed `.ir.json` load gate — POLICY-bound half (`load_ir_document`);
+// The fail-closed IR envelope load gate — POLICY-bound half (`load_ir_document`);
 // the policy-free half is re-exported from `zero_migrate_ir::load`.
 pub mod load;
 // Engine-side dialect-support + vendor-capability computation for the closed `Op`

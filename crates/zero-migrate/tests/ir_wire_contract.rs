@@ -1,6 +1,6 @@
 //! Contract-strictness regression suite.
 //!
-//! These tests pin the FROZEN `.ir.json` wire contract the JS `op.*`
+//! These tests pin the FROZEN IR envelope wire contract the JS `op.*`
 //! builder is written against. Each test is RED against the
 //! pre-fix code and GREEN after:
 //!
@@ -126,7 +126,7 @@ fn ir_column_facet_fields_are_camel_case() {
     // matching `FieldDescriptor`'s `#[serde(rename = …)]` — one
     // spelling across IR↔descriptor. And because `IrColumn` is `deny_unknown_fields`,
     // the snake_case spelling must NOT deserialize (the inverse of the bug: pre-fix
-    // a camelCase `.ir.json` following the codebase convention was REJECTED).
+    // a camelCase IR envelope following the codebase convention was REJECTED).
     use zero_migrate::model::ir::{ColType, IrColumn, VectorMetric};
 
     let col = IrColumn {
@@ -727,7 +727,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
     // `vectorMetric` + `mask` are now CARRIED on `Op::AddColumn` (a vector /
     // masked ADD COLUMN is meaningful), so a wire `addColumn` declaring them DESERIALIZES
     // cleanly. `idPrefix` STAYS create-only: an added column is never the system PK, so
-    // `Op::AddColumn` deliberately has NO `idPrefix` slot — a hand-crafted `.ir.json`
+    // `Op::AddColumn` deliberately has NO `idPrefix` slot — a hand-crafted IR envelope
     // carrying it is rejected fail-closed by `deny_unknown_fields` at deserialize.
 
     // idPrefix on addColumn: STILL rejected (no slot — create-only).

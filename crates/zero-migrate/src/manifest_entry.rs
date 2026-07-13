@@ -2,7 +2,7 @@
 //!
 //! Vendored byte-identically from the upstream bundle layer so the
 //! migrate engine's build front-end can emit bundle migration entries over
-//! committed `.ir.json` bytes without a normal-graph dependency on
+//! committed IR envelope bytes without a normal-graph dependency on
 //! the upstream bundle layer:
 //!
 //! - [`MigrationFileEntry`] — the manifest entry type, copied from the upstream
@@ -11,7 +11,7 @@
 //!   upstream bundle layer's `sha256_hex`.
 //!
 //! The serde shape and the hash bytes must stay identical to the originals: the
-//! committed migration `.ir.json` hash is content-addressed, so any drift would
+//! committed migration IR envelope hash is content-addressed, so any drift would
 //! change the recorded entry hash.
 
 use serde::{Deserialize, Serialize};

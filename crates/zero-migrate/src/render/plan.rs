@@ -2,7 +2,7 @@
 //! shared plan orchestrator's data types.
 //!
 //! One authored migration artifact — a `.sql` file *or* an
-//! `.ir.json` — lowers to an [`AppliedPlan`]: an ordered sequence of
+//! IR envelope — lowers to an [`AppliedPlan`]: an ordered sequence of
 //! [`PlanStep`]s the engine's single shared `apply_plan`
 //! ([`MigrationEngine::apply_plan`](crate::engine::MigrationEngine::apply_plan))
 //! runs in order. The step *types* reuse the engine's existing phase artifacts
@@ -21,7 +21,7 @@
 //!
 //! # The single-`Migration` case is the degenerate one-step plan
 //!
-//! A pure-DDL `.sql` (or `.ir.json` with no DML/backfill/online op) lowers to a
+//! A pure-DDL `.sql` (or IR envelope with no DML/backfill/online op) lowers to a
 //! plan whose `steps == [Ddl(one Migration)]` — the overwhelming common case,
 //! and the only shape the legacy Flyway/dbmate loader ever produces. The
 //! [`AppliedPlan::single_step`] facade builds exactly that, and
@@ -61,7 +61,7 @@ impl SqliteRebuildSpec {
     }
 }
 
-/// What one authored artifact (`.sql` or `.ir.json`) becomes after
+/// What one authored artifact (`.sql` or IR envelope) becomes after
 /// lowering — an ordered execution plan. NOT a single [`Migration`]; NOT
 /// the dry-run [`MigrationPlan`](crate::engine::MigrationPlan).
 #[derive(Debug, Clone)]
@@ -73,7 +73,7 @@ pub struct AppliedPlan {
     /// Ordered steps; `apply_plan` runs them in sequence.
     pub steps: Vec<PlanStep>,
     /// ONE checksum over the canonical artifact (for a `.sql` plan this is the
-    /// single step's `Migration.checksum`; for an `.ir.json` it is
+    /// single step's `Migration.checksum`; for an IR envelope it is
     /// `Checksum::of_ir` over the op list).
     pub checksum: Checksum,
     /// Flags derived ∪ overridden from the artifact.

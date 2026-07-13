@@ -117,14 +117,14 @@ fn disposition_token(disposition: Disposition) -> &'static str {
 }
 
 fn schema_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("op-ir.schema.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
 }
 
 /// The `Op` discriminant tokens the schema declares (the 54-op wire contract).
 fn schema_op_tags() -> BTreeSet<String> {
     let schema: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(schema_path()).expect("read op-ir.schema.json"))
-            .expect("parse op-ir.schema.json");
+        serde_json::from_str(&std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"))
+            .expect("parse ir-envelope.schema.json");
     schema
         .get("$defs")
         .and_then(|d| d.get("Op"))

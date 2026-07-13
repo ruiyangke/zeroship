@@ -502,7 +502,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A malformed `.ir.json` is a hard error (the CLI maps this to a non-zero exit).
+/// A malformed IR envelope is a hard error (the CLI maps this to a non-zero exit).
 #[test]
 fn malformed_ir_is_error() {
     let err = render_ir_json_sql("{ not json", SqlDialect::Postgres, &opts());

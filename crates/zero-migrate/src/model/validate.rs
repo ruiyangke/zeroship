@@ -1096,7 +1096,7 @@ pub fn validate_op_scoped(
             let pk_cols = primary_key.as_deref();
             // The per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
-            // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
+            // threat model is a hand-crafted IR envelope, so a malformed/reserved
             // prefix or a misplaced metric is refused fail-closed BEFORE lower /
             // checksum, never deferred to a render surprise.
             for col in columns {
@@ -1254,7 +1254,7 @@ pub fn validate_op_scoped(
             // ([`crate::model::load::enforce_ir_ownership`]) checks the op's TARGET
             // TABLE — but a bare-name DropIndex (`table: None`) has no
             // ownership-checkable target, so the gate would SKIP it, letting a
-            // hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}` drop
+            // hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}` drop
             // ANOTHER app's index cross-tenant. Until a name→owning-table registry
             // resolver exists, we refuse a bare-name DropIndex fail-closed: the
             // author must carry the owning-table hint, which makes the drop
@@ -3092,7 +3092,7 @@ fn validate_default_expr(
 /// Validate one [`IrColumn`](crate::model::ir::IrColumn)'s
 /// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
 ///
-/// Two fail-closed checks, with the IR's hand-crafted-`.ir.json` threat model in
+/// Two fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
 /// mind (the closed-enum + `deny_unknown_fields` design):
 ///
 /// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
@@ -6030,7 +6030,7 @@ mod tests {
     }
 
     // ── column-facet validate-time bounds ───────────────────────────────────
-    // RED before the `validate_column_facets` wiring: a hand-crafted `.ir.json`
+    // RED before the `validate_column_facets` wiring: a hand-crafted IR envelope
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
 
