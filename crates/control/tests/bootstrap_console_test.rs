@@ -10,8 +10,8 @@
 //! invariant: the seed mints NO control PAT and injects NO
 //! `ZEROSHIP_CONTROL_SERVICE_TOKEN` / `ZEROSHIP_CONTROL_URL` into the console env.
 //!
-//! REQUIRES a Postgres migrated by `zeroship-migrate`
-//! (`zeroship-migrate migrate --dir db/migrations-ts --profile platform`):
+//! REQUIRES a Postgres migrated by the platform migrate one-shot
+//! (`zeroship-platform-migrate --migrations-dir db/migrations-ts`):
 //!   - `CONTROL_TEST_DB` / `AUTH_DB_URL` / `PG_TEST_URL` — the DSN.
 //! Skips (prints why, returns) when absent. The pure derivation logic is covered
 //! by the crate's `bootstrap_console` unit tests, which run without infra.

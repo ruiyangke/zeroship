@@ -7,8 +7,7 @@
 //! engine's decoupling from a concrete network driver). The engine still exports
 //! [`migrator_role_name`](zero_migrate::migrator_role_name) (pure identifier
 //! derivation); this module supplies the DDL that establishes the least-privilege
-//! `migrator_<project>_<hash>` role, byte-identically to the in-tree
-//! `zeroship_migrate::apply::role::provision_migrator` it replaces.
+//! `migrator_<project>_<hash>` role.
 //!
 //! The provisioning runs over the SAME raw compio `Client` the service already
 //! holds (borrowed from the [`CompioPgSession`](zeroship_migrate_adapter::CompioPgSession)
@@ -83,8 +82,7 @@ async fn exec_retry(admin: &Client, sql: &str) -> Result<(), compio_postgres::Er
 
 /// Idempotently provision the least-privilege `migrator` role for a project.
 ///
-/// Ported byte-identically from the in-tree
-/// `zeroship_migrate::apply::role::provision_migrator`. Run by an admin/control
+/// Run by an admin/control
 /// principal with `CREATEROLE`. Establishes the role, makes it own the project
 /// schema, pins its `search_path`, and revokes write reach on the meta + extension
 /// schemas. The project schema is expected to exist (created by the caller before
