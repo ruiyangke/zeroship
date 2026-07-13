@@ -44,7 +44,8 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::guard::GuardConfig;
 use zero_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, ExecutorConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, PolicyProfile, PostgresBackend, SqlDialect,
+    LockMode, MigrationEngine, MigrationId, MigrationIr, PlanStep, PolicyProfile, PostgresBackend,
+    RenameStep, SqlDialect,
 };
 use zero_migrate_ir::capability::OperatorCapability;
 
@@ -169,6 +170,28 @@ fn discover_ts_files(dir: &Path) -> Result<Vec<PathBuf>, PlatformMigrateError> {
     }
     files.sort();
     Ok(files)
+}
+
+/// Derive the STABLE per-file version anchor from a `db/migrations-ts` filename:
+/// its leading `NNNNNNNNNNNNNN_` timestamp prefix (the standard
+/// filename-as-version convention). This is the deterministic identity every
+/// lowered step of the file is re-stamped from (see [`restamp_stable_versions`]),
+/// so an idempotent re-run reproduces byte-identical journal versions and the
+/// engine's already-applied skip matches across runs.
+///
+/// Falls back to the whole file stem when a filename has no digit prefix (never
+/// the case for the committed platform migrations, all `NNNN_slug.ts`).
+fn version_prefix_from_filename(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("migration");
+    match stem.split_once('_') {
+        Some((prefix, _)) if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) => {
+            prefix.to_string()
+        }
+        _ => stem.to_string(),
+    }
 }
 
 /// Derive the migration name label from a filename: strip the `.ts` extension and
@@ -302,6 +325,122 @@ fn author_and_lower_file(
         })
 }
 
+/// Per-file span of the order-preserving version space. Each file is assigned an
+/// ordinal (its position in the deterministic sorted-filename order); its lowered
+/// steps occupy `[file_ordinal * FILE_VERSION_STRIDE, +step_index]`. The stride is
+/// a large power of two — comfortably above any per-file lowered step count
+/// (the largest platform file lowers a few hundred steps) — so no two files' spans
+/// overlap and the WITHIN-file step order is preserved. `file_ordinal` (<= a few
+/// dozen) × the stride stays far below [`VERSION_CEILING`] (2^48), so the
+/// numeric-version → id encoding never saturates the 48-bit ordering field.
+const FILE_VERSION_STRIDE: u64 = 1 << 20;
+
+/// Re-stamp EVERY lowered migration's journal `version` with a DETERMINISTIC,
+/// ORDER-PRESERVING id anchored on the migration's `db/migrations-ts` FILENAME (its
+/// deterministic sorted position + the step's position within the file) so a re-run
+/// reproduces byte-identical versions and the engine's already-applied skip matches
+/// across runs.
+///
+/// # Why this is needed
+///
+/// The published engine's declarative builder mints ADDITIVE-DDL migration
+/// versions with `MigrationId::generate()` — a fresh, RANDOM `mig_…` on every
+/// lowering (only SCOPE-GATED destructive DDL is re-stamped with a deterministic
+/// `ddl_step_version`). The engine's already-applied skip keys on the journal
+/// `version`, so a second run of THIS one-shot re-lowers the identical `.ts` into a
+/// migration with a DIFFERENT random version — the journal has no matching row, the
+/// step is treated as pending, re-executes, and fails (`type "account_state"
+/// already exists`). That regresses the retired CLI's re-runnable one-shot posture
+/// the docker-compose `migrate` service depends on.
+///
+/// # What this does
+///
+/// For one file's lowered plan, each migration is re-stamped to
+/// `migration_id_for_version(file_ordinal * FILE_VERSION_STRIDE + step_index)`. That
+/// engine helper places the numeric version in the id's high 48 bits, so ASCENDING
+/// id string order == ascending numeric order. The engine runs a pending batch in
+/// version order (`order_pending` degrades to ascending-version order when there are
+/// no `depends_on` edges), so this monotonic, plan-order-preserving numbering keeps
+/// each file's steps executing in their lowered order (e.g. a table's CREATE before
+/// the CHECK/FK that references it). A raw `MigrationId::derive` content-hash id
+/// would be deterministic but NOT order-preserving, reshuffling the batch into hash
+/// order and breaking those intra-file ordering dependencies.
+///
+/// The numbering is a pure function of (sorted filename position, lowered step
+/// index), both deterministic across runs, so the same committed set re-lowers to
+/// byte-identical versions. The migration `checksum` is over
+/// `up`/`down`/`flags`/`owner_app`/`depends_on` (NOT the version), so re-stamping
+/// never triggers checksum drift.
+///
+/// Intra-file `depends_on` edges (e.g. a deferred FK migration depending on its
+/// table-create migration) are remapped through the old→new version map in the SAME
+/// pass, so the engine's `order_pending` topological sort still resolves.
+///
+/// The platform migrations are pure DDL, so every step is a `PlanStep::Ddl`. Any
+/// other step kind is an unexpected shape for the platform path; we fail closed
+/// rather than silently leave a non-deterministic (or unremapped) version behind.
+fn restamp_stable_versions(
+    lowered: &mut zero_migrate::render::lower::LoweredArtifact,
+    file_ordinal: usize,
+    version_prefix: &str,
+) -> Result<(), PlatformMigrateError> {
+    let base = (file_ordinal as u64) * FILE_VERSION_STRIDE;
+
+    // Pass 1 — assign each Ddl migration a deterministic, order-preserving new
+    // version and record the old→new mapping (for the depends_on remap). Fail closed
+    // on any non-Ddl step (unexpected for the pure-DDL platform path).
+    let mut remap: std::collections::HashMap<String, MigrationId> = std::collections::HashMap::new();
+    for (step_index, step) in lowered.plan.steps.iter().enumerate() {
+        match step {
+            PlanStep::Ddl(m) => {
+                let version = base + step_index as u64;
+                debug_assert!(
+                    (step_index as u64) < FILE_VERSION_STRIDE,
+                    "platform file {version_prefix} lowered more steps than the version stride"
+                );
+                remap.insert(
+                    m.version.as_str().to_string(),
+                    zero_migrate::migration_id_for_version(version),
+                );
+            }
+            PlanStep::Dml { .. }
+            | PlanStep::Backfill(_)
+            | PlanStep::OnlineRename(RenameStep::PgExpandContract(_))
+            | PlanStep::OnlineRename(RenameStep::SqliteRebuild(_)) => {
+                return Err(PlatformMigrateError::Apply {
+                    file: version_prefix.to_string(),
+                    message: format!(
+                        "unexpected non-DDL plan step at index {step_index} in a platform \
+                         migration (only pure DDL is supported); cannot stamp a stable version"
+                    ),
+                });
+            }
+        }
+    }
+
+    // Pass 2 — rewrite each migration's version + remap its depends_on edges.
+    for step in &mut lowered.plan.steps {
+        if let PlanStep::Ddl(m) = step {
+            if let Some(new_version) = remap.get(m.version.as_str()) {
+                m.version = new_version.clone();
+            }
+            for dep in &mut m.depends_on {
+                if let Some(new_dep) = remap.get(dep.as_str()) {
+                    *dep = new_dep.clone();
+                }
+            }
+        }
+    }
+
+    // Keep the plan's outer version marker in agreement with its first step (the
+    // engine borrows `plan.version` from the first step's version).
+    if let Some(PlanStep::Ddl(first)) = lowered.plan.steps.first() {
+        lowered.plan.version = first.version.clone();
+    }
+
+    Ok(())
+}
+
 /// Fold the tables an artifact creates into the live state so a later file sees
 /// them (the cross-file registry + live-set advance).
 fn advance_state(state: &mut ApplyState, owner_app: &str, created_tables: &[String]) {
@@ -409,8 +548,30 @@ pub async fn run_platform_migrations(
             .to_string();
 
         // AUTHOR (V8) + LOWER (Platform guard) — the fully-reachable half.
-        let lowered = author_and_lower_file(&ctx, &state, path)?;
+        let mut lowered = author_and_lower_file(&ctx, &state, path)?;
         let created_tables = lowered.created_tables.clone();
+
+        // Re-stamp every lowered step's journal version DETERMINISTICALLY from this
+        // file's sorted position + step order, so a re-run reproduces byte-identical
+        // versions and the engine's already-applied skip matches (the idempotent
+        // one-shot). `index` is the file's deterministic sorted-filename ordinal.
+        let version_prefix = version_prefix_from_filename(path);
+        restamp_stable_versions(&mut lowered, index, &version_prefix)?;
+
+        // The set of THIS file's own step versions — the accurate applied/skipped
+        // denominator. The engine's per-apply outcome reports the FULL journal's
+        // completed set as "skipped" (every prior file's rows accumulate), so we
+        // intersect against this file's versions to avoid the cross-file
+        // over-reporting (thousands of spurious "already applied" lines).
+        let file_versions: std::collections::HashSet<String> = lowered
+            .plan
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::Ddl(m) => Some(m.version.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
 
         // APPLY over the native compio seam, holding the project lock across the
         // whole set. Under the reachable Confined executor this fail-closes at the
@@ -445,8 +606,17 @@ pub async fn run_platform_migrations(
                 message: e.to_string(),
             })?;
 
-        report.applied.extend(outcome.applied.applied);
-        report.skipped.extend(outcome.applied.skipped);
+        // Attribute only THIS file's own versions to the run report. The engine's
+        // outcome lists every already-completed journal version (all prior files'
+        // rows) under `skipped`; filtering to `file_versions` keeps the report — and
+        // the CLI's per-line output — accurate instead of over-reporting thousands
+        // of cross-file "already applied" lines.
+        report
+            .applied
+            .extend(outcome.applied.applied.into_iter().filter(|v| file_versions.contains(v)));
+        report
+            .skipped
+            .extend(outcome.applied.skipped.into_iter().filter(|v| file_versions.contains(v)));
         advance_state(&mut state, owner_app, &created_tables);
     }
 

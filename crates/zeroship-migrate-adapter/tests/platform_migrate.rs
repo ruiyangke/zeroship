@@ -18,11 +18,22 @@
 mod platform_cli {
     use std::path::PathBuf;
 
+    use std::sync::Mutex;
+
     use zero_migrate::driver::SqlSession;
     use zeroship_migrate_adapter::platform::{
         author_and_lower_all, run_platform_migrations, PlatformMigrateConfig,
     };
     use zeroship_migrate_adapter::CompioPgSession;
+
+    /// Serialize the two live-PG apply tests. Both provision a scratch DB and create
+    /// the platform's CLUSTER-GLOBAL roles (`CREATE ROLE zeroship_control`, …); run in
+    /// parallel they race on the shared `pg_authid` catalog and PG aborts one with
+    /// `tuple concurrently updated`. `cargo test` runs test fns on multiple OS threads
+    /// by default, so this process-wide lock (not `--test-threads=1`) keeps the DB
+    /// apply tests from overlapping regardless of the caller's thread count. The
+    /// DB-free author+lower test does not take it.
+    static DB_APPLY_LOCK: Mutex<()> = Mutex::new(());
 
     /// The repo-root `db/migrations-ts` directory (the crate is two levels below).
     fn migrations_dir() -> PathBuf {
@@ -151,6 +162,23 @@ mod platform_cli {
         row.try_get::<_, bool>(0).expect("decode bool probe")
     }
 
+    /// The count of COMPLETED journal rows in the platform migration journal
+    /// (`zeroship_migrations.schema_migrations`) — the idempotency witness. A
+    /// re-runnable one-shot must leave this UNCHANGED across a re-run (no new rows,
+    /// no duplicates).
+    async fn journal_completed_count(session: &CompioPgSession) -> i64 {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT count(*)::bigint FROM zeroship_migrations.schema_migrations \
+                 WHERE phase = 'completed'",
+                &[],
+            )
+            .await
+            .expect("count platform journal rows");
+        row.try_get::<_, i64>(0).expect("decode journal count")
+    }
+
     /// PROVE Stage 4a end to end: apply ALL 11 platform migrations to a FRESH
     /// scratch database on :5440 via the real `run_platform_migrations` path
     /// (zeroship-runtime V8 author → zero-migrate Platform lower+apply over the
@@ -167,6 +195,8 @@ mod platform_cli {
             );
             return;
         };
+        // Serialize against the sibling DB-apply test (shared cluster-global roles).
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         // A unique scratch DB name per run (PG identifiers: lowercase, no dashes).
         let scratch = format!(
@@ -310,6 +340,158 @@ mod platform_cli {
         .await
         {
             return Err("no table grants to role 'zeroship_control'".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// PROVE the platform-migrate one-shot is IDEMPOTENT (re-runnable). On a FRESH
+    /// scratch DB: run 1 applies all 11 files' migrations (N applied, 0 skipped); run
+    /// 2 over the SAME already-migrated DB re-lowers the identical `.ts` set and must
+    /// skip EVERY migration (0 applied, N skipped) and exit clean — the journal row
+    /// count is UNCHANGED (no duplicate rows) and no "already exists" error surfaces.
+    ///
+    /// This is the regression guard for the filename-derived STABLE version fix: the
+    /// engine's already-applied skip keys on the journal version, so a re-run only
+    /// skips when re-lowering reproduces byte-identical, order-preserving versions.
+    /// Before the fix, additive DDL got a fresh RANDOM `MigrationId::generate()` per
+    /// lowering, so run 2 re-executed everything and failed (e.g. `type
+    /// "account_state" already exists`). Gated on `ZERO_MIGRATE_TEST_PG_URL`.
+    #[compio::test]
+    async fn platform_migrate_is_idempotent_on_rerun() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "skipping idempotency proof: ZERO_MIGRATE_TEST_PG_URL unset \
+                 (set it to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        // Serialize against the sibling DB-apply test (shared cluster-global roles).
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let scratch = format!(
+            "zs_stage4a_idem_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let scratch_dsn = dsn_with_db(&url, &scratch);
+
+        {
+            let admin = admin_session(&url).await;
+            let _ = admin
+                .batch(&format!("DROP DATABASE IF EXISTS \"{scratch}\""))
+                .await;
+            admin
+                .batch(&format!("CREATE DATABASE \"{scratch}\""))
+                .await
+                .unwrap_or_else(|e| panic!("CREATE DATABASE scratch failed: {e}"));
+        }
+
+        let result = run_idempotency_assertions(&scratch_dsn).await;
+
+        {
+            let admin = admin_session(&url).await;
+            let _ = admin
+                .batch(&format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE datname = '{scratch}' AND pid <> pg_backend_pid()"
+                ))
+                .await;
+            admin
+                .batch(&format!("DROP DATABASE IF EXISTS \"{scratch}\""))
+                .await
+                .expect("DROP DATABASE scratch");
+        }
+
+        result.expect("platform-migrate idempotency assertions must pass");
+    }
+
+    /// Run the migrate one-shot twice against `scratch_dsn` and assert the
+    /// idempotency contract. Returns `Ok(())` on success; the caller drops the DB.
+    async fn run_idempotency_assertions(scratch_dsn: &str) -> Result<(), String> {
+        let cfg = PlatformMigrateConfig {
+            database_url: scratch_dsn.to_string(),
+            migrations_dir: migrations_dir(),
+            project_schema: "zeroship".to_string(),
+            project_id: "zeroship".to_string(),
+        };
+
+        // ── RUN 1: fresh DB — everything applies, nothing skips ──
+        let run1 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("run 1 failed: {e}"))?;
+        if run1.applied.is_empty() {
+            return Err("run 1 applied nothing".to_string());
+        }
+        if !run1.skipped.is_empty() {
+            return Err(format!(
+                "run 1 (fresh DB) reported {} skipped — the per-file report over-counts \
+                 already-applied rows across files",
+                run1.skipped.len()
+            ));
+        }
+
+        // Journal row count after the first apply (the idempotency baseline).
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect journal probe: {e}"))?;
+        let rows_after_run1 = journal_completed_count(&probe).await;
+        if rows_after_run1 as usize != run1.applied.len() {
+            return Err(format!(
+                "run 1 applied {} but journal holds {} completed rows",
+                run1.applied.len(),
+                rows_after_run1
+            ));
+        }
+
+        // ── RUN 2: same already-migrated DB — nothing applies, everything skips ──
+        let run2 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("run 2 (idempotent re-run) failed: {e}"))?;
+        if !run2.applied.is_empty() {
+            return Err(format!(
+                "run 2 re-applied {} migration(s) — the re-run is NOT idempotent \
+                 (stable-version skip did not match)",
+                run2.applied.len()
+            ));
+        }
+        if run2.skipped.len() != run1.applied.len() {
+            return Err(format!(
+                "run 2 skipped {} but run 1 applied {} — the skip set must be exactly \
+                 run 1's applied set",
+                run2.skipped.len(),
+                run1.applied.len()
+            ));
+        }
+
+        // Journal row count is UNCHANGED — no duplicate rows appended by run 2.
+        let rows_after_run2 = journal_completed_count(&probe).await;
+        if rows_after_run2 != rows_after_run1 {
+            return Err(format!(
+                "journal grew from {rows_after_run1} to {rows_after_run2} rows across the \
+                 idempotent re-run (duplicate journal rows)"
+            ));
+        }
+
+        // No duplicate versions in the journal (each logical migration once).
+        let distinct: i64 = probe
+            .client()
+            .query_one(
+                "SELECT count(DISTINCT version)::bigint \
+                 FROM zeroship_migrations.schema_migrations WHERE phase = 'completed'",
+                &[],
+            )
+            .await
+            .map_err(|e| format!("count distinct versions: {e}"))?
+            .try_get::<_, i64>(0)
+            .map_err(|e| format!("decode distinct count: {e}"))?;
+        if distinct != rows_after_run2 {
+            return Err(format!(
+                "journal has {rows_after_run2} completed rows but only {distinct} distinct \
+                 versions — duplicate version rows present"
+            ));
         }
 
         Ok(())
