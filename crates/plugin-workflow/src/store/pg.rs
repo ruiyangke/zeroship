@@ -164,7 +164,6 @@ CREATE TABLE IF NOT EXISTS {runs} (
   blob_bytes bigint NOT NULL DEFAULT 0,
   wake_at timestamptz,
   claimed_by text,
-  claim_epoch integer NOT NULL DEFAULT 0,
   lease_expires timestamptz,
   dispatch_nonce text,
   last_dispatch_at timestamptz,
@@ -869,8 +868,7 @@ impl WorkflowTx for PgTx {
                     paused_from_status = NULL, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
-                    dispatch_nonce = NULL, \
-                    claim_epoch = claim_epoch + 1 \
+                    dispatch_nonce = NULL \
               WHERE id = $1 \
                 AND claimed_by = $2 \
                 AND dispatch_nonce = $3 \

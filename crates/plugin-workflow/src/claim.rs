@@ -315,7 +315,6 @@ where
             SET claimed_by = $1, \
                 lease_expires = $2, \
                 dispatch_nonce = $3, \
-                claim_epoch = claim_epoch + 1, \
                 state = CASE WHEN state = 'compensating' THEN 'compensating' ELSE 'running' END, \
                 terminal_at = NULL, \
                 last_dispatch_at = now() \
@@ -1160,8 +1159,7 @@ where
                 waiting_step_key = NULL, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
-                dispatch_nonce = NULL, \
-                claim_epoch = claim_epoch + 1 \
+                dispatch_nonce = NULL \
           WHERE id = $1 \
             AND cancel_requested \
             AND state NOT IN ('completed','failed','cancelled','stalled')",

@@ -748,7 +748,7 @@ impl DevWorkflowEngine {
             .execute(
                 "UPDATE workflow_runs \
                     SET claimed_by = ?1, lease_expires = ?2, dispatch_nonce = ?3, \
-                        claim_epoch = claim_epoch + 1, state = 'running', terminal_at = NULL, last_dispatch_at = ?4 \
+                        state = 'running', terminal_at = NULL, last_dispatch_at = ?4 \
                   WHERE id = ?5 AND claimed_by IS NULL AND state IN ('queued','running','sleeping','waiting')",
                 params![
                     DEV_OWNER_ID,
@@ -996,7 +996,6 @@ fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
             blob_bytes INTEGER NOT NULL DEFAULT 0,
             wake_at INTEGER,
             claimed_by TEXT,
-            claim_epoch INTEGER NOT NULL DEFAULT 0,
             lease_expires INTEGER,
             dispatch_nonce TEXT,
             last_dispatch_at INTEGER,

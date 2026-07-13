@@ -1370,8 +1370,7 @@ async fn create_run_inner(
                             paused_from_status = NULL, \
                             claimed_by = NULL, \
                             lease_expires = NULL, \
-                            dispatch_nonce = NULL, \
-                            claim_epoch = claim_epoch + 1 \
+                            dispatch_nonce = NULL \
                       WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
                       RETURNING id", runs = tables.runs),
                     &[&app_id, &workflow_name, key],
@@ -1567,8 +1566,7 @@ async fn start_many_inner(
                                 paused_from_status = NULL, \
                                 claimed_by = NULL, \
                                 lease_expires = NULL, \
-                                dispatch_nonce = NULL, \
-                                claim_epoch = claim_epoch + 1 \
+                                dispatch_nonce = NULL \
                           WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
                           RETURNING id", runs = tables.runs),
                         &[&app_id, &workflow_name, key],
@@ -2798,7 +2796,6 @@ async fn restart_run_inner(
                 claimed_by = NULL, \
                 lease_expires = NULL, \
                 dispatch_nonce = NULL, \
-                claim_epoch = claim_epoch + 1, \
                 deploy_id = $3, \
                 signal_epoch = signal_epoch + $4, \
                 restart_count = restart_count + 1, \
@@ -2912,10 +2909,6 @@ async fn control_transition(
                             dispatch_nonce = CASE \
                                 WHEN state = 'running' AND claimed_by IS NOT NULL THEN dispatch_nonce \
                                 ELSE NULL \
-                            END, \
-                            claim_epoch = CASE \
-                                WHEN state = 'running' AND claimed_by IS NOT NULL THEN claim_epoch \
-                                ELSE claim_epoch + 1 \
                             END \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
@@ -3035,8 +3028,7 @@ async fn control_transition(
                                 paused_from_status = NULL, \
                                 claimed_by = NULL, \
                                 lease_expires = NULL, \
-                                dispatch_nonce = NULL, \
-                                claim_epoch = claim_epoch + 1 \
+                                dispatch_nonce = NULL \
                           WHERE id = $1 AND app_id = $2 \
                           RETURNING state",
                             runs = tables.runs
@@ -3060,8 +3052,7 @@ async fn control_transition(
                                 paused_from_status = NULL, \
                                 claimed_by = NULL, \
                                 lease_expires = NULL, \
-                                dispatch_nonce = NULL, \
-                                claim_epoch = claim_epoch + 1 \
+                                dispatch_nonce = NULL \
                           WHERE id = $1 AND app_id = $2 \
                           RETURNING state",
                             runs = tables.runs
@@ -3086,8 +3077,7 @@ async fn control_transition(
                             paused_from_status = NULL, \
                             claimed_by = NULL, \
                             lease_expires = NULL, \
-                            dispatch_nonce = NULL, \
-                            claim_epoch = claim_epoch + 1 \
+                            dispatch_nonce = NULL \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
                         runs = tables.runs
