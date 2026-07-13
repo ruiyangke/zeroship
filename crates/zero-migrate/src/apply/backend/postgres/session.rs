@@ -401,7 +401,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
             }
             crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
                 if let Err(rb) = conn.batch("ROLLBACK").await {
-                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift (M4)");
+                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift");
                 }
                 return Err(ApplyError::ExistenceGuardDrift {
                     version: m.version.as_str().to_string(),
@@ -437,7 +437,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         if let Err(e) = conn.batch(&m.up).await {
             // Roll back; report the failure. No journal row was written.
             if let Err(rb) = conn.batch("ROLLBACK").await {
-                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error (M4)");
+                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error");
             }
             return Err(ApplyError::MigrationFailed {
                 version: m.version.as_str().to_string(),
@@ -491,7 +491,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         .await
     {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error (M4)");
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error");
         }
         return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
@@ -502,7 +502,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // rolls back the entire apply (no `completed` row, no edges).
     if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error (M4)");
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error");
         }
         return Err(ApplyError::Journal(e));
     }

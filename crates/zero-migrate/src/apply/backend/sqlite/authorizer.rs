@@ -501,7 +501,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // scoped to CreatorUp so a future engine maintenance op is not foreclosed.)
         AuthAction::Analyze { .. } if matches!(current, Mode::CreatorUp) => Authorization::Deny,
 
-        // -- Reindex on `main`/`temp` ALLOWED in CreatorUp (PHASE 4) --
+        // -- Reindex on `main`/`temp` ALLOWED in CreatorUp --
         // `SQLITE_REINDEX` fires NOT ONLY for a standalone `REINDEX` statement but
         // also INTRINSICALLY as part of a legitimate `CREATE INDEX` (SQLite reindexes
         // the freshly-created index to populate it). The engine emits the three
@@ -940,7 +940,7 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::DropView { view_name: "some_view" }, Some(MIG_ALIAS), None)),
             Authorization::Deny,
-            "DROP VIEW on _mig must be denied (M2)"
+            "DROP VIEW on _mig must be denied"
         );
     }
 
@@ -953,11 +953,11 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Analyze { table_name: "users" }, Some(MAIN_DB), None)),
             Authorization::Deny,
-            "ANALYZE must be denied in creator mode (M3)"
+            "ANALYZE must be denied in creator mode"
         );
     }
 
-    // PHASE 4: REINDEX on `main`/`temp` is ALLOWED in CreatorUp — it fires
+    // REINDEX on `main`/`temp` is ALLOWED in CreatorUp — it fires
     // intrinsically as part of a legitimate `CREATE INDEX` (which the engine emits
     // for the platform system-field indexes inside the creator `up`). It rebuilds an
     // existing index B-tree: no new table, no schema-structure change, never `_mig`.
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, Some(MAIN_DB), None)),
             Authorization::Allow,
-            "REINDEX on main must be allowed (intrinsic to CREATE INDEX, PHASE 4)"
+            "REINDEX on main must be allowed (intrinsic to CREATE INDEX)"
         );
         // None database (main/temp namespace) is also the app file.
         assert_eq!(
@@ -1001,7 +1001,7 @@ mod tests {
                 )
             ),
             Authorization::Deny,
-            "creator SELECT FROM \"_mig\".schema_migrations must be denied (M1)"
+            "creator SELECT FROM \"_mig\".schema_migrations must be denied"
         );
         // The engine's own journal reads (EngineJournal mode) stay allowed.
         m.store(Mode::EngineJournal);
