@@ -1,5 +1,5 @@
 {
-  "ir_version": 6,
+  "ir_version": 1,
   "name": "fluent_ddl",
   "owner_app": "app_corpus",
   "ops": [

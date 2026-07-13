@@ -89,7 +89,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts.
-pub const CURRENT_IR_VERSION: u32 = 6;
+pub const CURRENT_IR_VERSION: u32 = 1;
 
 /// Per-collection deploy-time data-validation strictness, mirroring the
 /// built-in `schema(...).strictness(...)` builder.
