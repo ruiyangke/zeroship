@@ -193,6 +193,10 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
     zeroship_core::db_url::is_sqlite_url(db_url)
 }
 
+// The usage-stream producer wiring (`usage_stream_config_from_env` +
+// `build_usage_outbox_from_env`) is shared with the gateway producer; it lives in
+// `zeroship_metering`.
+
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
     pub control_url: String,
@@ -423,6 +427,23 @@ fn main() -> std::io::Result<()> {
             "storage_remote",
             CheckValue::Flag(storage_backend.as_ref().is_some_and(StorageBackendConfig::is_remote)),
         );
+        report.field(
+            "usage_stream_configured",
+            CheckValue::Flag(
+                std::env::var("REDPANDA_BROKERS")
+                    .ok()
+                    .is_some_and(|s| !s.trim().is_empty()),
+            ),
+        );
+        report.field(
+            "usage_events_topic",
+            CheckValue::Plain(
+                std::env::var("USAGE_EVENTS_TOPIC")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_string()),
+            ),
+        );
 
         let fmt = if cli.check_config_format == "json" {
             CheckFormat::Json
@@ -519,36 +540,66 @@ fn main() -> std::io::Result<()> {
 
     // ── Metering infrastructure ──────────────────────────────────────────
     // ONE process-wide meter, shared with every ntex worker thread's
-    // `create_plugins` (via KernelConfig) AND the single flush task spawned
-    // here. Metering is infrastructure: there is NO `env.meter` creator API.
-    // The worker emits the five platform counters (`record_request`) and the
-    // db/kv/storage primitives emit raw usage metrics at their op boundary —
-    // all into this instance. The flush task drains it every ~10s and POSTs a
-    // `UsageReport` (idempotent, dedup'd on worker_id+sequence) to control.
-    let meter = Arc::new(zeroship_metering::Meter::new());
-    // Restart-unique metering identity for the (worker_id, sequence) dedup
-    // key. The per-process SequenceSource resets to 1 every boot, so the
-    // identity MUST change on every restart or post-restart sequences collide
-    // with pre-restart rows in usage_reports_seen and get dropped as phantom
-    // "duplicates" (silent under-billing). `boot_worker_id` folds a fresh
-    // per-process boot nonce onto the stable base ($HOSTNAME in k8s/compose,
-    // else the bind addr) to guarantee that. This identity is metering-only;
-    // CHWBL routing keys on bind addresses, not this string.
+    // `create_plugins` (via KernelConfig) AND the single stream outbox task
+    // spawned here. Metering is infrastructure: there is NO `env.meter`
+    // creator API. The worker emits the five platform counters
+    // (`record_request`) and the db/kv/storage primitives emit raw usage
+    // metrics at their op boundary. The outbox drains the meter every ~10s
+    // into `UsageEvent`s and publishes them to the durable stream keyed by app.
     let worker_base = std::env::var("HOSTNAME")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| bind_addr.to_string());
-    let worker_id = zeroship_metering::boot_worker_id(&worker_base);
-    zeroship_metering::spawn_flush_task(
-        Arc::clone(&meter),
-        zeroship_metering::FlushConfig {
-            control_url: config.control_url.clone(),
-            control_key: config.control_key.clone(),
-            worker_id: worker_id.clone(),
-            interval: zeroship_metering::DEFAULT_FLUSH_INTERVAL,
+    let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
+    let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
+    // Resolve the usage-stream producer config: env wins, the `[metering]` file
+    // overlay back-fills (so the billing stream is fully configurable in
+    // zeroship.toml, not env-only).
+    let fm = &boot.overlay.config.metering;
+    let stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
+        zeroship_metering::UsageStreamSettings {
+            brokers: fm.redpanda_brokers.clone(),
+            topic: fm.usage_events_topic.clone(),
+            group_id: fm.producer_group_id.clone(),
+            wal_path: fm.outbox_wal_path.clone(),
         },
     );
-    tracing::info!(worker_id = %worker_id, "metering flush task started");
+    match zeroship_metering::build_usage_outbox(&meter_source, &stream_settings) {
+        Ok(Some((outbox, outbox_config))) => {
+            let topic = outbox.topic().to_string();
+            let stream = format!("{outbox:?}");
+            zeroship_metering::spawn_outbox_task(
+                Arc::clone(&meter),
+                outbox,
+                outbox_config,
+            );
+            tracing::info!(
+                meter_source = %meter_source,
+                topic = %topic,
+                stream = %stream,
+                "metering usage-event outbox started"
+            );
+        }
+        Ok(None) => {
+            zeroship_metering::spawn_disabled_drain_task(
+                Arc::clone(&meter),
+                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
+                "REDPANDA_BROKERS is not set".to_string(),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                meter_source = %meter_source,
+                error = %error,
+                "usage stream configuration failed; metering outbox disabled"
+            );
+            zeroship_metering::spawn_disabled_drain_task(
+                Arc::clone(&meter),
+                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
+                format!("usage stream configuration failed: {error}"),
+            );
+        }
+    }
 
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests
@@ -567,7 +618,7 @@ fn main() -> std::io::Result<()> {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
-                // The ONE process-wide meter the flush task drains.
+                // The ONE process-wide meter the usage-event outbox drains.
                 meter: Arc::clone(&meter),
             },
         );

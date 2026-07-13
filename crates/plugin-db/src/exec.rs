@@ -1107,26 +1107,22 @@ mod tests {
             .await;
             assert!(bad.is_err(), "the bad query must fail");
 
-            let snap = meter.drain();
+            let events = meter.drain();
             let id = uuid::Uuid::parse_str(app_id).unwrap();
-            let u = snap.get(&id).expect("meter recorded usage for the app");
             assert_eq!(
-                u.custom.get("db_writes").copied(),
+                usage_value(&events, id, "db_writes"),
                 Some(1),
-                "one mutation = 1 db_writes; got {:?}",
-                u.custom
+                "one mutation = 1 db_writes; got {events:?}"
             );
             assert_eq!(
-                u.custom.get("db_rows_written").copied(),
+                usage_value(&events, id, "db_rows_written"),
                 Some(1),
-                "the insert returned 1 row; got {:?}",
-                u.custom
+                "the insert returned 1 row; got {events:?}"
             );
             assert_eq!(
-                u.custom.get("db_reads").copied(),
+                usage_value(&events, id, "db_reads"),
                 Some(2),
-                "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {:?}",
-                u.custom
+                "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {events:?}"
             );
 
             context::with_mut(|c| {
@@ -1135,6 +1131,17 @@ mod tests {
             });
         });
         reset_world();
+    }
+
+    fn usage_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: uuid::Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
     }
 
     // -------------------------------------------------------------------

@@ -22,7 +22,7 @@ use crate::AppState;
 // Request bodies
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateAppBody {
     pub name: String,
     #[serde(default = "default_plan")]
@@ -36,7 +36,7 @@ fn default_plan() -> String {
     crate::bootstrap_console::free_plan_id()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SetPlanBody {
     pub plan_id: String,
 }
@@ -46,7 +46,7 @@ pub struct SetPlanBody {
 /// amount, and an optional kind/expiry/note. Currency is USD-pinned (v1) — the
 /// `credit::grant` boundary rejects any other. The idempotency key arrives in the
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct GrantCreditBody {
     /// The creator (a `users.id` UUID — the `creator_billing` key).
     pub creator_id: Uuid,
@@ -79,7 +79,7 @@ fn default_credit_currency() -> String {
 /// tax split is OPTIONAL — when omitted, the endpoint derives it proportionally from
 /// the invoice's frozen `tax_cents`/`total_cents`. The idempotency key arrives in the
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct RefundBody {
     /// Positive amount to refund, in cents.
     pub amount_cents: i64,
@@ -810,7 +810,7 @@ pub async fn set_plan(
 // column; the plan default IS the ceiling. A request above it is rejected 403.
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SetSpendLimitBody {
     /// New override in cents, or `null` to clear back to the plan default.
     pub cents: Option<u64>,
@@ -959,7 +959,7 @@ pub async fn get_spend_limit(
 
 /// Pagination query for `GET /api/apps/{id}/invoices`. Defaults: 50 newest,
 /// offset 0. `limit` is clamped to `[1, 200]` to bound a single read.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct InvoiceListQuery {
     #[serde(default)]
     pub limit: Option<i64>,
@@ -969,7 +969,7 @@ pub struct InvoiceListQuery {
 
 /// Optional `?creator_id=` for the creator-keyed reads. Honoured ONLY for an
 /// operator (`Resource::Any`); a non-operator caller is always forced to self.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreatorScopeQuery {
     #[serde(default)]
     pub creator_id: Option<Uuid>,
@@ -1259,7 +1259,7 @@ async fn resolve_plan_default_cents(
 
 /// JSON shape for a plan in the catalog API. `price`/`runtime` serialize the
 /// pure types verbatim (the same JSON the DB JSONB columns hold).
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlanDto {
     pub id: String,
     pub name: String,
@@ -1294,7 +1294,7 @@ impl From<crate::plan_catalog::Plan> for PlanDto {
 /// `archived` is OPTIONAL: omitting it preserves the existing row's archived
 /// flag (a name/price edit must not silently un-archive a plan). Send
 /// `"archived": false` explicitly to un-archive, `true` to archive.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct UpsertPlanBody {
     pub name: String,
     pub price: crate::pricing::PlanPrice,
@@ -1479,7 +1479,7 @@ pub async fn archive_plan(
 // finalized in this config-write flow — no code needed here, only the guarantee).
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SetPricingConfigBody {
     /// New global default FX in pico-cents per CU. Must be
     /// `>= MIN_FX_PICO_CENTS_PER_UNIT`.

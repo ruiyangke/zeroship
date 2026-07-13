@@ -3,10 +3,9 @@
 use std::sync::Arc;
 
 use ntex::web;
-use ntex::web::types::{Json, Path, State};
+use ntex::web::types::{Path, State};
 use uuid::Uuid;
 
-use zeroship_core::types::UsageReport;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -153,7 +152,7 @@ pub async fn get_routes(
 /// Same gate as every other `/internal/*` endpoint ([`check_auth`]): the
 /// control-key shared secret (or `--dev-insecure`). This is NOT an
 /// unauthenticated bypass — without a valid control-key bearer it 401s exactly
-/// like `/internal/usage`.
+/// like the operator reconcile endpoints.
 ///
 /// The production reconcile cron only ever bills the PREVIOUS calendar month
 /// (`previous_period_start_unix(now)`), which an end-to-end test cannot wait a
@@ -230,45 +229,6 @@ pub async fn force_spend_reconcile(
         })),
         Err(e) => {
             tracing::error!(error = %e, "control-internal: force_spend_reconcile failed");
-            web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": e.to_string()}))
-        }
-    }
-}
-
-/// POST /internal/usage — accept a usage report from a worker.
-///
-/// `UsageReport { worker_id, report_id, sequence, counters: { app_id →
-/// AppUsage } }`. Ingest is IDEMPOTENT: the report is deduped on
-/// `(worker_id, sequence)` and aggregated per `(app_id, calendar-month,
-/// metric)` into `zeroship.usage_aggregates`. A duplicate (an at-least-once
-/// producer retry) is a no-op — it never double-counts. The response always
-/// carries the worker's `high_water` sequence so a producer can resync after
-/// a restart, plus a `duplicate` flag.
-pub async fn report_usage(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-    body: Json<UsageReport>,
-) -> web::HttpResponse {
-    // Internal endpoint, no user authz: workers authenticate with the
-    // control-key shared secret and there is no user principal.
-    if let Some(resp) = check_auth(&req, &state) {
-        return resp;
-    }
-    let metering = crate::metering::Metering::new(state.registry.clone());
-    match metering.ingest(&body).await {
-        Ok(outcome) => web::HttpResponse::Ok().json(&serde_json::json!({
-            "recorded": true,
-            "duplicate": outcome.duplicate,
-            "high_water": outcome.high_water_sequence,
-        })),
-        Err(e) => {
-            tracing::error!(
-                worker_id = %body.worker_id,
-                sequence = body.sequence,
-                error = %e,
-                "control-internal: usage ingest failed"
-            );
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error": e.to_string()}))
         }

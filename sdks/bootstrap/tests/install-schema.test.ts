@@ -397,6 +397,67 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
   });
 
+  test("does not require runtime descriptor system fields in insert input", async () => {
+    const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
+    const inserted: unknown[] = [];
+    const native = {
+      registerModel(name: string, schema: Record<string, unknown>) {
+        calls.push({ name, schema });
+        return Promise.resolve();
+      },
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection() {
+        return {
+          insert(row: unknown) {
+            inserted.push(row);
+            return Promise.resolve({
+              id: "hit_1",
+              created_at: Date.now(),
+              updated_at: Date.now(),
+              created_by: null,
+              updated_by: null,
+              version: 1,
+              deleted_at: null,
+              ...(row as Record<string, unknown>),
+            });
+          },
+          async find() { return []; },
+        };
+      },
+    } as unknown as ZeroshipDb;
+    const descriptor = {
+      version: 1,
+      collections: {
+        hits: {
+          fields: {
+            id: { type: "string", required: true },
+            created_at: { type: "date", required: true },
+            updated_at: { type: "date", required: true },
+            version: { type: "int", required: true },
+            path: { type: "string", required: true },
+          },
+          options: { softDelete: false, versioning: false, strictness: "strict" },
+          indexes: [],
+        },
+      },
+    };
+    const { ready } = installSchema({} as never, native, { descriptor } as never);
+    await ready;
+
+    const handle = native as unknown as Record<
+      string,
+      { insert(row: { path: string }): Promise<{ data: unknown; error: Error | null }> }
+    >;
+    const res = await handle.hits.insert({ path: "/hit/ready" });
+
+    assert.equal(res.error, null);
+    assert.deepEqual(inserted, [{ path: "/hit/ready" }]);
+    assert.ok(
+      "id" in calls[0].schema && "created_at" in calls[0].schema && "version" in calls[0].schema,
+      "descriptor system fields still reach registerModel/cache feed",
+    );
+  });
+
   test("installs no collections when no descriptor is supplied", async () => {
     const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
     const native = makeMockNative(calls);

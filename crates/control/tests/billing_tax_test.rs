@@ -36,6 +36,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -43,15 +45,13 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::metering::Metering;
 use zeroship_control::stripe_client::{Period, StripeApi};
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::tax::{TaxAmount, TaxContext, TaxProvider, TaxProviderKind};
 use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
-use zeroship_core::types::{AppUsage, UsageReport};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize the
@@ -268,6 +268,7 @@ async fn build_fixture(
     label: &str,
     tax_provider: Arc<dyn TaxProvider>,
 ) -> Fixture {
+    let mock = common::stripe_mock::start_mock_stripe().await;
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -278,6 +279,11 @@ async fn build_fixture(
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -315,10 +321,9 @@ async fn build_fixture(
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
@@ -361,6 +366,7 @@ async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
 
 /// A plan charging 1 cent/request, no included CU, no base fee (fx = 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -411,28 +417,20 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = std::collections::HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -500,10 +498,7 @@ async fn insert_grant(
 
 #[compio::test]
 async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "native",
@@ -555,10 +550,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 
 #[compio::test]
 async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     // Inject the FAKE provider the SAME way Native is injected (the Arc slot) — (c).
     let fake = Arc::new(FakeTaxProvider::new(123));
     let fx = build_fixture(&url, "fake", fake.clone() as Arc<dyn TaxProvider>).await;
@@ -610,10 +602,7 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
 
 #[compio::test]
 async fn fake_provider_tax_without_credit_holds_balance_check() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(250));
     let fx = build_fixture(&url, "fake-nocredit", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -681,10 +670,7 @@ impl TaxProvider for ErrTaxProvider {
 
 #[compio::test]
 async fn tax_provider_error_fails_closed_invoice_not_finalized() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "tax-err", Arc::new(ErrTaxProvider) as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A DISTINCT far-back period so this test's permanent 'draft' leftover (the finalize
@@ -739,10 +725,7 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 
 #[compio::test]
 async fn missing_customer_with_usage_is_skipped_no_invoice() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "nocust",
@@ -791,10 +774,7 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
 
 #[compio::test]
 async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(
         &url,
         "fullcredit",
@@ -878,10 +858,7 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
 
 #[compio::test]
 async fn tax_computed_once_over_summed_multi_segment_subtotal() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fake = Arc::new(FakeTaxProvider::new(200));
     let fx = build_fixture(&url, "tax-multiseg", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

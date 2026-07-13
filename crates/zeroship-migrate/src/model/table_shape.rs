@@ -189,7 +189,7 @@ fn system_column_to_ir(
         name: column.name.clone(),
         ty,
         nullable: Some(column.nullable),
-        default: None,
+        default: system_column_default(&column.name),
         unique: None,
         id_prefix: None,
         case_sensitive: None,
@@ -198,6 +198,21 @@ fn system_column_to_ir(
         generated: None,
         identity: None,
     })
+}
+
+fn system_column_default(name: &str) -> Option<IrDefault> {
+    match name {
+        "created_at" | "updated_at" => Some(IrDefault::Expr {
+            expr: Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: Vec::new(),
+            },
+        }),
+        "version" => Some(IrDefault::Literal {
+            value: crate::model::ir::IrScalar::Int(1),
+        }),
+        _ => None,
+    }
 }
 
 fn is_id_prefix_declaration(column: &IrColumn) -> bool {
@@ -420,6 +435,33 @@ mod tests {
             ]
         );
         assert_eq!(names[7], "title");
+        assert!(matches!(
+            columns.iter().find(|c| c.name == "created_at").and_then(|c| c.default.as_ref()),
+            Some(IrDefault::Expr {
+                expr: Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args,
+                },
+            }) if args.is_empty()
+        ));
+        assert!(matches!(
+            columns.iter().find(|c| c.name == "updated_at").and_then(|c| c.default.as_ref()),
+            Some(IrDefault::Expr {
+                expr: Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args,
+                },
+            }) if args.is_empty()
+        ));
+        assert_eq!(
+            columns
+                .iter()
+                .find(|c| c.name == "version")
+                .and_then(|c| c.default.as_ref()),
+            Some(&IrDefault::Literal {
+                value: crate::model::ir::IrScalar::Int(1),
+            })
+        );
         assert_eq!(primary_key.as_deref(), Some(&["id".to_string()][..]));
         let index_cols = indexes
             .iter()

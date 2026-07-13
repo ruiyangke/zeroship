@@ -490,6 +490,10 @@ fn render_collection_chains(meta: &RuntimeCollectionMetadata) -> String {
     out
 }
 
+fn is_system_field_name(name: &str) -> bool {
+    crate::model::ir::SYSTEM_FIELD_NAMES.contains(&name)
+}
+
 /// Render the generated `env.db.ts`: a `const schema = { … } as const` of
 /// `@zeroship/db` `t.*()` builder calls, wrapping a collection in the SDK
 /// `schema(...)` builder when the migration fold carries runtime metadata, then
@@ -530,6 +534,9 @@ fn render_env_dts(
         }
         if let Some(map) = cols.as_object() {
             for (col, def) in map {
+                if is_system_field_name(col) {
+                    continue;
+                }
                 body.push_str("    ");
                 body.push_str(&js_key(col));
                 body.push_str(": ");
@@ -1023,5 +1030,33 @@ mod tests {
         assert!(dts.contains("} as const;"));
         assert!(dts.contains("db: Db<typeof schema>;"));
         assert!(dts.contains("export {};"));
+    }
+
+    #[test]
+    fn env_dts_omits_platform_system_fields_from_builder_schema() {
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "hits".to_string(),
+            json!({
+                "id": { "type": "string", "required": true },
+                "created_at": { "type": "date", "required": true },
+                "updated_at": { "type": "date", "required": true },
+                "created_by": { "type": "string" },
+                "updated_by": { "type": "string" },
+                "version": { "type": "int", "required": true, "default": 1 },
+                "deleted_at": { "type": "date" },
+                "path": { "type": "string", "required": true },
+            }),
+        );
+        let metadata = BTreeMap::new();
+        let dts = render_env_dts(&defs, &metadata);
+
+        assert!(dts.contains("path: t.string().required(),"));
+        for name in crate::model::ir::SYSTEM_FIELD_NAMES {
+            assert!(
+                !dts.contains(&format!("{name}:")),
+                "env.db.ts builder schema must omit platform field {name}:\n{dts}"
+            );
+        }
     }
 }

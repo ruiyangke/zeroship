@@ -16,6 +16,7 @@ export function up() {
   table("federated_identities", { schema: "zeroship" }).unique("federated_identities_provider_subject_key").add({ columns: ["provider", "subject"] });
   table("payout_failures", { schema: "zeroship" }).unique("payout_failures_provider_payout_id_key").add({ columns: ["provider_payout_id"] });
   table("payouts", { schema: "zeroship" }).unique("payouts_event_id_key").add({ columns: ["event_id"] });
+  table("provider_dead_letter", { schema: "zeroship" }).unique("provider_dead_letter_provider_event_key").add({ columns: ["provider_id", "event_id"] });
   table("refund_provider_refs", { schema: "zeroship" }).unique("refund_provider_refs_provider_ref_kind_external_id_key").add({ columns: ["provider", "ref_kind", "external_id"] });
   table("refunds", { schema: "zeroship" }).unique("refunds_idempotency_key_key").add({ columns: ["idempotency_key"] });
   table("users", { schema: "zeroship" }).unique("users_email_key").add({ columns: ["email"] });
@@ -64,6 +65,7 @@ export function up() {
   table("hosts", { schema: "zeroship" }).index("idx_hosts_region_status").add({ on: ["region", "status"] });
   table("hosts", { schema: "zeroship" }).index("idx_hosts_status_heartbeat").add({ on: ["status", "last_heartbeat"] });
   table("payouts", { schema: "zeroship" }).index("idx_payouts_creator_time").add({ on: ["creator_id", { column: "occurred_at", order: "desc" }] });
+  table("provider_dead_letter", { schema: "zeroship" }).index("idx_provider_dead_letter_provider_created").add({ on: ["provider_id", { column: "created_at", order: "desc" }] });
   table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_ts_brin").add({ on: ["ts"], using: "brin", with: { pagesPerRange: 32 } });
   table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_sandbox_ts").add({ on: ["sandbox_id", "ts"] });
   table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_user_id_ts").add({ on: ["user_id", "ts"] });

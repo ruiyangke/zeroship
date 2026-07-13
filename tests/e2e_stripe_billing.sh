@@ -46,7 +46,8 @@
 # DB migrate, or the Stripe TEST env not sourced).
 #
 # Usage:
-#   source /home/ruiyang/.config/zeroship-stripe-test.env   # sets the TEST keys
+#   # put the Stripe TEST keys in the gitignored repo-root .env (auto-sourced):
+#   #   STRIPE_TEST_SECRET_KEY=sk_test_...  STRIPE_TEST_PUBLISHABLE_KEY=pk_test_...
 #   ./tests/e2e_stripe_billing.sh
 #   STRICT=1 ./tests/e2e_stripe_billing.sh     # treat documented divergences as hard fails
 #
@@ -60,6 +61,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 STRICT="${STRICT:-0}"
+
+# Load the gitignored repo-root .env (Stripe TEST keys) when the vars aren't
+# already exported. .env is chmod 600 + gitignored — secrets never reach git.
+if { [ -z "${STRIPE_TEST_SECRET_KEY:-}" ] || [ -z "${STRIPE_TEST_PUBLISHABLE_KEY:-}" ]; } && [ -f "$ROOT/.env" ]; then
+  set -a; . "$ROOT/.env"; set +a
+fi
 
 PASS=0; FAIL=0; DIVERGENCE=0
 pass()  { PASS=$((PASS+1));  echo "  ✓ $1"; }
@@ -79,7 +86,7 @@ DB=zeroship_stripe_e2e
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ] || [ -z "${STRIPE_TEST_PUBLISHABLE_KEY:-}" ]; then
   echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY / STRIPE_TEST_PUBLISHABLE_KEY not set."
-  echo "         source /home/ruiyang/.config/zeroship-stripe-test.env first."
+  echo "         put them in the gitignored repo-root .env (auto-sourced), or export them first."
   exit 0
 fi
 case "$STRIPE_TEST_SECRET_KEY" in
@@ -145,7 +152,10 @@ SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
 MIG_LOG="$WORK/migrate.log"
-if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+# Use the PREBUILT release binary (like the other billing e2es) so we never
+# rebuild zeroship-migrate from source — the libpg_query C build needs the nix
+# dev shell's headers, which a plain shell lacks (`sys/types.h' not found`).
+if ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-migrate" ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
   pass "zeroship-migrate platform set applied to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
 else
   fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
@@ -213,8 +223,17 @@ INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLIC
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
 VALUES ('$CREATOR', 'stripe', '$CUS')
 ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
--- usage_aggregates.period is a billing_period DATE (first-of-month), and metric
--- must reference billing_metrics ('requests' is seeded by changeset 0037).
+-- The platform migration set does NOT seed the pricing config: billing_metrics
+-- ('requests'), metric_weights (the CU weight), and pricing_config ('global' FX)
+-- must all be present or (a) the usage_aggregates FK to billing_metrics fails and
+-- (b) priced spend is \$0 (no invoice). Seed 'requests' at 1 CU/op × 1 cent/CU.
+INSERT INTO zeroship.billing_metrics (metric, kind, unit) VALUES ('requests','platform','op')
+ON CONFLICT (metric) DO UPDATE SET kind='platform';
+INSERT INTO zeroship.metric_weights (metric, units_per_op, per_units) VALUES ('requests', 1, 1)
+ON CONFLICT (metric) DO UPDATE SET units_per_op=1, per_units=1;
+INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) VALUES ('global', 1000000000000)
+ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit;
+-- usage_aggregates.period is a billing_period DATE (first-of-month).
 INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total, updated_at)
 VALUES ('$CLOSED_APP', to_timestamp($PERIOD_START)::date, 'requests', 750, NOW())
 ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
@@ -507,9 +526,18 @@ done
 case "$DU" in du_*) pass "REAL dispute object appeared: $DU";; *) diverge "no dispute object materialized for $DISP_CH within poll window (Stripe creates disputes asynchronously); dispute leg cannot be completed this run"; DU="";; esac
 
 if [ -n "$DU" ]; then
+  # A freshly-created dispute object populates `charge` immediately but
+  # `payment_intent` a beat later (Stripe eventual consistency). Re-fetch until
+  # BOTH are present so the "both candidates" assertion is deterministic — our
+  # handle_dispute_created resolves via EITHER, so this is only about the raw
+  # object's shape, not correctness. Falls through to whatever Stripe returns.
+  for _ in $(seq 1 10); do
+    DU_PI="$(sget "disputes/$DU" | jget payment_intent)"
+    DU_CH="$(sget "disputes/$DU" | jget charge)"
+    [ -n "$DU_PI" ] && [ -n "$DU_CH" ] && break
+    sleep 2
+  done
   DU_AMOUNT="$(sget "disputes/$DU" | jget amount)"
-  DU_PI="$(sget "disputes/$DU" | jget payment_intent)"
-  DU_CH="$(sget "disputes/$DU" | jget charge)"
   DU_REASON="$(sget "disputes/$DU" | jget reason)"
   echo "    REAL dispute: amount=${DU_AMOUNT}c pi=$DU_PI ch=$DU_CH reason=$DU_REASON"
   [ -n "$DU_PI" ] && [ -n "$DU_CH" ] && pass "REAL dispute object carries BOTH payment_intent ($DU_PI) and charge ($DU_CH) at top level — matches handle_dispute_created's candidates" \

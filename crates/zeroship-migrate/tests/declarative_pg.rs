@@ -2446,8 +2446,8 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
         .expect("create users");
 
     // Seed a pre-existing row whose `email` value MUST survive the rename. The
-    // platform system fields are NOT NULL (no DB-side default — the SDK runtime
-    // fills them), so the test supplies them explicitly.
+    // The platform system fields have DB-side defaults; the test supplies them
+    // explicitly to keep the seeded row deterministic.
     let schema = &cfg.project_schema;
     conn.batch_execute(&format!(
         "INSERT INTO \"{schema}\".\"users\" (id, created_at, updated_at, version, email) \
@@ -4532,7 +4532,7 @@ fn golden_pg_create_table_and_index() {
     let users = find_mig(&migs, "create_table_users");
     assert_eq!(
         users.up,
-        r#"CREATE TABLE "prj_g"."users" ("created_at" timestamptz NOT NULL, "created_by" text, "deleted_at" timestamptz, "handle" text NOT NULL, "id" text PRIMARY KEY NOT NULL, "updated_at" timestamptz NOT NULL, "updated_by" text, "version" integer NOT NULL)"#,
+        r#"CREATE TABLE "prj_g"."users" ("created_at" timestamptz NOT NULL DEFAULT now(), "created_by" text, "deleted_at" timestamptz, "handle" text NOT NULL, "id" text PRIMARY KEY NOT NULL, "updated_at" timestamptz NOT NULL DEFAULT now(), "updated_by" text, "version" integer NOT NULL DEFAULT 1)"#,
     );
     assert_eq!(users.down.as_deref(), Some(r#"DROP TABLE "prj_g"."users""#));
 
@@ -4540,7 +4540,7 @@ fn golden_pg_create_table_and_index() {
     let accounts = find_mig(&migs, "create_table_accounts");
     assert_eq!(
         accounts.up,
-        "CREATE TABLE \"prj_g\".\"accounts\" (\"created_at\" timestamptz NOT NULL, \"created_by\" text, \"deleted_at\" timestamptz, \"id\" text PRIMARY KEY NOT NULL, \"owner\" text, \"secret\" bytea /* zsenc:randomised:k1:string */, \"secret_masked\" text, \"ssn\" text, \"ssn_masked\" text, \"title\" text NOT NULL, \"updated_at\" timestamptz NOT NULL, \"updated_by\" text, \"version\" integer NOT NULL, CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"prj_g\".\"users\" (id));\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret_masked\" IS '__zsmask:kind=full,classification=pii';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
+        "CREATE TABLE \"prj_g\".\"accounts\" (\"created_at\" timestamptz NOT NULL DEFAULT now(), \"created_by\" text, \"deleted_at\" timestamptz, \"id\" text PRIMARY KEY NOT NULL, \"owner\" text, \"secret\" bytea /* zsenc:randomised:k1:string */, \"secret_masked\" text, \"ssn\" text, \"ssn_masked\" text, \"title\" text NOT NULL, \"updated_at\" timestamptz NOT NULL DEFAULT now(), \"updated_by\" text, \"version\" integer NOT NULL DEFAULT 1, CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"prj_g\".\"users\" (id));\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret_masked\" IS '__zsmask:kind=full,classification=pii';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
     );
     assert_eq!(accounts.down.as_deref(), Some(r#"DROP TABLE "prj_g"."accounts""#));
 

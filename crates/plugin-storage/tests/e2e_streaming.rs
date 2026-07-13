@@ -311,26 +311,22 @@ fn metering_storage_ops_emit_ops_and_bytes_scoped_to_app() {
     assert_eq!(status, 200, "storage metering app non-200; body: {body}");
     assert!(body.contains(r#""ok":true"#), "storage metering app failed; body: {body}");
 
-    let snap = meter.drain();
+    let events = meter.drain();
     let id = uuid::Uuid::parse_str(app_id).unwrap();
-    let u = snap.get(&id).expect("meter recorded usage for the app");
     assert_eq!(
-        u.custom.get("storage_ops").copied(),
+        usage_value(&events, id, "storage_ops"),
         Some(4),
-        "put + get + get(miss) + delete = 4 storage_ops; got {:?}",
-        u.custom
+        "put + get + get(miss) + delete = 4 storage_ops; got {events:?}"
     );
     assert_eq!(
-        u.custom.get("storage_bytes").copied(),
+        usage_value(&events, id, "storage_bytes"),
         Some(11),
-        "put wrote 11 bytes; got {:?}",
-        u.custom
+        "put wrote 11 bytes; got {events:?}"
     );
     assert_eq!(
-        u.custom.get("storage_egress_bytes").copied(),
+        usage_value(&events, id, "storage_egress_bytes"),
         Some(11),
-        "get read 11 bytes (miss adds 0); got {:?}",
-        u.custom
+        "get read 11 bytes (miss adds 0); got {events:?}"
     );
 }
 
@@ -357,13 +353,24 @@ export default {
     assert_eq!(status, 200, "non-200; body: {body}");
     assert!(body.contains(r#""ok":true"#), "app failed; body: {body}");
 
-    let snap = meter.drain();
+    let events = meter.drain();
     let id = uuid::Uuid::parse_str(app_id).unwrap();
     assert!(
-        snap.get(&id).is_none(),
+        !events.iter().any(|event| event.subject.app == Some(id)),
         "a failed/validation-rejected storage op must emit no metric; got {:?}",
-        snap.get(&id)
+        events
     );
+}
+
+fn usage_value(
+    events: &[zeroship_core::usage_event::UsageEvent],
+    app_id: uuid::Uuid,
+    meter: &str,
+) -> Option<u64> {
+    events
+        .iter()
+        .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+        .map(|event| event.value)
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@
 //! the REAL immutability triggers + the REAL `charge_cents`). Gated on
 //! `CONTROL_TEST_DB`; silent skip otherwise.
 
+mod common;
+
 use std::collections::HashMap;
 
 use compio_postgres::{connect, NoTls};
@@ -23,8 +25,8 @@ use uuid::Uuid;
 
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -105,10 +107,7 @@ async fn claim_draft(client: &compio_postgres::Client, creator: Uuid) -> String 
 
 #[compio::test]
 async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, _app) = seed_creator_app(&client).await;
     let inv = claim_draft(&client, creator).await;
@@ -153,10 +152,7 @@ async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
 
 #[compio::test]
 async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     let inv = claim_draft(&client, creator).await;
@@ -263,10 +259,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
 
 #[compio::test]
 async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, _app) = seed_creator_app(&client).await;
     let period = first_of_this_month();
@@ -373,10 +366,7 @@ async fn finalized_invoice_with_line(
 
 #[compio::test]
 async fn finalized_invoice_rejects_nonvoid_update() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     let inv = finalized_invoice_with_line(&client, creator, app).await;
@@ -399,10 +389,7 @@ async fn finalized_invoice_rejects_nonvoid_update() {
 
 #[compio::test]
 async fn finalized_to_void_is_the_only_legal_transition() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     let inv = finalized_invoice_with_line(&client, creator, app).await;
@@ -425,10 +412,7 @@ async fn finalized_to_void_is_the_only_legal_transition() {
 
 #[compio::test]
 async fn finalized_invoice_line_amount_update_is_rejected() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     let inv = finalized_invoice_with_line(&client, creator, app).await;
@@ -463,10 +447,7 @@ async fn finalized_invoice_rejects_line_insert() {
     //
     // RED before the trigger covered INSERT (it was BEFORE UPDATE OR DELETE only):
     // appending a line to a finalized invoice would silently succeed.
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     // Finalize an invoice that has one line.
@@ -508,10 +489,7 @@ async fn finalized_invoice_rejects_line_insert() {
 
 #[compio::test]
 async fn draft_invoice_lines_stay_mutable_until_finalize() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let (creator, app) = seed_creator_app(&client).await;
     let inv = claim_draft(&client, creator).await;

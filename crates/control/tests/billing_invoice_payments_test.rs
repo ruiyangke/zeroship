@@ -21,13 +21,15 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::invoice_payments::{append_charge, cash_collected};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -102,10 +104,7 @@ async fn finalize(client: &compio_postgres::Client, inv: &str, total: i64) {
 
 #[compio::test]
 async fn invoice_payments_is_append_only() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let creator = seed_creator(&client).await;
     let inv = claim_draft(&client, creator, first_of_this_month()).await;
@@ -147,10 +146,7 @@ async fn invoice_payments_is_append_only() {
 
 #[compio::test]
 async fn partial_unique_index_releases_period_only_on_void() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let creator = seed_creator(&client).await;
     let period = first_of_this_month();
@@ -226,10 +222,7 @@ async fn partial_unique_index_releases_period_only_on_void() {
 
 #[compio::test]
 async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let creator = seed_creator(&client).await;
     let inv = claim_draft(&client, creator, first_of_this_month()).await;
@@ -286,10 +279,7 @@ async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
 
 #[compio::test]
 async fn pr1_schema_objects_present() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
 
     // The partial unique index replaced the unconditional UNIQUE.

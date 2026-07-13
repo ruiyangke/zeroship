@@ -24,9 +24,9 @@ use crate::{cache, metrics, WorkerConfig};
 /// whenever EITHER threshold is crossed, so a long-lived SSE/streaming
 /// response bills continuously and a worker crash loses at most one
 /// interval's delta. These are RECORDING-cadence knobs (crash-loss
-/// granularity), distinct from the meter's flush-to-control cadence
-/// (`DEFAULT_FLUSH_INTERVAL`). The interval matches the flush cadence so a
-/// recorded delta is rarely stranded in-memory more than one flush.
+/// granularity), distinct from the meter's stream-outbox cadence. The interval
+/// matches the outbox cadence so a recorded delta is rarely stranded in-memory
+/// more than one drain.
 const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// ~1 MiB bounds the in-memory un-recorded egress between deltas.
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
@@ -544,6 +544,17 @@ mod tests {
             .expect("dispatch frame")
     }
 
+    fn usage_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
+    }
+
     // Regression: the `unlimited`/`enterprise` plan reports `wall_timeout =
     // None`, and `wall_limit` must pass that `None` straight through (no cap) so
     // a long single-request streaming upload isn't cut. Pre-fix this
@@ -980,27 +991,29 @@ mod tests {
             assert!(resp_body_len > 0, "handler returned a non-empty body");
 
             // Drain the SAME meter the handler fed — the faithful assertion.
-            let snap = meter.drain();
-            let usage = snap
-                .get(&app_id)
-                .expect("meter recorded usage for the dispatched app");
+            let events = meter.drain();
 
-            assert_eq!(usage.requests, 1, "requests counter unchanged");
             assert_eq!(
-                usage.ingress_bytes,
-                req_body.len() as u64,
+                usage_value(&events, app_id, "requests"),
+                Some(1),
+                "requests counter unchanged"
+            );
+            assert_eq!(
+                usage_value(&events, app_id, "ingress_bytes"),
+                Some(req_body.len() as u64),
                 "ingress_bytes must equal the request body length"
             );
             assert_eq!(
-                usage.egress_bytes, resp_body_len,
+                usage_value(&events, app_id, "egress_bytes"),
+                Some(resp_body_len),
                 "egress_bytes must equal the response body length"
             );
             assert!(
-                usage.wall_us > 0,
+                usage_value(&events, app_id, "wall_us").unwrap_or(0) > 0,
                 "wall_us must be a positive elapsed-time measurement"
             );
             assert!(
-                usage.cpu_us > 0,
+                usage_value(&events, app_id, "cpu_us").unwrap_or(0) > 0,
                 "cpu_us must be a positive CPU-time measurement"
             );
 
@@ -1271,22 +1284,24 @@ mod tests {
 
             // BEFORE close: a delta must already be recorded (the crash-loss
             // bound). Pre-fix this is empty (finalize-only recording).
-            let snap = meter.drain();
-            let usage = snap
-                .get(&app_id)
-                .expect("a streaming delta must be recorded BEFORE the stream closes");
+            let events = meter.drain();
             assert_eq!(
-                usage.egress_bytes, pushed,
+                usage_value(&events, app_id, "egress_bytes"),
+                Some(pushed),
                 "the mid-stream byte-threshold flush records the streamed bytes \
                  before finalize"
             );
             assert!(
-                usage.custom.get("stream_wall_us").copied().unwrap_or(0) >= 0,
+                usage_value(&events, app_id, "stream_wall_us").unwrap_or(0) >= 0,
                 "stream_wall_us is recorded as a custom metric on the incremental flush"
             );
             // The drain task NEVER counts `requests` (a stream is one request,
             // counted by record_stream_unary — not exercised here).
-            assert_eq!(usage.requests, 0, "stream_response must not touch requests");
+            assert_eq!(
+                usage_value(&events, app_id, "requests"),
+                None,
+                "stream_response must not touch requests"
+            );
 
             // Push a second batch, then close → the final delta lands the
             // remainder. The total across deltas equals the bytes streamed.
@@ -1299,16 +1314,20 @@ mod tests {
             writer.close();
             let_drain_run().await;
 
-            let snap2 = meter.drain();
             // `drain()` reset after the first read, so this second drain holds
             // only the post-first-drain deltas (the second batch + any final
             // wall delta).
-            let usage2 = snap2.get(&app_id).expect("final delta recorded at close");
+            let events2 = meter.drain();
             assert_eq!(
-                usage2.egress_bytes, more_len,
+                usage_value(&events2, app_id, "egress_bytes"),
+                Some(more_len),
                 "the final delta records the remaining streamed bytes"
             );
-            assert_eq!(usage2.requests, 0, "still no requests from the drain");
+            assert_eq!(
+                usage_value(&events2, app_id, "requests"),
+                None,
+                "still no requests from the drain"
+            );
         });
     }
 
@@ -1349,18 +1368,29 @@ mod tests {
             writer.close();
             let_drain_run().await;
 
-            let snap = meter.drain();
-            let usage = snap.get(&app_id).expect("usage recorded for the stream");
+            let events = meter.drain();
             assert_eq!(
-                usage.requests, 1,
+                usage_value(&events, app_id, "requests"),
+                Some(1),
                 "a stream counts exactly one request despite many incremental deltas"
             );
-            assert_eq!(usage.cpu_us, 123, "unary cpu_us recorded once");
-            assert_eq!(usage.ingress_bytes, 456, "unary ingress_bytes recorded once");
-            assert!(usage.egress_bytes > 0, "incremental egress accrued across deltas");
+            assert_eq!(
+                usage_value(&events, app_id, "cpu_us"),
+                Some(123),
+                "unary cpu_us recorded once"
+            );
+            assert_eq!(
+                usage_value(&events, app_id, "ingress_bytes"),
+                Some(456),
+                "unary ingress_bytes recorded once"
+            );
             assert!(
-                usage.custom.get("stream_wall_us").copied().unwrap_or(0) > 0
-                    || usage.egress_bytes > 0,
+                usage_value(&events, app_id, "egress_bytes").unwrap_or(0) > 0,
+                "incremental egress accrued across deltas"
+            );
+            assert!(
+                usage_value(&events, app_id, "stream_wall_us").unwrap_or(0) > 0
+                    || usage_value(&events, app_id, "egress_bytes").unwrap_or(0) > 0,
                 "stream_wall_us accrues over the stream lifetime"
             );
         });

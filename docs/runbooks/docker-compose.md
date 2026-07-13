@@ -9,7 +9,7 @@ dev domain. From the repo root:
 ```bash
 # Build everything ahead (so `up` never builds): the single shared image
 # (control/gateway/worker/auth/sandbox + the `zeroship` CLI) plus the external
-# images (postgres, caddy, verdaccio).
+# images (postgres, caddy, verdaccio, redpanda).
 docker compose build                   # all Dockerfile-based services
 docker compose pull                    # external images
 
@@ -70,6 +70,7 @@ point; these raw ports remain mapped for direct debugging):
 - `gateway` (`zeroship-gate`) → `localhost:8000`
 - `auth` (`zeroship-auth`) → `localhost:9092`
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
+- `redpanda` (Kafka-wire billing stream) → `REDPANDA_BROKERS=127.0.0.1:19092`
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 

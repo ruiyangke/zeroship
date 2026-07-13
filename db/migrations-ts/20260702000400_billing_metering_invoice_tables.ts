@@ -111,6 +111,23 @@ export function up() {
     },
     primaryKey: ["id"],
   });
+  table("provider_dead_letter", { schema: "zeroship" }).create({
+    columns: {
+      id: t.text().notNull(),
+      provider_id: t.text().notNull(),
+      event_id: t.text().notNull(),
+      source: t.text().notNull(),
+      subject: t.json().notNull(),
+      meter: t.text().notNull(),
+      event_time: t.bigInt().notNull(),
+      value: t.bigInt().notNull(),
+      dims: t.json().notNull(),
+      reason: t.text().notNull(),
+      created_at: t.timestamp().notNull().default(now()),
+    },
+    primaryKey: ["id"],
+  });
+  table("provider_dead_letter", { schema: "zeroship" }).check("provider_dead_letter_value_check").add({ expr: (col) => col("value").ge(0) });
   table("connect_checkout_failures", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -429,15 +446,6 @@ export function up() {
     primaryKey: ["app_id", "period", "metric"],
   });
   table("usage_aggregates", { schema: "zeroship" }).check("usage_aggregates_total_check").add({ expr: (col) => col("total").ge(0) });
-  table("usage_reports_seen", { schema: "zeroship" }).create({
-    columns: {
-      worker_id: t.text().notNull(),
-      sequence: t.bigInt().notNull(),
-      period: t.domain("billing_period"),
-      seen_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["worker_id", "sequence"],
-  });
 }
 
 export function down() {

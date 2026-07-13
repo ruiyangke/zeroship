@@ -9,18 +9,18 @@
 //! have changeset 0039 applied (drop+recreate `zeroship_billing_test`, re-run
 //! `ops/db-migrate.sh update`).
 
-use std::collections::HashMap;
+mod common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
-use zeroship_control::metering::{current_period_start_unix, Metering};
+use zeroship_control::metering::{current_period_start_unix, Metering, UsageAggregate};
 use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
-use zeroship_core::types::{AppUsage, SpendState, UsageReport};
+use zeroship_core::types::SpendState;
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// `SpendEngine::evaluate_all` is a FLEET-WIDE sweep (`SELECT id FROM apps` →
@@ -90,15 +90,18 @@ async fn make_app_on_priced_plan(
     (plan_id, rows[0].get("id"))
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
+async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
+    metering
+        .replace_period_snapshot(
+            current_period_start_unix(),
+            &[UsageAggregate {
+                app_id: app,
+                metric: "requests".to_string(),
+                total: i64::try_from(requests).expect("test requests fit i64"),
+            }],
+        )
+        .await
+        .expect("seed usage snapshot");
 }
 
 /// Read the persisted `(state, history_count)` for an app.
@@ -126,10 +129,7 @@ async fn read_state(
 
 #[compio::test]
 async fn evaluate_all_persists_and_returns_transitions() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -139,11 +139,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
     // Plan limit = 100 cents; 1 cent per request. Ingest 100 requests into the
     // CURRENT period ⇒ spend = 100 cents = 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest(&report(&worker, 1, app, 100))
-        .await
-        .expect("ingest usage");
+    seed_requests(&metering, app, 100).await;
     // Sanity: usage landed in the current period.
     let period = current_period_start_unix();
     assert_eq!(metering.total(&app, period, "requests").await.unwrap(), 100);
@@ -180,10 +176,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
 /// versa) would fail this consistency check.
 #[compio::test]
 async fn transition_writes_state_and_history_atomically_and_consistent() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -192,8 +185,7 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
 
     // Limit 100 cents, 1 cent/request, 100 requests ⇒ 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    seed_requests(&metering, app, 100).await;
 
     let transitions = engine.evaluate_all().await.expect("evaluate_all");
     let ours: Vec<_> = transitions.iter().filter(|t| t.app_id == app).collect();
@@ -244,10 +236,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // an app too). Pre-fix the sweep did `i64::try_from(spend_cents).unwrap_or(
     // i64::MAX)` — a silent clamp that wrote a Block state row, so enforcement
     // Blocked an app that reconcile would skip (unbilled): the two disagreed.
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -295,11 +284,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         .get("id");
 
     // Usage = i64::MAX requests in the current period.
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest(&report(&worker, 1, app, i64::MAX as u64))
-        .await
-        .expect("ingest overflow usage");
+    seed_requests(&metering, app, i64::MAX as u64).await;
 
     // The sweep must NOT transition (skip) our app, and write NO state row for it.
     let transitions = engine.evaluate_all().await.expect("evaluate_all");
@@ -317,10 +302,7 @@ async fn raising_limit_recovers_block_immediately() {
     // Faithful PG exercise of the raised-limit recovery: an app pinned at Block
     // recovers to Allow on the next tick once `set_limit` raises the cap far
     // above the deadband (deadband would otherwise hold Block at a fixed cap).
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -328,8 +310,7 @@ async fn raising_limit_recovers_block_immediately() {
     let engine = SpendEngine::new(registry);
 
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    seed_requests(&metering, app, 100).await;
 
     // Tick 1: Block.
     engine.evaluate_all().await.unwrap();
@@ -361,10 +342,7 @@ async fn raising_limit_recovers_block_immediately() {
 
 #[compio::test]
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -374,8 +352,7 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     // Plan default = 100c. Ingest 100 requests = 100c ⇒ at the plan default this
     // is 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    seed_requests(&metering, app, 100).await;
 
     // Set a generous override BEFORE the first eval. It must land in the dedicated
     // CONFIG table `app_spend_limit` — NOT in `app_spend_state` (which has no
@@ -417,10 +394,7 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
 
 #[compio::test]
 async fn transition_history_row_binds_non_null_period() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
@@ -429,8 +403,7 @@ async fn transition_history_row_binds_non_null_period() {
 
     // 100c cap, 100 requests ⇒ Block (a transition that writes history).
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering.ingest(&report(&worker, 1, app, 100)).await.unwrap();
+    seed_requests(&metering, app, 100).await;
     engine.evaluate_all().await.unwrap();
 
     // `spend_state_history.period` is NOT NULL in the redesigned schema — the
