@@ -7040,9 +7040,12 @@ version = "0.1.0"
 dependencies = [
  "compio",
  "compio-postgres",
+ "serde",
  "serde_json",
  "tracing",
+ "v8",
  "zero-migrate",
+ "zeroship-runtime",
 ]
 
 [[package]]

@@ -37,3 +37,10 @@ compio = { workspace = true }
 # The smoke test authors an IR envelope as JSON, then parses + re-serializes it
 # through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
 serde_json = { workspace = true }
+serde = { workspace = true }
+# Phase F Stage 2 authoring proof: run the STANDALONE zero-migrate recorder inside
+# zeroship-runtime's V8 isolate to author an ir_version:1 envelope from a `.ts`
+# migration — the platform's own V8 (no Node in the loop). Dev-only: the library
+# surface (Stage 1's SqlSession adapter) stays V8-free.
+zeroship-runtime = { workspace = true }
+v8 = { workspace = true }
