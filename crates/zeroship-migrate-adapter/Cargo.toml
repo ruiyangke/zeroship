@@ -1,0 +1,39 @@
+# Phase F — the monorepo's bridge between the published `zero-migrate` engine and
+# the platform's native compio-postgres driver.
+#
+# `zero-migrate` (the standalone engine at /home/ruiyang/Projects/zero-migrate)
+# ships NO native Rust network Postgres driver: its PG apply path is generic over
+# the driver-neutral `zero_migrate::driver::SqlSession` seam (the host/napi bridge
+# is the production producer). This crate supplies the MONOREPO's producer: a
+# newtype wrapping `compio_postgres::Client` that implements `SqlSession`, so the
+# platform's io_uring PG driver can drive the engine's apply flow directly, with no
+# tokio and no Node in the loop.
+#
+# Stage 1 is NON-DESTRUCTIVE: it only ADDS this consumption + adapter + a live
+# smoke test. It rewires no existing consumers and deletes nothing; the in-tree
+# `crates/zeroship-migrate` stays the platform's migration source until later
+# stages cut over.
+[package]
+name = "zeroship-migrate-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The published engine (path dep — cargo path-deps may point outside the
+# workspace). Default features light `host-pg` → the internal `pg_seam` cfg, which
+# exposes `driver::SqlSession`, the generic `PostgresBackend<D>`, and the
+# `<D: SqlSession>` apply/journal path this adapter drives.
+zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
+# The platform's native io_uring Postgres driver — the concrete session this
+# adapter maps onto the neutral seam.
+compio-postgres = { workspace = true }
+# For spawning + detaching the connection run-loop (the crate-wide compio pattern).
+compio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+# The smoke test authors an IR envelope as JSON, then parses + re-serializes it
+# through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
+serde_json = { workspace = true }

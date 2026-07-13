@@ -6618,6 +6618,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "zero-migrate"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "flume 0.11.1",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "indexmap 2.14.0",
+ "pg_query",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "zero-migrate-guard",
+ "zero-migrate-ir",
+]
+
+[[package]]
+name = "zero-migrate-guard"
+version = "0.1.0"
+dependencies = [
+ "pg_query",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "zero-migrate-ir",
+]
+
+[[package]]
+name = "zero-migrate-ir"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6983,6 +7032,17 @@ dependencies = [
  "zeroship-core",
  "zeroship-runtime",
  "zeroship-schema",
+]
+
+[[package]]
+name = "zeroship-migrate-adapter"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-postgres",
+ "serde_json",
+ "tracing",
+ "zero-migrate",
 ]
 
 [[package]]
