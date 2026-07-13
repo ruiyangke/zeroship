@@ -6,7 +6,7 @@
 //! The headline: a production caller derives its `descriptors` from `registerModel` =
 //! the POST-deploy DESIRED schema (post-rename: only `full_name` exists, `name` is
 //! GONE). The OLD descriptor entry (`apply_bundle_ir_sqlite`) fails closed on exactly
-//! that set (pinned by `ir_deploy_sqlite_rename_pr7.rs`). The NEW catalog entry sources
+//! that set (pinned by `ir_deploy_sqlite_rename_descriptor.rs`). The NEW catalog entry sources
 //! the rename's PRE-rename `name` column facts from a REAL pre-deploy SQLite-catalog
 //! read — so the rename runs as a rebuild WITHOUT a pre-rename descriptor:
 //!
@@ -16,7 +16,7 @@
 //!   BLOB affinity) is PRESERVED on the rebuilt table — the rebuild did not drop it;
 //! - the journal records the rebuild migration version.
 //!
-//! Contrast with `ir_deploy_sqlite_rename_pr7.rs:125`, which hand-feeds the PRE-rename
+//! Contrast with `ir_deploy_sqlite_rename_descriptor.rs`, which hand-feeds the PRE-rename
 //! descriptor — this test must NOT do that (the descriptors are the post-rename desired).
 
 use std::path::PathBuf;
@@ -29,8 +29,8 @@ use zero_migrate::{
     MigrationIr, PolicyProfile, SqliteBackend, SqliteIrApplyError, resolve_create_table_policy,
 };
 
-const PROJECT: &str = "prj_pr9b";
-const APP: &str = "app_pr9b";
+const PROJECT: &str = "prj_rename_catalog";
+const APP: &str = "app_rename_catalog";
 
 struct Paths {
     _dir: TempDir,

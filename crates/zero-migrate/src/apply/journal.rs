@@ -1247,7 +1247,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
             tracing::warn!(
                 error = %rb,
                 "zero-migrate: ROLLBACK failed after a \
-                 record_pending_contract_with_recovery error (PR9e)"
+                 record_pending_contract_with_recovery error"
             );
         }
         return Err(e);
@@ -1414,7 +1414,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
             tracing::warn!(
                 error = %rb,
                 "zero-migrate: ROLLBACK failed after a \
-                 mark_deploy_recovery_committed_batch error (PR9e)"
+                 mark_deploy_recovery_committed_batch error"
             );
         }
         return Err(e);

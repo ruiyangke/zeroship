@@ -412,7 +412,7 @@ mod recording_session_genericity {
             {
                 panic!(
                     "SqlSession verb issued while another is in flight — the engine \
-                     must be strictly one-verb-at-a-time (§B.6)"
+                     must be strictly one-verb-at-a-time"
                 );
             }
             Self(flag)

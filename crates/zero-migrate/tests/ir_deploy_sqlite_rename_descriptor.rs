@@ -22,8 +22,8 @@ use zero_migrate::{
     PolicyProfile, SqliteBackend, SqliteIrApplyError, resolve_create_table_policy,
 };
 
-const PROJECT: &str = "prj_pr7";
-const APP: &str = "app_pr7";
+const PROJECT: &str = "prj_rename_descriptor";
+const APP: &str = "app_rename_descriptor";
 
 struct Paths {
     _dir: TempDir,

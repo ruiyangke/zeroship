@@ -401,7 +401,7 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<bool, ApplyError> {
         if self.uses_two_phase_path(m) {
             return Err(ApplyError::Backend(
-                "sqlite backend: non-transactional apply does not exist on SQLite (design §2.3/L3)"
+                "sqlite backend: non-transactional apply does not exist on SQLite"
                     .to_string(),
             ));
         }

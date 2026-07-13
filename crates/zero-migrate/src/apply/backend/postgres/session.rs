@@ -594,7 +594,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     }
     if let Err(e) = conn.exec_text(template, &params).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
+            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error");
         }
         return Err(ApplyError::MigrationFailed {
             version: version.to_string(),

@@ -141,7 +141,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     // No PG online partition: a SQLite rebuild is one atomic offline step.
     assert!(
         out.pending_contract.is_empty(),
-        "the SQLite rebuild leg has NO pending_contract partition (§2.6.2)"
+        "the SQLite rebuild leg has NO pending_contract partition"
     );
     assert!(
         out.applied.applied.contains(&rebuild_version),

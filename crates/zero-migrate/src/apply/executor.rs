@@ -175,7 +175,7 @@ pub enum ApplyError {
     /// on a dialect that has no non-txn DDL to recover (SQLite).
     /// Rejected at the dialect boundary, before any apply. Postgres never returns
     /// this — its non-txn path is real.
-    #[error("migration {version} is transaction:false but the {dialect} backend has no non-transactional DDL path (design §2.3/L3)")]
+    #[error("migration {version} is transaction:false but the {dialect} backend has no non-transactional DDL path")]
     NonTxnUnsupportedOnDialect {
         /// The rejected migration's version.
         version: String,

@@ -610,12 +610,12 @@ mod tests {
             assert_eq!(
                 authorize(&m, &ctx(AuthAction::Function { function_name: "instr" }, None, None)),
                 Authorization::Allow,
-                "instr must be allow-listed in {mode:?} (PR6b splitPart lowering)"
+                "instr must be allow-listed in {mode:?} (splitPart lowering)"
             );
             assert_eq!(
                 authorize(&m, &ctx(AuthAction::Function { function_name: "replace" }, None, None)),
                 Authorization::Deny,
-                "replace must NOT be allow-listed in {mode:?} (only +1 scalar, §9)"
+                "replace must NOT be allow-listed in {mode:?} (only +1 scalar)"
             );
             assert_eq!(
                 authorize(
@@ -739,7 +739,7 @@ mod tests {
                     )
                 ),
                 Authorization::Allow,
-                "{pragma} must be allowed in engine mode (drift introspection, §2.7)"
+                "{pragma} must be allowed in engine mode (drift introspection)"
             );
         }
         // writable_schema is NOT an introspection pragma — denied even in engine mode.
