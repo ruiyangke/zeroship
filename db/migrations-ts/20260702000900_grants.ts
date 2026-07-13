@@ -1,4 +1,4 @@
-import { dropFunction, grant, revoke } from "@zeroship/migrate";
+import { grant, revoke } from "@zeroship/migrate";
 
 export const name = "grants";
 
@@ -37,7 +37,13 @@ export function up() {
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, from: ["public"] });
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, from: ["public"] });
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] }, from: ["public"] });
-  dropFunction({ schema: "zeroship", name: "zeroship_migrations_schema_migrations_immutable", ifExists: true });
+  // NOTE: the SQL baseline dropped `zeroship_migrations.schema_migrations_immutable()`
+  // here (an artifact of the retired in-tree engine's journal bootstrap). The
+  // published zero-migrate engine OWNS `<meta>_schema_migrations_immutable()` as its
+  // LIVE journal tamper-guard (meta schema `zeroship_migrations`), with a dependent
+  // BEFORE UPDATE/DELETE trigger. Dropping it would (a) fail without CASCADE and
+  // (b) if forced, disarm the append-only journal protection — so this stale
+  // cleanup line is removed; the engine manages its own journal function.
 }
 
 export function down() {

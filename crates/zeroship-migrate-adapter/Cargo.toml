@@ -17,9 +17,10 @@
 # Stage 4a adds the `platform` module + the `zeroship-platform-migrate` bin (behind
 # the `platform-cli` feature): the platform-schema migrate path rebuilt on the
 # published engine — author `db/migrations-ts/*.ts` via zeroship-runtime V8 → lower
-# under the Platform guard → apply over `CompioPgSession`. Author+lower is proven
-# green for all 11 platform migrations; APPLY surfaces a published-engine gap (no
-# public Platform `ExecutorConfig` seam). See `src/platform.rs`.
+# under the Platform guard → apply over `CompioPgSession`. Author+lower AND apply
+# run on the published engine's public token-gated Platform seams
+# (`GuardConfig::platform` + `ExecutorConfig::platform`); all 11 platform
+# migrations author+lower+apply green to a fresh DB. See `src/platform.rs`.
 [package]
 name = "zeroship-migrate-adapter"
 version = "0.1.0"
