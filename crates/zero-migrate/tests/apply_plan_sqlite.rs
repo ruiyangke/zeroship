@@ -1,13 +1,13 @@
-//! Faithful e2e for the single shared `apply_plan`'s SQLite leg of the
+//! Faithful e2e for the single shared `apply_plan`'s `SQLite` leg of the
 //! dual-EXECUTION rename dispatch (`op.*` DSL), against REAL temp-file
-//! SQLite.
+//! `SQLite`.
 //!
 //! A `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` driven
 //! THROUGH `apply_plan` executes via `MigrationBackend::rebuild_one` (the 12-step
-//! offline rebuild), NOT `run_online` (SQLite has no online capability). A seeded
+//! offline rebuild), NOT `run_online` (`SQLite` has no online capability). A seeded
 //! row survives the rename, the old column is gone, and the journal records the
-//! rebuild migration's version — proving `apply_plan` routes the SQLite variant to
-//! `rebuild_one`, with no `pending_contract` partition (a SQLite rebuild is one
+//! rebuild migration's version — proving `apply_plan` routes the `SQLite` variant to
+//! `rebuild_one`, with no `pending_contract` partition (a `SQLite` rebuild is one
 //! atomic offline step).
 
 use std::collections::HashMap;

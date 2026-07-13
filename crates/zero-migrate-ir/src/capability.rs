@@ -98,7 +98,7 @@ pub enum VendorCapability {
     RawSql,
     /// The gated raw view-body SELECT escape ([`VendorCapabilities::allow_raw_view_body`]).
     RawViewBody,
-    /// PostgreSQL materialized views ([`VendorCapabilities::allow_materialized_view`]).
+    /// `PostgreSQL` materialized views ([`VendorCapabilities::allow_materialized_view`]).
     MaterializedView,
 }
 
@@ -106,37 +106,37 @@ impl VendorCapability {
     /// A short, stable lower-camel token for diagnostics (the `op` field of the
     /// `VENDOR_OP_DENIED` envelope's reason).
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
-            VendorCapability::Extension => "extension",
-            VendorCapability::Schema => "schema",
-            VendorCapability::Role => "role",
-            VendorCapability::Grant => "grant",
-            VendorCapability::Rls => "rls",
-            VendorCapability::Partition => "partition",
-            VendorCapability::Policy => "policy",
-            VendorCapability::Function => "function",
-            VendorCapability::RawSql => "rawSql",
-            VendorCapability::RawViewBody => "rawViewBody",
-            VendorCapability::MaterializedView => "materializedView",
+            Self::Extension => "extension",
+            Self::Schema => "schema",
+            Self::Role => "role",
+            Self::Grant => "grant",
+            Self::Rls => "rls",
+            Self::Partition => "partition",
+            Self::Policy => "policy",
+            Self::Function => "function",
+            Self::RawSql => "rawSql",
+            Self::RawViewBody => "rawViewBody",
+            Self::MaterializedView => "materializedView",
         }
     }
 
     /// The capability-flag NAME the operator composes (for the suggested-fix text).
     #[must_use]
-    pub fn flag_name(self) -> &'static str {
+    pub const fn flag_name(self) -> &'static str {
         match self {
-            VendorCapability::Extension => "allowExtension",
-            VendorCapability::Schema => "allowSchema",
-            VendorCapability::Role => "allowRole",
-            VendorCapability::Grant => "allowGrant",
-            VendorCapability::Rls => "allowRls",
-            VendorCapability::Partition => "allowPartition",
-            VendorCapability::Policy => "allowPolicy",
-            VendorCapability::Function => "allowFunction",
-            VendorCapability::RawSql => "allowRawSql",
-            VendorCapability::RawViewBody => "allowRawViewBody",
-            VendorCapability::MaterializedView => "allowMaterializedView",
+            Self::Extension => "allowExtension",
+            Self::Schema => "allowSchema",
+            Self::Role => "allowRole",
+            Self::Grant => "allowGrant",
+            Self::Rls => "allowRls",
+            Self::Partition => "allowPartition",
+            Self::Policy => "allowPolicy",
+            Self::Function => "allowFunction",
+            Self::RawSql => "allowRawSql",
+            Self::RawViewBody => "allowRawViewBody",
+            Self::MaterializedView => "allowMaterializedView",
         }
     }
 }
@@ -159,7 +159,7 @@ pub struct VendorCapabilities {
     pub allow_grant: bool,
     /// RLS enable/force/disable/no-force.
     pub allow_rls: bool,
-    /// PostgreSQL partition attach.
+    /// `PostgreSQL` partition attach.
     pub allow_partition: bool,
     /// `CREATE/DROP POLICY`.
     pub allow_policy: bool,
@@ -169,7 +169,7 @@ pub struct VendorCapabilities {
     pub allow_raw_sql: bool,
     /// The gated raw view-body SELECT escape.
     pub allow_raw_view_body: bool,
-    /// PostgreSQL materialized views.
+    /// `PostgreSQL` materialized views.
     pub allow_materialized_view: bool,
     /// Whether references to schemas OTHER than the (single) project schema are
     /// admitted (the multi-schema operator posture). Cross-schema confinement is
@@ -186,7 +186,7 @@ impl VendorCapabilities {
     /// capability, NO cross-schema. Every vendor op is refused fail-closed. This is
     /// the composition [`TrustProfile::Confined`] maps onto.
     #[must_use]
-    pub fn confined() -> Self {
+    pub const fn confined() -> Self {
         Self {
             allow_extension: false,
             allow_schema: false,
@@ -209,7 +209,7 @@ impl VendorCapabilities {
     /// and [`TrustProfile::Trusted`] map onto. `schemas` is filled from the active
     /// allowlist by [`from_scope`](Self::from_scope).
     #[must_use]
-    pub fn operator() -> Self {
+    pub const fn operator() -> Self {
         Self {
             allow_extension: true,
             allow_schema: true,
@@ -234,7 +234,7 @@ impl VendorCapabilities {
     /// preset is not wired to a `TrustProfile` (there is no `Local` profile); it is
     /// available for a caller composing a bespoke gate.
     #[must_use]
-    pub fn local() -> Self {
+    pub const fn local() -> Self {
         Self {
             allow_extension: true,
             allow_schema: true,
@@ -254,10 +254,10 @@ impl VendorCapabilities {
 
     /// Map a [`TrustProfile`] onto its named preset: Confined ⇒
     /// [`confined`](Self::confined); Platform / Trusted ⇒ [`operator`](Self::operator).
-    /// The TrustProfile is the EXISTING operator-gated machinery; this is the
+    /// The `TrustProfile` is the EXISTING operator-gated machinery; this is the
     /// single bridge from it to the capability composition.
     #[must_use]
-    pub fn for_trust(trust: TrustProfile) -> Self {
+    pub const fn for_trust(trust: TrustProfile) -> Self {
         match trust {
             TrustProfile::Confined => Self::confined(),
             TrustProfile::Platform | TrustProfile::Trusted => Self::operator(),
@@ -296,7 +296,7 @@ impl VendorCapabilities {
     /// a vendor op whose required capability is NOT granted is
     /// refused.
     #[must_use]
-    pub fn grants(&self, cap: VendorCapability) -> bool {
+    pub const fn grants(&self, cap: VendorCapability) -> bool {
         match cap {
             VendorCapability::Extension => self.allow_extension,
             VendorCapability::Schema => self.allow_schema,

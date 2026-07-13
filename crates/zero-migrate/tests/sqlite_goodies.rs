@@ -1,28 +1,28 @@
-//! SQLite goodie-column coverage at parity with the PG `declarative_pg` /
+//! `SQLite` goodie-column coverage at parity with the PG `declarative_pg` /
 //! `drift_pg` vector / geoPoint tests — the faithful path: the real
-//! `DeclarativeAuthor` (SQLite dialect) builds the plan, applies it through the
+//! `DeclarativeAuthor` (`SQLite` dialect) builds the plan, applies it through the
 //! real hardened `SqliteBackend` on a temp file, and the assertions read the
 //! REAL DB end-state (`PRAGMA table_info`, `sqlite_master`) + a real re-diff.
 //!
 //! WHAT THE SQLITE ENGINE PATH ACTUALLY DOES (ground-truthed, not assumed):
 //!   - a `vector(N)` field → a plain `BLOB` column + a plain B-tree index over it
-//!     (the shared `def_to_column_type_for_dialect` maps vector→BLOB on SQLite;
+//!     (the shared `def_to_column_type_for_dialect` maps vector→BLOB on `SQLite`;
 //!     the engine's `SqliteEmitter::create_index` emits a plain B-tree for every
 //!     index kind — there is NO `vec0` virtual table and NO metric validation on
 //!     this path: sqlite-vec / vec0 vtables are the **plugin-db runtime** data
 //!     plane's concern, created via `ensure_vector_index`, NOT the migrate engine.
 //!     See `crates/plugin-db/tests/sqlite_integration.rs` and the
-//!     `sqlite_*_column_ddl` register_model follow-up note there).
+//!     `sqlite_*_column_ddl` `register_model` follow-up note there).
 //!   - a `geoPoint` field → a packed `BLOB` column + a plain B-tree index (no
 //!     PostGIS/GIST equivalent; spatial search is a haversine flat-scan in
 //!     plugin-db per `docs/reference/sqlite-divergences.md`).
 //!   - an `.fts()` field → an FTS5 **virtual table** (`<coll>__fts`) over the
 //!     source columns + AFTER sync triggers, emitted via the SHARED
 //!     `zero_migrate::schema::fts_sqlite` builders (the SAME structure plugin-db's
-//!     runtime `ensure_fts_index` builds). This is the SQLite FTS shape — there is
-//!     NO PG `__fts` tsvector column and NO GIN index (`tsvector` has no SQLite
+//!     runtime `ensure_fts_index` builds). This is the `SQLite` FTS shape — there is
+//!     NO PG `__fts` tsvector column and NO GIN index (`tsvector` has no `SQLite`
 //!     spelling). The SQLite-dialect `desired_snapshot_for_dialect` models it as an
-//!     `IndexSnapshot` with `access_method = "fts5"`, the SQLite emitter emits the
+//!     `IndexSnapshot` with `access_method = "fts5"`, the `SQLite` emitter emits the
 //!     vtable+triggers (run under engine mode, since the hardened authorizer permits
 //!     a vtable create ONLY in engine mode), and the drift introspector recognises
 //!     the live vtable (excluding its FTS5 shadow tables), so a re-diff is
@@ -70,7 +70,7 @@ fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
     d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect()
 }
 
-/// The declared SQLite type of `column` on `table`, via `PRAGMA table_info`
+/// The declared `SQLite` type of `column` on `table`, via `PRAGMA table_info`
 /// (engine mode lets the test issue the PRAGMA on `main`).
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
     be.actor()
@@ -148,13 +148,13 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     );
 }
 
-/// DIVERGENCE PIN — on the SQLite **migrate-engine** path, an `innerProduct`
+/// DIVERGENCE PIN — on the `SQLite` **migrate-engine** path, an `innerProduct`
 /// metric does NOT raise a `vector_unsupported_metric` error (that validation
 /// lives in the plugin-db runtime vector index builder, where sqlite-vec supports
 /// only cosine + L2). On the engine path the metric is metadata that rides into
-/// the (PG-shaped) ivfflat index snapshot; the SQLite leg emits a plain BLOB
+/// the (PG-shaped) ivfflat index snapshot; the `SQLite` leg emits a plain BLOB
 /// column + plain B-tree index, so ANY metric token applies cleanly. This pins
-/// that reality so a future "reject ip on SQLite at author time" change is a
+/// that reality so a future "reject ip on `SQLite` at author time" change is a
 /// visible, deliberate behaviour flip rather than a silent one.
 #[compio::test]
 async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {

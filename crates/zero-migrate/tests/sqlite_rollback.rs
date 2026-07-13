@@ -1,5 +1,5 @@
-//! Additive rollback proofs for the SQLite migration backend.
-//! Real temp-file SQLite throughout. Covers: additive
+//! Additive rollback proofs for the `SQLite` migration backend.
+//! Real temp-file `SQLite` throughout. Covers: additive
 //! reversals (DROP TABLE / DROP COLUMN), re-pending + re-apply, the
 //! rebuild-needed deferred typed error, and confinement of the `down`.
 

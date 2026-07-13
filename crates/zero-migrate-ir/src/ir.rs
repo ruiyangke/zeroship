@@ -83,6 +83,7 @@ const MAX_EXACT_INT: i64 = 1 << 53; // 9_007_199_254_740_992
 pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 
 /// The CURRENT IR wire-format version this engine build emits and accepts.
+///
 /// The IR shape evolves by BUMPING this; the loader rejects an
 /// unknown FUTURE `ir_version` fail-closed (an IR envelope authored by a newer
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
@@ -92,21 +93,16 @@ pub const CURRENT_IR_VERSION: u32 = 6;
 
 /// Per-collection deploy-time data-validation strictness, mirroring the
 /// built-in `schema(...).strictness(...)` builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TableStrictness {
     /// Refuse deploy-time validation violations.
+    #[default]
     Strict,
     /// Warn on violations but allow the push.
     Lenient,
     /// Skip deploy-time validation.
     Off,
-}
-
-impl Default for TableStrictness {
-    fn default() -> Self {
-        Self::Strict
-    }
 }
 
 /// Complete collection-level runtime options stamped on `createTable`.
@@ -205,12 +201,12 @@ impl SafeU64 {
                  safe-integer boundary"
             ));
         }
-        Ok(SafeU64(n))
+        Ok(Self(n))
     }
 
     /// The wrapped value (guaranteed `< 2^53`).
     #[must_use]
-    pub fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -262,7 +258,7 @@ impl<'de> Deserialize<'de> for SafeU64 {
                  integer (no fraction/exponent/sign)"
             ))
         })?;
-        SafeU64::new(n).map_err(D::Error::custom)
+        Self::new(n).map_err(D::Error::custom)
     }
 }
 
@@ -284,12 +280,12 @@ impl SafeI64 {
                  safe-integer boundary"
             ));
         }
-        Ok(SafeI64(n))
+        Ok(Self(n))
     }
 
     /// The wrapped value (guaranteed `|n| < 2^53`).
     #[must_use]
-    pub fn get(self) -> i64 {
+    pub const fn get(self) -> i64 {
         self.0
     }
 }
@@ -331,7 +327,7 @@ impl<'de> Deserialize<'de> for SafeI64 {
                  (no fraction/exponent)"
             ))
         })?;
-        SafeI64::new(n).map_err(D::Error::custom)
+        Self::new(n).map_err(D::Error::custom)
     }
 }
 
@@ -395,7 +391,7 @@ impl MigrationIr {
     ///
     /// # Errors
     /// [`IrVersionError`] if `self.ir_version > CURRENT_IR_VERSION`.
-    pub fn check_ir_version(&self) -> Result<(), IrVersionError> {
+    pub const fn check_ir_version(&self) -> Result<(), IrVersionError> {
         if self.ir_version > CURRENT_IR_VERSION {
             return Err(IrVersionError {
                 found: self.ir_version,
@@ -407,10 +403,11 @@ impl MigrationIr {
 }
 
 /// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR.
+///
 /// An absent key and an explicit `null` both mean "no override" here;
 /// the derive-then-override MERGE happens elsewhere, NOT this type's job.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct IrFlagsOverride {
     /// Override for `transactional`.
@@ -469,7 +466,7 @@ pub enum ColType {
     Json,
     /// Timestamp (with time zone on PG).
     Timestamp,
-    /// Narrow SQL `date`, admitted only as a PostgreSQL domain base type.
+    /// Narrow SQL `date`, admitted only as a `PostgreSQL` domain base type.
     Date,
     /// UUID.
     Uuid,
@@ -477,9 +474,9 @@ pub enum ColType {
     Inet,
     /// Text array (`text[]` on PG; JSON-encoded on non-PG backends).
     TextArray,
-    /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
+    /// Raw bytes (`BYTEA` on PG, `BLOB` on `SQLite`).
     Bytes,
-    /// Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).
+    /// Fixed-length character string (`CHAR(N)` / `PostgreSQL` `character(N)`).
     Char {
         /// Fixed length in characters.
         length: u32,
@@ -494,7 +491,7 @@ pub enum ColType {
         /// Vector dimensionality.
         vector: u32,
     },
-    /// Geographic point (PostGIS `geometry(Point)` / emulated on SQLite).
+    /// Geographic point (`PostGIS` `geometry(Point)` / emulated on `SQLite`).
     GeoPoint,
     /// Fixed-precision decimal.
     Decimal {
@@ -504,7 +501,7 @@ pub enum ColType {
         scale: u32,
     },
     /// Named enum type reference. Materialized as a Postgres `CREATE TYPE` ref,
-    /// inlined as SQLite `TEXT CHECK (...)`, and inlined as MySQL `ENUM(...)`.
+    /// inlined as `SQLite` `TEXT CHECK (...)`, and inlined as `MySQL` `ENUM(...)`.
     Enum {
         /// The enum type name.
         name: String,
@@ -526,7 +523,7 @@ pub enum ColType {
     /// Application-level encrypted column wrapping an inner type.
     Encrypted {
         /// The inner (plaintext) type.
-        of: Box<ColType>,
+        of: Box<Self>,
     },
 }
 
@@ -558,20 +555,20 @@ pub enum IrJsonValue {
     /// A UTF-8 string.
     Str(String),
     /// JSON array. Order is significant.
-    Array(Vec<IrJsonValue>),
+    Array(Vec<Self>),
     /// JSON object. Keys are sorted by [`BTreeMap`].
-    Object(BTreeMap<String, IrJsonValue>),
+    Object(BTreeMap<String, Self>),
 }
 
 impl Serialize for IrJsonValue {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         match self {
-            IrJsonValue::Null => ser.serialize_none(),
-            IrJsonValue::Bool(b) => ser.serialize_bool(*b),
-            IrJsonValue::Int(i) => ser.serialize_i64(*i),
-            IrJsonValue::Str(s) => ser.serialize_str(s),
-            IrJsonValue::Array(items) => items.serialize(ser),
-            IrJsonValue::Object(map) => map.serialize(ser),
+            Self::Null => ser.serialize_none(),
+            Self::Bool(b) => ser.serialize_bool(*b),
+            Self::Int(i) => ser.serialize_i64(*i),
+            Self::Str(s) => ser.serialize_str(s),
+            Self::Array(items) => items.serialize(ser),
+            Self::Object(map) => map.serialize(ser),
         }
     }
 }
@@ -579,17 +576,17 @@ impl Serialize for IrJsonValue {
 impl IrJsonValue {
     fn from_json_value(v: serde_json::Value) -> Result<Self, String> {
         match v {
-            serde_json::Value::Null => Ok(IrJsonValue::Null),
-            serde_json::Value::Bool(b) => Ok(IrJsonValue::Bool(b)),
-            serde_json::Value::String(s) => Ok(IrJsonValue::Str(s)),
+            serde_json::Value::Null => Ok(Self::Null),
+            serde_json::Value::Bool(b) => Ok(Self::Bool(b)),
+            serde_json::Value::String(s) => Ok(Self::Str(s)),
             serde_json::Value::Array(items) => items
                 .into_iter()
-                .map(IrJsonValue::from_json_value)
+                .map(Self::from_json_value)
                 .collect::<Result<Vec<_>, _>>()
                 .map(IrJsonValue::Array),
             serde_json::Value::Object(map) => map
                 .into_iter()
-                .map(|(k, v)| IrJsonValue::from_json_value(v).map(|v| (k, v)))
+                .map(|(k, v)| Self::from_json_value(v).map(|v| (k, v)))
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(IrJsonValue::Object),
             serde_json::Value::Number(n) => {
@@ -600,7 +597,7 @@ impl IrJsonValue {
                              json default values must stay below the JS safe-integer boundary"
                         ));
                     }
-                    Ok(IrJsonValue::Int(i))
+                    Ok(Self::Int(i))
                 } else if let Some(u) = n.as_u64() {
                     if u >= MAX_EXACT_INT as u64 {
                         return Err(format!(
@@ -608,7 +605,7 @@ impl IrJsonValue {
                              json default values must stay below the JS safe-integer boundary"
                         ));
                     }
-                    Ok(IrJsonValue::Int(u as i64))
+                    Ok(Self::Int(u as i64))
                 } else {
                     Err(format!(
                         "{EXPR_INVALID_NUMERIC}: json default values support integers only \
@@ -624,7 +621,7 @@ impl<'de> Deserialize<'de> for IrJsonValue {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
         let v = serde_json::Value::deserialize(de)?;
-        IrJsonValue::from_json_value(v).map_err(D::Error::custom)
+        Self::from_json_value(v).map_err(D::Error::custom)
     }
 }
 
@@ -648,7 +645,7 @@ impl JsonSchema for IrJsonValue {
                 { "type": "string" },
                 {
                     "type": "array",
-                    "items": self_ref.clone()
+                    "items": self_ref
                 },
                 {
                     "type": "object",
@@ -674,7 +671,7 @@ pub struct SequenceRef {
 /// A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —
 /// either a typed scalar literal, a closed expression AST, an EMPTY container
 /// default for JSON/text-array columns, a non-empty JSON value default for JSON
-/// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
+/// columns, or a `PostgreSQL` sequence `nextval(...)` reference. NEVER a raw SQL
 /// string (property A); the per-dialect default clause is rendered by the shared
 /// snapshot-builder kernel from this structured value.
 /// Deliberately richer than the DML [`IrValue`] slot: container/json/nextval
@@ -704,7 +701,7 @@ pub enum IrDefault {
         /// The JSON value.
         value: IrJsonValue,
     },
-    /// A PostgreSQL `nextval('<sequence>'::regclass)` default.
+    /// A `PostgreSQL` `nextval('<sequence>'::regclass)` default.
     Nextval {
         /// Closed sequence reference.
         sequence: SequenceRef,
@@ -719,11 +716,11 @@ impl Serialize for IrDefault {
         use serde::ser::SerializeMap as _;
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
-            IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
-            IrDefault::Expr { expr } => map.serialize_entry("expr", expr)?,
-            IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
-            IrDefault::Json { value } => map.serialize_entry("json", value)?,
-            IrDefault::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
+            Self::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
+            Self::Expr { expr } => map.serialize_entry("expr", expr)?,
+            Self::Container { kind } => map.serialize_entry("container", kind)?,
+            Self::Json { value } => map.serialize_entry("json", value)?,
+            Self::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
         }
         map.end()
     }
@@ -749,26 +746,26 @@ impl<'de> Deserialize<'de> for IrDefault {
                 value: IrScalar,
             }
             let wire: LiteralWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Literal { value: wire.value });
+            return Ok(Self::Literal { value: wire.value });
         }
         if let Some(v) = obj.get("expr") {
             let expr: Expr = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Expr { expr });
+            return Ok(Self::Expr { expr });
         }
         if let Some(v) = obj.get("container") {
             let kind: EmptyContainerKind =
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Container { kind });
+            return Ok(Self::Container { kind });
         }
         if let Some(v) = obj.get("json") {
             let value: IrJsonValue =
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Json { value });
+            return Ok(Self::Json { value });
         }
         if let Some(v) = obj.get("nextval") {
             let sequence: SequenceRef =
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Nextval { sequence });
+            return Ok(Self::Nextval { sequence });
         }
         Err(D::Error::custom(
             "IrDefault key must be one of \"literal\", \"expr\", \"container\", \"json\", or \"nextval\"",
@@ -892,11 +889,11 @@ impl VectorMetric {
     /// `vector_opclass` maps to the ivfflat/hnsw opclass).
     /// Kept in lock-step with the `serde(rename_all = "camelCase")` wire image.
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
-            VectorMetric::Cosine => "cosine",
-            VectorMetric::L2 => "l2",
-            VectorMetric::InnerProduct => "innerProduct",
+            Self::Cosine => "cosine",
+            Self::L2 => "l2",
+            Self::InnerProduct => "innerProduct",
         }
     }
 }
@@ -943,16 +940,16 @@ impl IrMaskKind {
     /// otherwise). Kept in lock-step with the `serde` wire image above and aligned
     /// with what `zero_migrate::schema::diff::MaskKind::from_sql` accepts.
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
-            IrMaskKind::Full => "full",
-            IrMaskKind::Last4 => "last4",
-            IrMaskKind::First4 => "first4",
-            IrMaskKind::Email => "email",
-            IrMaskKind::Name => "name",
-            IrMaskKind::DateYear => "date-year",
-            IrMaskKind::DateDecade => "date-decade",
-            IrMaskKind::None => "none",
+            Self::Full => "full",
+            Self::Last4 => "last4",
+            Self::First4 => "first4",
+            Self::Email => "email",
+            Self::Name => "name",
+            Self::DateYear => "date-year",
+            Self::DateDecade => "date-decade",
+            Self::None => "none",
         }
     }
 }
@@ -980,14 +977,14 @@ pub enum IrClassification {
 impl IrClassification {
     /// The SDK/IR-wire `classification` token (camelCase; all single words).
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
-            IrClassification::Public => "public",
-            IrClassification::Pii => "pii",
-            IrClassification::Spi => "spi",
-            IrClassification::Phi => "phi",
-            IrClassification::Pci => "pci",
-            IrClassification::Internal => "internal",
+            Self::Public => "public",
+            Self::Pii => "pii",
+            Self::Spi => "spi",
+            Self::Phi => "phi",
+            Self::Pci => "pci",
+            Self::Internal => "internal",
         }
     }
 }
@@ -1044,13 +1041,13 @@ impl IrMask {
 /// A generated/computed column facet.
 ///
 /// The expression is the closed [`Expr`] AST. `stored = true` renders STORED;
-/// `stored = false` renders VIRTUAL on SQLite and is fail-closed on Postgres.
+/// `stored = false` renders VIRTUAL on `SQLite` and is fail-closed on Postgres.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedCol {
     /// The generated-column expression.
     pub expr: Expr,
-    /// `true` ⇒ STORED; `false` ⇒ VIRTUAL (SQLite only).
+    /// `true` ⇒ STORED; `false` ⇒ VIRTUAL (`SQLite` only).
     pub stored: bool,
 }
 
@@ -1143,8 +1140,8 @@ pub struct IrColumn {
     /// [`Expr`] data, never raw SQL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<GeneratedCol>,
-    /// A SQL identity column facet. SQLite only has a sound emulation for the sole
-    /// integer primary-key case; other SQLite identity placements fail closed.
+    /// A SQL identity column facet. `SQLite` only has a sound emulation for the sole
+    /// integer primary-key case; other `SQLite` identity placements fail closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityCol>,
 }
@@ -1178,13 +1175,13 @@ impl RefAction {
     /// SQL clause). Kept in lock-step with the `serde(rename_all = "camelCase")`
     /// wire image so the render seam consumes the same string the wire carries.
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
-            RefAction::Cascade => "cascade",
-            RefAction::Restrict => "restrict",
-            RefAction::SetNull => "setNull",
-            RefAction::SetDefault => "setDefault",
-            RefAction::NoAction => "noAction",
+            Self::Cascade => "cascade",
+            Self::Restrict => "restrict",
+            Self::SetNull => "setNull",
+            Self::SetDefault => "setDefault",
+            Self::NoAction => "noAction",
         }
     }
 }
@@ -1222,12 +1219,12 @@ pub enum IndexElement {
         /// serializes identically to the pre-order wire shape.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<IndexSortOrder>,
-        /// PostgreSQL per-column operator class (e.g. `text_pattern_ops`).
+        /// `PostgreSQL` per-column operator class (e.g. `text_pattern_ops`).
         /// PG-vendor: fails closed on SQLite/MySQL. `None` serializes identically
         /// to the pre-opclass wire shape (byte-neutral when absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         opclass: Option<String>,
-        /// PostgreSQL per-column collation (e.g. `"C"`). PG-vendor: fails closed
+        /// `PostgreSQL` per-column collation (e.g. `"C"`). PG-vendor: fails closed
         /// on SQLite/MySQL. `None` serializes identically to the pre-collation
         /// wire shape (byte-neutral when absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1242,7 +1239,7 @@ pub enum IndexElement {
 
 /// True when any index element carries a PG-vendor per-column `opclass` or
 /// `collation`. Drives the `pgOnlyMethodOrFeature`/`pgOnlyIndexFeature` variant
-/// selection (fail-closed off PostgreSQL).
+/// selection (fail-closed off `PostgreSQL`).
 #[must_use]
 pub fn index_has_element_opclass_or_collation(columns: &[IndexElement]) -> bool {
     columns.iter().any(|element| {
@@ -1271,12 +1268,12 @@ pub enum IndexSortOrder {
     Desc,
 }
 
-/// CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
+/// CLOSED exclusion access-method set. `PostgreSQL` supports more methods, but the
 /// IR only admits the audited methods below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ExclusionMethod {
-    /// GiST (the default and common range/geometry exclusion method).
+    /// `GiST` (the default and common range/geometry exclusion method).
     Gist,
     /// SP-GiST.
     Spgist,
@@ -1284,7 +1281,7 @@ pub enum ExclusionMethod {
     Btree,
 }
 
-fn default_exclusion_method() -> ExclusionMethod {
+const fn default_exclusion_method() -> ExclusionMethod {
     ExclusionMethod::Gist
 }
 
@@ -1358,7 +1355,7 @@ pub enum IrConstraintKind {
         /// [`Op::ValidateConstraint`] validates them under a weaker lock.
         /// Additive-optional: absent is checksum-neutral (`skip_serializing_if`),
         /// so a FK that sets no `NOT VALID` serializes byte-identically to the
-        /// pre-slice wire image. Refused fail-closed off PostgreSQL.
+        /// pre-slice wire image. Refused fail-closed off `PostgreSQL`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         not_valid: Option<bool>,
     },
@@ -1373,14 +1370,14 @@ pub enum IrConstraintKind {
         expr: Expr,
         /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption);
         /// see [`IrConstraintKind::Fk::not_valid`]. Additive-optional + checksum-
-        /// neutral when absent. Refused fail-closed off PostgreSQL.
+        /// neutral when absent. Refused fail-closed off `PostgreSQL`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         not_valid: Option<bool>,
     },
-    /// PostgreSQL exclusion constraint (`EXCLUDE USING …`). Operators and
+    /// `PostgreSQL` exclusion constraint (`EXCLUDE USING …`). Operators and
     /// expression targets are closed tokens/ASTs, never raw SQL.
     Exclusion {
-        /// Access method. Defaults to GiST on the wire when omitted.
+        /// Access method. Defaults to `GiST` on the wire when omitted.
         #[serde(default = "default_exclusion_method")]
         using_method: ExclusionMethod,
         /// `(target WITH operator)` elements.
@@ -1427,7 +1424,7 @@ pub struct SequenceOwnedBy {
 /// so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
 /// method string into an unvalidated position that would reach the render seam.
 /// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
-/// the SQLite FTS5 virtual-table path (per-dialect lowering is the render seam's job).
+/// the `SQLite` FTS5 virtual-table path (per-dialect lowering is the render seam's job).
 /// Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1438,17 +1435,17 @@ pub enum IndexMethod {
     Brin,
     /// PG GIN.
     Gin,
-    /// PG GiST.
+    /// PG `GiST`.
     Gist,
-    /// pgvector IVFFlat ANN.
+    /// pgvector `IVFFlat` ANN.
     Ivfflat,
     /// pgvector HNSW ANN.
     Hnsw,
-    /// Full-text search (PG GIN-over-tsvector / SQLite FTS5 virtual table).
+    /// Full-text search (PG GIN-over-tsvector / `SQLite` FTS5 virtual table).
     Fts5,
 }
 
-/// Typed PostgreSQL index storage parameters. Closed set: never raw SQL.
+/// Typed `PostgreSQL` index storage parameters. Closed set: never raw SQL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IndexStorageParams {
@@ -1463,7 +1460,7 @@ pub struct IndexStorageParams {
 impl IndexStorageParams {
     /// True when no storage parameter would render.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.pages_per_range.is_none() && self.fillfactor.is_none()
     }
 }
@@ -1492,10 +1489,10 @@ pub struct IrIndex {
     /// Typed storage parameters (`WITH (...)`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with: Option<IndexStorageParams>,
-    /// PostgreSQL `ON ONLY` for partitioned parents.
+    /// `PostgreSQL` `ON ONLY` for partitioned parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<bool>,
-    /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as
+    /// `PostgreSQL` 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as
     /// equal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.
     /// `None` serializes identically to the pre-`nullsNotDistinct` wire shape
     /// (byte-neutral when absent).
@@ -1572,9 +1569,9 @@ pub enum PartitionBoundValue {
         /// Literal value.
         value: SafeI64,
     },
-    /// PostgreSQL `MINVALUE`.
+    /// `PostgreSQL` `MINVALUE`.
     MinValue,
-    /// PostgreSQL `MAXVALUE`.
+    /// `PostgreSQL` `MAXVALUE`.
     MaxValue,
 }
 
@@ -1606,12 +1603,12 @@ pub enum PartitionBounds {
 }
 
 /// CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment
-/// literal are carried; PostgreSQL's function comments normally require an
+/// literal are carried; `PostgreSQL`'s function comments normally require an
 /// argument-type signature for overloaded functions, but the IR intentionally
 /// models only the function name. Function comments are therefore rendered only
 /// for unambiguous `FUNCTION name` references and are not folded into the
 /// snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum CommentTarget {
     /// `COMMENT ON TABLE`.
@@ -1679,7 +1676,7 @@ pub enum CommentTarget {
         /// Optional schema qualifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
-        /// Function name. PostgreSQL overload signatures are intentionally not
+        /// Function name. `PostgreSQL` overload signatures are intentionally not
         /// modelled because an argument-type list would otherwise become a raw SQL
         /// passthrough string.
         name: String,
@@ -1691,31 +1688,31 @@ impl CommentTarget {
     #[must_use]
     pub fn schema(&self) -> Option<&str> {
         match self {
-            CommentTarget::Table { schema, .. }
-            | CommentTarget::Column { schema, .. }
-            | CommentTarget::Index { schema, .. }
-            | CommentTarget::Constraint { schema, .. }
-            | CommentTarget::View { schema, .. }
-            | CommentTarget::Type { schema, .. }
-            | CommentTarget::Sequence { schema, .. }
-            | CommentTarget::Function { schema, .. } => schema.as_deref(),
+            Self::Table { schema, .. }
+            | Self::Column { schema, .. }
+            | Self::Index { schema, .. }
+            | Self::Constraint { schema, .. }
+            | Self::View { schema, .. }
+            | Self::Type { schema, .. }
+            | Self::Sequence { schema, .. }
+            | Self::Function { schema, .. } => schema.as_deref(),
         }
     }
 
     /// The table whose metadata this comment mutates, when the target is
     /// table-scoped. Index comments do not carry an owning-table hint in the IR.
     #[must_use]
-    pub fn touched_table(&self) -> Option<&str> {
+    pub const fn touched_table(&self) -> Option<&str> {
         match self {
-            CommentTarget::Table { name, .. } | CommentTarget::Column { table: name, .. } => {
+            Self::Table { name, .. } | Self::Column { table: name, .. } => {
                 Some(name.as_str())
             }
-            CommentTarget::Constraint { table, .. } => Some(table.as_str()),
-            CommentTarget::Index { .. }
-            | CommentTarget::View { .. }
-            | CommentTarget::Type { .. }
-            | CommentTarget::Sequence { .. }
-            | CommentTarget::Function { .. } => None,
+            Self::Constraint { table, .. } => Some(table.as_str()),
+            Self::Index { .. }
+            | Self::View { .. }
+            | Self::Type { .. }
+            | Self::Sequence { .. }
+            | Self::Function { .. } => None,
         }
     }
 }
@@ -1724,7 +1721,7 @@ impl CommentTarget {
 /// CLOSED carrier: the conflict-target columns + an optional `doUpdate` map of
 /// `column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
 /// raw SQL string (property A). **PostgreSQL-only** — the lowering renders it on
-/// PG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a
+/// PG and HARD-REJECTS it on `SQLite` (`dialect_scope = PgOnly`). Modelled as a
 /// distinct IR type so the wire shape is closed + schemars-expressible and a
 /// hand-crafted IR envelope cannot smuggle an arbitrary clause.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1744,8 +1741,8 @@ pub struct IrOnConflict {
 /// the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
 /// (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
 /// `IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /
-/// SQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
-/// SQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
+/// `SQLite` (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
+/// `SQLite` has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
 /// CLOSED 2-variant enum so serde rejects any other token at deserialize and the
 /// validate-time legal-direction check (`ifNotExists` on create*/add*; `ifExists`
 /// on drop*/rename/alter) is a total match. Camel-cased on the wire
@@ -1805,28 +1802,28 @@ pub enum Privilege {
 impl Privilege {
     /// The SQL keyword for this privilege (`All` ⇒ `ALL PRIVILEGES`).
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            Privilege::All => "ALL PRIVILEGES",
-            Privilege::Select => "SELECT",
-            Privilege::Insert => "INSERT",
-            Privilege::Update => "UPDATE",
-            Privilege::Delete => "DELETE",
-            Privilege::Truncate => "TRUNCATE",
-            Privilege::References => "REFERENCES",
-            Privilege::Trigger => "TRIGGER",
-            Privilege::Usage => "USAGE",
-            Privilege::Connect => "CONNECT",
-            Privilege::Create => "CREATE",
-            Privilege::Execute => "EXECUTE",
-            Privilege::Temporary => "TEMPORARY",
+            Self::All => "ALL PRIVILEGES",
+            Self::Select => "SELECT",
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+            Self::Truncate => "TRUNCATE",
+            Self::References => "REFERENCES",
+            Self::Trigger => "TRIGGER",
+            Self::Usage => "USAGE",
+            Self::Connect => "CONNECT",
+            Self::Create => "CREATE",
+            Self::Execute => "EXECUTE",
+            Self::Temporary => "TEMPORARY",
         }
     }
 }
 
 /// **VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target. Tagged on `"kind"`; each shape is closed + `deny_unknown_fields` so a
 /// hand-crafted artifact cannot smuggle an arbitrary object class.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum GrantTarget {
     /// `… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all
@@ -1870,18 +1867,18 @@ pub enum TriggerTiming {
 impl TriggerTiming {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            TriggerTiming::Before => "BEFORE",
-            TriggerTiming::After => "AFTER",
-            TriggerTiming::InsteadOf => "INSTEAD OF",
+            Self::Before => "BEFORE",
+            Self::After => "AFTER",
+            Self::InsteadOf => "INSTEAD OF",
         }
     }
 }
 
 /// The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),
 /// joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`
-/// renders on Postgres and is refused on SQLite as a per-facet unsupported shape.
+/// renders on Postgres and is refused on `SQLite` as a per-facet unsupported shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum TriggerEvent {
@@ -1898,18 +1895,18 @@ pub enum TriggerEvent {
 impl TriggerEvent {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            TriggerEvent::Insert => "INSERT",
-            TriggerEvent::Update => "UPDATE",
-            TriggerEvent::Delete => "DELETE",
-            TriggerEvent::Truncate => "TRUNCATE",
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+            Self::Truncate => "TRUNCATE",
         }
     }
 }
 
 /// The CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon. `STATEMENT` renders on
-/// Postgres and is refused on SQLite as a per-facet unsupported shape.
+/// Postgres and is refused on `SQLite` as a per-facet unsupported shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ForEach {
@@ -1922,32 +1919,32 @@ pub enum ForEach {
 impl ForEach {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            ForEach::Row => "ROW",
-            ForEach::Statement => "STATEMENT",
+            Self::Row => "ROW",
+            Self::Statement => "STATEMENT",
         }
     }
 }
 
 /// The per-dialect trigger action model. Postgres triggers execute a named
-/// function; SQLite triggers carry an inline, closed statement body.
+/// function; `SQLite` triggers carry an inline, closed statement body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum TriggerAction {
-    /// `EXECUTE FUNCTION <name>()` (Postgres render; SQLite refuses).
+    /// `EXECUTE FUNCTION <name>()` (Postgres render; `SQLite` refuses).
     ExecuteFunction {
         /// Function name. Rendered as an identifier in the effective schema.
         name: String,
     },
-    /// Inline trigger body statements (SQLite render; Postgres refuses).
+    /// Inline trigger body statements (`SQLite` render; Postgres refuses).
     Body {
         /// Closed trigger statements rendered between `BEGIN` and `END`.
         statements: Vec<TriggerStmt>,
     },
 }
 
-/// A closed SQLite trigger body statement. DML-shaped variants reuse the existing
+/// A closed `SQLite` trigger body statement. DML-shaped variants reuse the existing
 /// DML payload fields where they make sense inside a trigger body; `Raise` is the
 /// closed replacement for raw trigger-body error text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1961,7 +1958,7 @@ pub enum TriggerStmt {
         columns: Vec<String>,
         /// Rows, each a positional list of typed scalar/closed-expression values.
         rows: Vec<Vec<IrValue>>,
-        /// Optional schema qualifier. On SQLite, non-main schemas are refused at
+        /// Optional schema qualifier. On `SQLite`, non-main schemas are refused at
         /// the normal lower schema gate before render.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -1998,9 +1995,9 @@ pub enum TriggerStmt {
         /// Closed expression rendered inline.
         expr: Expr,
     },
-    /// `SELECT RAISE(<level>, '<message>')` on SQLite.
+    /// `SELECT RAISE(<level>, '<message>')` on `SQLite`.
     Raise {
-        /// SQLite raise action.
+        /// `SQLite` raise action.
         level: RaiseLevel,
         /// Error message rendered through the SQL string-literal seam.
         message: String,
@@ -2015,25 +2012,25 @@ pub enum TriggerStmt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum RaiseLevel {
-    /// SQLite `RAISE(ABORT, …)`.
+    /// `SQLite` `RAISE(ABORT, …)`.
     Abort,
-    /// SQLite `RAISE(FAIL, …)`.
+    /// `SQLite` `RAISE(FAIL, …)`.
     Fail,
-    /// SQLite `RAISE(IGNORE)`.
+    /// `SQLite` `RAISE(IGNORE)`.
     Ignore,
-    /// SQLite `RAISE(ROLLBACK, …)`.
+    /// `SQLite` `RAISE(ROLLBACK, …)`.
     Rollback,
 }
 
 impl RaiseLevel {
-    /// SQLite's uppercase token spelling.
+    /// `SQLite`'s uppercase token spelling.
     #[must_use]
-    pub fn as_sqlite_sql(self) -> &'static str {
+    pub const fn as_sqlite_sql(self) -> &'static str {
         match self {
-            RaiseLevel::Abort => "ABORT",
-            RaiseLevel::Fail => "FAIL",
-            RaiseLevel::Ignore => "IGNORE",
-            RaiseLevel::Rollback => "ROLLBACK",
+            Self::Abort => "ABORT",
+            Self::Fail => "FAIL",
+            Self::Ignore => "IGNORE",
+            Self::Rollback => "ROLLBACK",
         }
     }
 }
@@ -2057,13 +2054,13 @@ pub enum PolicyCmd {
 impl PolicyCmd {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            PolicyCmd::All => "ALL",
-            PolicyCmd::Select => "SELECT",
-            PolicyCmd::Insert => "INSERT",
-            PolicyCmd::Update => "UPDATE",
-            PolicyCmd::Delete => "DELETE",
+            Self::All => "ALL",
+            Self::Select => "SELECT",
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -2084,10 +2081,10 @@ pub enum FuncLanguage {
 impl FuncLanguage {
     /// The SQL spelling (the lower-case language token).
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            FuncLanguage::Plpgsql => "plpgsql",
-            FuncLanguage::Sql => "sql",
+            Self::Plpgsql => "plpgsql",
+            Self::Sql => "sql",
         }
     }
 }
@@ -2107,11 +2104,11 @@ pub enum FuncVolatility {
 impl FuncVolatility {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            FuncVolatility::Volatile => "VOLATILE",
-            FuncVolatility::Stable => "STABLE",
-            FuncVolatility::Immutable => "IMMUTABLE",
+            Self::Volatile => "VOLATILE",
+            Self::Stable => "STABLE",
+            Self::Immutable => "IMMUTABLE",
         }
     }
 }
@@ -2131,11 +2128,11 @@ pub enum FuncArgMode {
 impl FuncArgMode {
     /// The SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            FuncArgMode::In => "IN",
-            FuncArgMode::Out => "OUT",
-            FuncArgMode::Inout => "INOUT",
+            Self::In => "IN",
+            Self::Out => "OUT",
+            Self::Inout => "INOUT",
         }
     }
 }
@@ -2144,7 +2141,7 @@ impl FuncArgMode {
 /// `r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it
 /// is rendered into the signature verbatim and the WHOLE statement is then
 /// `pg_query`-parsed by the guard.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FuncArg {
     /// Optional argument name.
@@ -2228,11 +2225,11 @@ fn consume_digits(bytes: &[u8], pos: &mut usize) -> bool {
     *pos > start
 }
 
-fn is_ident_start(byte: u8) -> bool {
+const fn is_ident_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
 }
 
-fn is_ident_continue(byte: u8) -> bool {
+const fn is_ident_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
@@ -2243,8 +2240,10 @@ fn is_ident_continue(byte: u8) -> bool {
 pub enum ViewQuery {
     /// A closed, engine-rendered SELECT subset.
     Structured {
-        /// The structured SELECT AST.
-        select: SelectAst,
+        /// The structured SELECT AST. Boxed to keep the enum small (the `Raw`
+        /// variant is just a `String`); `Box<T>` serializes transparently, so
+        /// the wire shape is unchanged.
+        select: Box<SelectAst>,
     },
     /// A raw read-only SELECT body. Requires `VendorCapability::RawViewBody`.
     Raw {
@@ -2283,7 +2282,7 @@ pub struct SelectAst {
 }
 
 /// A table reference in the closed SELECT subset.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableRef {
     /// Table name.
@@ -2334,10 +2333,10 @@ pub enum JoinKind {
 impl JoinKind {
     /// SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            JoinKind::Inner => "INNER",
-            JoinKind::Left => "LEFT",
+            Self::Inner => "INNER",
+            Self::Left => "LEFT",
         }
     }
 }
@@ -2367,10 +2366,10 @@ pub enum OrderDir {
 impl OrderDir {
     /// SQL spelling.
     #[must_use]
-    pub fn as_sql(self) -> &'static str {
+    pub const fn as_sql(self) -> &'static str {
         match self {
-            OrderDir::Asc => "ASC",
-            OrderDir::Desc => "DESC",
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
         }
     }
 }
@@ -2541,7 +2540,7 @@ pub enum Op {
     /// `ALTER TABLE <old> RENAME TO <new>`.
     ///
     /// A whole-table rename is a FAST catalog-metadata operation (`pg_class`
-    /// relname swap on PG; a `sqlite_master` rewrite on SQLite) — NOT the
+    /// relname swap on PG; a `sqlite_master` rewrite on `SQLite`) — NOT the
     /// online expand-contract shape an `Op::RenameColumn` lowers to. The
     /// expand-contract machinery exists to let old + new COLUMN names coexist
     /// across a rolling deploy via trigger dual-write (a missing column breaks
@@ -2605,8 +2604,8 @@ pub enum Op {
         /// A generated/computed added column facet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generated: Option<GeneratedCol>,
-        /// An identity added column facet. SQLite has no sound `ADD COLUMN`
-        /// emulation for identity, so the SQLite validator refuses it.
+        /// An identity added column facet. `SQLite` has no sound `ADD COLUMN`
+        /// emulation for identity, so the `SQLite` validator refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity: Option<IdentityCol>,
         /// the schema qualifier.
@@ -2656,10 +2655,10 @@ pub enum Op {
         /// Typed storage parameters (`WITH (...)`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         with: Option<IndexStorageParams>,
-        /// PostgreSQL `ON ONLY` for partitioned parents.
+        /// `PostgreSQL` `ON ONLY` for partitioned parents.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only: Option<bool>,
-        /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.
+        /// `PostgreSQL` 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nulls_not_distinct: Option<bool>,
         /// the schema qualifier.
@@ -2814,7 +2813,7 @@ pub enum Op {
     /// `ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously
     /// `NOT VALID`-added FK/CHECK against existing rows under a weaker lock
     /// (PostgreSQL-only online constraint adoption). Refused fail-closed off
-    /// PostgreSQL.
+    /// `PostgreSQL`.
     ValidateConstraint {
         /// Target table.
         table: String,
@@ -2849,9 +2848,9 @@ pub enum Op {
         /// Rows, each a positional list of typed scalar/closed-expression values.
         rows: Vec<Vec<IrValue>>,
         /// the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:
-        /// PG renders it natively; on a SQLite target it is a hard authoring error
+        /// PG renders it natively; on a `SQLite` target it is a hard authoring error
         /// (`dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is
-        /// no portable SQLite upsert and no raw route (property A). Absent ⇒ a plain
+        /// no portable `SQLite` upsert and no raw route (property A). Absent ⇒ a plain
         /// insert (portable on both backends).
         #[serde(skip_serializing_if = "Option::is_none")]
         on_conflict: Option<IrOnConflict>,
@@ -2917,16 +2916,16 @@ pub enum Op {
     Dialectal {
         /// Fallback op sequence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        default: Option<Vec<Op>>,
-        /// PostgreSQL op sequence.
+        default: Option<Vec<Self>>,
+        /// `PostgreSQL` op sequence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pg: Option<Vec<Op>>,
-        /// SQLite op sequence.
+        pg: Option<Vec<Self>>,
+        /// `SQLite` op sequence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        sqlite: Option<Vec<Op>>,
-        /// MySQL op sequence.
+        sqlite: Option<Vec<Self>>,
+        /// `MySQL` op sequence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        mysql: Option<Vec<Op>>,
+        mysql: Option<Vec<Self>>,
     },
 
     /// `CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.
@@ -2941,10 +2940,10 @@ pub enum Op {
         columns: Option<Vec<String>>,
         /// The view body.
         query: ViewQuery,
-        /// `CREATE OR REPLACE VIEW` on Postgres; SQLite lowers to drop+create.
+        /// `CREATE OR REPLACE VIEW` on Postgres; `SQLite` lowers to drop+create.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replace: Option<bool>,
-        /// PostgreSQL materialized view. Requires `VendorCapability::MaterializedView`.
+        /// `PostgreSQL` materialized view. Requires `VendorCapability::MaterializedView`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materialized: Option<bool>,
     },
@@ -2959,11 +2958,11 @@ pub enum Op {
         /// synthesized via a catalog probe; never solely a native `IF EXISTS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
-        /// Drop a PostgreSQL materialized view.
+        /// Drop a `PostgreSQL` materialized view.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materialized: Option<bool>,
     },
-    /// Create a named enum value set. PostgreSQL materializes it as a schema type;
+    /// Create a named enum value set. `PostgreSQL` materializes it as a schema type;
     /// SQLite/MySQL register it for column-use-site inlining.
     CreateEnum {
         /// Enum type name.
@@ -2986,7 +2985,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// Create a named domain. PostgreSQL materializes it as a schema type;
+    /// Create a named domain. `PostgreSQL` materializes it as a schema type;
     /// SQLite/MySQL register it for column-use-site inlining.
     CreateDomain {
         /// Domain type name.
@@ -3020,7 +3019,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// Create a standalone sequence. PostgreSQL renders it natively; SQLite/MySQL
+    /// Create a standalone sequence. `PostgreSQL` renders it natively; SQLite/MySQL
     /// refuse fail-closed because their auto-increment features are not general
     /// sequence objects.
     CreateSequence {
@@ -3315,7 +3314,7 @@ pub enum Op {
     },
     /// `CREATE TRIGGER <name> <timing> <events> ON <table> FOR EACH <forEach>
     /// [WHEN (<when>)] <action>`. The action is per-dialect: Postgres executes a
-    /// named function; SQLite carries a closed inline statement body. No raw SQL.
+    /// named function; `SQLite` carries a closed inline statement body. No raw SQL.
     CreateTrigger {
         /// The trigger name.
         name: String,
@@ -3337,7 +3336,7 @@ pub enum Op {
         when: Option<Expr>,
     },
     /// `DROP TRIGGER [IF EXISTS] <name> ON <table>` on Postgres;
-    /// `DROP TRIGGER [IF EXISTS] <name>` on SQLite.
+    /// `DROP TRIGGER [IF EXISTS] <name>` on `SQLite`.
     DropTrigger {
         /// The trigger name.
         name: String,
@@ -3417,67 +3416,67 @@ impl Op {
     #[must_use]
     pub fn touched_table(&self) -> Option<&str> {
         match self {
-            Op::CreateTable { name, .. } => Some(name.as_str()),
-            Op::CreatePartition { name, .. }
-            | Op::AttachPartition { name, .. }
-            | Op::DetachPartition { name, .. }
-            | Op::DropPartition { name, .. } => Some(name.as_str()),
-            Op::SetTableOptions { table, .. } => Some(table.as_str()),
+            Self::CreateTable { name, .. } => Some(name.as_str()),
+            Self::CreatePartition { name, .. }
+            | Self::AttachPartition { name, .. }
+            | Self::DetachPartition { name, .. }
+            | Self::DropPartition { name, .. } => Some(name.as_str()),
+            Self::SetTableOptions { table, .. } => Some(table.as_str()),
             // A table rename TOUCHES the existing (OLD) table — the interlock
             // gates the table the op operates ON, which is the source name.
-            Op::DropTable { table, .. }
-            | Op::RenameTable { table, .. }
-            | Op::AddColumn { table, .. }
-            | Op::DropColumn { table, .. }
-            | Op::CreateIndex { table, .. }
-            | Op::SetColumnType { table, .. }
-            | Op::SetColumnNotNull { table, .. }
-            | Op::DropColumnNotNull { table, .. }
-            | Op::SetColumnDefault { table, .. }
-            | Op::DropColumnDefault { table, .. }
-            | Op::RenameColumn { table, .. }
-            | Op::AddConstraint { table, .. }
-            | Op::DropConstraint { table, .. }
-            | Op::ValidateConstraint { table, .. }
-            | Op::Insert { table, .. }
-            | Op::Update { table, .. }
-            | Op::Delete { table, .. }
-            | Op::Backfill { table, .. } => Some(table.as_str()),
-            Op::CreateView { .. }
-            | Op::DropView { .. }
-            | Op::CreateEnum { .. }
-            | Op::DropEnum { .. }
-            | Op::CreateDomain { .. }
-            | Op::DropDomain { .. }
-            | Op::CreateSequence { .. }
-            | Op::AlterSequence { .. }
-            | Op::DropSequence { .. }
-            | Op::Dialectal { .. } => None,
-            Op::Comment { target, .. } => target.touched_table(),
+            Self::DropTable { table, .. }
+            | Self::RenameTable { table, .. }
+            | Self::AddColumn { table, .. }
+            | Self::DropColumn { table, .. }
+            | Self::CreateIndex { table, .. }
+            | Self::SetColumnType { table, .. }
+            | Self::SetColumnNotNull { table, .. }
+            | Self::DropColumnNotNull { table, .. }
+            | Self::SetColumnDefault { table, .. }
+            | Self::DropColumnDefault { table, .. }
+            | Self::RenameColumn { table, .. }
+            | Self::AddConstraint { table, .. }
+            | Self::DropConstraint { table, .. }
+            | Self::ValidateConstraint { table, .. }
+            | Self::Insert { table, .. }
+            | Self::Update { table, .. }
+            | Self::Delete { table, .. }
+            | Self::Backfill { table, .. } => Some(table.as_str()),
+            Self::CreateView { .. }
+            | Self::DropView { .. }
+            | Self::CreateEnum { .. }
+            | Self::DropEnum { .. }
+            | Self::CreateDomain { .. }
+            | Self::DropDomain { .. }
+            | Self::CreateSequence { .. }
+            | Self::AlterSequence { .. }
+            | Self::DropSequence { .. }
+            | Self::Dialectal { .. } => None,
+            Self::Comment { target, .. } => target.touched_table(),
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
-            Op::DropIndex { table, .. } => table.as_deref(),
+            Self::DropIndex { table, .. } => table.as_deref(),
             // VENDOR — table-scoped vendor ops (RLS / policy / trigger) touch their
             // table; the database-/role-/schema-level ones touch no table.
-            Op::SetRls { table, .. }
-            | Op::CreatePolicy { table, .. }
-            | Op::DropPolicy { table, .. }
-            | Op::CreateTrigger { table, .. }
-            | Op::DropTrigger { table, .. } => Some(table.as_str()),
-            Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::CreateExtension { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. }
-            | Op::Grant { .. }
-            | Op::Revoke { .. }
-            | Op::CreateFunction { .. }
-            | Op::DropFunction { .. }
-            | Op::PgRaw { .. } => None,
+            Self::SetRls { table, .. }
+            | Self::CreatePolicy { table, .. }
+            | Self::DropPolicy { table, .. }
+            | Self::CreateTrigger { table, .. }
+            | Self::DropTrigger { table, .. } => Some(table.as_str()),
+            Self::CreateSchema { .. }
+            | Self::DropSchema { .. }
+            | Self::CreateExtension { .. }
+            | Self::DropExtension { .. }
+            | Self::CreateRole { .. }
+            | Self::AlterRole { .. }
+            | Self::DropRole { .. }
+            | Self::DropOwnedBy { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::CreateFunction { .. }
+            | Self::DropFunction { .. }
+            | Self::PgRaw { .. } => None,
         }
     }
 
@@ -3485,7 +3484,7 @@ impl Op {
     /// table and delegate to [`Self::touched_table`]; `Dialectal` recursively
     /// flattens all present legs because its op sequence can touch several tables.
     pub fn collect_touched_tables<'a>(&'a self, set: &mut std::collections::BTreeSet<&'a str>) {
-        if let Op::Dialectal { default, pg, sqlite, mysql } = self {
+        if let Self::Dialectal { default, pg, sqlite, mysql } = self {
             for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
                 .into_iter()
                 .flatten()
@@ -3507,68 +3506,68 @@ impl Op {
     #[must_use]
     pub fn schema(&self) -> Option<&str> {
         match self {
-            Op::CreateTable { schema, .. }
-            | Op::CreatePartition { schema, .. }
-            | Op::AttachPartition { schema, .. }
-            | Op::DetachPartition { schema, .. }
-            | Op::DropPartition { schema, .. }
-            | Op::SetTableOptions { schema, .. }
-            | Op::DropTable { schema, .. }
-            | Op::RenameTable { schema, .. }
-            | Op::AddColumn { schema, .. }
-            | Op::DropColumn { schema, .. }
-            | Op::CreateIndex { schema, .. }
-            | Op::DropIndex { schema, .. }
-            | Op::SetColumnType { schema, .. }
-            | Op::SetColumnNotNull { schema, .. }
-            | Op::DropColumnNotNull { schema, .. }
-            | Op::SetColumnDefault { schema, .. }
-            | Op::DropColumnDefault { schema, .. }
-            | Op::RenameColumn { schema, .. }
-            | Op::AddConstraint { schema, .. }
-            | Op::DropConstraint { schema, .. }
-            | Op::ValidateConstraint { schema, .. }
-            | Op::Insert { schema, .. }
-            | Op::Update { schema, .. }
-            | Op::Delete { schema, .. }
-            | Op::Backfill { schema, .. }
-            | Op::CreateView { schema, .. }
-            | Op::DropView { schema, .. }
-            | Op::CreateEnum { schema, .. }
-            | Op::DropEnum { schema, .. }
-            | Op::CreateDomain { schema, .. }
-            | Op::DropDomain { schema, .. }
-            | Op::CreateSequence { schema, .. }
-            | Op::AlterSequence { schema, .. }
-            | Op::DropSequence { schema, .. } => schema.as_deref(),
-            Op::Comment { target, .. } => target.schema(),
+            Self::CreateTable { schema, .. }
+            | Self::CreatePartition { schema, .. }
+            | Self::AttachPartition { schema, .. }
+            | Self::DetachPartition { schema, .. }
+            | Self::DropPartition { schema, .. }
+            | Self::SetTableOptions { schema, .. }
+            | Self::DropTable { schema, .. }
+            | Self::RenameTable { schema, .. }
+            | Self::AddColumn { schema, .. }
+            | Self::DropColumn { schema, .. }
+            | Self::CreateIndex { schema, .. }
+            | Self::DropIndex { schema, .. }
+            | Self::SetColumnType { schema, .. }
+            | Self::SetColumnNotNull { schema, .. }
+            | Self::DropColumnNotNull { schema, .. }
+            | Self::SetColumnDefault { schema, .. }
+            | Self::DropColumnDefault { schema, .. }
+            | Self::RenameColumn { schema, .. }
+            | Self::AddConstraint { schema, .. }
+            | Self::DropConstraint { schema, .. }
+            | Self::ValidateConstraint { schema, .. }
+            | Self::Insert { schema, .. }
+            | Self::Update { schema, .. }
+            | Self::Delete { schema, .. }
+            | Self::Backfill { schema, .. }
+            | Self::CreateView { schema, .. }
+            | Self::DropView { schema, .. }
+            | Self::CreateEnum { schema, .. }
+            | Self::DropEnum { schema, .. }
+            | Self::CreateDomain { schema, .. }
+            | Self::DropDomain { schema, .. }
+            | Self::CreateSequence { schema, .. }
+            | Self::AlterSequence { schema, .. }
+            | Self::DropSequence { schema, .. } => schema.as_deref(),
+            Self::Comment { target, .. } => target.schema(),
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
-            Op::CreateExtension { schema, .. }
-            | Op::SetRls { schema, .. }
-            | Op::CreatePolicy { schema, .. }
-            | Op::DropPolicy { schema, .. }
-            | Op::CreateTrigger { schema, .. }
-            | Op::DropTrigger { schema, .. }
-            | Op::CreateFunction { schema, .. }
-            | Op::DropFunction { schema, .. } => schema.as_deref(),
+            Self::CreateExtension { schema, .. }
+            | Self::SetRls { schema, .. }
+            | Self::CreatePolicy { schema, .. }
+            | Self::DropPolicy { schema, .. }
+            | Self::CreateTrigger { schema, .. }
+            | Self::DropTrigger { schema, .. }
+            | Self::CreateFunction { schema, .. }
+            | Self::DropFunction { schema, .. } => schema.as_deref(),
             // VENDOR — these operate on the schema/role/database NAMESPACE itself
             // (the `name`/`roles` is NOT a schema qualifier), so no qualifier.
             //
             // `GrantTarget::Table { schema }` carries an INNER target schema rather
             // than an op-level qualifier; validate_op_schema_and_guard checks that
             // target schema explicitly.
-            Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. }
-            | Op::Grant { .. }
-            | Op::Revoke { .. }
-            | Op::PgRaw { .. }
-            | Op::Dialectal { .. } => None,
+            Self::CreateSchema { .. }
+            | Self::DropSchema { .. }
+            | Self::DropExtension { .. }
+            | Self::CreateRole { .. }
+            | Self::AlterRole { .. }
+            | Self::DropRole { .. }
+            | Self::DropOwnedBy { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::PgRaw { .. }
+            | Self::Dialectal { .. } => None,
         }
     }
 
@@ -3576,65 +3575,65 @@ impl Op {
     /// ops (`insert`/`update`/`delete`/`backfill`), which carry no guard.
     /// EXHAUSTIVE over the closed [`Op`] set.
     #[must_use]
-    pub fn existence_guard(&self) -> Option<ExistenceGuard> {
+    pub const fn existence_guard(&self) -> Option<ExistenceGuard> {
         match self {
-            Op::CreateTable { existence_guard, .. }
-            | Op::CreatePartition { existence_guard, .. }
-            | Op::DropPartition { existence_guard, .. }
-            | Op::DropTable { existence_guard, .. }
-            | Op::RenameTable { existence_guard, .. }
-            | Op::AddColumn { existence_guard, .. }
-            | Op::DropColumn { existence_guard, .. }
-            | Op::CreateIndex { existence_guard, .. }
-            | Op::DropIndex { existence_guard, .. }
-            | Op::SetColumnType { existence_guard, .. }
-            | Op::SetColumnNotNull { existence_guard, .. }
-            | Op::DropColumnNotNull { existence_guard, .. }
-            | Op::SetColumnDefault { existence_guard, .. }
-            | Op::DropColumnDefault { existence_guard, .. }
-            | Op::RenameColumn { existence_guard, .. }
-            | Op::AddConstraint { existence_guard, .. }
-            | Op::DropConstraint { existence_guard, .. }
-            | Op::ValidateConstraint { existence_guard, .. }
-            | Op::DropView { existence_guard, .. }
-            | Op::DropEnum { existence_guard, .. }
-            | Op::DropDomain { existence_guard, .. }
-            | Op::DropSequence { existence_guard, .. } => *existence_guard,
-            Op::AttachPartition { .. }
-            | Op::DetachPartition { .. }
-            | Op::SetTableOptions { .. }
-            | Op::Insert { .. }
-            | Op::Update { .. }
-            | Op::Delete { .. }
-            | Op::Backfill { .. }
-            | Op::Dialectal { .. }
-            | Op::Comment { .. }
-            | Op::CreateView { .. }
-            | Op::CreateEnum { .. }
-            | Op::CreateDomain { .. }
-            | Op::CreateSequence { .. }
-            | Op::AlterSequence { .. } => None,
+            Self::CreateTable { existence_guard, .. }
+            | Self::CreatePartition { existence_guard, .. }
+            | Self::DropPartition { existence_guard, .. }
+            | Self::DropTable { existence_guard, .. }
+            | Self::RenameTable { existence_guard, .. }
+            | Self::AddColumn { existence_guard, .. }
+            | Self::DropColumn { existence_guard, .. }
+            | Self::CreateIndex { existence_guard, .. }
+            | Self::DropIndex { existence_guard, .. }
+            | Self::SetColumnType { existence_guard, .. }
+            | Self::SetColumnNotNull { existence_guard, .. }
+            | Self::DropColumnNotNull { existence_guard, .. }
+            | Self::SetColumnDefault { existence_guard, .. }
+            | Self::DropColumnDefault { existence_guard, .. }
+            | Self::RenameColumn { existence_guard, .. }
+            | Self::AddConstraint { existence_guard, .. }
+            | Self::DropConstraint { existence_guard, .. }
+            | Self::ValidateConstraint { existence_guard, .. }
+            | Self::DropView { existence_guard, .. }
+            | Self::DropEnum { existence_guard, .. }
+            | Self::DropDomain { existence_guard, .. }
+            | Self::DropSequence { existence_guard, .. } => *existence_guard,
+            Self::AttachPartition { .. }
+            | Self::DetachPartition { .. }
+            | Self::SetTableOptions { .. }
+            | Self::Insert { .. }
+            | Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::Backfill { .. }
+            | Self::Dialectal { .. }
+            | Self::Comment { .. }
+            | Self::CreateView { .. }
+            | Self::CreateEnum { .. }
+            | Self::CreateDomain { .. }
+            | Self::CreateSequence { .. }
+            | Self::AlterSequence { .. } => None,
             // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
-            Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::CreateExtension { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. }
-            | Op::Grant { .. }
-            | Op::Revoke { .. }
-            | Op::SetRls { .. }
-            | Op::CreatePolicy { .. }
-            | Op::DropPolicy { .. }
-            | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. }
-            | Op::CreateFunction { .. }
-            | Op::DropFunction { .. }
-            | Op::PgRaw { .. } => None,
+            Self::CreateSchema { .. }
+            | Self::DropSchema { .. }
+            | Self::CreateExtension { .. }
+            | Self::DropExtension { .. }
+            | Self::CreateRole { .. }
+            | Self::AlterRole { .. }
+            | Self::DropRole { .. }
+            | Self::DropOwnedBy { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::SetRls { .. }
+            | Self::CreatePolicy { .. }
+            | Self::DropPolicy { .. }
+            | Self::CreateTrigger { .. }
+            | Self::DropTrigger { .. }
+            | Self::CreateFunction { .. }
+            | Self::DropFunction { .. }
+            | Self::PgRaw { .. } => None,
         }
     }
 
@@ -3644,63 +3643,63 @@ impl Op {
     /// `ifNotExists` on the create*/add* family, `ifExists` on the
     /// drop*/rename/alter family. EXHAUSTIVE over the closed [`Op`] set.
     #[must_use]
-    pub fn legal_existence_guard(&self) -> Option<ExistenceGuard> {
+    pub const fn legal_existence_guard(&self) -> Option<ExistenceGuard> {
         match self {
-            Op::CreateTable { .. }
-            | Op::CreatePartition { .. }
-            | Op::AddColumn { .. }
-            | Op::CreateIndex { .. }
-            | Op::AddConstraint { .. } => Some(ExistenceGuard::IfNotExists),
-            Op::DropTable { .. }
-            | Op::DropPartition { .. }
-            | Op::RenameTable { .. }
-            | Op::DropColumn { .. }
-            | Op::DropIndex { .. }
-            | Op::SetColumnType { .. }
-            | Op::SetColumnNotNull { .. }
-            | Op::DropColumnNotNull { .. }
-            | Op::SetColumnDefault { .. }
-            | Op::DropColumnDefault { .. }
-            | Op::RenameColumn { .. }
-            | Op::DropConstraint { .. }
-            | Op::ValidateConstraint { .. }
-            | Op::DropView { .. }
-            | Op::DropEnum { .. }
-            | Op::DropDomain { .. }
-            | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
-            Op::AttachPartition { .. }
-            | Op::DetachPartition { .. }
-            | Op::SetTableOptions { .. }
-            | Op::Insert { .. }
-            | Op::Update { .. }
-            | Op::Delete { .. }
-            | Op::Backfill { .. }
-            | Op::Dialectal { .. }
-            | Op::Comment { .. }
-            | Op::CreateView { .. }
-            | Op::CreateEnum { .. }
-            | Op::CreateDomain { .. }
-            | Op::CreateSequence { .. }
-            | Op::AlterSequence { .. } => None,
+            Self::CreateTable { .. }
+            | Self::CreatePartition { .. }
+            | Self::AddColumn { .. }
+            | Self::CreateIndex { .. }
+            | Self::AddConstraint { .. } => Some(ExistenceGuard::IfNotExists),
+            Self::DropTable { .. }
+            | Self::DropPartition { .. }
+            | Self::RenameTable { .. }
+            | Self::DropColumn { .. }
+            | Self::DropIndex { .. }
+            | Self::SetColumnType { .. }
+            | Self::SetColumnNotNull { .. }
+            | Self::DropColumnNotNull { .. }
+            | Self::SetColumnDefault { .. }
+            | Self::DropColumnDefault { .. }
+            | Self::RenameColumn { .. }
+            | Self::DropConstraint { .. }
+            | Self::ValidateConstraint { .. }
+            | Self::DropView { .. }
+            | Self::DropEnum { .. }
+            | Self::DropDomain { .. }
+            | Self::DropSequence { .. } => Some(ExistenceGuard::IfExists),
+            Self::AttachPartition { .. }
+            | Self::DetachPartition { .. }
+            | Self::SetTableOptions { .. }
+            | Self::Insert { .. }
+            | Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::Backfill { .. }
+            | Self::Dialectal { .. }
+            | Self::Comment { .. }
+            | Self::CreateView { .. }
+            | Self::CreateEnum { .. }
+            | Self::CreateDomain { .. }
+            | Self::CreateSequence { .. }
+            | Self::AlterSequence { .. } => None,
             // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
-            Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::CreateExtension { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. }
-            | Op::Grant { .. }
-            | Op::Revoke { .. }
-            | Op::SetRls { .. }
-            | Op::CreatePolicy { .. }
-            | Op::DropPolicy { .. }
-            | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. }
-            | Op::CreateFunction { .. }
-            | Op::DropFunction { .. }
-            | Op::PgRaw { .. } => None,
+            Self::CreateSchema { .. }
+            | Self::DropSchema { .. }
+            | Self::CreateExtension { .. }
+            | Self::DropExtension { .. }
+            | Self::CreateRole { .. }
+            | Self::AlterRole { .. }
+            | Self::DropRole { .. }
+            | Self::DropOwnedBy { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::SetRls { .. }
+            | Self::CreatePolicy { .. }
+            | Self::DropPolicy { .. }
+            | Self::CreateTrigger { .. }
+            | Self::DropTrigger { .. }
+            | Self::CreateFunction { .. }
+            | Self::DropFunction { .. }
+            | Self::PgRaw { .. } => None,
         }
     }
 }
@@ -3729,7 +3728,7 @@ impl MigrationIr {
 /// ≥ 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
 /// loader. Exact integers `|v| < 2^53` become [`IrScalar::Int`]; arbitrary-
 /// precision numbers must be sent as `{ "decimal": "…" }` strings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrScalar {
     /// JSON `null`.
     Null,
@@ -3753,18 +3752,18 @@ impl Serialize for IrScalar {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         match self {
-            IrScalar::Null => ser.serialize_none(),
-            IrScalar::Bool(b) => ser.serialize_bool(*b),
-            IrScalar::Int(i) => ser.serialize_i64(*i),
-            IrScalar::Str(s) => ser.serialize_str(s),
+            Self::Null => ser.serialize_none(),
+            Self::Bool(b) => ser.serialize_bool(*b),
+            Self::Int(i) => ser.serialize_i64(*i),
+            Self::Str(s) => ser.serialize_str(s),
             // Tagged objects so the deserializer can distinguish a decimal/bytes
             // value from a plain string. Single-key maps.
-            IrScalar::Decimal(d) => {
+            Self::Decimal(d) => {
                 let mut m = ser.serialize_map(Some(1))?;
                 m.serialize_entry("decimal", d)?;
                 m.end()
             }
-            IrScalar::Bytes(b) => {
+            Self::Bytes(b) => {
                 // Canonical STANDARD (padded) base64 — one encoding per payload.
                 let encoded = BASE64_STANDARD.encode(b);
                 let mut m = ser.serialize_map(Some(1))?;
@@ -3779,6 +3778,7 @@ impl Serialize for IrScalar {
 /// single fractional part)? No exponent, no whitespace, at least one digit.
 /// (Arbitrary precision is the whole point of the decimal-string carrier, so we
 /// do not parse it into a float — we only shape-check it.)
+#[must_use]
 pub fn is_decimal_string(s: &str) -> bool {
     let body = s.strip_prefix('-').or_else(|| s.strip_prefix('+')).unwrap_or(s);
     if body.is_empty() {
@@ -3803,9 +3803,9 @@ impl<'de> Deserialize<'de> for IrScalar {
         // shape (is_i64 / is_u64 / is_f64) and apply the numeric domain.
         let v = serde_json::Value::deserialize(de)?;
         match v {
-            serde_json::Value::Null => Ok(IrScalar::Null),
-            serde_json::Value::Bool(b) => Ok(IrScalar::Bool(b)),
-            serde_json::Value::String(s) => Ok(IrScalar::Str(s)),
+            serde_json::Value::Null => Ok(Self::Null),
+            serde_json::Value::Bool(b) => Ok(Self::Bool(b)),
+            serde_json::Value::String(s) => Ok(Self::Str(s)),
             serde_json::Value::Number(n) => {
                 // A fractional/exponential number is NEVER an exact integer:
                 // serde_json classifies it as f64-only (is_i64/is_u64 false).
@@ -3816,7 +3816,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                              use a bigint/decimal string ({{\"decimal\":\"…\"}}) instead"
                         )));
                     }
-                    Ok(IrScalar::Int(i))
+                    Ok(Self::Int(i))
                 } else if let Some(u) = n.as_u64() {
                     if u >= MAX_EXACT_INT as u64 {
                         return Err(D::Error::custom(format!(
@@ -3825,7 +3825,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                         )));
                     }
                     // u < 2^53 < i64::MAX, so the cast is exact.
-                    Ok(IrScalar::Int(u as i64))
+                    Ok(Self::Int(u as i64))
                 } else {
                     // Fractional or exponential — rejected outright.
                     Err(D::Error::custom(format!(
@@ -3850,7 +3850,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                              numeric literal (no exponent/whitespace, at least one digit)"
                         )));
                     }
-                    Ok(IrScalar::Decimal(s.to_string()))
+                    Ok(Self::Decimal(s.to_string()))
                 } else if let Some(b) = map.get("bytes") {
                     let s = b.as_str().ok_or_else(|| {
                         D::Error::custom("IrScalar bytes must be a base64 string")
@@ -3862,7 +3862,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                             "IrScalar bytes is not valid canonical base64: {e}"
                         ))
                     })?;
-                    Ok(IrScalar::Bytes(decoded))
+                    Ok(Self::Bytes(decoded))
                 } else {
                     Err(D::Error::custom(
                         "IrScalar object key must be \"decimal\" or \"bytes\"",
@@ -3927,13 +3927,13 @@ pub enum IrValue {
 
 impl From<IrScalar> for IrValue {
     fn from(value: IrScalar) -> Self {
-        IrValue::Scalar(value)
+        Self::Scalar(value)
     }
 }
 
 impl From<Expr> for IrValue {
     fn from(value: Expr) -> Self {
-        IrValue::Expr(value)
+        Self::Expr(value)
     }
 }
 
@@ -4453,7 +4453,7 @@ mod tests {
         // Strip the 8-byte u64-BE op-COUNT header; the remainder begins with the
         // unrelated op's own length-prefixed JCS segment.
         let alone = CanonicalOpList(std::slice::from_ref(&unrelated)).canonical_bytes();
-        let with_rename = CanonicalOpList(&[unrelated.clone(), rename]).canonical_bytes();
+        let with_rename = CanonicalOpList(&[unrelated, rename]).canonical_bytes();
         let alone_seg = &alone[8..];
         let with_rename_seg = &with_rename[8..];
         assert!(
@@ -4581,7 +4581,7 @@ mod tests {
             ir_version: 1,
             name: "m".into(),
             owner_app: String::new(),
-            ops: base_ops.clone(),
+            ops: base_ops,
             flags: IrFlagsOverride::default(),
             depends_on: vec![],
             supersedes: vec![],

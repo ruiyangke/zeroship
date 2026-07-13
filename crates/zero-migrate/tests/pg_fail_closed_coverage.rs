@@ -46,7 +46,7 @@ fn lit_str(value: &str) -> Expr {
     Expr::lit(IrScalar::Str(value.to_string()))
 }
 
-fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
+const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::ColRef { .. }
         | Expr::Literal { .. }
@@ -202,13 +202,13 @@ fn ir_with(op: Op) -> MigrationIr {
     }
 }
 
-fn true_expr() -> Expr {
+const fn true_expr() -> Expr {
     Expr::lit(IrScalar::Bool(true))
 }
 
 fn structured_view_query() -> ViewQuery {
     ViewQuery::Structured {
-        select: SelectAst {
+        select: Box::new(SelectAst {
             from: TableRef {
                 name: "users".to_string(),
                 schema: None,
@@ -221,7 +221,7 @@ fn structured_view_query() -> ViewQuery {
             having: None,
             order_by: None,
             limit: None,
-        },
+        }),
     }
 }
 
@@ -261,16 +261,12 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         | Op::DropSequence { .. }
         | Op::CreateTrigger { .. }
         | Op::DropTrigger { .. } => None,
-        Op::CreateView {
-            query,
-            materialized,
-            ..
-        } => {
+        Op::CreateView { materialized, .. } => {
             if materialized.unwrap_or(false) {
                 Some("CreateView::Materialized")
-            } else if matches!(query, ViewQuery::Raw { .. }) {
-                None
             } else {
+                // Both structured and raw (non-materialized) createView are
+                // portable — no PG-vendor op kind.
                 None
             }
         }

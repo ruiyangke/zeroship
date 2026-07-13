@@ -351,7 +351,7 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// **Why this is the drift anchor and the rendered SQL is NOT.** The anchor is
 /// the checksum over the canonical op list — one plan checksum over the canonical
 /// op list, not the rendered SQL. Because the op list
-/// is dialect-NEUTRAL, the SAME IR envelope re-deployed on PG or SQLite re-derives
+/// is dialect-NEUTRAL, the SAME IR envelope re-deployed on PG or `SQLite` re-derives
 /// the SAME anchor — so a re-deploy detects drift against the logical artifact, not
 /// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
 /// changes this checksum ⇒ the executor's net-applied drift gate aborts

@@ -49,13 +49,13 @@ use crate::model::ir::{
     /// The single per-op reason used where a supported cell has no refusal — it is
     /// never surfaced (`support_cell` only asks for a reason on an `Unsupported`
     /// disposition), but a non-empty placeholder keeps the well-formed invariant.
-    const NEVER_REFUSED: &'static str = "internal: supported cell has no refusal reason";
-    const NEXTVAL_PG_ONLY: &'static str =
+    const NEVER_REFUSED: &str = "internal: supported cell has no refusal reason";
+    const NEXTVAL_PG_ONLY: &str =
         "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences";
-    const IDENTITY_ALWAYS_PG_ONLY: &'static str =
+    const IDENTITY_ALWAYS_PG_ONLY: &str =
         "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
          identity({ always: false }) / autoIncrement() on the sole integer primary key";
-    const BY_DEFAULT_IDENTITY_SINGLE_PK: &'static str =
+    const BY_DEFAULT_IDENTITY_SINGLE_PK: &str =
         "identity({ always: false }) / autoIncrement() must be the sole primary-key \
          column on SQLite/MySQL";
 

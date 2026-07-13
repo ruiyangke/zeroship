@@ -67,14 +67,14 @@ fn create_structured_view(replace: Option<bool>, materialized: Option<bool>) -> 
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: active_users_select(),
+            select: Box::new(active_users_select()),
         },
         replace,
         materialized,
     }
 }
 
-fn count_star() -> Expr {
+const fn count_star() -> Expr {
     Expr::Agg {
         func: AggFunc::Count,
         arg: None,
@@ -134,7 +134,7 @@ fn grouped_order_totals_view() -> Op {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "orders".to_string(),
                     schema: None,
@@ -173,7 +173,7 @@ fn grouped_order_totals_view() -> Op {
                     dir: Some(OrderDir::Asc),
                 }]),
                 limit: Some(SafeU64::new(10).unwrap()),
-            },
+            }),
         },
         replace: None,
         materialized: None,
@@ -186,7 +186,7 @@ fn pg_first_aggregate_rollup_view() -> Op {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "orders".to_string(),
                     schema: None,
@@ -224,7 +224,7 @@ fn pg_first_aggregate_rollup_view() -> Op {
                 }),
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace: None,
         materialized: None,
@@ -538,7 +538,7 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
         name: "user_names".to_string(),
         schema: None,
         columns: Some(vec!["display_name".to_string()]),
-        query: ViewQuery::Structured { select },
+        query: ViewQuery::Structured { select: Box::new(select) },
         replace: None,
         materialized: None,
     };

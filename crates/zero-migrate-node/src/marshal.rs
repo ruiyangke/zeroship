@@ -29,7 +29,7 @@ pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 
 /// `Bind → JsCell` (Rust → JS bind fold). `Int→int`, `Text→text`,
 /// `Bool→bool`, `Null→null`, `Decimal→text` (PG infers the numeric target from
-/// context — the same fold the MySQL `bind_to_json` proves).
+/// context — the same fold the `MySQL` `bind_to_json` proves).
 #[must_use]
 pub fn bind_to_cell(bind: &Bind) -> JsCell {
     match bind {

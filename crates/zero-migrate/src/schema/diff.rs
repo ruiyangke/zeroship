@@ -964,8 +964,7 @@ pub fn compute_diff(
             // making the operation idempotent even if the live snapshot
             // is briefly stale.
             let sql = crate::schema::query::build_add_column(app_id, collection, field, def)
-                .ok()
-                .map(|s| s.to_string());
+                .ok();
             ops.push(DiffOp {
                 collection: collection.to_string(),
                 change_kind: ChangeKind::AddColumn,
@@ -1071,8 +1070,7 @@ pub fn compute_diff(
                     // orchestrator can run ALTER TABLE ADD CONSTRAINT
                     // after the column is created.
                     let sql = crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
-                        .ok()
-                        .map(|s| s.to_string());
+                        .ok();
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddForeignKey,
@@ -1098,8 +1096,7 @@ pub fn compute_diff(
             // detect a policy mismatch.
             if live_fk.is_none() {
                 let sql = crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
-                    .ok()
-                    .map(|s| s.to_string());
+                    .ok();
                 ops.push(DiffOp {
                     collection: collection.to_string(),
                     change_kind: ChangeKind::AddForeignKey,

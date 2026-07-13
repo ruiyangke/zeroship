@@ -1,6 +1,6 @@
-//! Drift proofs for the SQLite migration backend.
-//! Real temp-file SQLite throughout — `snapshot_schema` over the live app
-//! file, checksum drift over the journal, sentinel recovery from sqlite_master.
+//! Drift proofs for the `SQLite` migration backend.
+//! Real temp-file `SQLite` throughout — `snapshot_schema` over the live app
+//! file, checksum drift over the journal, sentinel recovery from `sqlite_master`.
 
 use std::path::PathBuf;
 

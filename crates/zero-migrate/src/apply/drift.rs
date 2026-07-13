@@ -1673,8 +1673,8 @@ fn diff_attrs(
             push(
                 &obj,
                 "case_sensitive",
-                &format_case_sensitive(ec.case_sensitive),
-                &format_case_sensitive(ac.case_sensitive),
+                format_case_sensitive(ec.case_sensitive),
+                format_case_sensitive(ac.case_sensitive),
             );
             push(
                 &obj,

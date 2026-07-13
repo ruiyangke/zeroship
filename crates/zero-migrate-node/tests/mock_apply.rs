@@ -40,7 +40,7 @@ struct MockDispatch {
 }
 
 impl MockDispatch {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             log: RefCell::new(Vec::new()),
         }
@@ -51,7 +51,7 @@ impl MockDispatch {
     /// leg) gets rows — and we return NONE (nothing applied yet), so the supplied
     /// migration is pending and gets applied. Every other read (introspection,
     /// squash, drift) gets an empty rowset — a valid empty decode.
-    fn rows_for(&self, _sql: &str) -> Vec<JsRow> {
+    const fn rows_for(&self, _sql: &str) -> Vec<JsRow> {
         Vec::new()
     }
 }
@@ -166,7 +166,7 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     // in the applied list), and nothing was skipped/recovered.
     assert_eq!(
         apply_outcome.applied,
-        vec![version_str.clone()],
+        vec![version_str],
         "the pending migration's version is journaled as applied"
     );
     assert!(

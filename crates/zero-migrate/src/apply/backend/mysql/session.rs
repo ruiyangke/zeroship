@@ -142,7 +142,7 @@ fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> u64 {
         .unwrap_or_else(|| cfg.lock_timeout_ms());
     // Round UP to whole seconds (MySQL's unit), floor 1s so a sub-second budget
     // never becomes a 0 = "no wait" that fails every contended DDL.
-    ((ms + 999) / 1000).max(1)
+    ms.div_ceil(1000).max(1)
 }
 
 /// Session-level `SET SESSION …` for the (always non-txn on MySQL) apply path.

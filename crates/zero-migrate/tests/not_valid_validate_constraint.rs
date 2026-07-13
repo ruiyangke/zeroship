@@ -1,4 +1,4 @@
-//! Regression coverage for PostgreSQL online constraint adoption (the additive
+//! Regression coverage for `PostgreSQL` online constraint adoption (the additive
 //! DSL-redesign slice): the `not_valid` facet on FK/CHECK constraints and the new
 //! `Op::ValidateConstraint`.
 //!
@@ -7,7 +7,7 @@
 //!      `ADD CONSTRAINT … CHECK (…) NOT VALID`, `ALTER TABLE … VALIDATE CONSTRAINT`.
 //!   2. VALIDATE (fail-closed) — `notValid` on FK/CHECK is REFUSED on SQLite/MySQL;
 //!      `Op::ValidateConstraint` is REFUSED off Postgres; both are accepted on PG.
-//!   3. RECORDER — the `constraint_not_valid` corpus fixture (op_round_trip.rs) is
+//!   3. RECORDER — the `constraint_not_valid` corpus fixture (`op_round_trip.rs`) is
 //!      the byte-stable REAL-recorder gate for `addForeignKey/addCheck { notValid }`
 //!      + `.constraint(name).validate()`; this file asserts the recorded golden shape.
 

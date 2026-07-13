@@ -1,16 +1,16 @@
-//! **The ROUND-TRIP ORACLE for `fold_ops` on real SQLite.**
+//! **The ROUND-TRIP ORACLE for `fold_ops` on real `SQLite`.**
 //!
-//! The SQLite leg of the fold oracle. Restricted to the ops the SQLite backend
+//! The `SQLite` leg of the fold oracle. Restricted to the ops the `SQLite` backend
 //! supports through `IrAuthor::load_and_lower` + `engine.apply` WITHOUT the 12-step
 //! rebuild: `createTable` (plain columns + an index), `addColumn`, `dropColumn`,
 //! `createIndex`, `dropIndex`. The PG-only ops (`alterColumn*`, stand-alone
 //! `addConstraint`, table-level UNIQUE/FK on a `createTable`) are `SqliteRebuildOnly`
-//! / not threaded into the SQLite emitter, so they live in the PG-only oracle.
+//! / not threaded into the `SQLite` emitter, so they live in the PG-only oracle.
 //!
-//! Same shape as the PG oracle: APPLY the corpus to a real temp-file SQLite backend,
+//! Same shape as the PG oracle: APPLY the corpus to a real temp-file `SQLite` backend,
 //! INTROSPECT via `snapshot_schema_sqlite`, FOLD the SAME ops offline with the
 //! `SqlDialect::Sqlite` dialect, assert structural equality. No DB env gate is
-//! needed — SQLite is an embedded temp file, always available.
+//! needed — `SQLite` is an embedded temp file, always available.
 //!
 //! Run with `--test-threads=1` for parity with the rest of the suite.
 
@@ -52,7 +52,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
-/// Apply one IR doc through the REAL SQLite pipeline (`load_and_lower` + engine
+/// Apply one IR doc through the REAL `SQLite` pipeline (`load_and_lower` + engine
 /// apply), returning its ordered `Op` list so the caller accumulates the full
 /// stream the fold replays. The live table set is threaded so the lower can inline.
 async fn apply_doc(
@@ -95,18 +95,18 @@ async fn apply_doc(
 }
 
 /// SQLite-leg canonicalization to a common comparison form (the SAME normalization
-/// the differ's SQLite drift comparison uses — `sqlite_canonical_type`):
+/// the differ's `SQLite` drift comparison uses — `sqlite_canonical_type`):
 ///
-///   1. **Column `data_type` → SQLite affinity.** `fold_ops` routes through the
+///   1. **Column `data_type` → `SQLite` affinity.** `fold_ops` routes through the
 ///      shared `build_table_snapshot`, which always emits the PG `information_schema`
 ///      spelling (`text`/`boolean`/`timestamp with time zone`/`double precision`/…)
-///      regardless of dialect, whereas the live SQLite catalog reports the SQLite
+///      regardless of dialect, whereas the live `SQLite` catalog reports the `SQLite`
 ///      declared affinity (`text`/`integer`/`real`/…). Folding BOTH sides through
 ///      `sqlite_canonical_type` (the exact differ canonicalizer) collapses the
 ///      spelling divergence while still detecting a REAL type change (string→number
 ///      maps to two distinct tokens). This is the documented SQLite-introspection
 ///      normalization the brief calls out.
-///   2. **Drop the PRIMARY KEY constraint + its implicit index.** SQLite reports the
+///   2. **Drop the PRIMARY KEY constraint + its implicit index.** `SQLite` reports the
 ///      PK constraint under a different introspection NAME (`pk_<table>` vs the fold's
 ///      `<table>_pkey`) and materializes NO separate index in `sqlite_master`,
 ///      whereas the fold (PG-shaped) carries `<table>_pkey` for both. The PK is

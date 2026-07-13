@@ -381,7 +381,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
                 let _ = conn.batch("ROLLBACK").await;
                 // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
                 return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
                     crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
@@ -719,7 +719,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
             Ok(s) => s,
             Err(e) => {
                 return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
                     crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),

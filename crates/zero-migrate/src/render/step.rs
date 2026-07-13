@@ -28,7 +28,7 @@ pub enum RenameStep {
 }
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindValue {
     /// SQL `NULL`.
     Null,

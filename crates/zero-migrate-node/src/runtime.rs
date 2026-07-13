@@ -2,7 +2,7 @@
 //!
 //! The engine is a real state machine whose I/O leaves are `oneshot`/reply channels
 //! woken **out-of-thread** by the host `done` callback. So it needs an
-//! executor that drives ONE future with NO io_uring reactor and NO tokio: a single
+//! executor that drives ONE future with NO `io_uring` reactor and NO tokio: a single
 //! `futures::executor::block_on` on a dedicated `std::thread`. `block_on` parks the
 //! worker thread on a `std::thread`-parking `Waker`; a `Sender::send` from the JS
 //! thread `unpark`s it (cross-thread-safe per `std::thread::Thread::unpark`) and the

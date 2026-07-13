@@ -1,9 +1,9 @@
-//! The `MigrationEngine` drives SQLite end-to-end through a
-//! `SqliteBackend`, against REAL temp-file SQLite (the faithful path: the actual
+//! The `MigrationEngine` drives `SQLite` end-to-end through a
+//! `SqliteBackend`, against REAL temp-file `SQLite` (the faithful path: the actual
 //! `DeclarativeAuthor` builds the plan, and the engine's generic `apply_declarative`
 //! orchestrates the plain set + the 12-step rebuild under confinement + the `_mig`
 //! journal). This proves the engine is now generic over
-//! `MigrationBackend`, the `plan_declarative` fail-close on SQLite rebuilds is gone,
+//! `MigrationBackend`, the `plan_declarative` fail-close on `SQLite` rebuilds is gone,
 //! and a rebuild is driven through `SqliteBackend::rebuild_one` under the
 //! destructive/approval gate — NOT the direct executor-internal seam.
 //!
@@ -13,8 +13,8 @@
 //!   journaled `completed`;
 //! - a clean RE-RUN is a no-op (idempotent) on the engine path (empty desired-vs-live
 //!   diff AND the versioned-journal-completed rebuild path);
-//! - a SQLite declarative deploy with a RENAME routes to a rebuild (not run_expand);
-//!   `plan.renames` is empty for SQLite;
+//! - a `SQLite` declarative deploy with a RENAME routes to a rebuild (not `run_expand`);
+//!   `plan.renames` is empty for `SQLite`;
 //! - the destructive/approval gate is intact: a rebuild without `Approval::Approved`
 //!   is refused (not auto-approved — the dev-relaxed posture is handled separately).
 
@@ -82,7 +82,7 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
     (d.snapshot, ownership)
 }
 
-/// `PRAGMA main.table_info(<table>)` → the declared SQLite type of `column`.
+/// `PRAGMA main.table_info(<table>)` → the declared `SQLite` type of `column`.
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     let info = be
@@ -423,7 +423,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         .await
         .expect("read renamed column");
     assert_eq!(
-        val.first().and_then(|r| r.first()).and_then(|c| c.clone()).as_deref(),
+        val.first().and_then(|r| r.first()).and_then(std::clone::Clone::clone).as_deref(),
         Some("a@b.test"),
         "the value followed the rename into email_address"
     );

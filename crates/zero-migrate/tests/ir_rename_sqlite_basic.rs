@@ -1,22 +1,22 @@
 //! Faithful e2e + unit coverage for the IR `renameColumn` lowering on the
-//! **SQLite** leg, and the dialect-router unit facts.
+//! **`SQLite`** leg, and the dialect-router unit facts.
 //!
-//! The SQLite leg lowers ONE `op.renameColumn` to ONE
+//! The `SQLite` leg lowers ONE `op.renameColumn` to ONE
 //! `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` (the 12-step OFFLINE
 //! table rebuild), executed via `MigrationBackend::rebuild_one` — NOT `run_online`
-//! (SQLite has no online schema-change capability). These tests drive the REAL
+//! (`SQLite` has no online schema-change capability). These tests drive the REAL
 //! lowering (`IrAuthor::lower_steps`) and APPLY through the engine's single shared
-//! `apply_plan` on a real temp-file SQLite backend:
+//! `apply_plan` on a real temp-file `SQLite` backend:
 //!
 //! - a seeded row SURVIVES the rename, the OLD column is gone, the journal records
 //!   the rebuild migration (proving the `rebuild_one` path, NOT `run_online`);
 //! - the lowered step is a `SqliteRebuild`, never a `PgExpandContract` (the leg
 //!   dispatch, asserted structurally before apply);
-//! - a neutral `ColType` renders the correct SQLite affinity in the rebuilt CREATE;
-//! - a SQLite rename whose live table structure is ABSENT fails closed
+//! - a neutral `ColType` renders the correct `SQLite` affinity in the rebuilt CREATE;
+//! - a `SQLite` rename whose live table structure is ABSENT fails closed
 //!   (`SqliteRenameNeedsLiveTable`) — never a wrong rebuild from a partial view.
 //!
-//! No shims, no PG-gated skips: the real SQLite runtime + the real journal.
+//! No shims, no PG-gated skips: the real `SQLite` runtime + the real journal.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -75,8 +75,8 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
     }
 }
 
-/// Build the full `LiveSchema` (table snapshots + SQLite SDK schema `Value`s)
-/// for the SQLite rename leg, by routing the descriptor set through the SAME
+/// Build the full `LiveSchema` (table snapshots + `SQLite` SDK schema `Value`s)
+/// for the `SQLite` rename leg, by routing the descriptor set through the SAME
 /// `desired_snapshot_for_dialect` the differ uses — so the live facts the rename
 /// rebuild consumes are byte-identical to a `t.*`-diff's desired snapshot.
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
@@ -94,7 +94,7 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         unique_indexes: BTreeSet::new(),
         table_snapshots: desired.snapshot.tables.clone(),
         partitions: desired.snapshot.partitions.clone(),
-        sqlite_schemas: desired.sqlite_schemas.clone(),
+        sqlite_schemas: desired.sqlite_schemas,
         table_ownership,
     }
 }
@@ -122,7 +122,7 @@ fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
 }
 
 /// Apply a v1 descriptor set as the first deploy (createTable), so the live
-/// SQLite file actually has the table the rename rebuilds. Returns the live facts.
+/// `SQLite` file actually has the table the rename rebuilds. Returns the live facts.
 async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) {
     // Lower each table's createTable IR and apply it.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);

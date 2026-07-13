@@ -1,9 +1,9 @@
-//! FAITHFUL e2e for the SQLite **batched / resumable backfill executor**
-//! against REAL temp-file SQLite (no shim, no PG-gating). Drives the real
+//! FAITHFUL e2e for the `SQLite` **batched / resumable backfill executor**
+//! against REAL temp-file `SQLite` (no shim, no PG-gating). Drives the real
 //! hardened migration connection + the real batched executor, then probes the rows
 //! to prove the data transform actually happened, crash-safely and exactly-once.
 //!
-//! Coverage (the SQLite backfill obligations):
+//! Coverage (the `SQLite` backfill obligations):
 //! - a large table transforms in bounded batches, resumable;
 //! - crash mid-run (bounded run, no completion) → resume reaches the SAME final
 //!   state, EXACTLY ONCE (a `val = val + 1` transform makes a double-apply visible);
@@ -30,14 +30,14 @@ use zero_migrate::SqliteBackend;
 /// crash-fuzz test arms the PROCESS-GLOBAL fault registry
 /// (`fault::arm(BACKFILL_MID_BATCHES, …)`), which would trip a CONCURRENT backfill
 /// in another test. Holding this lock for each test's backfill run makes the
-/// armed-fault window exclusive (the SQLite analog of the `_pg` suite's
+/// armed-fault window exclusive (the `SQLite` analog of the `_pg` suite's
 /// `--test-threads=1` convention, scoped to this file so the rest of the suite
 /// still parallelizes).
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     // Recover from a poisoned lock (a panicking test still releases the window).
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct Paths {
@@ -58,7 +58,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 /// Seed a `nums(id INTEGER PRIMARY KEY, val INTEGER, done INTEGER)` table with
-/// `n` rows (val = id, done = 0) directly via the actor's CreatorUp mode (the
+/// `n` rows (val = id, done = 0) directly via the actor's `CreatorUp` mode (the
 /// creator-writable path), each its own autocommit statement.
 async fn seed_nums(be: &SqliteBackend, n: i64) {
     let actor = be.actor();
@@ -78,14 +78,14 @@ async fn seed_nums(be: &SqliteBackend, n: i64) {
         .expect("seed rows");
 }
 
-/// Read a single integer scalar via a CreatorUp query.
+/// Read a single integer scalar via a `CreatorUp` query.
 async fn scalar_i64(be: &SqliteBackend, sql: &str) -> i64 {
     let actor = be.actor();
     actor.set_mode(Mode::CreatorUp).await.unwrap();
     let rows = actor.query(sql).await.expect("query");
     rows.first()
         .and_then(|r| r.first())
-        .and_then(|c| c.clone())
+        .and_then(std::clone::Clone::clone)
         .and_then(|s| s.parse().ok())
         .unwrap_or(-1)
 }

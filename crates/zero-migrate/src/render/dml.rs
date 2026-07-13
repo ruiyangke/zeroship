@@ -876,7 +876,7 @@ fn select_dialect_leg<'a>(
         SqlDialect::Sqlite => sqlite,
         SqlDialect::Mysql => mysql,
     };
-    own.as_deref().or_else(|| default.as_deref()).ok_or_else(|| {
+    own.as_deref().or(default.as_deref()).ok_or_else(|| {
         DmlError::UnrenderableExpr(format!(
             "dialect() has no leg for the {dialect:?} target and no default — the \
              structural validator must refuse this before assembly"
@@ -1267,7 +1267,7 @@ pub struct OnConflict {
 
 /// The assembled one-shot DML statement: the placeholder template + ordered binds.
 /// Fed straight into [`PlanStep::Dml`](crate::render::step::PlanStep::Dml).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledDml {
     /// The placeholder SQL (`$n`/`?n` — never an inlined value).
     pub template: String,

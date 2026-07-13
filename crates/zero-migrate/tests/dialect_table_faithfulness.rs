@@ -107,7 +107,7 @@ fn parse_sidecar() -> Vec<SidecarRow> {
         .collect()
 }
 
-fn disposition_token(disposition: Disposition) -> &'static str {
+const fn disposition_token(disposition: Disposition) -> &'static str {
     match disposition {
         Disposition::Portable => "portable",
         Disposition::TransparentDegradable => "transparentDegradable",
@@ -243,7 +243,7 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "t".into(),
                     schema: None,
@@ -256,7 +256,7 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
                 having: None,
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace,
         materialized,
@@ -282,7 +282,7 @@ fn trigger(
     }
 }
 
-fn body(statements: Vec<TriggerStmt>) -> TriggerAction {
+const fn body(statements: Vec<TriggerStmt>) -> TriggerAction {
     TriggerAction::Body { statements }
 }
 
@@ -292,6 +292,9 @@ fn select_stmt() -> TriggerStmt {
 
 /// The representative corpus: `(kind, variant, Op)`. Payload-dependent ops carry
 /// one entry per distinct `support()` branch (see file header).
+// Intentional `Vec::new()` + per-op `push` for line-by-line readability of the
+// hand-authored corpus; folding the first push into `vec![]` buys nothing here.
+#[allow(clippy::vec_init_then_push)]
 fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     let mut c: Vec<(&'static str, &'static str, Op)> = Vec::new();
 

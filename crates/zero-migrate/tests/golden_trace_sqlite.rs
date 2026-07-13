@@ -1,18 +1,18 @@
-//! The GOLDEN-TRACE ORACLE, SQLite leg.
+//! The GOLDEN-TRACE ORACLE, `SQLite` leg.
 //!
 //! The peer of `golden_trace_pg.rs` for the two SQLite-specific declarative paths
 //! the re-point must preserve byte-for-byte:
 //!
-//! - (b) a SQLite RENAME-via-REBUILD (the offline 12-step `rebuild_one`, NOT
+//! - (b) a `SQLite` RENAME-via-REBUILD (the offline 12-step `rebuild_one`, NOT
 //!   expand-contract), driven through the live re-pointed `apply_declarative` vs.
 //!   the independent pre-re-point oracle (`engine.apply` for the plain set +
 //!   `backend.rebuild_one` for each rebuild, in historical order), and
 //! - (g) the EMPTY-RENAMES FAIL-CLOSED guard: a plan that carries a PG
-//!   expand-contract rename to a backend with NO online capability (SQLite) must
+//!   expand-contract rename to a backend with NO online capability (`SQLite`) must
 //!   fail closed, never silently drop the rename — asserted at the `apply_plan`
 //!   level (the convergence point).
 //!
-//! Real temp-file SQLite throughout. The (b) capture is frozen into an immutable
+//! Real temp-file `SQLite` throughout. The (b) capture is frozen into an immutable
 //! committed fixture under `tests/golden-traces/`.
 
 use std::collections::HashMap;
@@ -67,8 +67,8 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
     (d.snapshot, ownership)
 }
 
-/// The normalized SQLite capture: the journal trace (version|phase) in net order +
-/// the `people` table column shape (PRAGMA table_info). Version ids are stable here
+/// The normalized `SQLite` capture: the journal trace (version|phase) in net order +
+/// the `people` table column shape (PRAGMA `table_info`). Version ids are stable here
 /// (PROJECT/APP are constants, not per-test tokens), so the bytes are frozen-stable.
 async fn capture(be: &SqliteBackend) -> String {
     let mut out = String::new();
@@ -104,20 +104,17 @@ fn assert_frozen(name: &str, body: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden-traces");
     std::fs::create_dir_all(&dir).expect("golden-traces dir");
     let path = dir.join(format!("{name}.txt"));
-    match std::fs::read_to_string(&path) {
-        Ok(frozen) => assert_eq!(
-            body, frozen,
-            "golden-trace fixture `{name}` drift vs the frozen committed fixture at {}",
+    if let Ok(frozen) = std::fs::read_to_string(&path) { assert_eq!(
+        body, frozen,
+        "golden-trace fixture `{name}` drift vs the frozen committed fixture at {}",
+        path.display()
+    ); } else {
+        std::fs::write(&path, body).expect("write fresh fixture");
+        panic!(
+            "golden-trace fixture `{name}` was ABSENT — wrote a fresh capture to {}. \
+             Review + commit it; re-run to assert against the frozen copy.",
             path.display()
-        ),
-        Err(_) => {
-            std::fs::write(&path, body).expect("write fresh fixture");
-            panic!(
-                "golden-trace fixture `{name}` was ABSENT — wrote a fresh capture to {}. \
-                 Review + commit it; re-run to assert against the frozen copy.",
-                path.display()
-            );
-        }
+        );
     }
 }
 
@@ -134,7 +131,7 @@ async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
     }
 }
 
-/// The pre-re-point orchestration on SQLite: plain set (gated `apply`) → each
+/// The pre-re-point orchestration on `SQLite`: plain set (gated `apply`) → each
 /// rebuild (gate + `rebuild_one`), no renames. Built from the public primitives the
 /// old `apply_declarative_locked` body used. Shares NO code with the live path.
 async fn oracle_apply(

@@ -139,7 +139,7 @@ pub fn classify(sql: &str) -> Result<Vec<StatementClass>, ParseError> {
 }
 
 /// Extract top-level `DROP INDEX` targets from raw SQL using the same real
-/// PostgreSQL parse tree the guard consumes.
+/// `PostgreSQL` parse tree the guard consumes.
 ///
 /// SQL text cannot say whether an index is unique; callers with a live database
 /// can use these names to resolve `pg_index.indisunique` at apply/review time.
@@ -197,7 +197,7 @@ pub fn raw_sql_requires_index_drop_approval(sql: &str) -> Result<bool, ParseErro
     Ok(false)
 }
 
-fn is_top_level_drop_index(node: &NodeEnum) -> bool {
+const fn is_top_level_drop_index(node: &NodeEnum) -> bool {
     matches!(node, NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32)
 }
 
@@ -217,7 +217,7 @@ fn node_is_opaque_execution_carrier(node: &NodeEnum) -> bool {
     }
 }
 
-fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
+const fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
     match node {
         NodeRef::DoStmt(_) | NodeRef::CreateFunctionStmt(_) => true,
         NodeRef::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
@@ -477,11 +477,11 @@ fn alter_table_is_non_destructive(at: &protobuf::AlterTableStmt) -> bool {
     })
 }
 
-fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
+const fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
     Some("UPDATE")
 }
 
-fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
+const fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
     Some("DELETE")
 }
 
@@ -533,7 +533,7 @@ fn destructive_alter_table_cmd_json_operation(body: &Value) -> Option<&'static s
     json_i32_field(body, "subtype").and_then(destructive_alter_table_subtype_operation)
 }
 
-fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
+const fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
     if subtype == AlterTableType::AtDropColumn as i32 {
         Some("DROP COLUMN")
     } else if subtype == AlterTableType::AtDropConstraint as i32 {

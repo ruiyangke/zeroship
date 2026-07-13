@@ -1,12 +1,12 @@
-//! Descriptor → engine-generated SQLite `up` → applied through the
-//! hardened `SqliteBackend` → drift round-trip. Real temp-file SQLite throughout
+//! Descriptor → engine-generated `SQLite` `up` → applied through the
+//! hardened `SqliteBackend` → drift round-trip. Real temp-file `SQLite` throughout
 //! (the faithful path: the actual `DeclarativeAuthor` emitter routes through the
 //! shared `zero_migrate::schema` emitter, and the real backend authorizer applies the
 //! unqualified DDL into `main` = the app file).
 //!
-//! Also: the TrustProfile-SQLite wiring (Confined SQLite accepts descriptor-
-//! generated DDL; a raw untrusted SQL string is REFUSED on the Confined SQLite
-//! guard; Platform fail-closes to Confined on SQLite).
+//! Also: the TrustProfile-SQLite wiring (Confined `SQLite` accepts descriptor-
+//! generated DDL; a raw untrusted SQL string is REFUSED on the Confined `SQLite`
+//! guard; Platform fail-closes to Confined on `SQLite`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -173,7 +173,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         .as_deref()
         .or(secret.encryption_sentinel.as_deref());
     assert!(
-        secret_sentinel.map(|s| s.contains("zero-migrate:enc:")).unwrap_or(false),
+        secret_sentinel.is_some_and(|s| s.contains("zero-migrate:enc:")),
         "encryption `zero-migrate:enc:` sentinel must round-trip through the drift snapshot: {secret:?}"
     );
 
@@ -187,8 +187,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         masked
             .comment_sentinel
             .as_deref()
-            .map(|s| s.contains("zero-migrate:mask:"))
-            .unwrap_or(false),
+            .is_some_and(|s| s.contains("zero-migrate:mask:")),
         "mask `zero-migrate:mask:` sentinel must round-trip through the drift snapshot: {masked:?}"
     );
 }
@@ -315,8 +314,8 @@ async fn sqlite_deferred_fk_is_typed_error() {
 // TrustProfile-SQLite wiring.
 // ---------------------------------------------------------------------------
 
-/// Confined SQLite accepts the descriptor-generated DDL (it applies cleanly through
-/// the backend); a RAW untrusted SQL string is REFUSED by the Confined SQLite guard.
+/// Confined `SQLite` accepts the descriptor-generated DDL (it applies cleanly through
+/// the backend); a RAW untrusted SQL string is REFUSED by the Confined `SQLite` guard.
 #[test]
 fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::confined_sqlite(PROJECT));
@@ -331,7 +330,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
     );
 }
 
-/// The PG Confined guard still vets raw PG SQL (regression: SQLite rejection does
+/// The PG Confined guard still vets raw PG SQL (regression: `SQLite` rejection does
 /// not bleed into the PG path).
 #[test]
 fn confined_pg_guard_still_checks_raw_sql() {
@@ -343,7 +342,7 @@ fn confined_pg_guard_still_checks_raw_sql() {
 }
 
 /// Platform is a PG-only posture → `for_dialect(Sqlite)` fail-closes to Confined
-/// SQLite (the resulting guard refuses raw SQL, like any Confined SQLite guard).
+/// `SQLite` (the resulting guard refuses raw SQL, like any Confined `SQLite` guard).
 #[test]
 fn platform_fails_closed_to_confined_on_sqlite() {
     // Build a Platform config via the public confined entry then re-key it for
@@ -385,7 +384,7 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 /// The live snapshot for a first-deploy descriptor set: compiled through the same
 /// `desired_snapshot` machinery the second deploy uses, so the column `data_type`
 /// spellings match exactly (a manually-built or SQLite-introspected live would use
-/// SQLite type affinities that the desired-side PG spellings would falsely diff
+/// `SQLite` type affinities that the desired-side PG spellings would falsely diff
 /// against — a separate, deeper normalisation gap, out of scope for this finding).
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
     let d = desired_snapshot(PROJECT, descs).expect("first-deploy desired_snapshot");
@@ -397,10 +396,10 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
     (d.snapshot, ownership)
 }
 
-/// (a) Second-deploy ADD COLUMN on SQLite emits UNqualified, SQLite-legal DDL AND
+/// (a) Second-deploy ADD COLUMN on `SQLite` emits `UNqualified`, SQLite-legal DDL AND
 /// APPLIES through the real hardened backend (the table persists, the column is
 /// added). Pre-fix the `up` was `ALTER TABLE "prj_demo"."accounts" ADD COLUMN …`,
-/// which fails "no such table" on SQLite.
+/// which fails "no such table" on `SQLite`.
 #[compio::test]
 async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     // First deploy: accounts(title). Second deploy: accounts(title, note).
@@ -477,9 +476,9 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     );
 }
 
-/// (b) A second-deploy DROP INDEX on SQLite ACTUALLY drops the index. Pre-fix the
+/// (b) A second-deploy DROP INDEX on `SQLite` ACTUALLY drops the index. Pre-fix the
 /// `up` was `DROP INDEX "prj_demo"."accounts_handle_idx"`, which SILENTLY no-ops on
-/// SQLite (the qualified name never resolves) — reporting success while the index
+/// `SQLite` (the qualified name never resolves) — reporting success while the index
 /// survives. We assert the index is GONE via PRAGMA (we do NOT trust IF EXISTS).
 #[compio::test]
 async fn second_deploy_drop_index_actually_drops_on_sqlite() {
@@ -558,9 +557,9 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
 }
 
 /// (c) P3b — a rebuild-needing existing-table op (ALTER COLUMN TYPE) now GENERATES
-/// a 12-step table rebuild on SQLite (it no longer fails closed). The plan carries
+/// a 12-step table rebuild on `SQLite` (it no longer fails closed). The plan carries
 /// ONE `SqliteRebuild` naming the op; it is NOT dangling `ALTER COLUMN … TYPE` PG
-/// DDL (a non-existent statement on SQLite) and NOT a silent pass.
+/// DDL (a non-existent statement on `SQLite`) and NOT a silent pass.
 #[compio::test]
 async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
     // First deploy: accounts(count: number → `double precision`).
@@ -678,7 +677,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
 /// SQLite-introspected live snapshot, produces ZERO spurious drift — no
 /// `SqliteRebuildRequired` for the encrypted (`bytea`→`blob`), number
 /// (`double precision`→`real`), or timestamp (`… with time zone`→`text`)
-/// columns whose PG and SQLite spellings differ.
+/// columns whose PG and `SQLite` spellings differ.
 ///
 /// This is RED before the dialect-aware normalisation: the raw-spelling compare
 /// (`lc.data_type != c.data_type`) sees `blob != bytea` (etc.) and returns
@@ -715,8 +714,7 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
             .columns
             .iter()
             .find(|c| c.name == name)
-            .map(|c| c.data_type.as_str())
-            .unwrap_or("<missing>")
+            .map_or("<missing>", |c| c.data_type.as_str())
     };
     assert_eq!(live_type("secret"), "blob", "encrypted column introspects as SQLite blob");
     assert_eq!(live_type("amount"), "real", "number column introspects as SQLite real");
@@ -1127,8 +1125,8 @@ async fn golden_sqlite_drops() {
 ///
 /// Twin of the existence-guard probe's
 /// `add_column_ifnotexists_sqlite_ref_over_live_string_is_noop`
-/// (`tests/existence_guard_sqlite.rs`): the guard SatisfiedNoop's a `ref` declared
-/// over a live `string` column because both fold to the SQLite `text` affinity. This
+/// (`tests/existence_guard_sqlite.rs`): the guard `SatisfiedNoop`'s a `ref` declared
+/// over a live `string` column because both fold to the `SQLite` `text` affinity. This
 /// test pins the EXACT boundary of that consistency on the FAITHFUL introspected path,
 /// so the corrected report can state it honestly rather than over-claim:
 ///
@@ -1140,10 +1138,10 @@ async fn golden_sqlite_drops() {
 ///    spelling compare would have seen a change; GREEN after.)
 ///
 /// 2. **FOREIGN KEY — a LEGITIMATE differ-only rebuild, NOT a column drift.** A `ref`
-///    also declares a deferred FK. SQLite has no `ALTER TABLE ADD CONSTRAINT`, so the
+///    also declares a deferred FK. `SQLite` has no `ALTER TABLE ADD CONSTRAINT`, so the
 ///    full declarative differ reconciles the new FK via a 12-step table REBUILD
 ///    (`add foreign key accounts.owner_fkey`). The `ifNotExists` existence-guard
-///    DELIBERATELY does NOT add this FK (a present column is a SatisfiedNoop; a `ref`
+///    DELIBERATELY does NOT add this FK (a present column is a `SatisfiedNoop`; a `ref`
 ///    adds no FK via `ALTER`). So the guard and the full differ AGREE on the column and
 ///    DIVERGE on the FK — by design. This is the honest contour the report must state:
 ///    the affinity blind spot is real and bounded to the column shape; the FK is the

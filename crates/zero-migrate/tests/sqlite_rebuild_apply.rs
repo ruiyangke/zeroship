@@ -1,8 +1,8 @@
-//! The SQLite 12-step table REBUILD, end-to-end against REAL temp-file
-//! SQLite through the hardened `SqliteBackend`. The faithful path:
+//! The `SQLite` 12-step table REBUILD, end-to-end against REAL temp-file
+//! `SQLite` through the hardened `SqliteBackend`. The faithful path:
 //! the real `DeclarativeAuthor` builds the rebuild spec from a descriptor diff, and
-//! the real backend executes the 12-step under confinement (CreatorUp rebuild DDL,
-//! EngineJournal PRAGMA/check/journal, `foreign_keys` toggles straddling the txn).
+//! the real backend executes the 12-step under confinement (`CreatorUp` rebuild DDL,
+//! `EngineJournal` PRAGMA/check/journal, `foreign_keys` toggles straddling the txn).
 //!
 //! Coverage:
 //! - type change with rows preserved + journaled + indexes recreated;
@@ -105,8 +105,7 @@ async fn foreign_keys_on(be: &SqliteBackend) -> bool {
     rows.first()
         .and_then(|r| r.first())
         .and_then(|c| c.as_deref())
-        .map(|s| s == "1")
-        .unwrap_or(false)
+        .is_some_and(|s| s == "1")
 }
 
 // ---------------------------------------------------------------------------
@@ -447,8 +446,7 @@ async fn goodie_sentinels_survive_rebuild() {
             .comment_sentinel
             .as_deref()
             .or(secret.encryption_sentinel.as_deref())
-            .map(|s| s.contains("zero-migrate:enc:"))
-            .unwrap_or(false),
+            .is_some_and(|s| s.contains("zero-migrate:enc:")),
         "encryption sentinel must survive the rebuild + recover via drift: {secret:?}"
     );
     let masked = t
@@ -460,8 +458,7 @@ async fn goodie_sentinels_survive_rebuild() {
         masked
             .comment_sentinel
             .as_deref()
-            .map(|s| s.contains("zero-migrate:mask:"))
-            .unwrap_or(false),
+            .is_some_and(|s| s.contains("zero-migrate:mask:")),
         "mask sentinel must survive the rebuild + recover via drift: {masked:?}"
     );
 }
@@ -858,7 +855,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
     let idx_sql = idx
         .first()
         .and_then(|r| r.first())
-        .and_then(|c| c.clone())
+        .and_then(std::clone::Clone::clone)
         .expect("partial index must still exist post-rebuild");
     assert!(
         idx_sql.to_ascii_uppercase().contains("WHERE"),

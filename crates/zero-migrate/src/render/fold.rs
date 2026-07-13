@@ -2826,7 +2826,7 @@ fn facet_check_constraints(
         if !values.is_empty() {
             let mut leaves = Vec::with_capacity(values.len());
             for v in values {
-                let scalar = json_to_ir_scalar(v).ok_or(ProduceError::UnrepresentableFacet {
+                let scalar = json_to_ir_scalar(v).ok_or_else(|| ProduceError::UnrepresentableFacet {
                     table: table.to_string(),
                     column: f.name.clone(),
                     facet: "enum",

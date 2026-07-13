@@ -110,25 +110,25 @@ pub enum ScalarFn {
     /// `abs(e)`
     Abs,
     /// `(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a
-    /// `mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;
-    /// the `%` spelling is identical on PG, SQLite, and MySQL, so this stays a
+    /// `mod(...)` call) because `SQLite` exposes `%` but has NO `mod()` SQL function;
+    /// the `%` spelling is identical on PG, `SQLite`, and `MySQL`, so this stays a
     /// dialect-NEUTRAL `ScalarFn` (special-cased at the render seam).
     Mod,
     /// `round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on
-    /// PG, SQLite, and MySQL. Optional second (precision) argument.
+    /// PG, `SQLite`, and `MySQL`. Optional second (precision) argument.
     Round,
-    /// `floor(<x>)` — portable floor. `floor()` exists on PG, MySQL, and SQLite
+    /// `floor(<x>)` — portable floor. `floor()` exists on PG, `MySQL`, and `SQLite`
     /// (≥3.35). Identical spelling.
     Floor,
-    /// `ceil(<x>)` — portable ceiling. `ceil()` exists on PG, SQLite (≥3.35), and
-    /// MySQL (where `CEIL` is an alias of `CEILING`). Identical spelling.
+    /// `ceil(<x>)` — portable ceiling. `ceil()` exists on PG, `SQLite` (≥3.35), and
+    /// `MySQL` (where `CEIL` is an alias of `CEILING`). Identical spelling.
     Ceil,
     /// `substr(<s>, <start>[, <len>])` — portable substring. `substr()` exists on
-    /// PG, SQLite, and MySQL (where `SUBSTR` is an alias of `SUBSTRING`). Identical
+    /// PG, `SQLite`, and `MySQL` (where `SUBSTR` is an alias of `SUBSTRING`). Identical
     /// spelling. 1-based `start`; optional `len`.
     Substr,
     /// `replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists
-    /// on PG, SQLite, and MySQL with identical spelling and semantics.
+    /// on PG, `SQLite`, and `MySQL` with identical spelling and semantics.
     Replace,
     /// **VENDOR** — `current_setting('<name>', <missingOk>)`.
     /// A PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation
@@ -150,9 +150,9 @@ pub enum ScalarFn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SynthFn {
-    /// NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).
+    /// NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (`SQLite`).
     ConcatWs,
-    /// `split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.
+    /// `split_part` (PG) / pinned `instr`/`substr` unroll (`SQLite`), in-envelope only.
     SplitPart,
     /// `now()` / current timestamp, evaluated at apply time.
     Now,
@@ -175,7 +175,7 @@ pub enum CastTarget {
     Boolean,
     /// `bytes` (`BYTEA` on PG)
     Bytes,
-    /// `uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).
+    /// `uuid` (PG-native `uuid`; `text` on `SQLite`, which has no uuid type).
     /// Needed for the VENDOR policy predicates — a tenant-isolation
     /// policy casts `current_setting('app.tenant_id', true)::uuid`, so a
     /// faithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,
@@ -186,7 +186,7 @@ pub enum CastTarget {
 /// CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
 ///
 /// Each admitted field has a live three-dialect proof and a faithful renderer on
-/// PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+/// `PostgreSQL`, `SQLite`, and `MySQL`. Fields with PostgreSQL-only semantics live in
 /// [`PgExtractField`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -212,7 +212,7 @@ pub enum ExtractField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PgExtractField {
-    /// Seconds including fractional seconds on PostgreSQL.
+    /// Seconds including fractional seconds on `PostgreSQL`.
     Second,
     /// Day-of-year.
     Doy,
@@ -246,8 +246,8 @@ pub enum PgExtractField {
 
 /// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`).
 ///
-/// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
-/// SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+/// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on `PostgreSQL`,
+/// `SQLite`, and `MySQL` (only the surrounding identifier quoting differs), so there
 /// is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -276,7 +276,7 @@ pub enum AggFunc {
 /// non-`distinct` [`Expr::Agg`] serializes byte-minimally. The
 /// bool `default`s to `false` on deserialize, so the round-trip is faithful.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(b: &bool) -> bool {
+const fn is_false(b: &bool) -> bool {
     !*b
 }
 
@@ -316,16 +316,16 @@ pub enum Expr {
         /// The operator.
         op: BinaryOp,
         /// Left operand.
-        lhs: Box<Expr>,
+        lhs: Box<Self>,
         /// Right operand.
-        rhs: Box<Expr>,
+        rhs: Box<Self>,
     },
     /// A unary operation (`<op> operand` / `operand <op>`).
     UnaryOp {
         /// The operator.
         op: UnaryOp,
         /// The operand.
-        operand: Box<Expr>,
+        operand: Box<Self>,
     },
     /// A searched `CASE` (`c.case({ branches: [{ when, then }], else? })`). Each branch is
     /// `(when, then)`; both halves are themselves closed-AST nodes.
@@ -334,14 +334,14 @@ pub enum Expr {
         branches: Vec<CaseBranch>,
         /// Optional `ELSE` result.
         #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
-        r#else: Option<Box<Expr>>,
+        r#else: Option<Box<Self>>,
     },
     /// An allow-listed named scalar function call.
     FnCall {
         /// The function (allow-listed).
         r#fn: ScalarFn,
         /// The argument expressions.
-        args: Vec<Expr>,
+        args: Vec<Self>,
     },
     /// An engine-SYNTHESIZED helper call. The per-dialect lowering is the
     /// engine's; the author never sees the rendered form.
@@ -350,57 +350,57 @@ pub enum Expr {
         r#fn: SynthFn,
         /// The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`
         /// args, validated in-envelope structurally).
-        args: Vec<Expr>,
+        args: Vec<Self>,
     },
     /// A cast to a portable type (`.cast({ to: "int" })`).
     Cast {
         /// The expression being cast.
-        operand: Box<Expr>,
+        operand: Box<Self>,
         /// The portable target type.
         target: CastTarget,
     },
     /// A **portable** inclusive range test (`c("x").between(low, high)`) rendered
     /// exactly as `(<operand> BETWEEN <low> AND <high>)` — IDENTICAL SQL on PG,
-    /// SQLite, and MySQL (standard SQL, inclusive on both ends).
+    /// `SQLite`, and `MySQL` (standard SQL, inclusive on both ends).
     Between {
         /// The expression under test.
-        operand: Box<Expr>,
+        operand: Box<Self>,
         /// The inclusive lower bound.
-        low: Box<Expr>,
+        low: Box<Self>,
         /// The inclusive upper bound.
-        high: Box<Expr>,
+        high: Box<Self>,
     },
     /// A **portable** `LIKE` pattern match (`c("x").like(pattern)`) rendered exactly
-    /// as `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.
+    /// as `(<operand> LIKE <pattern>)` — the SAME syntax on PG, `SQLite`, and `MySQL`.
     ///
     /// NOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is
-    /// case-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is
+    /// case-sensitive, `SQLite` is ASCII-case-insensitive by default, and `MySQL` is
     /// collation-dependent — so a dialect-uniform portability PROOF is a
     /// claiming-phase obligation. This adds the node + the
     /// faithful syntax render only; it does not yet claim cross-dialect parity.
     Like {
         /// The expression under test.
-        operand: Box<Expr>,
+        operand: Box<Self>,
         /// The LIKE pattern expression.
-        pattern: Box<Expr>,
+        pattern: Box<Self>,
     },
     /// A **portable** NULL-safe inequality (`c("x").distinctFrom(y)`). The
-    /// per-dialect lowering is the engine's job (this is the point): PG + SQLite
-    /// render the standard `(<left> IS DISTINCT FROM <right>)`; MySQL has NO
+    /// per-dialect lowering is the engine's job (this is the point): PG + `SQLite`
+    /// render the standard `(<left> IS DISTINCT FROM <right>)`; `MySQL` has NO
     /// `IS DISTINCT FROM` operator, so it lowers to `(NOT (<left> <=> <right>))` —
-    /// `<=>` is MySQL's NULL-safe equality, so its negation is exactly
+    /// `<=>` is `MySQL`'s NULL-safe equality, so its negation is exactly
     /// "distinct from" (NULL-aware inequality).
     DistinctFrom {
         /// Left operand.
-        left: Box<Expr>,
+        left: Box<Self>,
         /// Right operand.
-        right: Box<Expr>,
+        right: Box<Self>,
     },
     /// A **PORTABLE** aggregate function application (`c.agg.count()`,
     /// `c.agg.sum(e)`, `c.agg.count(e, { distinct: true })`).
     ///
-    /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and
-    /// MySQL (only identifier quoting differs), so there is NO dialect gate. `arg:
+    /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, `SQLite`, and
+    /// `MySQL` (only identifier quoting differs), so there is NO dialect gate. `arg:
     /// None` with `func: Count` is `COUNT(*)`; a present `arg` renders
     /// `<func>(<arg>)`, and `distinct` inserts `DISTINCT`
     /// (`count(DISTINCT <arg>)`).
@@ -413,27 +413,27 @@ pub enum Expr {
         func: AggFunc,
         /// The single argument expression. `None` + `func: Count` = `COUNT(*)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        arg: Option<Box<Expr>>,
+        arg: Option<Box<Self>>,
         /// Optional second argument for `StringAgg` only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        delimiter: Option<Box<Expr>>,
+        delimiter: Option<Box<Self>>,
         /// `DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the
         /// wire when `false` so the node serializes byte-minimally.
         #[serde(default, skip_serializing_if = "is_false")]
         distinct: bool,
     },
     /// A **portable** scalar-list membership predicate (`c("x").in([...])` /
-    /// `c("x").notIn([...])`). PostgreSQL renders in the pg_dump-faithful
+    /// `c("x").notIn([...])`). `PostgreSQL` renders in the pg_dump-faithful
     /// `= ANY (ARRAY[...])` / `<> ALL (ARRAY[...])` shape; text elements keep an
-    /// explicit `::text` cast. SQLite and MySQL render `IN (...)` / `NOT IN (...)`.
+    /// explicit `::text` cast. `SQLite` and `MySQL` render `IN (...)` / `NOT IN (...)`.
     /// Empty lists are defined:
     /// `IN []` renders false, `NOT IN []` renders true.
     InList {
         /// The expression tested against the literal scalar list.
-        expr: Box<Expr>,
+        expr: Box<Self>,
         /// Homogeneous scalar elements. Text elements serialize as plain JSON
-        /// strings and PostgreSQL renders each as a safe string literal with an
-        /// explicit `::text` cast to match pg_dump's CHECK/domain shape.
+        /// strings and `PostgreSQL` renders each as a safe string literal with an
+        /// explicit `::text` cast to match `pg_dump`'s CHECK/domain shape.
         elems: Vec<IrScalar>,
         /// `false` => membership (`IN` / `= ANY`); `true` => non-membership
         /// (`NOT IN` / `<> ALL`).
@@ -443,7 +443,7 @@ pub enum Expr {
     /// `(<expr> ~ '<pattern>'::text)`.
     PgRegexMatch {
         /// The value expression to match.
-        expr: Box<Expr>,
+        expr: Box<Self>,
         /// The regex pattern. It is always rendered as a SQL string literal; never
         /// concatenated as free-form SQL.
         pattern: String,
@@ -451,22 +451,22 @@ pub enum Expr {
     /// **PG-ONLY** scalar expression `pg_column_size(<expr>)`.
     PgColumnSize {
         /// The expression whose on-disk size Postgres should measure.
-        expr: Box<Expr>,
+        expr: Box<Self>,
     },
     /// **PORTABLE** scalar expression extracting a date/time part whose numeric
-    /// semantics are identical on PostgreSQL, SQLite, and MySQL.
+    /// semantics are identical on `PostgreSQL`, `SQLite`, and `MySQL`.
     Extract {
         /// Closed EXTRACT field.
         field: ExtractField,
         /// Source expression.
-        from: Box<Expr>,
+        from: Box<Self>,
     },
     /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
     PgExtract {
-        /// Closed PostgreSQL EXTRACT field.
+        /// Closed `PostgreSQL` EXTRACT field.
         field: PgExtractField,
         /// Source expression.
-        from: Box<Expr>,
+        from: Box<Self>,
     },
     /// **PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.
     PgInterval {
@@ -492,7 +492,7 @@ pub enum Expr {
     /// NEITHER its own leg NOR a `default` is REFUSED fail-closed
     /// (`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing
     /// the `sqlite` leg with no `default` is fine when targeting PG, refused when
-    /// targeting SQLite. At least one leg must be present — a legless `dialect({})`
+    /// targeting `SQLite`. At least one leg must be present — a legless `dialect({})`
     /// is malformed on every target (`UNSUPPORTED`), enforced at validate (all
     /// four fields are `serde(default)` so an empty node deserializes, then the
     /// structural gate refuses it).
@@ -508,20 +508,20 @@ pub enum Expr {
         /// The fallback leg, rendered for any target dialect that has no explicit
         /// own leg. Its presence makes the covered set ALL dialects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        default: Option<Box<Expr>>,
-        /// The PostgreSQL leg.
+        default: Option<Box<Self>>,
+        /// The `PostgreSQL` leg.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pg: Option<Box<Expr>>,
-        /// The SQLite leg.
+        pg: Option<Box<Self>>,
+        /// The `SQLite` leg.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        sqlite: Option<Box<Expr>>,
-        /// The MySQL leg.
+        sqlite: Option<Box<Self>>,
+        /// The `MySQL` leg.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        mysql: Option<Box<Expr>>,
+        mysql: Option<Box<Self>>,
     },
 }
 
-/// Structured duration value for PostgreSQL interval literals and future portable
+/// Structured duration value for `PostgreSQL` interval literals and future portable
 /// date shifts. All fields are optional integers; validation requires at least
 /// one present field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -543,7 +543,7 @@ pub struct Duration {
 
 impl Duration {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.years.is_none()
             && self.months.is_none()
             && self.days.is_none()
@@ -564,10 +564,10 @@ pub struct CaseBranch {
 }
 
 impl Expr {
-    /// A `ColRef` convenience constructor (tests / IrAuthor).
+    /// A `ColRef` convenience constructor (tests / `IrAuthor`).
     #[must_use]
     pub fn col(name: impl Into<String>) -> Self {
-        Expr::ColRef {
+        Self::ColRef {
             name: name.into(),
             table: None,
         }
@@ -576,7 +576,7 @@ impl Expr {
     /// A qualified `ColRef` convenience constructor (`c("orders", "id")`).
     #[must_use]
     pub fn col_qualified(table: impl Into<String>, name: impl Into<String>) -> Self {
-        Expr::ColRef {
+        Self::ColRef {
             name: name.into(),
             table: Some(table.into()),
         }
@@ -584,7 +584,7 @@ impl Expr {
 
     /// A `Literal` convenience constructor.
     #[must_use]
-    pub fn lit(value: IrScalar) -> Self {
-        Expr::Literal { value }
+    pub const fn lit(value: IrScalar) -> Self {
+        Self::Literal { value }
     }
 }

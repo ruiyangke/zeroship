@@ -1,24 +1,24 @@
-//! Multi-app UNION + per-table ownership coverage on the SQLite leg (Tier-2).
+//! Multi-app UNION + per-table ownership coverage on the `SQLite` leg (Tier-2).
 //!
-//! REACHABILITY (investigated, not assumed): the dev SQLite tier runs ONE app
+//! REACHABILITY (investigated, not assumed): the dev `SQLite` tier runs ONE app
 //! file per app (`run_sqlite_via_engine`, `app_id` = the app), so a *single
 //! deploy* never mixes two apps. BUT the ownership / conflict / union machinery
 //! lives in `desired_snapshot` + `DeclarativeAuthor::diff`, which are
-//! dialect-agnostic and DO run on the SQLite author: the author carries one
+//! dialect-agnostic and DO run on the `SQLite` author: the author carries one
 //! `owner_app`, and `diff` enforces it against the caller's `live_ownership` map
-//! regardless of dialect. So these scenarios ARE reachable through the SQLite
+//! regardless of dialect. So these scenarios ARE reachable through the `SQLite`
 //! author and are tested here:
 //!   - identical re-declaration → idempotent union (owner = lexicographically
-//!     smallest), and the merged table APPLIES on a real SQLite file + re-diffs
+//!     smallest), and the merged table APPLIES on a real `SQLite` file + re-diffs
 //!     ZERO-drift (faithful end-state, not just a pure-function check);
 //!   - conflicting declaration → `ConflictingDeclaration` (fail-closed);
 //!   - drop of a table owned by ANOTHER app → `NotTableOwner` (fail-closed);
 //!   - drop of a live table whose owner is unknown → `DropOfUnownedTable`
 //!     (fail-closed, the partial-union guard).
 //!
-//! N-A on the SQLite leg (NOT tested — documented, not written): cross-slice FK
+//! N-A on the `SQLite` leg (NOT tested — documented, not written): cross-slice FK
 //! `depends_on` topo across DISTINCT owners in ONE apply is not a single-deploy
-//! SQLite shape (one app file per app; a cross-app FK target lives in another
+//! `SQLite` shape (one app file per app; a cross-app FK target lives in another
 //! app's file, which the engine does not ATTACH on the confined leg) — the
 //! cross-app FK *target-missing* guard is already covered dialect-neutrally in
 //! `declarative_sqlite::sqlite_deferred_fk_is_typed_error`.
@@ -56,7 +56,7 @@ fn backend(p: &Paths) -> SqliteBackend {
     SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
 }
 
-/// A SQLite author deploying AS `owner_app`.
+/// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, SqlDialect::Sqlite)
 }

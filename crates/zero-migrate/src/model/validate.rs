@@ -563,7 +563,7 @@ fn validate_partition_bounds_well_formed(
                 &[crate::model::ir::PartitionBoundValue],
                 &[crate::model::ir::PartitionBoundValue],
             )> = Vec::new();
-            for (_name, (op_index, bounds)) in &parent.children {
+            for (op_index, bounds) in parent.children.values() {
                 match bounds {
                     PartitionBounds::Range { from, to } => {
                         if from.len() != columns.len() || to.len() != columns.len() {
@@ -637,7 +637,7 @@ fn validate_partition_bounds_well_formed(
         }
         PartitionSpec::List { .. } => {
             let mut seen = std::collections::BTreeSet::new();
-            for (_name, (op_index, bounds)) in &parent.children {
+            for (op_index, bounds) in parent.children.values() {
                 match bounds {
                     PartitionBounds::List { values } => {
                         for value in values {
@@ -673,7 +673,7 @@ fn validate_partition_bounds_well_formed(
         }
         PartitionSpec::Hash { .. } => {
             let mut classes = Vec::new();
-            for (_name, (op_index, bounds)) in &parent.children {
+            for (op_index, bounds) in parent.children.values() {
                 match bounds {
                     PartitionBounds::Default => {
                         return Err(partition_error(
@@ -783,7 +783,7 @@ fn validate_partition_bounds_total(
         PartitionSpec::Hash { .. } => {
             let mut lcm = 1_u128;
             let mut classes = Vec::new();
-            for (_name, (op_index, bounds)) in &parent.children {
+            for (op_index, bounds) in parent.children.values() {
                 if let PartitionBounds::Hash { modulus, remainder } = bounds {
                     lcm = hash_lcm(lcm, u128::from(*modulus)).ok_or_else(|| {
                         partition_error(
@@ -2105,7 +2105,7 @@ fn validate_vendor_op(
     let caps = crate::model::op_support::vendor_capabilities(op);
     if caps.is_empty() {
         return Ok(()); // portable-core op — not gated here.
-    };
+    }
 
     // (1) SQLite — every vendor op except RawViewBody is PgOnly. Refuse
     // fail-closed at load. RawViewBody is a raw surface but not PgOnly; SQLite can

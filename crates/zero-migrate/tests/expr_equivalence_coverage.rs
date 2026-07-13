@@ -47,7 +47,7 @@ enum ExprCoverage {
     },
 }
 
-fn portable(
+const fn portable(
     variant: &'static str,
     proof: &'static str,
     claim: ProofClaim,
@@ -59,11 +59,11 @@ fn portable(
     }
 }
 
-fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
+const fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
     ExprCoverage::Vendor { variant, reason }
 }
 
-fn classify_expr(expr: &Expr) -> ExprCoverage {
+const fn classify_expr(expr: &Expr) -> ExprCoverage {
     match expr {
         Expr::ColRef { .. } => portable(
             "ColRef",
@@ -196,7 +196,7 @@ fn classify_expr(expr: &Expr) -> ExprCoverage {
     }
 }
 
-fn lit_int(value: i64) -> Expr {
+const fn lit_int(value: i64) -> Expr {
     Expr::lit(IrScalar::Int(value))
 }
 
@@ -284,7 +284,7 @@ fn portable_expr_samples() -> Vec<Expr> {
     ]
 }
 
-fn dialect_pairs() -> [(Dialect, SqlDialect); 3] {
+const fn dialect_pairs() -> [(Dialect, SqlDialect); 3] {
     [
         (Dialect::Postgres, SqlDialect::Postgres),
         (Dialect::Sqlite, SqlDialect::Sqlite),

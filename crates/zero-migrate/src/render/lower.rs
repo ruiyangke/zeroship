@@ -328,7 +328,7 @@ impl LiveSchema {
             table_snapshots: desired.snapshot.tables.clone(),
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
-            partitions: desired.snapshot.partitions.clone(),
+            partitions: desired.snapshot.partitions,
         })
     }
 
@@ -401,7 +401,7 @@ impl LiveSchema {
             table_snapshots: live.tables.clone(),
             sqlite_schemas,
             table_ownership,
-            partitions: live.partitions.clone(),
+            partitions: live.partitions,
         })
     }
 
@@ -3360,7 +3360,7 @@ impl IrAuthor {
             let reassembled = statements.join(";\n");
             if reassembled != mig.up {
                 return Err(IrGuardedLowerError::ReassemblyMismatch {
-                    name: mig.name.clone(),
+                    name: mig.name,
                 });
             }
             steps.push(PlanStep::Ddl(mig));
@@ -3915,7 +3915,7 @@ impl IrAuthor {
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
         let col = self.add_column_snapshot(table, to, ty, None, None, None, None, None, None, None)?;
-        let ir_data_type = col.data_type.clone();
+        let ir_data_type = col.data_type;
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (both legs).**
         // A pure online rename mirrors values across the two columns and CANNOT also
@@ -7305,9 +7305,7 @@ mod tests {
                     name: "net_policy_limits_json".into(),
                     ty: ColType::Json,
                     nullable: None,
-                    default: Some(IrDefault::Json {
-                        value: value.clone(),
-                    }),
+                    default: Some(IrDefault::Json { value }),
                     unique: None,
                     id_prefix: None,
                     case_sensitive: None,

@@ -1,5 +1,5 @@
-//! Confinement proofs for the hardened SQLite migration backend.
-//! EVERY claim is proven against a REAL temp-file SQLite — never a shim.
+//! Confinement proofs for the hardened `SQLite` migration backend.
+//! EVERY claim is proven against a REAL temp-file `SQLite` — never a shim.
 //!
 //! Each `confine_*` test drives a creator `up` that attempts one escape and
 //! asserts it is DENIED (by the authorizer or DEFENSIVE), AND that the failure did
@@ -7,12 +7,12 @@
 //!
 //! Attacks proven denied:
 //!   (a) ATTACH an arbitrary file
-//!   (b) PRAGMA writable_schema=ON then a sqlite_master write
-//!   (c) SELECT load_extension(...)
-//!   (d) DROP TABLE "_mig".schema_migrations
+//!   (b) PRAGMA `writable_schema=ON` then a `sqlite_master` write
+//!   (c) SELECT `load_extension`(...)
+//!   (d) DROP TABLE "_`mig".schema_migrations`
 //!   (e) DROP TRIGGER on the _mig immutability trigger
-//!   (f) INSERT INTO "_mig".schema_migrations ... directly
-//!   (g) CREATE TRIGGER on app_tbl whose body writes _mig
+//!   (f) INSERT INTO "_`mig".schema_migrations` ... directly
+//!   (g) CREATE TRIGGER on `app_tbl` whose body writes _mig
 //!   (h) cross-tenant: a backend for app A cannot reach app B's file
 //! Plus: direct UPDATE/DELETE on _mig rejected by the trigger; DETACH denied;
 //! version floor satisfied.
@@ -76,7 +76,7 @@ fn mig(up: &str) -> Migration {
 /// AUTHORIZER denials must assert `is_authorizer_denied()` SPECIFICALLY, so a test
 /// cannot green-pass on an unrelated `Exec` error. The looser acceptance is
 /// reserved for genuinely-defensive cases — e.g. the creator-trigger-targeting-
-/// `_mig` vector (g), whose qualified form is rejected by SQLite's PARSER, not the
+/// `_mig` vector (g), whose qualified form is rejected by `SQLite`'s PARSER, not the
 /// authorizer.
 #[derive(Clone, Copy)]
 enum DenyKind {
@@ -90,7 +90,7 @@ enum DenyKind {
 /// error (an authorizer "not authorized" if the authorizer catches it first, else a
 /// parser / "readonly" / "database is locked" class). Used by the
 /// `AuthorizerOrDefensive` cases.
-fn is_defensive_block(e: &SqliteActorError) -> bool {
+const fn is_defensive_block(e: &SqliteActorError) -> bool {
     matches!(e, SqliteActorError::Exec(_))
 }
 
@@ -541,8 +541,8 @@ async fn reindex_no_arg_rejected_in_creator_up() {
 }
 
 /// (2) A real CREATE TABLE that emits system-field indexes APPLIES under
-/// CreatorUp — the regression for the REINDEX-on-main relaxation's motivation.
-/// CREATE INDEX fires SQLITE_REINDEX intrinsically; the relaxation must let that
+/// `CreatorUp` — the regression for the REINDEX-on-main relaxation's motivation.
+/// CREATE INDEX fires `SQLITE_REINDEX` intrinsically; the relaxation must let that
 /// pass on `main`, or the create fails to apply.
 #[compio::test]
 async fn create_table_with_system_field_indexes_applies_under_creator_up() {

@@ -148,7 +148,7 @@ pub struct ApplyRequest {
     pub project_schema: String,
     /// The migrator role to `SET ROLE` under (least-privilege apply). Optional.
     pub migrator_role: Option<String>,
-    /// `"postgres" | "mysql"` — selects the dialect backend (SQLite is in-process).
+    /// `"postgres" | "mysql"` — selects the dialect backend (`SQLite` is in-process).
     pub dialect: String,
     /// The project's `{ table: owner_app }` ownership registry. Empty on a
     /// fresh single-app project.

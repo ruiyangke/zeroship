@@ -379,7 +379,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
     )
     .unwrap();
 
-    let mut set_ops = base.ops.clone();
+    let mut set_ops = base.ops;
     set_ops.push(Op::Comment {
         target: CommentTarget::Table { schema: None, name: "users".into() },
         comment: Some("User accounts".into()),

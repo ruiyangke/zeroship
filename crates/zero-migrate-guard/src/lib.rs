@@ -2,7 +2,7 @@
 //!
 //! This crate is the security heart of the migration engine, extracted into its
 //! own crate so it owns the ONLY C dependency on the non-SQLite path
-//! (`pg_query` → libpg_query). It parses every migration statement with the real
+//! (`pg_query` → `libpg_query`). It parses every migration statement with the real
 //! Postgres parser and enforces the deny-list, the cross-schema confinement, and
 //! the operational advisories — regardless of the submitted SQL.
 //!

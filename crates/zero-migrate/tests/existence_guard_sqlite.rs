@@ -1,22 +1,22 @@
 //! Faithful e2e for the executor-side existence-guard catalog
-//! probe on REAL SQLite (temp-file backend). Each test builds a guarded `op.*` IR,
-//! lowers it through the REAL `IrAuthor` (SQLite dialect, which stamps the
+//! probe on REAL `SQLite` (temp-file backend). Each test builds a guarded `op.*` IR,
+//! lowers it through the REAL `IrAuthor` (`SQLite` dialect, which stamps the
 //! `GuardProbe` onto the lowered `Migration`), and applies it through the REAL
 //! `SqliteBackend::apply_one` — the same per-migration apply seam
 //! `execute_pending` drives under the held lock. No shims.
 //!
 //! SQLite-supported guarded ops (addConstraint/alterColumn/dropConstraint are
-//! PG-only at lower — they route through the rebuild on SQLite, so they are not
+//! PG-only at lower — they route through the rebuild on `SQLite`, so they are not
 //! stand-alone-guardable here):
-//! - addColumn ifNotExists: absent → runs; present+matching → SatisfiedNoop (no
+//! - addColumn ifNotExists: absent → runs; present+matching → `SatisfiedNoop` (no
 //!   duplicate-column error, version journaled); present+divergent type →
 //!   `ExistenceGuardDrift` naming `data_type`, nothing applied.
 //! - createTable ifNotExists: present+extra-live-column → fail closed.
-//! - dropColumn ifExists: present → drops + journaled; absent → SatisfiedNoop.
-//! - dropTable ifExists: absent → SatisfiedNoop journaled.
+//! - dropColumn ifExists: present → drops + journaled; absent → `SatisfiedNoop`.
+//! - dropTable ifExists: absent → `SatisfiedNoop` journaled.
 //!
-//! Plus the SQLite affinity-fold compare (F1): the PG-spelled snapshot data_type is
-//! folded to the SQLite affinity (`sqlite_canonical_type`) before compare — exactly
+//! Plus the `SQLite` affinity-fold compare (F1): the PG-spelled snapshot `data_type` is
+//! folded to the `SQLite` affinity (`sqlite_canonical_type`) before compare — exactly
 //! as the differ does — so a guarded createTable/addColumn re-run is idempotent for
 //! every type (timestamp/jsonb/text/ref all fold to the `text` affinity and match),
 //! while a GENUINE affinity change (string→number, text↔real) still fails closed.
@@ -57,9 +57,9 @@ fn cfg() -> ExecutorConfig {
     ExecutorConfig::new("prj_test", "main")
 }
 
-/// Lower a guarded IR op through the REAL `IrAuthor` (SQLite dialect). Returns the
+/// Lower a guarded IR op through the REAL `IrAuthor` (`SQLite` dialect). Returns the
 /// lowered migrations (with the `GuardProbe` stamped). The bound project schema is
-/// `main` (the SQLite implicit target).
+/// `main` (the `SQLite` implicit target).
 fn lower(op: Op) -> Vec<Migration> {
     let ir = MigrationIr {
         ir_version: 2,
@@ -120,7 +120,7 @@ async fn view_exists(be: &SqliteBackend, name: &str) -> bool {
 }
 
 /// Does an index of this name PHYSICALLY exist on `table`? Probes
-/// `PRAGMA index_list(table)` (the SQLite analogue of the PG `pg_indexes`
+/// `PRAGMA index_list(table)` (the `SQLite` analogue of the PG `pg_indexes`
 /// helper). `unique_only` further asserts the index is unique.
 async fn index_exists(be: &SqliteBackend, table: &str, index: &str, unique_only: bool) -> bool {
     let rows = be
@@ -564,16 +564,16 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
 }
 
 /// **F1 regression (the headline finding)** — a guarded `createTable ifNotExists`
-/// RE-RUN on SQLite must be an idempotent no-op. Before the fix the Table probe's
-/// `expect_columns` data_type was the PG spelling (`field_data_type` always maps via
+/// RE-RUN on `SQLite` must be an idempotent no-op. Before the fix the Table probe's
+/// `expect_columns` `data_type` was the PG spelling (`field_data_type` always maps via
 /// the PG dialect), so a timestamp system column read as `timestamp with time zone`
-/// while the live SQLite catalog reports the `text` affinity. `decide_table`'s raw
+/// while the live `SQLite` catalog reports the `text` affinity. `decide_table`'s raw
 /// `expect != live` compare therefore hard-FailDrifted (`ExistenceGuardDrift` naming
 /// `column t.created_at` / `data_type`) on EVERY re-deploy — every table carries
-/// created_at/updated_at/deleted_at timestamps, so NO guarded SQLite createTable was
+/// `created_at/updated_at/deleted_at` timestamps, so NO guarded `SQLite` createTable was
 /// idempotent. After the fix the decider folds both sides through
 /// `sqlite_canonical_type` (timestamp/jsonb/text → `text` affinity) and the Table
-/// leg verifies presence+affinity only, so the re-run is a SatisfiedNoop.
+/// leg verifies presence+affinity only, so the re-run is a `SatisfiedNoop`.
 ///
 /// RED pre-fix: the second apply returns `ExistenceGuardDrift { data_type }`.
 #[compio::test]
@@ -628,25 +628,25 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     assert!(table_has_column(&be, "t", "happened").await, "timestamp survives re-run");
 }
 
-/// **Regression — SQLite multi-unit secondary-index physical existence.**
+/// **Regression — `SQLite` multi-unit secondary-index physical existence.**
 /// A guarded `createTable ifNotExists` with a `unique:true` field lowers to
-/// MULTIPLE units on SQLite too: the CREATE TABLE (which inlines the system-field
+/// MULTIPLE units on `SQLite` too: the CREATE TABLE (which inlines the system-field
 /// indexes) PLUS a SEPARATE `CREATE INDEX` unit for the unique field's index
-/// (`lower_create_table` skips only the SYSTEM-field indexes on SQLite —
+/// (`lower_create_table` skips only the SYSTEM-field indexes on `SQLite` —
 /// declarative.rs:4587 — every other non-PK index, including a `unique:true`
 /// field's, is its own guarded `CREATE INDEX` unit; declarative.rs:4583-4604).
 ///
 /// Before the fix the SAME `Table` probe was stamped on EVERY unit, so once
 /// unit 0 created the table, the index unit saw the table PRESENT + base columns
-/// matching → SatisfiedNoop → the unique index was SILENTLY SKIPPED (but journaled
+/// matching → `SatisfiedNoop` → the unique index was SILENTLY SKIPPED (but journaled
 /// completed). This asserts the unique index PHYSICALLY exists (via
 /// `PRAGMA index_list`) after a fresh guarded create, and that a RE-RUN is an
-/// idempotent no-op with the index surviving — the SQLite leg of the fix that
+/// idempotent no-op with the index surviving — the `SQLite` leg of the fix that
 /// the PG `create_table_ifnotexists_fresh_creates_all_secondary_indexes_…` test
 /// covers on the PG leg.
 ///
 /// RED pre-fix: the per-unit object-scoped probe does not exist, the index unit
-/// SatisfiedNoops on the table's presence, so `index_exists(… "t_email_key", …)`
+/// `SatisfiedNoops` on the table's presence, so `index_exists(… "t_email_key", …)`
 /// is false.
 #[compio::test]
 async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_reruns_idempotent() {
@@ -722,7 +722,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
 
 /// **F1 regression — addColumn re-run for a timestamp column.** A guarded
 /// `addColumn ifNotExists` of a timestamp column, re-run over the now-present
-/// column, must be a SatisfiedNoop (not a false `timestamp with time zone != text`
+/// column, must be a `SatisfiedNoop` (not a false `timestamp with time zone != text`
 /// drift). The timestamp is NOT a within-text-affinity SDK-facet ambiguity that the
 /// Column-leg guards (that is for string↔ref/date authored as a bare string); a
 /// timestamp authored as a timestamp folds to the `text` affinity and matches.
@@ -833,7 +833,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef { name: "t".into(), schema: None, alias: None },
                 projection: vec![SelectItem::ColRef {
                     table: None,
@@ -846,7 +846,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
                 having: None,
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace: None,
         materialized: None,

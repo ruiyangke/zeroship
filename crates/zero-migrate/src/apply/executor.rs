@@ -806,7 +806,7 @@ async fn apply_locked<B: MigrationBackend>(
         .check_checksum_drift(cfg, all_migrations)
         .await
         .map_err(|e| match e {
-            crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+            crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
             crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
             crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
             crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
@@ -2010,7 +2010,7 @@ mod order_tests {
     fn missing_dependency_is_an_error() {
         let a = MigrationId::generate();
         let ghost = MigrationId::generate();
-        let set = vec![m(a.clone(), vec![ghost.clone()])];
+        let set = vec![m(a, vec![ghost])];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
         let err = order_pending(&set, &completed, &std::collections::HashSet::new()).unwrap_err();
         assert!(matches!(err, ApplyError::MissingDependency { .. }), "got {err:?}");

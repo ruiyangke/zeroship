@@ -2048,7 +2048,7 @@ mod tests {
             Err(SealError::ReplayedNonce)
         ));
 
-        let cloned_verifier = verifier.clone();
+        let cloned_verifier = verifier;
         assert!(matches!(
             sealed.verify(&cloned_verifier),
             Err(SealError::ReplayedNonce)

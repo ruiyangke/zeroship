@@ -7,7 +7,7 @@
 //! coexist in-tree.
 
 /// Base62 alphabet — sorted so lexicographic order matches numeric order
-/// for the high bits (timestamp), preserving UUIDv7 sort order.
+/// for the high bits (timestamp), preserving `UUIDv7` sort order.
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Reverse lookup table: ASCII byte → base62 digit (255 = invalid)
@@ -24,6 +24,7 @@ const fn build_decode_table() -> [u8; 128] {
 const DECODE: [u8; 128] = build_decode_table();
 
 /// Encode 128-bit UUID bytes to 22-char base62 string.
+#[must_use]
 pub fn uuid_to_base62(uuid: &uuid::Uuid) -> String {
     let bytes = uuid.as_bytes();
     // Treat as a 128-bit big-endian integer and repeatedly divide by 62
@@ -90,18 +91,20 @@ pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
             return Err(format!("invalid base62 character: {}", b as char));
         }
         n = n.checked_mul(62)
-            .and_then(|n| n.checked_add(digit as u128))
+            .and_then(|n| n.checked_add(u128::from(digit)))
             .ok_or_else(|| "base62 overflow".to_string())?;
     }
     Ok(uuid::Uuid::from_bytes(n.to_be_bytes()))
 }
 
-/// Generate a new UUIDv7 (timestamp-ordered).
+/// Generate a new `UUIDv7` (timestamp-ordered).
+#[must_use]
 pub fn new_v7() -> uuid::Uuid {
     uuid::Uuid::now_v7()
 }
 
 /// Generate a typed ID: `{prefix}_{base62(uuidv7)}`
+#[must_use]
 pub fn generate(prefix: &str) -> String {
     let uuid = new_v7();
     format!("{}_{}", prefix, uuid_to_base62(&uuid))

@@ -14,7 +14,7 @@ use crate::ir::ExistenceGuard;
 pub struct ExpectColumn {
     /// Column name.
     pub name: String,
-    /// The introspectable data-type spelling (PG type / SQLite affinity).
+    /// The introspectable data-type spelling (PG type / `SQLite` affinity).
     pub data_type: String,
     /// Declared nullability.
     pub nullable: bool,
@@ -32,8 +32,8 @@ pub enum GuardDir {
 impl From<ExistenceGuard> for GuardDir {
     fn from(g: ExistenceGuard) -> Self {
         match g {
-            ExistenceGuard::IfNotExists => GuardDir::IfNotExists,
-            ExistenceGuard::IfExists => GuardDir::IfExists,
+            ExistenceGuard::IfNotExists => Self::IfNotExists,
+            ExistenceGuard::IfExists => Self::IfExists,
         }
     }
 }
@@ -150,14 +150,14 @@ impl GuardProbe {
     #[must_use]
     pub fn schema(&self) -> &str {
         match self {
-            GuardProbe::Table { schema, .. }
-            | GuardProbe::Column { schema, .. }
-            | GuardProbe::Index { schema, .. }
-            | GuardProbe::Constraint { schema, .. }
-            | GuardProbe::View { schema, .. }
-            | GuardProbe::Sequence { schema, .. }
-            | GuardProbe::NamedType { schema, .. }
-            | GuardProbe::ColumnPresence { schema, .. } => schema,
+            Self::Table { schema, .. }
+            | Self::Column { schema, .. }
+            | Self::Index { schema, .. }
+            | Self::Constraint { schema, .. }
+            | Self::View { schema, .. }
+            | Self::Sequence { schema, .. }
+            | Self::NamedType { schema, .. }
+            | Self::ColumnPresence { schema, .. } => schema,
         }
     }
 }

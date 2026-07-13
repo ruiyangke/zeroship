@@ -149,7 +149,7 @@ fn one_op_ir(op: Op) -> MigrationIr {
     }
 }
 
-fn sql_dialect(dialect: Dialect) -> SqlDialect {
+const fn sql_dialect(dialect: Dialect) -> SqlDialect {
     match dialect {
         Dialect::Postgres => SqlDialect::Postgres,
         Dialect::Sqlite => SqlDialect::Sqlite,
@@ -490,7 +490,7 @@ fn nextval_default_ops() -> Vec<Op> {
         Op::SetColumnDefault {
             table: "events".into(),
             column: "id".into(),
-            value: col.default.clone().expect("nextval default"),
+            value: col.default.expect("nextval default"),
             schema: None,
             existence_guard: None,
         },

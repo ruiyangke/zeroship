@@ -1,7 +1,7 @@
 //! Checksum byte-stability + `Checksum::of_ir` determinism/sensitivity.
 //!
-//! Two front doors fold into the SAME `fold_common` tail (flags + owner_app +
-//! depends_on + supersedes + preconditions). `Checksum::of` folds `up`/`down`
+//! Two front doors fold into the SAME `fold_common` tail (flags + `owner_app` +
+//! `depends_on` + supersedes + preconditions). `Checksum::of` folds `up`/`down`
 //! then `fold_common`; `Checksum::of_ir` folds the canonical op-list (RFC 8785
 //! JCS per op, length-prefixed, in op order) then the SAME `fold_common`.
 //!
@@ -222,7 +222,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     assert_eq!(c1, c1b, "of_ir must be deterministic");
 
     // Order-sensitive: reordering the two ops changes the checksum.
-    let ops_rev = vec![add_b.clone(), add_a.clone()];
+    let ops_rev = vec![add_b, add_a];
     let c_rev = Checksum::of_ir(
         &CanonicalOpList(&ops_rev),
         &flags,
@@ -463,7 +463,7 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
 }
 
 /// Dialect-stability (spec line 1267): a portable migration's `of_ir` is
-/// IDENTICAL across the PG and SQLite renders, because `of_ir` is dialect-neutral
+/// IDENTICAL across the PG and `SQLite` renders, because `of_ir` is dialect-neutral
 /// by construction (no dialect parameter; it hashes the neutral op list + the
 /// derived-then-overridden flags). This pins the single-artifact / single-checksum
 /// invariant so a future `IrAuthor` that leaks per-dialect *lowered* flags into
@@ -606,7 +606,7 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
 }
 
 /// JCS key-order independence: building the same logical op two ways (here via
-/// a CreateTable with columns in a fixed order) is stable, and the canonical
+/// a `CreateTable` with columns in a fixed order) is stable, and the canonical
 /// encoding does not depend on Rust struct field declaration order — it sorts
 /// keys. (Sanity that the JCS encoder sorts object keys.)
 #[test]

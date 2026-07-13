@@ -1,12 +1,12 @@
-//! Faithful e2e for the creator IR envelope path on the SQLite leg,
+//! Faithful e2e for the creator IR envelope path on the `SQLite` leg,
 //! driven through the REAL fail-closed LOAD GATE + lower (`IrAuthor::load_and_lower`)
-//! and APPLIED on a real temp-file SQLite backend via the engine.
+//! and APPLIED on a real temp-file `SQLite` backend via the engine.
 //!
-//! This is the SQLite peer of the PG deploy e2e:
+//! This is the `SQLite` peer of the PG deploy e2e:
 //! a valid IR envelope lowers + applies (the table exists, the migration journals),
 //! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
-//! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
-//! any apply. No shims, no PG-gating: the real SQLite runtime.
+//! against a `SQLite` target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
+//! any apply. No shims, no PG-gating: the real `SQLite` runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

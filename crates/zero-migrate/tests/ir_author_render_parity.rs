@@ -55,7 +55,7 @@ const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
 
 /// The `(up, down)` SQL pairs of a migration list — the byte-comparable render
-/// surface (the UUIDv7 version + the human name are non-deterministic identity,
+/// surface (the `UUIDv7` version + the human name are non-deterministic identity,
 /// excluded from the parity comparison).
 fn sql_pairs(migs: &[zero_migrate::Migration]) -> Vec<(String, Option<String>)> {
     migs.iter().map(|m| (m.up.clone(), m.down.clone())).collect()
@@ -480,7 +480,7 @@ fn create_index_render_is_byte_identical_pg() {
     // the ONLY emitted op is the CREATE INDEX.
     let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
         .expect("desired");
-    let mut live_desc = desc.clone();
+    let mut live_desc = desc;
     live_desc.indexes = vec![];
     let live_full = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
         .expect("live");
@@ -739,7 +739,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
 /// `ON DELETE CASCADE` on Postgres.** The earlier imperative FK silently dropped the
 /// actions; this is the regression test that would FAIL on that earlier code (the
 /// rendered DDL carried no `ON DELETE` clause). Applies on PG (the stand-alone
-/// addConstraint path is PG-only by `require_pg_for`; the SQLite leg refuses a
+/// addConstraint path is PG-only by `require_pg_for`; the `SQLite` leg refuses a
 /// stand-alone FK add, unchanged).
 #[test]
 fn add_constraint_fk_renders_on_delete_cascade_pg() {
@@ -1420,7 +1420,7 @@ fn create_index_render_is_byte_identical_sqlite() {
     let desired =
         zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
             .expect("desired");
-    let mut live_desc = desc.clone();
+    let mut live_desc = desc;
     live_desc.indexes = vec![];
     let live_full =
         zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)

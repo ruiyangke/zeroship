@@ -20,7 +20,7 @@
 //!      sentinel + `_masked` sibling (closing the runtime masking-fidelity gap too).
 //!
 //! This test PINS the round-trip: a standalone mask authored on a plaintext column
-//! SURVIVES descriptors → ops → fold and reappears on the recovered FieldDef. (The
+//! SURVIVES descriptors → ops → fold and reappears on the recovered `FieldDef`. (The
 //! live-PG `zero-migrate:mask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
 
 use zero_migrate::render::declarative::{

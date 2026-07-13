@@ -72,7 +72,7 @@ impl<D: VerbDispatch> std::fmt::Debug for NapiHostSession<D> {
 
 impl<D: VerbDispatch> NapiHostSession<D> {
     /// Wrap a transport into a `SqlSession`.
-    pub fn new(dispatch: D) -> Self {
+    pub const fn new(dispatch: D) -> Self {
         Self {
             dispatch,
             in_flight: AtomicBool::new(false),
@@ -170,14 +170,14 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
 /// `result.rowCount` (node-pg) when present, else the returned rowset length. The
 /// engine's `execute` consumers branch on `== 0` vs `> 0` (journal write-back /
 /// idempotent recovery), so a faithful count matters.
-fn affected(reply: &JsReply) -> u64 {
+const fn affected(reply: &JsReply) -> u64 {
     match reply.row_count {
         Some(c) if c >= 0 => c as u64,
         _ => reply.rows.len() as u64,
     }
 }
 
-/// The one-in-flight guard — the exact discipline the MySQL `JsDriverBackend`
+/// The one-in-flight guard — the exact discipline the `MySQL` `JsDriverBackend`
 /// uses (`transport.rs` `in_flight`), lifted to `AtomicBool` because the seam is
 /// `&self`.
 struct InFlightGuard<'a>(&'a AtomicBool);

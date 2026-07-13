@@ -240,12 +240,12 @@ pub struct MigrationFlags {
     /// A repeatable's `down` is always `None` (replace-style; no true reverse).
     pub repeatable: bool,
     /// **Engine-emitted goodie DDL** — the `up` is descriptor-derived,
-    /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the SQLite
-    /// **EngineJournal** authorizer mode rather than the confined **CreatorUp** mode.
+    /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the `SQLite`
+    /// **`EngineJournal`** authorizer mode rather than the confined **`CreatorUp`** mode.
     ///
-    /// The only DDL that needs this today is the SQLite **FTS5 virtual table** (+ its
-    /// sync triggers): the hardened SQLite authorizer denies `CREATE VIRTUAL TABLE …
-    /// USING fts5(…)` in CreatorUp (a creator may never make a vtable) and allows it
+    /// The only DDL that needs this today is the `SQLite` **FTS5 virtual table** (+ its
+    /// sync triggers): the hardened `SQLite` authorizer denies `CREATE VIRTUAL TABLE …
+    /// USING fts5(…)` in `CreatorUp` (a creator may never make a vtable) and allows it
     /// ONLY in engine mode. The FTS index is emitted by the engine from a `.fts()`
     /// descriptor — it carries no untrusted SQL string — so running it in engine mode
     /// does not widen the creator surface. `false` (default) ⇒ the historical
@@ -427,12 +427,12 @@ impl Checksum {
     /// `of_ir` is dialect-neutral BY CONSTRUCTION — it takes no dialect parameter
     /// and hashes only the neutral op list + the derived+overridden flags +
     /// owner + deps + preconditions. A single portable migration therefore has
-    /// ONE checksum across the PG and SQLite renders (the single-artifact /
+    /// ONE checksum across the PG and `SQLite` renders (the single-artifact /
     /// single-checksum invariant).
     ///
     /// A future `IrAuthor` MUST pass the **dialect-neutral derived-then-overridden**
     /// flags here — NEVER the per-dialect *lowered* flags. The lowering legitimately
-    /// diverges per dialect (e.g. SQLite forces `transactional: true` and drops
+    /// diverges per dialect (e.g. `SQLite` forces `transactional: true` and drops
     /// `concurrently` for a concurrent index while PG keeps `transactional: false`).
     /// Folding those POST-lowering per-dialect flags into the
     /// hash would make `of_ir` diverge per dialect and silently break the

@@ -23,13 +23,13 @@ pub enum SqlDialect {
     /// `decode($N, 'base64')::bytea` so the BYTEA column receives raw bytes
     /// from the base64 text param.
     Postgres,
-    /// SQLite dialect: encrypted-column binds emit `$N` and the param value is
+    /// `SQLite` dialect: encrypted-column binds emit `$N` and the param value is
     /// tagged with a blob sentinel so the session actor binds raw bytes (BLOB)
     /// instead of text.
     Sqlite,
-    /// MySQL dialect: encrypted-column binds wrap the placeholder with
+    /// `MySQL` dialect: encrypted-column binds wrap the placeholder with
     /// `FROM_BASE64(?)` so the LONGBLOB column receives raw bytes from the
-    /// base64 text param. Render-only today; no live MySQL runtime/backend
+    /// base64 text param. Render-only today; no live `MySQL` runtime/backend
     /// constructs this dialect for execution.
     Mysql,
 }

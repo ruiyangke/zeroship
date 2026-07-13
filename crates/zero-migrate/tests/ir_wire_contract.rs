@@ -7,10 +7,10 @@
 //! - **wire casing** — the op-region (every `Op` struct-variant field, the
 //!   constraint/index/batch/expr-AST/coltype operands) is camelCase, matching
 //!   the normative design's `ifExists` / `cursorColumn` / `batchSize` /
-//!   `referencesTable`; the `MigrationIr` envelope + `flags` stay snake_case
+//!   `referencesTable`; the `MigrationIr` envelope + `flags` stay `snake_case`
 //!   (`ir_version`, `owner_app`, `depends_on`, `requires_approval`). A JS
 //!   builder emitting idiomatic camelCase op fields must round-trip.
-//! - **deny_unknown_fields** — an unknown key (envelope OR per-op) is rejected
+//! - **`deny_unknown_fields`** — an unknown key (envelope OR per-op) is rejected
 //!   at load, BEFORE any checksum, so on-disk bytes can carry nothing the
 //!   identity checksum does not see.
 //! - **structural numeric domain** — `batchSize` / `limit` / `timeout_ms`

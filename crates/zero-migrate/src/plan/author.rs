@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(n1, index_name(&long_table, &long_cols));
         // Distinct long shapes → distinct names (the hash suffix disambiguates,
         // unlike a blind truncation that would collide on the shared prefix).
-        let mut other_cols = long_cols.clone();
+        let mut other_cols = long_cols;
         other_cols.push("d".repeat(20));
         let n2 = index_name(&long_table, &other_cols);
         assert_ne!(n1, n2, "distinct column sets must yield distinct index names");

@@ -1414,7 +1414,7 @@ pub fn build_add_foreign_key(
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
     let fk_clause = build_fk_clause(app_id, field, def, target, SqlDialect::Postgres)?;
-    Ok(format!("ALTER TABLE {} ADD {}", table, fk_clause))
+    Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
 
 /// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (B2 diff
@@ -3037,15 +3037,13 @@ mod tests {
         assert_eq!(n1, n2, "name must be deterministic for idempotent re-runs");
         assert!(
             n1.len() <= 63,
-            "name {} exceeds Postgres NAMEDATALEN limit of 63",
-            n1
+            "name {n1} exceeds Postgres NAMEDATALEN limit of 63"
         );
         // Hash is 8 base32 chars at the tail.
         let tail = &n1[n1.len() - 8..];
         assert!(
             tail.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-            "tail '{}' should be base32",
-            tail
+            "tail '{tail}' should be base32"
         );
     }
 
@@ -3068,8 +3066,8 @@ mod tests {
         //   "t_" (2) + col (55) + "_idx" (4) = 61  → hashed
         let col = "c".repeat(54);
         let name = index_name("t", &[col.as_str()], false);
-        assert_eq!(name.len(), 60, "name: {}", name);
-        assert!(name.ends_with("_idx"), "should keep readable suffix: {}", name);
+        assert_eq!(name.len(), 60, "name: {name}");
+        assert!(name.ends_with("_idx"), "should keep readable suffix: {name}");
     }
 
     #[test]
@@ -3079,8 +3077,7 @@ mod tests {
         assert!(name.len() <= 63);
         assert!(
             !name.ends_with("_idx"),
-            "over-threshold name should end with the hash, not _idx: {}",
-            name
+            "over-threshold name should end with the hash, not _idx: {name}"
         );
     }
 
@@ -3127,11 +3124,10 @@ mod tests {
             "email": {"type": "string", "required": true, "unique": true},
         });
         let create = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
-        assert!(create.contains("NOT NULL"), "still emits NOT NULL: {}", create);
+        assert!(create.contains("NOT NULL"), "still emits NOT NULL: {create}");
         assert!(
             !create.contains(" UNIQUE"),
-            "CREATE TABLE must not emit inline UNIQUE (would force non-concurrent index): {}",
-            create
+            "CREATE TABLE must not emit inline UNIQUE (would force non-concurrent index): {create}"
         );
 
         let alter = build_add_column(
@@ -3143,8 +3139,7 @@ mod tests {
         .unwrap();
         assert!(
             !alter.contains(" UNIQUE"),
-            "ADD COLUMN must not emit inline UNIQUE: {}",
-            alter
+            "ADD COLUMN must not emit inline UNIQUE: {alter}"
         );
     }
 

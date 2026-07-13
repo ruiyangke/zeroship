@@ -114,7 +114,7 @@ fn resolve_domain(ty: &Type) -> &Type {
 }
 
 /// A text-family base type — decoded as `String` / `TextArray` element.
-fn is_text_family(ty: &Type) -> bool {
+const fn is_text_family(ty: &Type) -> bool {
     matches!(
         *ty,
         Type::TEXT | Type::NAME | Type::VARCHAR | Type::BPCHAR | Type::UNKNOWN
@@ -209,7 +209,7 @@ impl<'a> postgres::types::FromSql<'a> for PgNumericText {
         // where exactness matters. For a raw numeric column, fall back to a decimal
         // string reconstruction.
         let s = pg_numeric_from_binary(raw)?;
-        Ok(PgNumericText(s))
+        Ok(Self(s))
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -314,10 +314,10 @@ enum ToSqlHolder {
 impl ToSqlHolder {
     fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
         match self {
-            ToSqlHolder::Null => &Option::<&str>::None,
-            ToSqlHolder::Bool(b) => b,
-            ToSqlHolder::Int(n) => n,
-            ToSqlHolder::Text(s) => s,
+            Self::Null => &Option::<&str>::None,
+            Self::Bool(b) => b,
+            Self::Int(n) => n,
+            Self::Text(s) => s,
         }
     }
 }
@@ -447,7 +447,7 @@ impl SqlSession for PgDevSession {
     }
 }
 
-/// Drain a `RowIter` fully, returning (decoded rows, rows_affected). Used by
+/// Drain a `RowIter` fully, returning (decoded rows, `rows_affected`). Used by
 /// `exec_text` (ignores rows, reads the count).
 fn drain_row_iter(
     mut iter: postgres::RowIter<'_>,

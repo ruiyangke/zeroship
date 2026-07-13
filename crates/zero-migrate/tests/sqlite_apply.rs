@@ -1,5 +1,5 @@
-//! Journal + atomic-apply + idempotency proofs for the SQLite migration backend.
-//! Real temp-file SQLite throughout.
+//! Journal + atomic-apply + idempotency proofs for the `SQLite` migration backend.
+//! Real temp-file `SQLite` throughout.
 
 use std::path::PathBuf;
 
@@ -63,7 +63,7 @@ fn mig_named(name: &str, up: &str) -> Migration {
     }
 }
 
-/// A throwaway ExecutorConfig (the SQLite backend ignores PG-shaped fields).
+/// A throwaway `ExecutorConfig` (the `SQLite` backend ignores PG-shaped fields).
 fn cfg() -> ExecutorConfig {
     ExecutorConfig::new("prj_test", "app")
 }

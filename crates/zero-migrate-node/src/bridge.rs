@@ -55,7 +55,7 @@ use crate::wire::{
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
-/// two NETWORK dialects reach the host driver — SQLite is in-process rusqlite and
+/// two NETWORK dialects reach the host driver — `SQLite` is in-process rusqlite and
 /// never crosses the seam, so it is not a host-apply target.
 #[derive(Debug, Clone, Copy)]
 enum ApplyDialect {
@@ -88,13 +88,15 @@ impl ApplyDialect {
 
 /// The IR-format version this addon was built against (fail-closed floor).
 #[napi(js_name = "irVersion")]
-pub fn ir_version() -> u32 {
+#[must_use]
+pub const fn ir_version() -> u32 {
     api::current_ir_version()
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate). Returns a
 /// typed [`LoadVerifyReply`]; never throws for a malformed document.
 #[napi(js_name = "loadVerify")]
+#[must_use]
 pub fn load_verify(
     envelope_json: String,
     deploying_app: String,
@@ -166,10 +168,12 @@ impl VerbDispatch for TsfnDispatch {
         // Park the (single-threaded) engine future on the oneshot the `done`
         // callback fires from the JS thread. Awaiting a `oneshot::Receiver` — NEVER
         // a JS Promise — keeps the reactor-less block_on sufficient.
-        rx.await.unwrap_or(Err(JsError {
-            message: "host driver dropped the `done` callback without replying".to_string(),
-            code: None,
-        }))
+        rx.await.unwrap_or_else(|_| {
+            Err(JsError {
+                message: "host driver dropped the `done` callback without replying".to_string(),
+                code: None,
+            })
+        })
     }
 }
 
@@ -227,7 +231,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
 }
 
 /// Detach a `Function<'_>`'s borrow of a per-call `Env` into a `Function<'static>`
-/// via a raw napi_value round-trip. Sound because the `napi_value` outlives the
+/// via a raw `napi_value` round-trip. Sound because the `napi_value` outlives the
 /// native call boundary (it is handed to JS / stored in the TSFN payload) — the same
 /// round-trip napi's own return codegen performs.
 fn detach_function<Args, Ret>(
@@ -320,7 +324,7 @@ fn status_reply(s: &MigrationStatus) -> StatusReply {
 
 /// The wire spelling of a [`HistoryKind`] — the single home of the mapping (was a
 /// closure-local `match` in the `history` entrypoint).
-fn history_kind_str(kind: HistoryKind) -> &'static str {
+const fn history_kind_str(kind: HistoryKind) -> &'static str {
     match kind {
         HistoryKind::Completed => "applied",
         HistoryKind::RolledBack => "rolled_back",

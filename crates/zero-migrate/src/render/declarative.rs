@@ -274,7 +274,7 @@ fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bo
     } else if matches!(dialect, SqlDialect::Sqlite) {
         sqlite_ddl_type(&c.data_type).to_string()
     } else if matches!(dialect, SqlDialect::Mysql) {
-        mysql_ddl_type(&c.data_type).to_string()
+        mysql_ddl_type(&c.data_type)
     } else {
         ddl_type(&c.data_type).to_string()
     }
@@ -2145,7 +2145,7 @@ fn build_table_snapshot_impl(
                     // and default actions are omitted per dialect. Built to
                     // match live byte-for-byte so a policy FK re-diffs clean.
                     definition: fk_definition_for_dialect(
-                        &[f.name.clone()],
+                        std::slice::from_ref(&f.name),
                         project_schema,
                         target,
                         &["id".to_string()],
@@ -4581,7 +4581,7 @@ impl DeclarativeAuthor {
             copy_columns,
             recreate_objects,
             dropped_columns,
-            reason: reason.clone(),
+            reason,
         };
 
         // The journal migration: its `up` carries the new-table CREATE (so the

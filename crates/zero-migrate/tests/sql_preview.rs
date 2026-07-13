@@ -55,7 +55,7 @@ const REPRESENTATIVE_IR: &str = r#"{
   ]
 }"#;
 
-/// Same representative set for MySQL, excluding `renameColumn`: MySQL declares
+/// Same representative set for `MySQL`, excluding `renameColumn`: `MySQL` declares
 /// rename unsupported in this phase, so preview must validate-refuse it rather
 /// than print a runtime-resolved label.
 const REPRESENTATIVE_IR_MYSQL: &str = r#"{
@@ -80,8 +80,8 @@ const REPRESENTATIVE_IR_MYSQL: &str = r#"{
   ]
 }"#;
 
-/// MySQL-specific render proof: the portable IR pieces MySQL can render in phase 1
-/// lower to valid MySQL 8 DDL/DML without opening a database.
+/// MySQL-specific render proof: the portable IR pieces `MySQL` can render in phase 1
+/// lower to valid `MySQL` 8 DDL/DML without opening a database.
 const MYSQL_FEATURE_IR: &str = r#"{
   "ir_version": 1,
   "name": "mysql_feature",
@@ -390,7 +390,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
 
 /// `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
 /// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
-/// OnlineRename step). It locks the no-fabrication contract for the rename render
+/// `OnlineRename` step). It locks the no-fabrication contract for the rename render
 /// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
 /// under a `-- [runtime-resolved]` label, and NO bare executable rename SQL (no
 /// `ALTER … RENAME`, no `CREATE TRIGGER`, no uncommented expand DDL) may leak.
