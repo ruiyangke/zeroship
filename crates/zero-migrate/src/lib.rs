@@ -136,34 +136,34 @@ pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
 // the whole PG seam — the addon (`host-pg`) is the primary consumer of these
 // neutral types. MySQL will ride the same seam; SQLite does NOT (in-process
 // rusqlite).
-#[cfg(pg_seam)]
-pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
-pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
-pub use apply::baseline::{BaselineError, BaselineOutcome};
-pub use plan::author::{
-    AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
-};
 pub use analysis::classify::{
     classify, drop_index_targets, relations_touched, DdlKind, DropIndexTarget, OwnershipNeed,
     ParseError, StatementClass, TouchedRelation,
+};
+pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
+pub use apply::baseline::{BaselineError, BaselineOutcome};
+pub use apply::drift::{
+    diff_snapshots, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError, DriftReport,
+    OrphanJournal, StructuralDrift,
+};
+pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
+#[cfg(pg_seam)]
+pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
+pub use engine::{
+    recognizes_contract_apply, DeclarativeApplyError, DeclarativeDeployOutcome,
+    DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
+    PlannedMigration, RollbackEngineError,
+};
+pub use plan::author::{
+    AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use render::declarative::{
     desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, sqlite_canonical_type,
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema,
     FieldDescriptor, IndexDescriptor, RenameHint, SqliteRebuild,
 };
-pub use engine::{
-    recognizes_contract_apply, DeclarativeApplyError, DeclarativeDeployOutcome,
-    DeclarativeDeployPlan, EngineError, MigrationEngine, MigrationPlan, OnlineError,
-    PlannedMigration, RollbackEngineError,
-};
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
-};
-pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
-pub use apply::drift::{
-    diff_snapshots, AlteredObject, ChecksumDrift,
-    ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
 // `check_checksum_drift` reads the journal over a `&D: SqlSession`; `snapshot_schema`
 // introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
@@ -171,8 +171,8 @@ pub use apply::drift::{
 #[cfg(pg_seam)]
 pub use apply::drift::{check_checksum_drift, snapshot_schema};
 pub use apply::executor::{
-    ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
-    RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
+    ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
+    RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 // `apply` is generic over the `SqlSession` seam — on the whole PG
 // seam. `rollback` is still `&Client`-typed (out of v1 scope) — PG-only.
@@ -182,24 +182,24 @@ pub use apply::executor::apply;
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
-pub use render::fold::{
-    descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
-    ProduceError, RecoveredCheck,
-};
 pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
 pub use model::policy::{SchemaScope, TrustProfile};
 pub use model::profile::{
-    AuthorPrimaryKeyPolicy, DataSecurityConfig, DestructiveOps, IndexCreation,
-    InjectedSystemColumnPolicy, InjectedSystemIndexPolicy, OperationalConfig, PolicyCapabilities,
-    PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile, PrimaryKeyAuthorPolicy,
-    RoleAttribute, RoleCapabilityConfig, SealError, SealVerifier, SealedPosture, SealedProfile,
-    TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy, seal_effective_profile,
+    seal_effective_profile, AuthorPrimaryKeyPolicy, DataSecurityConfig, DestructiveOps,
+    IndexCreation, InjectedSystemColumnPolicy, InjectedSystemIndexPolicy, OperationalConfig,
+    PolicyCapabilities, PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile,
+    PrimaryKeyAuthorPolicy, RoleAttribute, RoleCapabilityConfig, SealError, SealVerifier,
+    SealedPosture, SealedProfile, TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy,
     CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
 pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
+pub use render::fold::{
+    descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
+    ProduceError, RecoveredCheck,
+};
 // The deploy-target dialect — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new`.
 pub use schema::query::SqlDialect;
@@ -212,29 +212,23 @@ pub use apply::journal::{
 // SQLite backend has its own `sqlite/journal_sql.rs` peers. On the whole PG seam.
 #[cfg(pg_seam)]
 pub use apply::journal::{
-    applied, applied_count, ensure_journal, history as journal_history,
-    latest_completed_checksums, net_rolled_back, outstanding_pending_contracts,
-    record_baseline, record_completed, record_rolled_back, record_started,
-    resolve_pending_contract, superseded_versions,
+    applied, applied_count, ensure_journal, history as journal_history, latest_completed_checksums,
+    net_rolled_back, outstanding_pending_contracts, record_baseline, record_completed,
+    record_rolled_back, record_started, resolve_pending_contract, superseded_versions,
 };
 // The structured pending-contract interlock payloads.
+pub use ops::squash::{squash, SquashError, SquashOutcome};
+pub use ops::status::{BlockedPlan, MigrationStatus, PendingContractStatus, StatusError};
 pub use plan::pending::{
     ActionPayload, DependencyPendingContract, OrphanedPendingContract, PendingContractRefusal,
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
     CODE_TABLE_HAS_PENDING_CONTRACT,
-};
-pub use ops::squash::{squash, SquashError, SquashOutcome};
-pub use ops::status::{
-    BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
 // `history` / `status` are generic over the `SqlSession` seam —
 // on the whole PG seam so a host driver can drive the pending-migrations flow.
 #[cfg(pg_seam)]
 pub use ops::status::{history, status};
 // The confined submit path is PG-only; gated with `mod ops::submit`.
-pub use plan::manifest::{
-    compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
-};
 pub use model::migration::{
     migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
@@ -245,6 +239,9 @@ pub use model::snapshot::{
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, ViewSnapshot,
 };
+pub use plan::manifest::{
+    compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
+};
 // The `op.*` portable IR: the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown`;
@@ -252,12 +249,12 @@ pub use model::snapshot::{
 pub use model::ir::{
     CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
     ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod,
-    IndexSortOrder, IndexStorageParams, IrClassification, IrColumn, IrConstraint,
-    IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind,
-    IrScalar, IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
-    TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
-    CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    IndexSortOrder, IndexStorageParams, IrClassification, IrColumn, IrConstraint, IrConstraintKind,
+    IrDefault, IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue,
+    IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec,
+    RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
+    TableRuntimeOptionsPatch, TableStrictness, VectorMetric, CURRENT_IR_VERSION,
+    EXPR_INVALID_NUMERIC,
 };
 // The fail-closed IR envelope load gate: deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
@@ -302,14 +299,14 @@ pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, Ren
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
+#[cfg(pg_seam)]
+pub use apply::precondition::evaluate as evaluate_precondition;
+pub use apply::precondition::PreconditionError;
+pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use render::sql_preview::{
     render_ir_envelope_sql, render_ir_envelope_sql_statements, render_plan_sql, render_set_sql,
     PreviewOpts, RUNTIME_RESOLVED,
 };
-pub use apply::precondition::PreconditionError;
-#[cfg(pg_seam)]
-pub use apply::precondition::evaluate as evaluate_precondition;
-pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 // `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
 // error enum); the provisioning fns run over a PG `admin: &Client` — PG-only.
 pub use apply::role::{migrator_role_name, RoleError};

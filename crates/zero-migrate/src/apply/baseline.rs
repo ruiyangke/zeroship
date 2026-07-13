@@ -31,9 +31,9 @@
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
+use crate::apply::journal::{self, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
-use crate::apply::journal::{self, JournalError};
 use crate::model::migration::Migration;
 
 /// What [`baseline`] did.
@@ -247,7 +247,8 @@ async fn first_baseline_version<D: SqlSession>(
     // fails closed on an empty / NUL name, byte-identical to the prior
     // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
     // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
-    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema).map_err(JournalError::from)?;
+    let meta =
+        crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema).map_err(JournalError::from)?;
     let rows = conn
         .query(
             &format!(

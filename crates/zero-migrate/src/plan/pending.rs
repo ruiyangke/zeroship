@@ -207,7 +207,10 @@ mod tests {
     /// them byte-exact.
     #[test]
     fn payload_codes_are_exact() {
-        assert_eq!(CODE_TABLE_HAS_PENDING_CONTRACT, "TABLE_HAS_PENDING_CONTRACT");
+        assert_eq!(
+            CODE_TABLE_HAS_PENDING_CONTRACT,
+            "TABLE_HAS_PENDING_CONTRACT"
+        );
         assert_eq!(
             CODE_DEPENDENCY_PENDING_CONTRACT,
             "DEPENDENCY_PENDING_CONTRACT"
@@ -235,7 +238,10 @@ mod tests {
         assert_eq!(o.code, CODE_ORPHANED_PENDING_CONTRACT);
         assert_eq!(o.abort_action.command, "migrate resolve-pending --abort");
         assert_eq!(o.abort_action.version, "mig_expandV2");
-        assert_eq!(o.remediation, vec!["readd_rename_op", "resolve_pending_abort"]);
+        assert_eq!(
+            o.remediation,
+            vec!["readd_rename_op", "resolve_pending_abort"]
+        );
     }
 
     /// Each payload round-trips through JSON (the orchestrator parses it off the

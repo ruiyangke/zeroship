@@ -1,5 +1,5 @@
 {
-  "ir_version": 6,
+  "ir_version": 1,
   "name": "in_list_scalars",
   "owner_app": "app_corpus",
   "ops": [

@@ -29,7 +29,7 @@ pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 
 /// `Bind → JsCell` (Rust → JS bind fold). `Int→int`, `Text→text`,
 /// `Bool→bool`, `Null→null`, `Decimal→text` (PG infers the numeric target from
-/// context — the same fold the MySQL `bind_to_json` proves).
+/// context — the same fold the `MySQL` `bind_to_json` proves).
 #[must_use]
 pub fn bind_to_cell(bind: &Bind) -> JsCell {
     match bind {
@@ -192,10 +192,7 @@ mod tests {
     fn bind_fold_covers_every_variant() {
         assert_eq!(bind_to_cell(&Bind::Null).kind, "null");
         assert_eq!(bind_to_cell(&Bind::Bool(true)).kind, "bool");
-        assert_eq!(
-            bind_to_cell(&Bind::Int(42)).int_str.as_deref(),
-            Some("42")
-        );
+        assert_eq!(bind_to_cell(&Bind::Int(42)).int_str.as_deref(), Some("42"));
         assert_eq!(
             bind_to_cell(&Bind::Decimal("1.5".into())).text.as_deref(),
             Some("1.5")
@@ -212,10 +209,7 @@ mod tests {
             cell_to_value(&cell_int_str("9223372036854775807".into())).unwrap(),
             Value::Int(i64::MAX)
         );
-        assert_eq!(
-            cell_to_value(&cell_int(5)).unwrap(),
-            Value::Int(5)
-        );
+        assert_eq!(cell_to_value(&cell_int(5)).unwrap(), Value::Int(5));
         // A JS-number int
         let mut c = cell_null();
         c.kind = "int".into();

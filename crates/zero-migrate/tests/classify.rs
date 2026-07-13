@@ -75,14 +75,23 @@ fn drop_constraint_is_destructive() {
 fn expanded_destructive_set_is_classified_canonically() {
     for (sql, operation) in [
         ("DELETE FROM products", "DELETE"),
-        ("DROP MATERIALIZED VIEW product_rollups", "DROP MATERIALIZED VIEW"),
+        (
+            "DROP MATERIALIZED VIEW product_rollups",
+            "DROP MATERIALIZED VIEW",
+        ),
         ("DROP VIEW product_view", "DROP VIEW"),
         ("DROP SEQUENCE product_seq", "DROP SEQUENCE"),
         ("DROP TYPE product_type", "DROP TYPE"),
         ("DROP DOMAIN product_domain", "DROP DOMAIN"),
         ("DROP FUNCTION product_fn()", "DROP FUNCTION"),
-        ("ALTER TABLE products ALTER COLUMN price TYPE int", "ALTER COLUMN TYPE"),
-        ("ALTER TABLE products DETACH PARTITION products_2026", "DETACH PARTITION"),
+        (
+            "ALTER TABLE products ALTER COLUMN price TYPE int",
+            "ALTER COLUMN TYPE",
+        ),
+        (
+            "ALTER TABLE products DETACH PARTITION products_2026",
+            "DETACH PARTITION",
+        ),
     ] {
         let c = one(sql);
         assert!(c.destructive, "{sql} must be classified destructive");
@@ -126,10 +135,8 @@ fn unqualified_select_has_no_schema() {
 
 #[test]
 fn multi_statement_yields_one_class_each_in_order() {
-    let v = classify(
-        "CREATE TABLE a(id int); ALTER TABLE a ADD COLUMN b text; DROP TABLE a;",
-    )
-    .expect("should parse");
+    let v = classify("CREATE TABLE a(id int); ALTER TABLE a ADD COLUMN b text; DROP TABLE a;")
+        .expect("should parse");
     assert_eq!(v.len(), 3);
     assert_eq!(v[0].kind, DdlKind::CreateTable);
     assert_eq!(v[1].kind, DdlKind::AddColumn);
@@ -152,7 +159,10 @@ fn alter_column_type_classified() {
 
 #[test]
 fn dml_and_copy_and_create_extension() {
-    assert_eq!(one("INSERT INTO products(id) VALUES (1)").kind, DdlKind::Dml);
+    assert_eq!(
+        one("INSERT INTO products(id) VALUES (1)").kind,
+        DdlKind::Dml
+    );
     assert_eq!(one("UPDATE products SET id = 2").kind, DdlKind::Dml);
     assert_eq!(one("DELETE FROM products").kind, DdlKind::Dml);
     assert_eq!(
@@ -163,7 +173,10 @@ fn dml_and_copy_and_create_extension() {
         .kind,
         DdlKind::Dml
     );
-    assert_eq!(one("CREATE EXTENSION pgcrypto").kind, DdlKind::CreateExtension);
+    assert_eq!(
+        one("CREATE EXTENSION pgcrypto").kind,
+        DdlKind::CreateExtension
+    );
     assert_eq!(one("COPY products TO '/tmp/x'").kind, DdlKind::Copy);
 }
 
@@ -308,7 +321,9 @@ fn join_collects_all_schemas() {
 #[test]
 fn empty_input_yields_no_statements() {
     assert!(classify("").expect("empty parses").is_empty());
-    assert!(classify("  -- just a comment\n").expect("comment-only parses").is_empty());
+    assert!(classify("  -- just a comment\n")
+        .expect("comment-only parses")
+        .is_empty());
 }
 
 #[test]

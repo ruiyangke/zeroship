@@ -204,11 +204,20 @@ async fn declarative_add_column_diff_applies() {
 
     // Deploy v1: widgets(title).
     let v1_desc = descriptor("widgets", "title", "string", true);
-    let desired_v1 = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v1_desc))
-        .expect("desired v1");
-    let live0 = snapshot_schema(&session, &cfg.project_schema).await.expect("live0");
+    let desired_v1 =
+        desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v1_desc)).expect("desired v1");
+    let live0 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("live0");
     let plan1 = engine
-        .plan_declarative(&desired_v1, &live0, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(
+            &desired_v1,
+            &live0,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
         .expect("plan v1");
     let backend = PostgresBackend::new_generic(&session);
     engine
@@ -221,17 +230,36 @@ async fn declarative_add_column_diff_applies() {
         name: "widgets".into(),
         owner_app: "app_test".into(),
         fields: vec![
-            FieldDescriptor { name: "title".into(), ty: "string".into(), required: true, ..Default::default() },
-            FieldDescriptor { name: "subtitle".into(), ty: "string".into(), required: false, ..Default::default() },
+            FieldDescriptor {
+                name: "title".into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "subtitle".into(),
+                ty: "string".into(),
+                required: false,
+                ..Default::default()
+            },
         ],
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired_v2 = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v2_desc))
-        .expect("desired v2");
-    let live1 = snapshot_schema(&session, &cfg.project_schema).await.expect("live1");
+    let desired_v2 =
+        desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v2_desc)).expect("desired v2");
+    let live1 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("live1");
     let plan2 = engine
-        .plan_declarative(&desired_v2, &live1, &HashMap::new(), &author, &[], &guard_cfg(&cfg))
+        .plan_declarative(
+            &desired_v2,
+            &live1,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+        )
         .expect("plan v2");
     assert!(
         !plan2.plain.items.is_empty(),
@@ -244,7 +272,9 @@ async fn declarative_add_column_diff_applies() {
         .expect("apply v2 add-column");
 
     // The new column now exists, and live round-trips to desired_v2 with zero drift.
-    let live2 = snapshot_schema(&session, &cfg.project_schema).await.expect("live2");
+    let live2 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("live2");
     let table = live2.tables.get("widgets").expect("widgets table present");
     assert!(
         table.columns.iter().any(|c| c.name == "subtitle"),

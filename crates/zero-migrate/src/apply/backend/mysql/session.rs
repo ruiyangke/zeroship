@@ -39,8 +39,8 @@ use crate::apply::backend::mysql::journal_sql;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, CompletedRecord};
 use crate::conn::ExecutorConfig;
-use crate::model::migration::Migration;
 use crate::driver::SqlSession;
+use crate::model::migration::Migration;
 
 /// How long `GET_LOCK` waits (seconds) for the project apply lock before the
 /// acquire is treated as contended. Mirrors the "serialize concurrent deploys"
@@ -92,9 +92,11 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
         .await?;
     // GET_LOCK returns 1 (acquired), 0 (timeout), or NULL (error). mysql2 surfaces
     // the 1/0 as an integer cell.
-    let got: Option<i64> = row.try_get("got").map_err(|e| ApplyError::Backend(format!(
-        "mysql GET_LOCK returned an undecodable result: {e}"
-    )))?;
+    let got: Option<i64> = row.try_get("got").map_err(|e| {
+        ApplyError::Backend(format!(
+            "mysql GET_LOCK returned an undecodable result: {e}"
+        ))
+    })?;
     match got {
         Some(1) => Ok(()),
         Some(0) => Err(ApplyError::Backend(format!(
@@ -127,7 +129,9 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
 /// override if set, else the executor-wide default. Mirrors the PG
 /// `statement_timeout` render.
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
+    m.flags
+        .timeout_ms
+        .unwrap_or_else(|| cfg.statement_timeout_ms())
 }
 
 /// The effective `innodb_lock_wait_timeout` (seconds) for a migration: its
@@ -142,7 +146,7 @@ fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> u64 {
         .unwrap_or_else(|| cfg.lock_timeout_ms());
     // Round UP to whole seconds (MySQL's unit), floor 1s so a sub-second budget
     // never becomes a 0 = "no wait" that fails every contended DDL.
-    ((ms + 999) / 1000).max(1)
+    ms.div_ceil(1000).max(1)
 }
 
 /// Session-level `SET SESSION …` for the (always non-txn on MySQL) apply path.
@@ -215,7 +219,11 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     // Phase 2: the immutable completed row + clear the marker. A fresh-path squash
     // is stamped `kind='squash'` so its supersession edges are honored by
     // `superseded_versions`; the edges are written after the completed row.
-    let kind = if supersedes.is_empty() { "apply" } else { "squash" };
+    let kind = if supersedes.is_empty() {
+        "apply"
+    } else {
+        "squash"
+    };
     journal_sql::record_completed(
         conn,
         cfg,

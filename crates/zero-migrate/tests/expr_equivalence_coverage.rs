@@ -47,11 +47,7 @@ enum ExprCoverage {
     },
 }
 
-fn portable(
-    variant: &'static str,
-    proof: &'static str,
-    claim: ProofClaim,
-) -> ExprCoverage {
+const fn portable(variant: &'static str, proof: &'static str, claim: ProofClaim) -> ExprCoverage {
     ExprCoverage::Portable {
         variant,
         proof,
@@ -59,11 +55,11 @@ fn portable(
     }
 }
 
-fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
+const fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
     ExprCoverage::Vendor { variant, reason }
 }
 
-fn classify_expr(expr: &Expr) -> ExprCoverage {
+const fn classify_expr(expr: &Expr) -> ExprCoverage {
     match expr {
         Expr::ColRef { .. } => portable(
             "ColRef",
@@ -196,7 +192,7 @@ fn classify_expr(expr: &Expr) -> ExprCoverage {
     }
 }
 
-fn lit_int(value: i64) -> Expr {
+const fn lit_int(value: i64) -> Expr {
     Expr::lit(IrScalar::Int(value))
 }
 
@@ -273,7 +269,10 @@ fn portable_expr_samples() -> Vec<Expr> {
         // covered by render and MySQL live inList/notIn/empty-list proofs
         Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec![IrScalar::Str("active".to_string()), IrScalar::Str("trial".to_string())],
+            elems: vec![
+                IrScalar::Str("active".to_string()),
+                IrScalar::Str("trial".to_string()),
+            ],
             negated: false,
         },
         // covered by extract_equivalence::portable_extract_fields_are_live_equivalent_on_all_three_dialects
@@ -284,7 +283,7 @@ fn portable_expr_samples() -> Vec<Expr> {
     ]
 }
 
-fn dialect_pairs() -> [(Dialect, SqlDialect); 3] {
+const fn dialect_pairs() -> [(Dialect, SqlDialect); 3] {
     [
         (Dialect::Postgres, SqlDialect::Postgres),
         (Dialect::Sqlite, SqlDialect::Sqlite),
@@ -360,7 +359,8 @@ fn every_portable_expr_variant_has_registered_three_dialect_coverage() {
         }
     }
 
-    let expected: BTreeSet<&'static str> = EXPECTED_PORTABLE_EXPR_VARIANTS.iter().copied().collect();
+    let expected: BTreeSet<&'static str> =
+        EXPECTED_PORTABLE_EXPR_VARIANTS.iter().copied().collect();
     assert_eq!(
         seen, expected,
         "the portable Expr variant gate must be updated with the closed Expr enum"
@@ -381,7 +381,10 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
     let vendor_samples = vec![
         Expr::FnCall {
             r#fn: ScalarFn::CurrentSetting,
-            args: vec![lit_str("zero_migrate.tenant_app"), Expr::lit(IrScalar::Bool(true))],
+            args: vec![
+                lit_str("zero_migrate.tenant_app"),
+                Expr::lit(IrScalar::Bool(true)),
+            ],
         },
         Expr::FnCall {
             r#fn: ScalarFn::CurrentUser,

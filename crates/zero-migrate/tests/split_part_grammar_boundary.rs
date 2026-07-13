@@ -1,4 +1,4 @@
-//! The two-list separation: `instr` is added to the SQLite AUTHORIZER
+//! The two-list separation: `instr` is added to the `SQLite` AUTHORIZER
 //! allow-list ONLY (for the engine's pinned `splitPart` lowering), NOT to the
 //! portable-expression grammar a creator authors against. So a creator-authored
 //! raw `instr` / `substr` / `split_part` named function is REJECTED at IR load
@@ -9,11 +9,11 @@
 //! functions an author may BUILD; they are distinct lists.
 
 use std::collections::BTreeMap;
-use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::model::expr::{Expr, SynthFn};
 use zero_migrate::model::ir::{IrScalar, IrValue};
 use zero_migrate::model::load::load_ir_document;
 use zero_migrate::model::validate::Dialect;
+use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";
@@ -23,9 +23,16 @@ fn split(col: &str, delim: &str, n: i64) -> Expr {
     Expr::FnSynth {
         r#fn: SynthFn::SplitPart,
         args: vec![
-            Expr::ColRef { name: col.into(), table: None },
-            Expr::Literal { value: IrScalar::Str(delim.into()) },
-            Expr::Literal { value: IrScalar::Int(n) },
+            Expr::ColRef {
+                name: col.into(),
+                table: None,
+            },
+            Expr::Literal {
+                value: IrScalar::Str(delim.into()),
+            },
+            Expr::Literal {
+                value: IrScalar::Int(n),
+            },
         ],
     }
 }
@@ -51,8 +58,9 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
             ]}}"#
         );
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let err = load_ir_document(&ir, APP, dialect, &registry(), None, None)
-                .expect_err(&format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"));
+            let err = load_ir_document(&ir, APP, dialect, &registry(), None, None).expect_err(
+                &format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"),
+            );
             // The closed ScalarFn enum has no such variant → a deserialize/contract
             // rejection. (Never a silent acceptance that would later mis-apply.)
             let msg = err.to_string();
@@ -65,7 +73,7 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
 }
 
 /// The engine-synthesized in-envelope `.splitPart` (`FnSynth(splitPart)`) IS
-/// accepted — it loads on both dialects (the SQLite leg is PG-renderable + in the
+/// accepted — it loads on both dialects (the `SQLite` leg is PG-renderable + in the
 /// pinned envelope). This is the ONLY split surface; it contrasts with the raw
 /// rejection above.
 #[test]
@@ -81,8 +89,8 @@ fn in_envelope_split_part_helper_accepted() {
     }
 }
 
-/// An OUT-of-envelope `FnSynth(splitPart)` is rejected on the SQLite leg
-/// (EXPR_NOT_PORTABLE) but loads on PG — the dialect-gated verdict, now at
+/// An OUT-of-envelope `FnSynth(splitPart)` is rejected on the `SQLite` leg
+/// (`EXPR_NOT_PORTABLE`) but loads on PG — the dialect-gated verdict, now at
 /// its expression level for splitPart (multi-char delim).
 #[test]
 fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
@@ -96,7 +104,8 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
     let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None, None)
         .expect_err("out-of-envelope splitPart must reject on SQLite");
     assert!(
-        err.to_string().contains("EXPR_NOT_PORTABLE") || err.to_string().to_lowercase().contains("portable"),
+        err.to_string().contains("EXPR_NOT_PORTABLE")
+            || err.to_string().to_lowercase().contains("portable"),
         "the SQLite leg must reject with EXPR_NOT_PORTABLE; got: {err}"
     );
 }
@@ -105,7 +114,7 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
 /// The grammar test proved an out-of-envelope splitPart LOADS on PG; this proves it
 /// actually LOWERS to native `split_part(col, 'delim', n)` on a Postgres target
 /// (the `dialect_scope=PgOnly` escape) instead of hard-erroring at
-/// render — and that the SAME node still rejects at lower on a SQLite target.
+/// render — and that the SAME node still rejects at lower on a `SQLite` target.
 #[test]
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
     // multi-char delimiter, the grammar-boundary example.

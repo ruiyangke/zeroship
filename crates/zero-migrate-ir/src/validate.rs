@@ -54,7 +54,7 @@ pub const CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 /// out-of-envelope `c.fn.splitPart`) — kept distinct from `UNSUPPORTED` because
 /// the remedy differs ("stay in-envelope or accept `PgOnly`").
 pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
-/// A `dialect_scope = PgOnly` artifact deployed against a SQLite target.
+/// A `dialect_scope = PgOnly` artifact deployed against a `SQLite` target.
 pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
 /// An op-function called outside an active recorder — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
@@ -130,8 +130,7 @@ pub const CODE_PARTITION_KEY_COVERAGE: &str = "PARTITION_KEY_COVERAGE";
 /// Partition rule 2: collapse-affirmed bound sets must be total.
 pub const CODE_PARTITION_BOUNDS_NOT_TOTAL: &str = "PARTITION_BOUNDS_NOT_TOTAL";
 /// Partition rule 2: v1 range collapse only supports a single partition key.
-pub const CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED: &str =
-    "PARTITION_COMPOSITE_KEY_UNSUPPORTED";
+pub const CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED: &str = "PARTITION_COMPOSITE_KEY_UNSUPPORTED";
 /// Partition rule 2: collapse predicates require two-valued, non-null keys.
 pub const CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE: &str =
     "PARTITION_KEY_NULLABLE_UNDER_COLLAPSE";
@@ -141,7 +140,7 @@ pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED"
 pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry. Mirrors the
-/// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
+/// `typed_id` convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
 /// chars; the auto-derivation in `plugin-db`'s `system_fields_pass` caps at 4 for
 /// collection-derived prefixes). A hand-authored prefix is bounded to the SAME 4
 /// so the minted `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
@@ -152,20 +151,20 @@ pub const MAX_ID_PREFIX_LEN: usize = 4;
 pub enum Dialect {
     /// Postgres.
     Postgres,
-    /// SQLite.
+    /// `SQLite`.
     Sqlite,
-    /// MySQL.
+    /// `MySQL`.
     Mysql,
 }
 
 impl Dialect {
     /// The lower-case wire spelling used in the structured payload.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Dialect::Postgres => "postgres",
-            Dialect::Sqlite => "sqlite",
-            Dialect::Mysql => "mysql",
+            Self::Postgres => "postgres",
+            Self::Sqlite => "sqlite",
+            Self::Mysql => "mysql",
         }
     }
 }
@@ -187,12 +186,12 @@ pub enum UnsupportedKind {
 impl UnsupportedKind {
     /// The wire spelling.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            UnsupportedKind::Op => "op",
-            UnsupportedKind::Expr => "expr",
-            UnsupportedKind::VirtualColumn => "virtualColumn",
-            UnsupportedKind::Identity => "identity",
+            Self::Op => "op",
+            Self::Expr => "expr",
+            Self::VirtualColumn => "virtualColumn",
+            Self::Identity => "identity",
         }
     }
 }
@@ -228,18 +227,30 @@ impl AuthoringError {
     pub fn to_json(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         if let Some(fix) = &self.suggested_fix {
-            map.insert("suggested_fix".into(), serde_json::Value::String(fix.clone()));
+            map.insert(
+                "suggested_fix".into(),
+                serde_json::Value::String(fix.clone()),
+            );
         }
         map.insert("code".into(), serde_json::Value::String(self.code.clone()));
         if let Some(kind) = self.kind {
-            map.insert("kind".into(), serde_json::Value::String(kind.as_str().into()));
+            map.insert(
+                "kind".into(),
+                serde_json::Value::String(kind.as_str().into()),
+            );
         }
         map.insert("op_index".into(), serde_json::Value::from(self.op_index));
         if let Some(loc) = &self.ts_location {
             map.insert("ts_location".into(), serde_json::Value::String(loc.clone()));
         }
-        map.insert("dialect".into(), serde_json::Value::String(self.dialect.as_str().into()));
-        map.insert("reason".into(), serde_json::Value::String(self.reason.clone()));
+        map.insert(
+            "dialect".into(),
+            serde_json::Value::String(self.dialect.as_str().into()),
+        );
+        map.insert(
+            "reason".into(),
+            serde_json::Value::String(self.reason.clone()),
+        );
         serde_json::Value::Object(map)
     }
 }
@@ -291,14 +302,20 @@ pub struct TargetScope<'a> {
 impl<'a> TargetScope<'a> {
     /// A scope that resolves `ColRef`s against the given column set.
     #[must_use]
-    pub fn new(table: &'a str, columns: &'a [String]) -> Self {
-        Self { table, columns: Some(columns) }
+    pub const fn new(table: &'a str, columns: &'a [String]) -> Self {
+        Self {
+            table,
+            columns: Some(columns),
+        }
     }
 
     /// A scope that does NOT resolve `ColRef`s (structural-only validation).
     #[must_use]
-    pub fn structural_only(table: &'a str) -> Self {
-        Self { table, columns: None }
+    pub const fn structural_only(table: &'a str) -> Self {
+        Self {
+            table,
+            columns: None,
+        }
     }
 }
 
@@ -319,7 +336,12 @@ pub fn validate_expr(
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
-    let ctx = Ctx { target_dialect, scope, op_index, ts_location };
+    let ctx = Ctx {
+        target_dialect,
+        scope,
+        op_index,
+        ts_location,
+    };
     ctx.walk(expr)
 }
 
@@ -330,7 +352,7 @@ enum ExprVolatility {
     Volatile,
 }
 
-fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
+const fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
     match f {
         ScalarFn::CurrentSetting | ScalarFn::CurrentUser => ExprVolatility::Stable,
         ScalarFn::Coalesce
@@ -349,14 +371,14 @@ fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
     }
 }
 
-fn synth_fn_volatility(f: SynthFn) -> ExprVolatility {
+const fn synth_fn_volatility(f: SynthFn) -> ExprVolatility {
     match f {
         SynthFn::Now | SynthFn::GenRandomUuid => ExprVolatility::Volatile,
         SynthFn::ConcatWs | SynthFn::SplitPart => ExprVolatility::Immutable,
     }
 }
 
-fn scalar_fn_name(f: ScalarFn) -> &'static str {
+const fn scalar_fn_name(f: ScalarFn) -> &'static str {
     match f {
         ScalarFn::Coalesce => "coalesce",
         ScalarFn::Nullif => "nullif",
@@ -376,7 +398,7 @@ fn scalar_fn_name(f: ScalarFn) -> &'static str {
     }
 }
 
-fn synth_fn_name(f: SynthFn) -> &'static str {
+const fn synth_fn_name(f: SynthFn) -> &'static str {
     match f {
         SynthFn::ConcatWs => "concatWs",
         SynthFn::SplitPart => "splitPart",
@@ -385,7 +407,7 @@ fn synth_fn_name(f: SynthFn) -> &'static str {
     }
 }
 
-fn agg_func_name(f: AggFunc) -> &'static str {
+const fn agg_func_name(f: AggFunc) -> &'static str {
     match f {
         AggFunc::Count => "count",
         AggFunc::Sum => "sum",
@@ -399,7 +421,7 @@ fn agg_func_name(f: AggFunc) -> &'static str {
     }
 }
 
-fn agg_func_is_pg_first(f: AggFunc) -> bool {
+const fn agg_func_is_pg_first(f: AggFunc) -> bool {
     matches!(
         f,
         AggFunc::StringAgg | AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr
@@ -434,13 +456,23 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         Expr::DistinctFrom { left, right } => {
             first_aggregate(left).or_else(|| first_aggregate(right))
         }
-        Expr::Agg { func, arg, delimiter, .. } => arg
+        Expr::Agg {
+            func,
+            arg,
+            delimiter,
+            ..
+        } => arg
             .as_deref()
             .and_then(first_aggregate)
             .or_else(|| delimiter.as_deref().and_then(first_aggregate))
-            .or(Some(agg_func_name(*func))),
+            .or_else(|| Some(agg_func_name(*func))),
         Expr::InList { expr, .. } => first_aggregate(expr),
-        Expr::Dialectal { default, pg, sqlite, mysql } => [
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => [
             default.as_deref(),
             pg.as_deref(),
             sqlite.as_deref(),
@@ -496,17 +528,20 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
             .and_then(first_volatile_function)
             .or_else(|| delimiter.as_deref().and_then(first_volatile_function)),
         Expr::InList { expr, .. } => first_volatile_function(expr),
-        Expr::Dialectal { default, pg, sqlite, mysql } => {
-            [
-                default.as_deref(),
-                pg.as_deref(),
-                sqlite.as_deref(),
-                mysql.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .find_map(first_volatile_function)
-        }
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => [
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(first_volatile_function),
     }
 }
 
@@ -565,7 +600,7 @@ pub fn validate_no_aggregate_expr_context(
 // ── The structural expression-AST walker (policy-free) ─────────────────────
 
 /// The maximum expression-AST nesting [`validate_expr`]'s walker will descend
-/// before refusing the tree as a [`CODE_UNSUPPORTED`] DoS guard. The bound is
+/// before refusing the tree as a [`CODE_UNSUPPORTED`] `DoS` guard. The bound is
 /// OWNED by the validator (an explicit counter) rather than left implicit to
 /// `serde_json`'s compile-time `recursion_limit` (~128) at deserialize: a future
 /// switch to a streaming/custom deserializer, or a raised serde limit, would
@@ -612,9 +647,8 @@ impl Ctx<'_> {
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
                 format!(
-                    "expression nesting exceeds the maximum supported depth ({}); \
-                     flatten the expression",
-                    MAX_EXPR_DEPTH
+                    "expression nesting exceeds the maximum supported depth ({MAX_EXPR_DEPTH}); \
+                     flatten the expression"
                 ),
                 Some("reduce the nesting depth of this expression".to_string()),
             ));
@@ -685,10 +719,17 @@ impl Ctx<'_> {
             // Aggregate node: count/sum/avg/min/max render on all three
             // dialects. The long-tail aggregate variants are PostgreSQL-first and
             // fail closed off-PG unless wrapped in dialect({...}).
-            Expr::Agg { func, arg, delimiter, distinct: _ } => {
-                self.check_agg(*func, arg.as_deref(), delimiter.as_deref(), d)
-            }
-            Expr::InList { expr, elems, negated: _ } => self.check_in_list(expr, elems, d),
+            Expr::Agg {
+                func,
+                arg,
+                delimiter,
+                distinct: _,
+            } => self.check_agg(*func, arg.as_deref(), delimiter.as_deref(), d),
+            Expr::InList {
+                expr,
+                elems,
+                negated: _,
+            } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
                 self.check_pg_only_expr("pg_column_size")?;
@@ -706,9 +747,12 @@ impl Ctx<'_> {
             // The one Layer-2 portability escape: a per-dialect value
             // divergence. Structurally validate EVERY present leg (dialect-
             // neutral), then apply the per-TARGET scope math (own leg OR default).
-            Expr::Dialectal { default, pg, sqlite, mysql } => {
-                self.check_dialectal(default, pg, sqlite, mysql, d)
-            }
+            Expr::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => self.check_dialectal(default, pg, sqlite, mysql, d),
         }
     }
 
@@ -792,7 +836,7 @@ impl Ctx<'_> {
         ))
     }
 
-    fn with_target_dialect(&self, target_dialect: Dialect) -> Ctx<'_> {
+    const fn with_target_dialect(&self, target_dialect: Dialect) -> Ctx<'_> {
         Ctx {
             target_dialect,
             scope: self.scope,
@@ -807,14 +851,11 @@ impl Ctx<'_> {
         expr: &Expr,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.with_target_dialect(target_dialect).walk_depth(expr, depth)
+        self.with_target_dialect(target_dialect)
+            .walk_depth(expr, depth)
     }
 
-    fn walk_depth_portable_default(
-        &self,
-        expr: &Expr,
-        depth: u32,
-    ) -> Result<(), AuthoringError> {
+    fn walk_depth_portable_default(&self, expr: &Expr, depth: u32) -> Result<(), AuthoringError> {
         for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             self.walk_depth_as(dialect, expr, depth)?;
         }
@@ -965,8 +1006,8 @@ impl Ctx<'_> {
     }
 
     /// A splitPart **portability-boundary** reject: the call is well-formed and
-    /// PG-renderable (`split_part` accepts it), but OUT of the pinned SQLite
-    /// envelope. It is therefore a hard error ONLY on the SQLite leg and
+    /// PG-renderable (`split_part` accepts it), but OUT of the pinned `SQLite`
+    /// envelope. It is therefore a hard error ONLY on the `SQLite` leg and
     /// loads fine on a Postgres target — the loads-on-PG/rejected-on-SQLite
     /// verdict. The caller must only reach this when `target_dialect == Sqlite`.
     fn split_part_envelope_err(&self, reason: String) -> AuthoringError {
@@ -990,7 +1031,7 @@ impl Ctx<'_> {
     /// PG-renderable-but-SQLite-out-of-envelope verdict, SQLite-only), the renderer
     /// enforces this same grammar fail-closed on BOTH dialects, so the validator
     /// rejects it regardless of `target_dialect` — and stamps the *current* target so
-    /// the payload's `dialect` is faithful to the deploy. CODE_EXPR_NOT_PORTABLE (the
+    /// the payload's `dialect` is faithful to the deploy. `CODE_EXPR_NOT_PORTABLE` (the
     /// structured envelope), the AI loop's primary structured-feedback signal.
     fn split_part_grammar_err(&self, reason: String) -> AuthoringError {
         self.err(
@@ -1007,10 +1048,10 @@ impl Ctx<'_> {
     }
 
     /// A concatWs **portability-boundary** reject: the call is well-formed and
-    /// PG-renderable (`concat_ws` takes any expression delimiter), but the SQLite
+    /// PG-renderable (`concat_ws` takes any expression delimiter), but the `SQLite`
     /// lowering's literal-delimiter head-trim assumption is violated by a
     /// non-literal delimiter. Like [`Self::split_part_envelope_err`], it is a hard
-    /// error ONLY on the SQLite leg; the caller only reaches it when
+    /// error ONLY on the `SQLite` leg; the caller only reaches it when
     /// `target_dialect == Sqlite`.
     fn concat_ws_delim_envelope_err(&self, reason: String) -> AuthoringError {
         self.err(
@@ -1061,9 +1102,7 @@ impl Ctx<'_> {
             CODE_DIALECT_UNSUPPORTED,
             Some(UnsupportedKind::Expr),
             self.target_dialect,
-            format!(
-                "{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"
-            ),
+            format!("{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"),
             Some(
                 "use dialect({ pg: ..., sqlite: ..., mysql: ... }) to provide an explicit \
                  SQLite leg, or avoid regex on SQLite"
@@ -1080,9 +1119,7 @@ impl Ctx<'_> {
             CODE_DIALECT_UNSUPPORTED,
             Some(UnsupportedKind::Expr),
             self.target_dialect,
-            format!(
-                "{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"
-            ),
+            format!("{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"),
             Some(
                 "wrap this aggregate in dialect({ pg: ..., sqlite: ..., mysql: ... }) with \
                  explicit non-Postgres legs, or target Postgres only"
@@ -1109,7 +1146,10 @@ impl Ctx<'_> {
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
                 format!("{} aggregate requires an argument", agg_func_name(func)),
-                Some("call the aggregate as a receiver chain method, e.g. col(\"x\").arrayAgg()".to_string()),
+                Some(
+                    "call the aggregate as a receiver chain method, e.g. col(\"x\").arrayAgg()"
+                        .to_string(),
+                ),
             ));
         }
         match (func, delimiter) {
@@ -1119,7 +1159,10 @@ impl Ctx<'_> {
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
                 "stringAgg aggregate requires a delimiter".to_string(),
-                Some("call col(\"x\").stringAgg(delimiter) with a string or expression delimiter".to_string()),
+                Some(
+                    "call col(\"x\").stringAgg(delimiter) with a string or expression delimiter"
+                        .to_string(),
+                ),
             )),
             (_, Some(_)) => Err(self.err(
                 CODE_UNSUPPORTED,
@@ -1176,9 +1219,7 @@ impl Ctx<'_> {
                     self.check_pg_text_literal(s, "inList element")?;
                     ElemKind::Text
                 }
-                crate::ir::IrScalar::Int(_) | crate::ir::IrScalar::Decimal(_) => {
-                    ElemKind::Number
-                }
+                crate::ir::IrScalar::Int(_) | crate::ir::IrScalar::Decimal(_) => ElemKind::Number,
                 crate::ir::IrScalar::Bool(_) => ElemKind::Bool,
                 crate::ir::IrScalar::Null => ElemKind::Null,
                 crate::ir::IrScalar::Bytes(_) => {
@@ -1258,7 +1299,9 @@ impl Ctx<'_> {
         //    here rather than deferring to render time. We capture the validated
         //    string/int so the SQLite ENVELOPE checks below need not re-match.
         let delim = match &args[1] {
-            Expr::Literal { value: crate::ir::IrScalar::Str(s) } => s,
+            Expr::Literal {
+                value: crate::ir::IrScalar::Str(s),
+            } => s,
             Expr::Literal { value: other } => {
                 return Err(self.split_part_grammar_err(format!(
                     "c.fn.splitPart delimiter must be a string literal; got {other:?}"
@@ -1272,7 +1315,9 @@ impl Ctx<'_> {
             }
         };
         let n = match &args[2] {
-            Expr::Literal { value: crate::ir::IrScalar::Int(n) } => {
+            Expr::Literal {
+                value: crate::ir::IrScalar::Int(n),
+            } => {
                 if *n < 1 {
                     return Err(self.split_part_grammar_err(format!(
                         "c.fn.splitPart part index n must be a positive integer; got {n}"

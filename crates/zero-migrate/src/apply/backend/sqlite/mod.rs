@@ -401,8 +401,7 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<bool, ApplyError> {
         if self.uses_two_phase_path(m) {
             return Err(ApplyError::Backend(
-                "sqlite backend: non-transactional apply does not exist on SQLite"
-                    .to_string(),
+                "sqlite backend: non-transactional apply does not exist on SQLite".to_string(),
             ));
         }
         // The additive path covers a caller-supplied CREATE TABLE up + the
@@ -535,13 +534,12 @@ impl MigrationBackend for SqliteBackend {
         let applied = journal_sql::applied(&self.actor)
             .await
             .map_err(|e| DriftError::Backend(e.to_string()))?;
-        Ok(crate::apply::drift::compare_applied_to_set(&applied, migrations))
+        Ok(crate::apply::drift::compare_applied_to_set(
+            &applied, migrations,
+        ))
     }
 
-    async fn snapshot_schema(
-        &self,
-        _cfg: &ExecutorConfig,
-    ) -> Result<SchemaSnapshot, DriftError> {
+    async fn snapshot_schema(&self, _cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
         // introspect the LIVE `main` (app file) schema via sqlite_master +
         // PRAGMAs into the same `SchemaSnapshot` shape the PG path returns, under
         // engine mode. Recovers inline mask/encryption sentinels.
@@ -724,8 +722,10 @@ impl MigrationBackend for SqliteBackend {
         }
         // Map the plan binds to the transport-safe SQLite bind mirror (the shared
         // `?n`-binding seam — `SqliteBind::from_bind`).
-        let sqlite_binds: Vec<crate::apply::backend::sqlite::actor::SqliteBind> =
-            binds.iter().map(crate::apply::backend::sqlite::actor::SqliteBind::from_bind).collect();
+        let sqlite_binds: Vec<crate::apply::backend::sqlite::actor::SqliteBind> = binds
+            .iter()
+            .map(crate::apply::backend::sqlite::actor::SqliteBind::from_bind)
+            .collect();
         journal_sql::run_dml(
             &self.actor,
             version.as_str(),

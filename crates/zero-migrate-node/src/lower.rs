@@ -30,9 +30,7 @@ use std::collections::BTreeMap;
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::model::profile::PolicyProfile;
-use zero_migrate::{
-    resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, SqlDialect,
-};
+use zero_migrate::{resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, SqlDialect};
 
 /// Map the wire dialect spelling to the render [`SqlDialect`]. Unknown → `Err`.
 fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
@@ -199,10 +197,19 @@ mod tests {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
         match lower_envelope_to_migrations(&env, "app_widgets", "app_widgets", "postgres", "{}") {
             Ok(migs) => {
-                assert!(!migs.is_empty(), "a create-first envelope lowers to ≥1 migration");
+                assert!(
+                    !migs.is_empty(),
+                    "a create-first envelope lowers to ≥1 migration"
+                );
                 let m = &migs[0];
-                assert!(!m.up.is_empty(), "the lowered migration has non-empty up SQL");
-                assert_eq!(m.owner_app, "app_widgets", "owner_app is stamped from the arg");
+                assert!(
+                    !m.up.is_empty(),
+                    "the lowered migration has non-empty up SQL"
+                );
+                assert_eq!(
+                    m.owner_app, "app_widgets",
+                    "owner_app is stamped from the arg"
+                );
             }
             Err(msg) => {
                 // Fail-closed is acceptable here (op-schema mismatch) — the load gate
@@ -212,4 +219,3 @@ mod tests {
         }
     }
 }
-

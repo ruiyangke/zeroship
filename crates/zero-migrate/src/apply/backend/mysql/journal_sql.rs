@@ -367,7 +367,12 @@ pub(crate) async fn record_started<D: SqlSession>(
                  (version, name, checksum, applied_by)
              VALUES (?, ?, ?, ?)"
         ),
-        &[version.into(), name.into(), checksum.into(), applied_by.into()],
+        &[
+            version.into(),
+            name.into(),
+            checksum.into(),
+            applied_by.into(),
+        ],
     )
     .await?;
     Ok(())

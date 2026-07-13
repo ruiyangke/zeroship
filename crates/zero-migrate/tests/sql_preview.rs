@@ -21,14 +21,12 @@
 //! --test sql_preview`.
 
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::PlanStep;
 use zero_migrate::render::sql_preview::{
     render_ir_envelope_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-use zero_migrate::{
-    resolve_create_table_policy, MigrationIr, PolicyProfile,
-};
 use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::PlanStep;
+use zero_migrate::{resolve_create_table_policy, MigrationIr, PolicyProfile};
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, an online rename).
@@ -55,7 +53,7 @@ const REPRESENTATIVE_IR: &str = r#"{
   ]
 }"#;
 
-/// Same representative set for MySQL, excluding `renameColumn`: MySQL declares
+/// Same representative set for `MySQL`, excluding `renameColumn`: `MySQL` declares
 /// rename unsupported in this phase, so preview must validate-refuse it rather
 /// than print a runtime-resolved label.
 const REPRESENTATIVE_IR_MYSQL: &str = r#"{
@@ -80,8 +78,8 @@ const REPRESENTATIVE_IR_MYSQL: &str = r#"{
   ]
 }"#;
 
-/// MySQL-specific render proof: the portable IR pieces MySQL can render in phase 1
-/// lower to valid MySQL 8 DDL/DML without opening a database.
+/// MySQL-specific render proof: the portable IR pieces `MySQL` can render in phase 1
+/// lower to valid `MySQL` 8 DDL/DML without opening a database.
 const MYSQL_FEATURE_IR: &str = r#"{
   "ir_version": 1,
   "name": "mysql_feature",
@@ -111,7 +109,10 @@ const MYSQL_FEATURE_IR: &str = r#"{
 }"#;
 
 fn opts() -> PreviewOpts {
-    PreviewOpts { default_schema: "public".to_string(), owner_app: "app_preview".to_string() }
+    PreviewOpts {
+        default_schema: "public".to_string(),
+        owner_app: "app_preview".to_string(),
+    }
 }
 
 /// Render the representative IR for a dialect through the offline IR preview.
@@ -122,14 +123,13 @@ fn render_representative(dialect: SqlDialect) -> String {
         REPRESENTATIVE_IR
     };
     let ir = resolve_envelope_json(ir);
-    render_ir_envelope_sql(&ir, dialect, &opts())
-        .expect("representative IR renders offline")
+    render_ir_envelope_sql(&ir, dialect, &opts()).expect("representative IR renders offline")
 }
 
 fn resolve_envelope_json(ir: &str) -> String {
     let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
-    let resolved =
-        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("preview fixture IR resolves");
+    let resolved = resolve_create_table_policy(&raw, &PolicyProfile::confined())
+        .expect("preview fixture IR resolves");
     serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
 
@@ -148,17 +148,26 @@ fn assert_golden(name: &str, actual: &str) {
 
 #[test]
 fn golden_pg() {
-    assert_golden("sql_preview_pg.txt", &render_representative(SqlDialect::Postgres));
+    assert_golden(
+        "sql_preview_pg.txt",
+        &render_representative(SqlDialect::Postgres),
+    );
 }
 
 #[test]
 fn golden_sqlite() {
-    assert_golden("sql_preview_sqlite.txt", &render_representative(SqlDialect::Sqlite));
+    assert_golden(
+        "sql_preview_sqlite.txt",
+        &render_representative(SqlDialect::Sqlite),
+    );
 }
 
 #[test]
 fn golden_mysql() {
-    assert_golden("sql_preview_mysql.txt", &render_representative(SqlDialect::Mysql));
+    assert_golden(
+        "sql_preview_mysql.txt",
+        &render_representative(SqlDialect::Mysql),
+    );
 }
 
 /// FAITHFULNESS — every rendered DDL/DML statement is byte-identical to the SQL the
@@ -200,9 +209,12 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
     let envelope_json = resolve_envelope_json(envelope_json);
     let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
     let author = IrAuthor::new("public", "app_preview", dialect);
-    let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("lowers offline");
+    let steps = author
+        .lower_steps(&ir, &LiveSchema::default())
+        .expect("lowers offline");
 
-    let preview = render_ir_envelope_sql(&envelope_json, dialect, &opts()).expect("renders offline");
+    let preview =
+        render_ir_envelope_sql(&envelope_json, dialect, &opts()).expect("renders offline");
 
     for step in &steps {
         match step {
@@ -272,15 +284,23 @@ fn online_rename_is_labeled_never_fabricated() {
             "rename must be labeled runtime-resolved for {dialect:?}:\n{out}"
         );
         // No fabricated rename mechanics.
-        assert!(!out.contains("RENAME"), "must not fabricate ALTER … RENAME:\n{out}");
-        assert!(!out.contains("CREATE TRIGGER"), "must not fabricate a dual-write trigger:\n{out}");
+        assert!(
+            !out.contains("RENAME"),
+            "must not fabricate ALTER … RENAME:\n{out}"
+        );
+        assert!(
+            !out.contains("CREATE TRIGGER"),
+            "must not fabricate a dual-write trigger:\n{out}"
+        );
         // The only statement lines are comments — there is no executable rename SQL.
         for line in out.lines() {
             let l = line.trim_start();
             if l.is_empty() || l.starts_with("--") {
                 continue;
             }
-            panic!("fabricated executable SQL for an online rename in {dialect:?}: {line:?}\n{out}");
+            panic!(
+                "fabricated executable SQL for an online rename in {dialect:?}: {line:?}\n{out}"
+            );
         }
     }
 }
@@ -375,29 +395,38 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
         .expect("DB-independent IR lowers offline");
 
     let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
-    assert!(out.contains("-- plan"), "carries the per-plan header:\n{out}");
-    assert!(out.contains("(dialect: postgres)"), "labels the dialect:\n{out}");
+    assert!(
+        out.contains("-- plan"),
+        "carries the per-plan header:\n{out}"
+    );
+    assert!(
+        out.contains("(dialect: postgres)"),
+        "labels the dialect:\n{out}"
+    );
 
     // Every lowered DDL body appears verbatim — faithfulness to the engine's lowering.
     let steps = author.lower_steps(&ir, &LiveSchema::default()).unwrap();
     for step in &steps {
         if let PlanStep::Ddl(m) = step {
             let body = m.up.trim_end().trim_end_matches(';');
-            assert!(out.contains(body), "render_plan_sql missing lowered DDL:\n{body}\n--\n{out}");
+            assert!(
+                out.contains(body),
+                "render_plan_sql missing lowered DDL:\n{body}\n--\n{out}"
+            );
         }
     }
 }
 
 /// `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
 /// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
-/// OnlineRename step). It locks the no-fabrication contract for the rename render
+/// `OnlineRename` step). It locks the no-fabrication contract for the rename render
 /// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
 /// under a `-- [runtime-resolved]` label, and NO bare executable rename SQL (no
 /// `ALTER … RENAME`, no `CREATE TRIGGER`, no uncommented expand DDL) may leak.
 #[test]
 fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
-    use zero_migrate::{PlanStep, RenameStep};
     use zero_migrate::{ExpandContractAuthor, OnlineIntent};
+    use zero_migrate::{PlanStep, RenameStep};
 
     // Author a REAL PG expand-contract plan via the same author the engine uses, so
     // the test feeds the genuine E1..C2 + backfill shape (never a synthetic stub).
@@ -441,7 +470,10 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     // The expand/contract additive DDL IS surfaced (the E1 `ADD COLUMN` / the E2
     // dual-write `CREATE … TRIGGER`) — but it must appear ONLY inside `--` comment
     // lines, never as a bare executable statement.
-    assert!(out.contains("ADD COLUMN"), "the additive expand DDL should be surfaced:\n{out}");
+    assert!(
+        out.contains("ADD COLUMN"),
+        "the additive expand DDL should be surfaced:\n{out}"
+    );
 
     // THE no-fabrication invariant: every non-blank line is a comment. No bare
     // executable rename SQL (no uncommented ALTER/CREATE TRIGGER/RENAME) may leak —
@@ -454,7 +486,12 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
         panic!("bare executable SQL leaked from an online-rename render: {line:?}\n{out}");
     }
     // Belt-and-suspenders: the lines that carry the rename mechanics are comments.
-    for needle in ["ADD COLUMN", "CREATE OR REPLACE FUNCTION", "CREATE", "TRIGGER"] {
+    for needle in [
+        "ADD COLUMN",
+        "CREATE OR REPLACE FUNCTION",
+        "CREATE",
+        "TRIGGER",
+    ] {
         for line in out.lines().filter(|l| l.contains(needle)) {
             assert!(
                 line.trim_start().starts_with("--"),
@@ -500,6 +537,12 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
         .expect("DB-independent IR lowers offline");
 
     let out = render_set_sql(&[plan], SqlDialect::Postgres, &opts());
-    assert!(out.contains("CREATE TABLE"), "the lowered DDL should surface:\n{out}");
-    assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
+    assert!(
+        out.contains("CREATE TABLE"),
+        "the lowered DDL should surface:\n{out}"
+    );
+    assert!(
+        out.contains("-- preview:"),
+        "carries a summary line:\n{out}"
+    );
 }

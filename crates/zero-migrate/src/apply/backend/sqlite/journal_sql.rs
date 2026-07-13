@@ -492,15 +492,16 @@ pub(crate) async fn run_dml(
         // 3. EngineJournal — INSERT the `completed` row. SEPARATE prepares from the
         // DML, with the mode flip strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
-        let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
-            up: template,
-            down: None,
-            flags: &crate::model::migration::MigrationFlags::default(),
-            owner_app,
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
+        let checksum =
+            crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
+                up: template,
+                down: None,
+                flags: &crate::model::migration::MigrationFlags::default(),
+                owner_app,
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            });
         let name_lit = sql_lit(name);
         let checksum_lit = sql_lit(checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);

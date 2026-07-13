@@ -42,10 +42,10 @@
 use std::collections::HashSet;
 
 use crate::apply::backend::MigrationBackend;
-use crate::conn::ExecutorConfig;
 use crate::apply::executor::ApplyError;
-use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::apply::journal::{JournalError, Phase};
+use crate::conn::ExecutorConfig;
+use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::model::migration::Migration;
 
 /// What [`squash`] did.

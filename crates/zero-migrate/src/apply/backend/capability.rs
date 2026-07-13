@@ -108,7 +108,11 @@ pub trait OnlineSchemaChange {
         applied_by: &'a str,
         lock_mode: crate::apply::executor::LockMode,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::apply::executor::ApplyOutcome, OnlineError>> + 'a>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::apply::executor::ApplyOutcome, OnlineError>,
+                > + 'a,
+        >,
     >;
 }
 
@@ -190,9 +194,7 @@ pub trait ShadowDryRun {
         cfg: &'a ExecutorConfig,
         shadow_cfg: &'a ShadowConfig,
         applied_by: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>>;
 
     /// Dry-run a declarative deploy plan against a seeded shadow clone.
     fn dry_run_declarative<'a>(
@@ -202,7 +204,5 @@ pub trait ShadowDryRun {
         cfg: &'a ExecutorConfig,
         shadow_cfg: &'a ShadowConfig,
         applied_by: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>>;
 }

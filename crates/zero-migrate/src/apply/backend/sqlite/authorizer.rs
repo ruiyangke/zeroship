@@ -225,9 +225,7 @@ fn is_engine_allowed_pragma(name: &str) -> bool {
         "index_info",
         "foreign_key_list",
     ];
-    ENGINE_PRAGMAS
-        .iter()
-        .any(|p| name.eq_ignore_ascii_case(p))
+    ENGINE_PRAGMAS.iter().any(|p| name.eq_ignore_ascii_case(p))
 }
 
 /// True iff `name` is a SQLite schema table (`sqlite_master` / `sqlite_temp_master`
@@ -574,7 +572,11 @@ mod tests {
     use super::*;
     use rusqlite::hooks::TransactionOperation;
 
-    fn ctx<'a>(action: AuthAction<'a>, db: Option<&'a str>, accessor: Option<&'a str>) -> AuthContext<'a> {
+    fn ctx<'a>(
+        action: AuthAction<'a>,
+        db: Option<&'a str>,
+        accessor: Option<&'a str>,
+    ) -> AuthContext<'a> {
         AuthContext {
             action,
             database_name: db,
@@ -592,7 +594,10 @@ mod tests {
                 Authorization::Deny
             );
             assert_eq!(
-                authorize(&m, &ctx(AuthAction::Detach { database_name: "x" }, None, None)),
+                authorize(
+                    &m,
+                    &ctx(AuthAction::Detach { database_name: "x" }, None, None)
+                ),
                 Authorization::Deny
             );
         }
@@ -608,19 +613,43 @@ mod tests {
         for mode in [Mode::CreatorUp, Mode::EngineJournal] {
             m.store(mode);
             assert_eq!(
-                authorize(&m, &ctx(AuthAction::Function { function_name: "instr" }, None, None)),
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Function {
+                            function_name: "instr"
+                        },
+                        None,
+                        None
+                    )
+                ),
                 Authorization::Allow,
                 "instr must be allow-listed in {mode:?} (splitPart lowering)"
             );
             assert_eq!(
-                authorize(&m, &ctx(AuthAction::Function { function_name: "replace" }, None, None)),
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Function {
+                            function_name: "replace"
+                        },
+                        None,
+                        None
+                    )
+                ),
                 Authorization::Deny,
                 "replace must NOT be allow-listed in {mode:?} (only +1 scalar)"
             );
             assert_eq!(
                 authorize(
                     &m,
-                    &ctx(AuthAction::Function { function_name: "load_extension" }, None, None)
+                    &ctx(
+                        AuthAction::Function {
+                            function_name: "load_extension"
+                        },
+                        None,
+                        None
+                    )
                 ),
                 Authorization::Deny,
                 "load_extension stays denied"
@@ -629,7 +658,16 @@ mod tests {
         // `instr` is matched case-insensitively, like the rest of the allow-list.
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Function { function_name: "INSTR" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Function {
+                        function_name: "INSTR"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Allow
         );
     }
@@ -642,7 +680,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::Pragma { pragma_name: "writable_schema", pragma_value: Some("1") },
+                    AuthAction::Pragma {
+                        pragma_name: "writable_schema",
+                        pragma_value: Some("1")
+                    },
                     None,
                     None
                 )
@@ -652,7 +693,14 @@ mod tests {
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::Pragma { pragma_name: "foreign_keys", pragma_value: Some("OFF") }, None, None)
+                &ctx(
+                    AuthAction::Pragma {
+                        pragma_name: "foreign_keys",
+                        pragma_value: Some("OFF")
+                    },
+                    None,
+                    None
+                )
             ),
             Authorization::Deny,
             "foreign_keys toggle is engine-only"
@@ -661,14 +709,28 @@ mod tests {
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::Pragma { pragma_name: "foreign_keys", pragma_value: Some("OFF") }, None, None)
+                &ctx(
+                    AuthAction::Pragma {
+                        pragma_name: "foreign_keys",
+                        pragma_value: Some("OFF")
+                    },
+                    None,
+                    None
+                )
             ),
             Authorization::Allow
         );
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::Pragma { pragma_name: "writable_schema", pragma_value: Some("1") }, None, None)
+                &ctx(
+                    AuthAction::Pragma {
+                        pragma_name: "writable_schema",
+                        pragma_value: Some("1")
+                    },
+                    None,
+                    None
+                )
             ),
             Authorization::Deny,
             "writable_schema denied even in engine mode"
@@ -686,7 +748,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::Pragma { pragma_name: "foreign_key_check", pragma_value: None },
+                    AuthAction::Pragma {
+                        pragma_name: "foreign_key_check",
+                        pragma_value: None
+                    },
                     Some(MAIN_DB),
                     None
                 )
@@ -699,7 +764,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::Pragma { pragma_name: "foreign_key_check", pragma_value: None },
+                    AuthAction::Pragma {
+                        pragma_name: "foreign_key_check",
+                        pragma_value: None
+                    },
                     Some(MAIN_DB),
                     None
                 )
@@ -720,7 +788,10 @@ mod tests {
                 authorize(
                     &m,
                     &ctx(
-                        AuthAction::Pragma { pragma_name: pragma, pragma_value: Some("users") },
+                        AuthAction::Pragma {
+                            pragma_name: pragma,
+                            pragma_value: Some("users")
+                        },
                         Some(MAIN_DB),
                         None
                     )
@@ -733,7 +804,10 @@ mod tests {
                 authorize(
                     &m,
                     &ctx(
-                        AuthAction::Pragma { pragma_name: pragma, pragma_value: Some("users") },
+                        AuthAction::Pragma {
+                            pragma_name: pragma,
+                            pragma_value: Some("users")
+                        },
                         Some(MAIN_DB),
                         None
                     )
@@ -748,7 +822,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::Pragma { pragma_name: "writable_schema", pragma_value: Some("1") },
+                    AuthAction::Pragma {
+                        pragma_name: "writable_schema",
+                        pragma_value: Some("1")
+                    },
                     None,
                     None
                 )
@@ -763,17 +840,41 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         for action in [
-            AuthAction::Insert { table_name: "schema_migrations" },
-            AuthAction::Update { table_name: "schema_migrations", column_name: "checksum" },
-            AuthAction::Delete { table_name: "schema_migrations" },
-            AuthAction::DropTable { table_name: "schema_migrations" },
-            AuthAction::DropTrigger { trigger_name: "zs_immutable_trg", table_name: "schema_migrations" },
+            AuthAction::Insert {
+                table_name: "schema_migrations",
+            },
+            AuthAction::Update {
+                table_name: "schema_migrations",
+                column_name: "checksum",
+            },
+            AuthAction::Delete {
+                table_name: "schema_migrations",
+            },
+            AuthAction::DropTable {
+                table_name: "schema_migrations",
+            },
+            AuthAction::DropTrigger {
+                trigger_name: "zs_immutable_trg",
+                table_name: "schema_migrations",
+            },
         ] {
-            assert_eq!(authorize(&m, &ctx(action, Some(MIG_ALIAS), None)), Authorization::Deny);
+            assert_eq!(
+                authorize(&m, &ctx(action, Some(MIG_ALIAS), None)),
+                Authorization::Deny
+            );
         }
         m.store(Mode::EngineJournal);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Insert { table_name: "schema_migrations" }, Some(MIG_ALIAS), None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Insert {
+                        table_name: "schema_migrations"
+                    },
+                    Some(MIG_ALIAS),
+                    None
+                )
+            ),
             Authorization::Allow
         );
     }
@@ -792,7 +893,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::AlterTable { database_name: MAIN_DB, table_name: "users" },
+                    AuthAction::AlterTable {
+                        database_name: MAIN_DB,
+                        table_name: "users"
+                    },
                     Some("nickname"),
                     None
                 )
@@ -805,7 +909,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::AlterTable { database_name: MIG_ALIAS, table_name: "schema_migrations" },
+                    AuthAction::AlterTable {
+                        database_name: MIG_ALIAS,
+                        table_name: "schema_migrations"
+                    },
                     None,
                     None
                 )
@@ -819,7 +926,10 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::AlterTable { database_name: MIG_ALIAS, table_name: "schema_migrations" },
+                    AuthAction::AlterTable {
+                        database_name: MIG_ALIAS,
+                        table_name: "schema_migrations"
+                    },
                     None,
                     None
                 )
@@ -833,20 +943,56 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Function { function_name: "abs" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Function {
+                        function_name: "abs"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Allow
         );
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Function { function_name: "load_extension" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Function {
+                        function_name: "load_extension"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Deny
         );
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Function { function_name: "vec_distance_cosine" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Function {
+                        function_name: "vec_distance_cosine"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Deny,
             "vec_* denied in creator mode"
         );
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Function { function_name: "totally_unknown_fn" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Function {
+                        function_name: "totally_unknown_fn"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Deny,
             "unknown function fail-closed"
         );
@@ -862,7 +1008,9 @@ mod tests {
             authorize(
                 &m,
                 &ctx(
-                    AuthAction::Insert { table_name: "schema_migrations" },
+                    AuthAction::Insert {
+                        table_name: "schema_migrations"
+                    },
                     Some(MIG_ALIAS),
                     Some("creator_trg")
                 )
@@ -878,14 +1026,27 @@ mod tests {
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::CreateVtable { table_name: "v", module_name: "vec0" }, Some(MAIN_DB), None)
+                &ctx(
+                    AuthAction::CreateVtable {
+                        table_name: "v",
+                        module_name: "vec0"
+                    },
+                    Some(MAIN_DB),
+                    None
+                )
             ),
             Authorization::Deny
         );
         assert_eq!(
             authorize(
                 &m,
-                &ctx(AuthAction::Transaction { operation: TransactionOperation::Begin }, None, None)
+                &ctx(
+                    AuthAction::Transaction {
+                        operation: TransactionOperation::Begin
+                    },
+                    None,
+                    None
+                )
             ),
             Authorization::Deny
         );
@@ -899,12 +1060,30 @@ mod tests {
         // Some("main") on most actions and None on the main namespace for a few.
         for db in [Some(MAIN_DB), None] {
             assert_eq!(
-                authorize(&m, &ctx(AuthAction::CreateTable { table_name: "users" }, db, None)),
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::CreateTable {
+                            table_name: "users"
+                        },
+                        db,
+                        None
+                    )
+                ),
                 Authorization::Allow,
                 "CREATE TABLE on main (db={db:?}) must be allowed in creator mode"
             );
             assert_eq!(
-                authorize(&m, &ctx(AuthAction::Insert { table_name: "users" }, db, None)),
+                authorize(
+                    &m,
+                    &ctx(
+                        AuthAction::Insert {
+                            table_name: "users"
+                        },
+                        db,
+                        None
+                    )
+                ),
                 Authorization::Allow,
                 "INSERT on main (db={db:?}) must be allowed in creator mode"
             );
@@ -919,9 +1098,15 @@ mod tests {
             m.store(mode);
             for action in [
                 AuthAction::CreateTempTable { table_name: "t" },
-                AuthAction::CreateTempTrigger { trigger_name: "g", table_name: "t" },
+                AuthAction::CreateTempTrigger {
+                    trigger_name: "g",
+                    table_name: "t",
+                },
                 AuthAction::CreateTempView { view_name: "v" },
-                AuthAction::CreateTempIndex { index_name: "i", table_name: "t" },
+                AuthAction::CreateTempIndex {
+                    index_name: "i",
+                    table_name: "t",
+                },
             ] {
                 assert_eq!(
                     authorize(&m, &ctx(action, None, None)),
@@ -938,7 +1123,16 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::DropView { view_name: "some_view" }, Some(MIG_ALIAS), None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::DropView {
+                        view_name: "some_view"
+                    },
+                    Some(MIG_ALIAS),
+                    None
+                )
+            ),
             Authorization::Deny,
             "DROP VIEW on _mig must be denied"
         );
@@ -951,7 +1145,16 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Analyze { table_name: "users" }, Some(MAIN_DB), None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Analyze {
+                        table_name: "users"
+                    },
+                    Some(MAIN_DB),
+                    None
+                )
+            ),
             Authorization::Deny,
             "ANALYZE must be denied in creator mode"
         );
@@ -966,13 +1169,31 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, Some(MAIN_DB), None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Reindex {
+                        index_name: "ix_users"
+                    },
+                    Some(MAIN_DB),
+                    None
+                )
+            ),
             Authorization::Allow,
             "REINDEX on main must be allowed (intrinsic to CREATE INDEX)"
         );
         // None database (main/temp namespace) is also the app file.
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, None, None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Reindex {
+                        index_name: "ix_users"
+                    },
+                    None,
+                    None
+                )
+            ),
             Authorization::Allow,
             "REINDEX with None db (main) must be allowed"
         );
@@ -1032,7 +1253,14 @@ mod tests {
         let m = AuthMode::new();
         m.store(Mode::CreatorUp);
         assert_eq!(
-            authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix" }, Some(MIG_ALIAS), None)),
+            authorize(
+                &m,
+                &ctx(
+                    AuthAction::Reindex { index_name: "ix" },
+                    Some(MIG_ALIAS),
+                    None
+                )
+            ),
             Authorization::Deny,
             "REINDEX on _mig must stay denied (catch-all Reindex Deny, not the \
              immutability arm which omits Reindex)"

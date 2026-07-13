@@ -1,5 +1,5 @@
 {
-  "ir_version": 6,
+  "ir_version": 1,
   "name": "ddl_create",
   "owner_app": "app_corpus",
   "ops": [

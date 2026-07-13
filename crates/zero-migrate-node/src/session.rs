@@ -22,12 +22,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zero_migrate::driver::{Bind, DbError, Row};
 use zero_migrate::driver::SqlSession;
+use zero_migrate::driver::{Bind, DbError, Row};
 
-use crate::marshal::{
-    bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest,
-};
+use crate::marshal::{bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest};
 
 /// The verb kinds crossing to the host (kept in sync with [`JsRequest::kind`]).
 pub const KIND_BATCH: &str = "batch";
@@ -72,7 +70,7 @@ impl<D: VerbDispatch> std::fmt::Debug for NapiHostSession<D> {
 
 impl<D: VerbDispatch> NapiHostSession<D> {
     /// Wrap a transport into a `SqlSession`.
-    pub fn new(dispatch: D) -> Self {
+    pub const fn new(dispatch: D) -> Self {
         Self {
             dispatch,
             in_flight: AtomicBool::new(false),
@@ -100,7 +98,10 @@ impl<D: VerbDispatch> NapiHostSession<D> {
             binds: binds.iter().map(bind_to_cell).collect(),
             text_params: Vec::new(),
         };
-        self.dispatch.dispatch(req).await.map_err(|e| js_error_to_seam(&e))
+        self.dispatch
+            .dispatch(req)
+            .await
+            .map_err(|e| js_error_to_seam(&e))
     }
 
     /// Decode a reply's rows into neutral [`Row`]s.
@@ -134,11 +135,7 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
         Ok(affected(&reply))
     }
 
-    async fn exec_text(
-        &self,
-        sql: &str,
-        params: &[Option<String>],
-    ) -> Result<u64, DbError> {
+    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
         let _g = self.enter();
         // Text-format params: cross verbatim as `(string | null)[]` — NO
         // type coercion, NO explicit OID. `None → null → PG NULL`.
@@ -148,7 +145,11 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
             binds: Vec::new(),
             text_params: params.to_vec(),
         };
-        let reply = self.dispatch.dispatch(req).await.map_err(|e| js_error_to_seam(&e))?;
+        let reply = self
+            .dispatch
+            .dispatch(req)
+            .await
+            .map_err(|e| js_error_to_seam(&e))?;
         Ok(affected(&reply))
     }
 
@@ -170,14 +171,14 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
 /// `result.rowCount` (node-pg) when present, else the returned rowset length. The
 /// engine's `execute` consumers branch on `== 0` vs `> 0` (journal write-back /
 /// idempotent recovery), so a faithful count matters.
-fn affected(reply: &JsReply) -> u64 {
+const fn affected(reply: &JsReply) -> u64 {
     match reply.row_count {
         Some(c) if c >= 0 => c as u64,
         _ => reply.rows.len() as u64,
     }
 }
 
-/// The one-in-flight guard — the exact discipline the MySQL `JsDriverBackend`
+/// The one-in-flight guard — the exact discipline the `MySQL` `JsDriverBackend`
 /// uses (`transport.rs` `in_flight`), lifted to `AtomicBool` because the seam is
 /// `&self`.
 struct InFlightGuard<'a>(&'a AtomicBool);

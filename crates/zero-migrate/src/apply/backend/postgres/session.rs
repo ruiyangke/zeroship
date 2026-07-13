@@ -28,8 +28,8 @@ use crate::apply::backend::PgSessionSnapshot;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
 use crate::conn::ExecutorConfig;
-use crate::model::migration::Migration;
 use crate::driver::SqlSession;
+use crate::model::migration::Migration;
 
 /// A stable i64 advisory-lock key from the project id, mirroring the
 /// `hashtext(project_id)` design intent: we run `pg_advisory_lock(hashtext($1))`
@@ -129,7 +129,9 @@ pub(crate) async fn restore_session<D: SqlSession>(
 /// override ([`crate::model::migration::MigrationFlags::timeout_ms`]) if set, else
 /// the executor-wide default.
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
+    m.flags
+        .timeout_ms
+        .unwrap_or_else(|| cfg.statement_timeout_ms())
 }
 
 /// The effective `lock_timeout` for a migration: its per-migration override
@@ -141,7 +143,9 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// window), while every other migration keeps the conservative fail-fast
 /// default. It mirrors [`effective_timeout_ms`] exactly.
 fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
-    m.flags.lock_timeout_ms.unwrap_or_else(|| cfg.lock_timeout_ms())
+    m.flags
+        .lock_timeout_ms
+        .unwrap_or_else(|| cfg.lock_timeout_ms())
 }
 
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
@@ -185,7 +189,12 @@ fn set_local_role_sql(
     cfg.pg
         .migrator_role
         .as_ref()
-        .map(|role| Ok(format!("SET LOCAL ROLE {}", crate::render::dml::quote_ident_checked(role)?)))
+        .map(|role| {
+            Ok(format!(
+                "SET LOCAL ROLE {}",
+                crate::render::dml::quote_ident_checked(role)?
+            ))
+        })
         .transpose()
 }
 
@@ -261,13 +270,15 @@ pub(crate) fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyErro
                     version: m.version.as_str().to_string(),
                     reason: format!(
                         "`CREATE INDEX CONCURRENTLY {}` lacks `IF NOT EXISTS`",
-                        if idx.idxname.is_empty() { "<unnamed>" } else { &idx.idxname }
+                        if idx.idxname.is_empty() {
+                            "<unnamed>"
+                        } else {
+                            &idx.idxname
+                        }
                     ),
                 });
             }
-            NodeEnum::AlterEnumStmt(e)
-                if !e.new_val.is_empty() && !e.skip_if_new_val_exists =>
-            {
+            NodeEnum::AlterEnumStmt(e) if !e.new_val.is_empty() && !e.skip_if_new_val_exists => {
                 return Err(ApplyError::NonIdempotentNonTxn {
                     version: m.version.as_str().to_string(),
                     reason: format!(
@@ -381,7 +392,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
                 let _ = conn.batch("ROLLBACK").await;
                 // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
                 return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
                     crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
@@ -554,7 +565,11 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         .iter()
         .map(|b| match b {
             crate::render::step::BindValue::Null => None,
-            crate::render::step::BindValue::Bool(v) => Some(if *v { "true".to_string() } else { "false".to_string() }),
+            crate::render::step::BindValue::Bool(v) => Some(if *v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }),
             crate::render::step::BindValue::Int(v) => Some(v.to_string()),
             crate::render::step::BindValue::Decimal(s) => Some(s.clone()),
             crate::render::step::BindValue::Text(s) => Some(s.clone()),
@@ -719,7 +734,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
             Ok(s) => s,
             Err(e) => {
                 return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
                     crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
@@ -827,8 +842,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // `apply`'s `restore_session` is an unconditional backstop.
     if let Some(role) = &cfg.pg.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
-        conn.batch(&format!("SET ROLE {role_q}"))
-            .await?;
+        conn.batch(&format!("SET ROLE {role_q}")).await?;
     }
     let up_result = conn.batch(&m.up).await;
     if cfg.pg.migrator_role.is_some() {
@@ -991,8 +1005,7 @@ fn index_names_in_up(up: &str) -> Vec<String> {
     };
     let mut names = Vec::new();
     for raw_stmt in &parsed.protobuf.stmts {
-        if let Some(NodeEnum::IndexStmt(idx)) =
-            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        if let Some(NodeEnum::IndexStmt(idx)) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
         {
             if !idx.idxname.is_empty() {
                 names.push(idx.idxname.clone());
@@ -1189,8 +1202,7 @@ mod pg_confinement_shape_tests {
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
         // Default budget (3000 ms) when the migration sets no override.
         let default_m = trivial_migration();
-        let default_session =
-            set_local_session_sql(&cfg, &default_m).expect("session sql renders");
+        let default_session = set_local_session_sql(&cfg, &default_m).expect("session sql renders");
         assert!(
             default_session.contains("SET LOCAL lock_timeout = 3000;"),
             "no override ⇒ the SHORT executor default (3000 ms); got: {default_session}"
@@ -1307,7 +1319,10 @@ mod non_txn_idempotency_tests {
              INSERT INTO t (id) VALUES (1);",
         );
         let err = validate_non_txn_idempotent(&m).expect_err("DML among DDL must be rejected");
-        assert!(matches!(err, ApplyError::NonIdempotentNonTxn { .. }), "got {err:?}");
+        assert!(
+            matches!(err, ApplyError::NonIdempotentNonTxn { .. }),
+            "got {err:?}"
+        );
     }
 
     // The legitimate non-txn ops (idempotent CONCURRENTLY / ADD VALUE IF NOT

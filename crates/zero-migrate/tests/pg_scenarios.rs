@@ -32,8 +32,8 @@ use support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
-    apply, check_checksum_drift, ensure_journal, snapshot_schema, status, history, Approval,
-    ApplyError, ExecutorConfig, Migration, MigrationFlags, MigrationId, PostgresBackend,
+    apply, check_checksum_drift, ensure_journal, history, snapshot_schema, status, ApplyError,
+    Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, PostgresBackend,
 };
 
 // ---------------------------------------------------------------------------
@@ -173,27 +173,47 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     );
     let m = mig(v.clone(), "create_widgets", &up);
 
-    let out = apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("apply create_widgets");
-    assert_eq!(out.applied, vec![v.as_str().to_string()], "one migration applied");
+    let out = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply create_widgets");
+    assert_eq!(
+        out.applied,
+        vec![v.as_str().to_string()],
+        "one migration applied"
+    );
     assert!(
         table_exists(&session, &cfg.project_schema, "widgets").await,
         "the migration's table was created against real PG"
     );
 
     // The journal recorded a completed event, readable back over the seam.
-    let applied = zero_migrate::applied(&session, &cfg).await.expect("journal read");
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(applied.len(), 1, "one journal row");
     assert_eq!(applied[0].version, v.as_str());
     assert_eq!(applied[0].checksum, m.checksum.as_str());
 
     // Idempotent re-run: no-op, no second row.
-    let out2 = apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("re-apply no-op");
+    let out2 = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("re-apply no-op");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate::applied(&session, &cfg).await.expect("journal re-read");
+    let applied2 = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal re-read");
     assert_eq!(applied2.len(), 1, "no duplicate journal row on re-apply");
 
     drop_schemas(&session, &cfg).await;
@@ -271,9 +291,15 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             cfg.project_schema
         ),
     );
-    apply(&session, &cfg, std::slice::from_ref(&base), Approval::None, "app_test")
-        .await
-        .expect("apply base");
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&base),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply base");
 
     // A non-txn idempotent CREATE INDEX CONCURRENTLY IF NOT EXISTS.
     let v1 = MigrationId::generate();
@@ -285,9 +311,15 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             cfg.project_schema
         ),
     );
-    let out = apply(&session, &cfg, &[base.clone(), idx.clone()], Approval::None, "app_test")
-        .await
-        .expect("apply non-txn index");
+    let out = apply(
+        &session,
+        &cfg,
+        &[base.clone(), idx.clone()],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply non-txn index");
     assert!(
         out.applied.contains(&v1.as_str().to_string()),
         "the non-txn migration applied via the two-phase path"
@@ -331,7 +363,9 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             || out2.recovered.contains(&v2.as_str().to_string()),
         "the crashed non-txn migration was recovered + completed: {out2:?}"
     );
-    let applied = zero_migrate::applied(&session, &cfg).await.expect("journal read");
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied.iter().any(|e| e.version == v2.as_str()),
         "the recovered version is now net-applied in the journal"
@@ -354,9 +388,13 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
 
-    ensure_journal(&session, &cfg).await.expect("ensure_journal 1");
+    ensure_journal(&session, &cfg)
+        .await
+        .expect("ensure_journal 1");
     // Re-bootstrap: must not error (CREATE … IF NOT EXISTS discipline).
-    ensure_journal(&session, &cfg).await.expect("ensure_journal 2 (idempotent)");
+    ensure_journal(&session, &cfg)
+        .await
+        .expect("ensure_journal 2 (idempotent)");
 
     let v = MigrationId::generate();
     zero_migrate::record_completed(
@@ -374,7 +412,9 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     .await
     .expect("record_completed");
 
-    let applied = zero_migrate::applied(&session, &cfg).await.expect("journal read");
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].version, v.as_str());
     assert_eq!(applied[0].checksum, "cafef00d");
@@ -403,28 +443,47 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
         cfg.project_schema
     );
     let m = mig(v.clone(), "create_accounts", &up);
-    apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("apply");
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply");
 
     // No drift when the set matches the journal.
     let report = check_checksum_drift(&session, &cfg, std::slice::from_ref(&m))
         .await
         .expect("drift check clean");
-    assert!(report.is_clean(), "no drift when the set matches: {report:?}");
+    assert!(
+        report.is_clean(),
+        "no drift when the set matches: {report:?}"
+    );
 
     // Tamper: same version, different `up` → different checksum. The journal's
     // recorded checksum no longer matches the set's ⇒ drift.
     let tampered = mig(
         v.clone(),
         "create_accounts",
-        &format!("CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY, evil text)", cfg.project_schema),
+        &format!(
+            "CREATE TABLE \"{}\".accounts (id bigint PRIMARY KEY, evil text)",
+            cfg.project_schema
+        ),
     );
-    assert_ne!(tampered.checksum.as_str(), m.checksum.as_str(), "tamper changed the checksum");
+    assert_ne!(
+        tampered.checksum.as_str(),
+        m.checksum.as_str(),
+        "tamper changed the checksum"
+    );
     let report2 = check_checksum_drift(&session, &cfg, std::slice::from_ref(&tampered))
         .await
         .expect("drift check tampered");
-    assert!(!report2.is_clean(), "a tampered applied checksum is detected as drift");
+    assert!(
+        !report2.is_clean(),
+        "a tampered applied checksum is detected as drift"
+    );
 
     drop_schemas(&session, &cfg).await;
 }
@@ -446,9 +505,15 @@ async fn snapshot_schema_reflects_the_live_catalog() {
         "CREATE TABLE \"{}\".profiles (id bigint PRIMARY KEY, email text NOT NULL, age int)",
         cfg.project_schema
     );
-    apply(&session, &cfg, &[mig(v, "create_profiles", &up)], Approval::None, "app_test")
-        .await
-        .expect("apply");
+    apply(
+        &session,
+        &cfg,
+        &[mig(v, "create_profiles", &up)],
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply");
 
     let snap = snapshot_schema(&session, &cfg.project_schema)
         .await
@@ -483,7 +548,10 @@ async fn second_session_blocks_on_the_held_project_lock() {
 
     use zero_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&holder);
-    backend.acquire_project_lock(&cfg).await.expect("holder acquires");
+    backend
+        .acquire_project_lock(&cfg)
+        .await
+        .expect("holder acquires");
 
     // The contender uses pg_try_advisory_lock on the SAME key → must fail (held).
     let got = contender
@@ -498,7 +566,10 @@ async fn second_session_blocks_on_the_held_project_lock() {
         "a second session must NOT acquire the project lock while it is held"
     );
 
-    backend.release_project_lock(&cfg).await.expect("holder releases");
+    backend
+        .release_project_lock(&cfg)
+        .await
+        .expect("holder releases");
     let got2 = contender
         .query_one(
             "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
@@ -540,10 +611,19 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
     let down = format!("DROP TABLE \"{}\".temp_t", cfg.project_schema);
     let m = mig_with_down(v.clone(), "create_temp_t", &up, &down);
 
-    apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("apply");
-    assert!(table_exists(&session, &cfg.project_schema, "temp_t").await, "table created");
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "temp_t").await,
+        "table created"
+    );
 
     // Roll back the ONE migration through the shipped backend leaf.
     let backend = PostgresBackend::new_generic(&session);
@@ -573,25 +653,38 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
         .await
         .expect("journal event counts");
     assert_eq!(
-        counts.try_get::<_, i64>("applied_n").expect("decode applied_n"),
+        counts
+            .try_get::<_, i64>("applied_n")
+            .expect("decode applied_n"),
         1,
         "the applied row is append-only (not deleted on rollback)"
     );
     assert_eq!(
-        counts.try_get::<_, i64>("rolled_n").expect("decode rolled_n"),
+        counts
+            .try_get::<_, i64>("rolled_n")
+            .expect("decode rolled_n"),
         1,
         "a rolled_back event was appended"
     );
 
     // Net state: the version is now pending → a re-apply re-creates the table.
-    let out = apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("re-apply after rollback");
+    let out = apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("re-apply after rollback");
     assert!(
         out.applied.contains(&v.as_str().to_string()),
         "the rolled-back version is re-appliable"
     );
-    assert!(table_exists(&session, &cfg.project_schema, "temp_t").await, "table re-created");
+    assert!(
+        table_exists(&session, &cfg.project_schema, "temp_t").await,
+        "table re-created"
+    );
 
     drop_schemas(&session, &cfg).await;
 }
@@ -612,7 +705,9 @@ async fn baseline_records_completed_without_running_up() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     ensure_project_schema(&session, &cfg).await;
-    ensure_journal(&session, &cfg).await.expect("ensure_journal");
+    ensure_journal(&session, &cfg)
+        .await
+        .expect("ensure_journal");
 
     use zero_migrate::driver::SqlSession;
     // Create the table DIRECTLY (as if the DB predates the engine).
@@ -641,7 +736,9 @@ async fn baseline_records_completed_without_running_up() {
 
     // The version is journaled net-applied (via the baseline), and the table
     // survived (the up did NOT run).
-    let applied = zero_migrate::applied(&session, &cfg).await.expect("journal read");
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied.iter().any(|e| e.version == v.as_str()),
         "the baseline recorded the version as net-applied"
@@ -672,9 +769,15 @@ async fn status_and_history_report_over_the_seam() {
     let v = MigrationId::generate();
     let up = format!("CREATE TABLE \"{}\".s (id bigint)", cfg.project_schema);
     let m = mig(v.clone(), "create_s", &up);
-    apply(&session, &cfg, std::slice::from_ref(&m), Approval::None, "app_test")
-        .await
-        .expect("apply");
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+        Approval::None,
+        "app_test",
+    )
+    .await
+    .expect("apply");
 
     let st = status(&session, &cfg, std::slice::from_ref(&m))
         .await
@@ -689,7 +792,9 @@ async fn status_and_history_report_over_the_seam() {
         st.pending
     );
 
-    let hist = history(&session, &cfg).await.expect("history over the seam");
+    let hist = history(&session, &cfg)
+        .await
+        .expect("history over the seam");
     assert!(
         hist.iter().any(|e| e.version == v.as_str()),
         "history returns the applied event"
@@ -732,7 +837,9 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
         "expected NonIdempotentNonTxn, got {err:?}"
     );
     // All-up-front: nothing applied (not even the valid base migration).
-    let applied = zero_migrate::applied(&session, &cfg).await.unwrap_or_default();
+    let applied = zero_migrate::applied(&session, &cfg)
+        .await
+        .unwrap_or_default();
     assert!(
         applied.is_empty(),
         "a denied batch applies NOTHING (all-up-front guard): {applied:?}"

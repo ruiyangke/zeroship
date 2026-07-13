@@ -46,7 +46,7 @@ fn lit_str(value: &str) -> Expr {
     Expr::lit(IrScalar::Str(value.to_string()))
 }
 
-fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
+const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::ColRef { .. }
         | Expr::Literal { .. }
@@ -90,7 +90,10 @@ fn pg_only_expr_samples() -> Vec<Expr> {
     vec![
         Expr::FnCall {
             r#fn: ScalarFn::CurrentSetting,
-            args: vec![lit_str("zero_migrate.tenant_app"), Expr::lit(IrScalar::Bool(true))],
+            args: vec![
+                lit_str("zero_migrate.tenant_app"),
+                Expr::lit(IrScalar::Bool(true)),
+            ],
         },
         Expr::FnCall {
             r#fn: ScalarFn::CurrentUser,
@@ -117,10 +120,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
 }
 
 fn scope_columns() -> Vec<String> {
-    ["name", "ts"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    ["name", "ts"].into_iter().map(str::to_string).collect()
 }
 
 #[test]
@@ -139,7 +139,10 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, Some(&expr))
             .unwrap_or_else(|err| panic!("{kind} must render on Postgres: {err:?}"));
-        assert!(!rendered.set_clause.trim().is_empty(), "{kind} PG render is empty");
+        assert!(
+            !rendered.set_clause.trim().is_empty(),
+            "{kind} PG render is empty"
+        );
 
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
             let err = validate_expr(&expr, dialect, &scope, 0, None)
@@ -151,8 +154,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         }
     }
 
-    let expected: BTreeSet<&'static str> =
-        EXPECTED_PG_ONLY_EXPR_NODES.iter().copied().collect();
+    let expected: BTreeSet<&'static str> = EXPECTED_PG_ONLY_EXPR_NODES.iter().copied().collect();
     assert_eq!(seen, expected, "PG-only Expr coverage drifted");
 }
 
@@ -202,13 +204,13 @@ fn ir_with(op: Op) -> MigrationIr {
     }
 }
 
-fn true_expr() -> Expr {
+const fn true_expr() -> Expr {
     Expr::lit(IrScalar::Bool(true))
 }
 
 fn structured_view_query() -> ViewQuery {
     ViewQuery::Structured {
-        select: SelectAst {
+        select: Box::new(SelectAst {
             from: TableRef {
                 name: "users".to_string(),
                 schema: None,
@@ -221,7 +223,7 @@ fn structured_view_query() -> ViewQuery {
             having: None,
             order_by: None,
             limit: None,
-        },
+        }),
     }
 }
 
@@ -261,16 +263,12 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         | Op::DropSequence { .. }
         | Op::CreateTrigger { .. }
         | Op::DropTrigger { .. } => None,
-        Op::CreateView {
-            query,
-            materialized,
-            ..
-        } => {
+        Op::CreateView { materialized, .. } => {
             if materialized.unwrap_or(false) {
                 Some("CreateView::Materialized")
-            } else if matches!(query, ViewQuery::Raw { .. }) {
-                None
             } else {
+                // Both structured and raw (non-materialized) createView are
+                // portable — no PG-vendor op kind.
                 None
             }
         }
@@ -455,7 +453,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|err| panic!("{kind} must render on PG: {err:?}"));
         assert!(
-            migrations.iter().any(|migration| !migration.up.trim().is_empty()),
+            migrations
+                .iter()
+                .any(|migration| !migration.up.trim().is_empty()),
             "{kind} PG lower produced no SQL"
         );
 
@@ -488,8 +488,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         }
     }
 
-    let expected: BTreeSet<&'static str> =
-        EXPECTED_PG_VENDOR_OP_KINDS.iter().copied().collect();
+    let expected: BTreeSet<&'static str> = EXPECTED_PG_VENDOR_OP_KINDS.iter().copied().collect();
     assert_eq!(seen, expected, "PG vendor op fail-closed coverage drifted");
 }
 

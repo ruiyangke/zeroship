@@ -66,8 +66,10 @@ pub fn load_verify(
         Err(e) => return err_report(e),
     };
     // `load_ir_document` takes a `BTreeMap` (deterministic ownership iteration).
-    let registry: std::collections::BTreeMap<String, String> =
-        registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let registry: std::collections::BTreeMap<String, String> = registry
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     match load_ir_document(envelope_json, deploying_app, dialect, &registry, None, None) {
         Ok(ir) => LoadVerifyReply {

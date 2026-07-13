@@ -1,9 +1,9 @@
 //! Low-level lowered-plan step values.
 
+use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::declarative::SqliteRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
-use crate::model::backfill::BackfillSpec;
 
 /// The dialect reach of an applied plan, derived from its ops. A separate,
 /// journaled facet — **not** folded into the identity checksum.
@@ -28,7 +28,7 @@ pub enum RenameStep {
 }
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindValue {
     /// SQL `NULL`.
     Null,
@@ -95,7 +95,11 @@ impl PlanStep {
     pub fn approval_scope_version(&self) -> Option<&str> {
         match self {
             PlanStep::Ddl(m) if m.flags.destructive => Some(m.version.as_str()),
-            PlanStep::Dml { version, destructive, .. } if *destructive => Some(version.as_str()),
+            PlanStep::Dml {
+                version,
+                destructive,
+                ..
+            } if *destructive => Some(version.as_str()),
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb))
                 if rb.migration.flags.destructive =>
             {

@@ -32,28 +32,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::analysis::analyze::Advisory;
 use crate::guard::{guard_for, GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use crate::model::expr::Expr;
-use crate::model::load::op_created_table;
-use crate::render::declarative::{
-    build_resolved_table_snapshot, build_table_snapshot, json_value_default_expr_for_col_type,
-    json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
-};
-use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
-    ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
-    IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
-    Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
+    ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexMethod, IndexStorageParams,
+    IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join, MigrationIr, Op,
+    OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
     RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
     TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
+use crate::model::load::op_created_table;
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
     TableSnapshot,
 };
+use crate::render::declarative::{
+    build_resolved_table_snapshot, build_table_snapshot, json_value_default_expr_for_col_type,
+    json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
+    DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
+};
 use crate::render::plan::AppliedPlan;
+use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::step::{BindValue, PlanStep, RenameStep};
 use crate::schema::query::SqlDialect;
 
@@ -328,7 +328,7 @@ impl LiveSchema {
             table_snapshots: desired.snapshot.tables.clone(),
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
-            partitions: desired.snapshot.partitions.clone(),
+            partitions: desired.snapshot.partitions,
         })
     }
 
@@ -393,7 +393,12 @@ impl LiveSchema {
         //     keyed by table. Full facets, no lossy catalog reconstruction.
         let sqlite_schemas = descriptors
             .iter()
-            .map(|d| (d.name.clone(), crate::render::declarative::descriptor_to_sdk_schema(d)))
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    crate::render::declarative::descriptor_to_sdk_schema(d),
+                )
+            })
             .collect();
         Ok(Self {
             tables: live.tables.keys().cloned().collect(),
@@ -401,7 +406,7 @@ impl LiveSchema {
             table_snapshots: live.tables.clone(),
             sqlite_schemas,
             table_ownership,
-            partitions: live.partitions.clone(),
+            partitions: live.partitions,
         })
     }
 
@@ -418,7 +423,10 @@ impl LiveSchema {
         self.table_snapshots
             .iter()
             .map(|(table, snap)| {
-                (table.clone(), snap.columns.iter().map(|c| c.name.clone()).collect())
+                (
+                    table.clone(),
+                    snap.columns.iter().map(|c| c.name.clone()).collect(),
+                )
             })
             .collect()
     }
@@ -675,9 +683,7 @@ pub enum IrLowerError {
     /// A column facet is unsupported on the target dialect. Generated/identity
     /// columns are cross-dialect core with per-facet refusals (for example,
     /// SQLite non-PK identity or Postgres virtual generated columns).
-    #[error(
-        "IrAuthor::lower of column facet {kind:?} is unsupported on {dialect:?}: {reason:?}"
-    )]
+    #[error("IrAuthor::lower of column facet {kind:?} is unsupported on {dialect:?}: {reason:?}")]
     ColumnUnsupported {
         /// Stable unsupported-kind token (`virtualColumn`, `identity`, …).
         kind: &'static str,
@@ -771,9 +777,7 @@ pub struct GuardedFragment {
 /// The human message leads with the op-index + kind so an author/AI
 /// sees *which* op the guard refused, not a bare "statement denied".
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "op #{op_index} ({op_kind}): rendered statement denied by guard: {source}"
-)]
+#[error("op #{op_index} ({op_kind}): rendered statement denied by guard: {source}")]
 pub struct FragmentGuardDenied {
     /// The op whose rendered fragment the guard denied.
     pub op_index: usize,
@@ -824,10 +828,13 @@ impl NamedTypeRegistry {
                 reason: "duplicate definition",
             });
         }
-        self.enums.insert(name.to_string(), EnumDef {
-            schema: schema.to_string(),
-            values: values.to_vec(),
-        });
+        self.enums.insert(
+            name.to_string(),
+            EnumDef {
+                schema: schema.to_string(),
+                values: values.to_vec(),
+            },
+        );
         Ok(())
     }
 
@@ -836,10 +843,12 @@ impl NamedTypeRegistry {
     }
 
     pub(crate) fn enum_def(&self, name: &str) -> Result<&EnumDef, IrLowerError> {
-        self.enums.get(name).ok_or_else(|| IrLowerError::NamedTypeMissing {
-            kind: "enum",
-            name: name.to_string(),
-        })
+        self.enums
+            .get(name)
+            .ok_or_else(|| IrLowerError::NamedTypeMissing {
+                kind: "enum",
+                name: name.to_string(),
+            })
     }
 
     pub(crate) fn enum_schema_or<'a>(&'a self, name: &str, default_schema: &'a str) -> &'a str {
@@ -865,13 +874,16 @@ impl NamedTypeRegistry {
                 reason: "duplicate definition",
             });
         }
-        self.domains.insert(name.to_string(), DomainDef {
-            schema: schema.to_string(),
-            as_type: as_type.clone(),
-            check: check.clone(),
-            default: default.clone(),
-            not_null,
-        });
+        self.domains.insert(
+            name.to_string(),
+            DomainDef {
+                schema: schema.to_string(),
+                as_type: as_type.clone(),
+                check: check.clone(),
+                default: default.clone(),
+                not_null,
+            },
+        );
         Ok(())
     }
 
@@ -880,10 +892,12 @@ impl NamedTypeRegistry {
     }
 
     pub(crate) fn domain_def(&self, name: &str) -> Result<&DomainDef, IrLowerError> {
-        self.domains.get(name).ok_or_else(|| IrLowerError::NamedTypeMissing {
-            kind: "domain",
-            name: name.to_string(),
-        })
+        self.domains
+            .get(name)
+            .ok_or_else(|| IrLowerError::NamedTypeMissing {
+                kind: "domain",
+                name: name.to_string(),
+            })
     }
 
     pub(crate) fn domain_schema_or<'a>(&'a self, name: &str, default_schema: &'a str) -> &'a str {
@@ -904,7 +918,10 @@ pub(crate) fn render_enum_values(values: &[String]) -> String {
 
 fn quote_engine_ident(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
     crate::render::dml::quote_ident_checked(ident)
-        .map_err(|e| crate::render::dml::DmlError::InvalidIdentifier { what, value: e.value })
+        .map_err(|e| crate::render::dml::DmlError::InvalidIdentifier {
+            what,
+            value: e.value,
+        })
         .map_err(IrLowerError::DmlAssemble)
 }
 
@@ -942,7 +959,10 @@ pub(crate) fn enum_inline_check(
     Ok(format!("CHECK ({col} IN ({}))", render_enum_values(values)))
 }
 
-pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Result<String, IrLowerError> {
+pub(crate) fn render_ir_default(
+    default: &IrDefault,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
     match default {
         IrDefault::Literal { value } => {
             crate::render::dml::inline_literal(value).map_err(IrLowerError::DmlAssemble)
@@ -1154,11 +1174,7 @@ impl IrAuthor {
     ) -> Self {
         let project_schema = project_schema.into();
         Self {
-            decl: DeclarativeAuthor::new_for_dialect(
-                project_schema.clone(),
-                owner_app,
-                dialect,
-            ),
+            decl: DeclarativeAuthor::new_for_dialect(project_schema.clone(), owner_app, dialect),
             // Confined-by-default scope: a `default_schema` set later is admitted
             // ONLY if it case-folds to the project schema unless a Platform/Trusted
             // CLI explicitly widens via `with_schema_scope`.
@@ -1373,7 +1389,13 @@ impl IrAuthor {
         // table than the pending one.
         let depends_on = ir.depends_on.clone();
         let plan = self.assemble_plan(&ir, steps);
-        Ok(LoweredArtifact { plan, fragments, created_tables, touched_tables, depends_on })
+        Ok(LoweredArtifact {
+            plan,
+            fragments,
+            created_tables,
+            touched_tables,
+            depends_on,
+        })
     }
 
     /// The touched-set for an IR, with a `dropIndex`'s owning TABLE resolved
@@ -1398,7 +1420,10 @@ impl IrAuthor {
     pub fn resolved_touched_tables(ir: &MigrationIr, live: &LiveSchema) -> Vec<String> {
         let mut touched_tables = ir.touched_tables();
         for op in &ir.ops {
-            if let Op::DropIndex { name, table: None, .. } = op {
+            if let Op::DropIndex {
+                name, table: None, ..
+            } = op
+            {
                 let entry = Self::resolve_index_owner(name, live)
                     .unwrap_or_else(|| crate::engine::TOUCHES_UNKNOWN.to_string());
                 if !touched_tables.contains(&entry) {
@@ -1596,7 +1621,13 @@ impl IrAuthor {
         live: &LiveSchema,
         named_types: &mut NamedTypeRegistry,
     ) -> Result<(), IrLowerError> {
-        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
             if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
                 for inner in leg {
                     if matches!(inner, Op::Dialectal { .. }) {
@@ -1634,7 +1665,11 @@ impl IrAuthor {
             named_types,
         )? {
             LoweredOp::Ddl(units) => {
-                out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
+                out.extend(
+                    units
+                        .into_iter()
+                        .map(|(mig, _statements)| PlanStep::Ddl(mig)),
+                );
             }
             LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
             LoweredOp::Dml(step) => out.push(step),
@@ -1746,7 +1781,10 @@ impl IrAuthor {
                 named_types.create_enum(name, &eff_schema, values)?;
                 if self.dialect.supports(Capability::MaterializedEnumType) {
                     let qname = pg_type_qname(&eff_schema, name)?;
-                    let up = format!("CREATE TYPE {qname} AS ENUM ({})", render_enum_values(values));
+                    let up = format!(
+                        "CREATE TYPE {qname} AS ENUM ({})",
+                        render_enum_values(values)
+                    );
                     let down = Some(format!("DROP TYPE {qname}"));
                     vec![decl.lower_vendor_statement(&format!("create_enum_{name}"), up, down)]
                 } else {
@@ -1798,11 +1836,7 @@ impl IrAuthor {
                     );
                     if let Some(default) = default {
                         up.push_str(" DEFAULT ");
-                        up.push_str(&render_ir_default_for_type(
-                            default,
-                            as_type,
-                            self.dialect,
-                        )?);
+                        up.push_str(&render_ir_default_for_type(default, as_type, self.dialect)?);
                     }
                     if not_null.unwrap_or(false) {
                         up.push_str(" NOT NULL");
@@ -2060,10 +2094,7 @@ impl IrAuthor {
                 vec![decl.lower_create_index(table, &idx)]
             }
             Op::CreatePartition {
-                name,
-                of,
-                bounds,
-                ..
+                name, of, bounds, ..
             } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
                     let spec = partition_state
@@ -2077,8 +2108,12 @@ impl IrAuthor {
                         bounds,
                         PartitionBounds::Default | PartitionBounds::Hash { .. }
                     ) {
-                        let guard_sql =
-                            self.render_partition_collapse_mirror_guard(&eff_schema, of, &spec, bounds)?;
+                        let guard_sql = self.render_partition_collapse_mirror_guard(
+                            &eff_schema,
+                            of,
+                            &spec,
+                            bounds,
+                        )?;
                         Some(self.partition_collapse_dml_step(
                             op_index,
                             &format!("partition_collapse_guard_{of}_{name}"),
@@ -2131,11 +2166,7 @@ impl IrAuthor {
                     ));
                 }
                 partition_state.remove_child(parent, name);
-                vec![decl.lower_detach_partition(
-                    parent,
-                    name,
-                    concurrently.unwrap_or(false),
-                )]
+                vec![decl.lower_detach_partition(parent, name, concurrently.unwrap_or(false))]
             }
             Op::DropPartition {
                 parent,
@@ -2217,7 +2248,12 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_column(table, column)]
             }
-            Op::DropIndex { name, unique, table, .. } => {
+            Op::DropIndex {
+                name,
+                unique,
+                table,
+                ..
+            } => {
                 // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
                 // validator; a table-hinted one reaches here.
                 //
@@ -2371,7 +2407,12 @@ impl IrAuthor {
                 }
                 vec![decl.lower_alter_column_nullability(table, column, true)]
             }
-            Op::SetColumnDefault { table, column, value, .. } => {
+            Op::SetColumnDefault {
+                table,
+                column,
+                value,
+                ..
+            } => {
                 // Same SQLite rebuild constraint as setColumnType.
                 self.require_capability_for(Capability::NativeAlterColumn, "setColumnDefault")?;
                 let default_sql = match value {
@@ -2439,7 +2480,13 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_column_default(table, column)]
             }
-            Op::RenameColumn { table, from, to, ty, .. } => {
+            Op::RenameColumn {
+                table,
+                from,
+                to,
+                ty,
+                ..
+            } => {
                 // ONE online-rename plan step, dialect-chosen at lower.
                 // The neutral→PG / neutral→SQLite-affinity translation
                 // lives in `lower_rename`; the destination authors (the
@@ -2467,7 +2514,9 @@ impl IrAuthor {
                 let step = self.lower_rename(table, from, to, ty, live_schema)?;
                 return Ok(LoweredOp::Rename(Box::new(step)));
             }
-            Op::AddConstraint { table, constraint, .. } => {
+            Op::AddConstraint {
+                table, constraint, ..
+            } => {
                 let units = self.lower_add_constraint(&decl, &eff_schema, table, constraint)?;
                 // addConstraint ifNotExists: the probe compares the
                 // catalog KIND, and a PRESENT same-name + same-kind
@@ -2543,10 +2592,7 @@ impl IrAuthor {
             // Lowering — the DML ops lower through the creator-DML assembler
             // (`crate::render::dml`) into a `PlanStep::Dml`/`PlanStep::Backfill`, NOT a DDL
             // `Migration`. Each returns early with a `LoweredOp::Dml`.
-            Op::Insert { .. }
-            | Op::Update { .. }
-            | Op::Delete { .. }
-            | Op::Backfill { .. } => {
+            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {
                 return Ok(LoweredOp::Dml(self.lower_dml_op(
                     op_index,
                     op,
@@ -2811,10 +2857,16 @@ impl IrAuthor {
 
         let mut terms = Vec::new();
         if !matches!(from, PartitionBoundValue::MinValue) {
-            terms.push(format!("{key_sql} >= {}", render_partition_bound_literal(from)?));
+            terms.push(format!(
+                "{key_sql} >= {}",
+                render_partition_bound_literal(from)?
+            ));
         }
         if !matches!(to, PartitionBoundValue::MaxValue) {
-            terms.push(format!("{key_sql} < {}", render_partition_bound_literal(to)?));
+            terms.push(format!(
+                "{key_sql} < {}",
+                render_partition_bound_literal(to)?
+            ));
         }
         Ok(if terms.is_empty() {
             "1 = 1".to_string()
@@ -2872,8 +2924,8 @@ impl IrAuthor {
         eff_schema: &str,
         decl: &DeclarativeAuthor,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        let stmts = crate::render::renderer::renderer(self.dialect)
-            .render_trigger_op(op, eff_schema)?;
+        let stmts =
+            crate::render::renderer::renderer(self.dialect).render_trigger_op(op, eff_schema)?;
         Ok(stmts
             .into_iter()
             .map(|s| decl.lower_vendor_statement(&s.name, s.up, s.down))
@@ -2887,7 +2939,9 @@ impl IrAuthor {
         decl: &DeclarativeAuthor,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         let stmt = render_view_op(op, eff_schema, self.dialect, Some(&self.scope))?;
-        Ok(vec![decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)])
+        Ok(vec![
+            decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)
+        ])
     }
 
     /// **Lower a DML op** (`insert`/`update`/`del`/`backfill`) into a
@@ -2957,11 +3011,19 @@ impl IrAuthor {
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         match op {
-            Op::Insert { table, columns, rows, on_conflict, .. } => {
-                let oc = on_conflict.as_ref().map(|c| crate::render::dml::OnConflict {
-                    columns: c.columns.clone(),
-                    do_update: c.do_update.clone(),
-                });
+            Op::Insert {
+                table,
+                columns,
+                rows,
+                on_conflict,
+                ..
+            } => {
+                let oc = on_conflict
+                    .as_ref()
+                    .map(|c| crate::render::dml::OnConflict {
+                        columns: c.columns.clone(),
+                        do_update: c.do_update.clone(),
+                    });
                 // qualify into the op's effective schema.
                 let asm = crate::render::dml::assemble_insert(
                     eff_schema,
@@ -2974,7 +3036,12 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "insert", asm, false))
             }
-            Op::Update { table, set, r#where, .. } => {
+            Op::Update {
+                table,
+                set,
+                r#where,
+                ..
+            } => {
                 let asm = crate::render::dml::assemble_update(
                     eff_schema,
                     dialect,
@@ -2985,7 +3052,12 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "update", asm, false))
             }
-            Op::Delete { table, r#where, limit, .. } => {
+            Op::Delete {
+                table,
+                r#where,
+                limit,
+                ..
+            } => {
                 let asm = crate::render::dml::assemble_delete(
                     eff_schema,
                     dialect,
@@ -2998,18 +3070,27 @@ impl IrAuthor {
                 // refuses it without `Approval::Approved`.
                 Ok(self.dml_step(op_index, table, "delete", asm, true))
             }
-            Op::Backfill { table, cursor_column, batch_size, set, filter, name, .. } => self
-                .lower_backfill(
-                    eff_schema,
-                    table,
-                    cursor_column,
-                    batch_size.get(),
-                    set,
-                    filter.as_ref(),
-                    name,
-                ),
+            Op::Backfill {
+                table,
+                cursor_column,
+                batch_size,
+                set,
+                filter,
+                name,
+                ..
+            } => self.lower_backfill(
+                eff_schema,
+                table,
+                cursor_column,
+                batch_size.get(),
+                set,
+                filter.as_ref(),
+                name,
+            ),
             // Unreachable: lower_one_op only routes the four DML ops here.
-            _ => Err(IrLowerError::UnsupportedOp("non-DML op routed to lower_dml_op")),
+            _ => Err(IrLowerError::UnsupportedOp(
+                "non-DML op routed to lower_dml_op",
+            )),
         }
     }
 
@@ -3224,7 +3305,13 @@ impl IrAuthor {
         raw_island_guard: &SqlGuard,
         trust: TrustProfile,
     ) -> Result<(), IrGuardedLowerError> {
-        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
             if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
                 for inner in leg {
                     if matches!(inner, Op::Dialectal { .. }) {
@@ -3329,13 +3416,12 @@ impl IrAuthor {
                             })
                             .map(|outcome| advisories.extend(outcome.advisories))?,
                         _ => {
-                            let outcome = guard.check(stmt).map_err(|source| {
-                                FragmentGuardDenied {
+                            let outcome =
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
                                     op_index,
                                     op_kind,
                                     source,
-                                }
-                            })?;
+                                })?;
                             advisories.extend(outcome.advisories);
                         }
                     }
@@ -3359,9 +3445,7 @@ impl IrAuthor {
             // rewritten, or re-quoted between guarding and concatenation.
             let reassembled = statements.join(";\n");
             if reassembled != mig.up {
-                return Err(IrGuardedLowerError::ReassemblyMismatch {
-                    name: mig.name.clone(),
-                });
+                return Err(IrGuardedLowerError::ReassemblyMismatch { name: mig.name });
             }
             steps.push(PlanStep::Ddl(mig));
         }
@@ -3380,7 +3464,10 @@ impl IrAuthor {
         CollectionDescriptor {
             name: name.to_string(),
             owner_app: self.decl.owner_app().to_string(),
-            fields: columns.iter().map(ir_column_to_field_resolved_create).collect(),
+            fields: columns
+                .iter()
+                .map(ir_column_to_field_resolved_create)
+                .collect(),
             indexes: Vec::new(),
             runtime_options: runtime_options.cloned().unwrap_or_default(),
         }
@@ -3420,7 +3507,11 @@ impl IrAuthor {
             let Some(sibling) = sibling else {
                 continue;
             };
-            if snap.columns.iter().any(|existing| existing.name == sibling.name) {
+            if snap
+                .columns
+                .iter()
+                .any(|existing| existing.name == sibling.name)
+            {
                 continue;
             }
             snap.columns.push(sibling);
@@ -3475,10 +3566,10 @@ impl IrAuthor {
                             "validated non-Postgres createTable CHECK reached lower",
                         ));
                     }
-                    let name = c
-                        .name
-                        .as_deref()
-                        .map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                    let name = c.name.as_deref().map_or_else(
+                        || derived_check_constraint_name(table, expr),
+                        str::to_string,
+                    );
                     let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
                     snap.constraints.push(ConstraintSnapshot {
                         name,
@@ -3511,7 +3602,7 @@ impl IrAuthor {
                     }
                     if columns.is_empty() {
                         return Err(IrLowerError::UnsupportedOp(
-                        "validated createTable FOREIGN KEY with no local column reached lower",
+                            "validated createTable FOREIGN KEY with no local column reached lower",
                         ));
                     }
                     let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
@@ -3703,7 +3794,9 @@ impl IrAuthor {
             .iter()
             .find(|c| c.name == column)
             .cloned()
-            .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))?;
+            .ok_or(IrLowerError::UnsupportedOp(
+                "addColumn (column folded away)",
+            ))?;
         apply_author_type_override_to_column(table, column, ty, &mut main, self.dialect)?;
         apply_structured_default_to_column(table, column, ty, default, &mut main, self.dialect)?;
         let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
@@ -3739,30 +3832,28 @@ impl IrAuthor {
         named_types: &NamedTypeRegistry,
     ) -> Result<(), IrLowerError> {
         match &source.ty {
-            ColType::Enum { name, .. } => {
-                match self.dialect {
-                    SqlDialect::Postgres => {
-                        let schema = named_types.enum_schema_or(name, default_schema);
-                        col.data_type = pg_type_data_type(schema, name);
-                        col.ddl_type_override = Some(pg_type_qname(schema, name)?);
-                    }
-                    SqlDialect::Sqlite => {
-                        let def = named_types.enum_def(name)?;
-                        col.data_type = "text".to_string();
-                        col.inline_checks.push(enum_inline_check(
-                            &source.name,
-                            &def.values,
-                            self.dialect,
-                        )?);
-                    }
-                    SqlDialect::Mysql => {
-                        let def = named_types.enum_def(name)?;
-                        let ty = mysql_enum_type(&def.values);
-                        col.data_type = ty.clone();
-                        col.ddl_type_override = Some(ty);
-                    }
+            ColType::Enum { name, .. } => match self.dialect {
+                SqlDialect::Postgres => {
+                    let schema = named_types.enum_schema_or(name, default_schema);
+                    col.data_type = pg_type_data_type(schema, name);
+                    col.ddl_type_override = Some(pg_type_qname(schema, name)?);
                 }
-            }
+                SqlDialect::Sqlite => {
+                    let def = named_types.enum_def(name)?;
+                    col.data_type = "text".to_string();
+                    col.inline_checks.push(enum_inline_check(
+                        &source.name,
+                        &def.values,
+                        self.dialect,
+                    )?);
+                }
+                SqlDialect::Mysql => {
+                    let def = named_types.enum_def(name)?;
+                    let ty = mysql_enum_type(&def.values);
+                    col.data_type = ty.clone();
+                    col.ddl_type_override = Some(ty);
+                }
+            },
             ColType::Domain { name, .. } => {
                 if matches!(self.dialect, SqlDialect::Postgres) {
                     let schema = named_types.domain_schema_or(name, default_schema);
@@ -3842,16 +3933,7 @@ impl IrAuthor {
             }),
             _ => {
                 let col = self.add_column_snapshot(
-                    "__domain",
-                    "VALUE",
-                    as_type,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    "__domain", "VALUE", as_type, None, None, None, None, None, None, None,
                 )?;
                 Ok(crate::render::declarative::ddl_type(&col.data_type).to_string())
             }
@@ -3914,8 +3996,9 @@ impl IrAuthor {
         // `data_type` via the SHARED builder (the SAME spelling the differ's
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
-        let col = self.add_column_snapshot(table, to, ty, None, None, None, None, None, None, None)?;
-        let ir_data_type = col.data_type.clone();
+        let col =
+            self.add_column_snapshot(table, to, ty, None, None, None, None, None, None, None)?;
+        let ir_data_type = col.data_type;
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (both legs).**
         // A pure online rename mirrors values across the two columns and CANNOT also
@@ -4019,12 +4102,14 @@ impl IrAuthor {
                 // the live SDK schema Value). Absent ⇒ fail closed. `pg_ty` is unused
                 // on this leg (the rebuild's affinity comes from the SDK Value), so it
                 // is not computed here — only the live shape drives the rebuild.
-                let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
-                    IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
-                })?;
-                let live_schema_value = live.sqlite_schemas.get(table).ok_or_else(|| {
-                    IrLowerError::SqliteRenameNeedsLiveTable(table.to_string())
-                })?;
+                let live_snapshot = live
+                    .table_snapshots
+                    .get(table)
+                    .ok_or_else(|| IrLowerError::SqliteRenameNeedsLiveTable(table.to_string()))?;
+                let live_schema_value = live
+                    .sqlite_schemas
+                    .get(table)
+                    .ok_or_else(|| IrLowerError::SqliteRenameNeedsLiveTable(table.to_string()))?;
                 // The REAL introspected owner of the live table — the subject of the
                 // differ's cross-app drop/ALTER guard. Absent ⇒ fail closed (the
                 // rebuild must NOT fabricate ownership as the deploying app, which
@@ -4092,10 +4177,7 @@ impl IrAuthor {
                 dialect: self.dialect,
             });
         }
-        self.require_capability_for(
-            Capability::AlterTableAddConstraint,
-            "addConstraint",
-        )?;
+        self.require_capability_for(Capability::AlterTableAddConstraint, "addConstraint")?;
         let name = constraint.name.as_deref();
         let mig = match &constraint.kind {
             IrConstraintKind::Fk {
@@ -4153,9 +4235,14 @@ impl IrAuthor {
                 // CONDITIONAL quoting the CREATE-TABLE / fold path uses, so an
                 // imperative- and a declarative-authored UNIQUE round-trip identically
                 // against `pg_get_constraintdef` (`UNIQUE (slug)`, not `UNIQUE ("slug")`).
-                let body = format!("UNIQUE ({})", crate::render::declarative::constraintdef_cols(columns));
-                let cname =
-                    name.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string);
+                let body = format!(
+                    "UNIQUE ({})",
+                    crate::render::declarative::constraintdef_cols(columns)
+                );
+                let cname = name.map_or_else(
+                    || derived_constraint_name(table, columns, "key"),
+                    str::to_string,
+                );
                 // A UNIQUE add on an existing table scans + locks and can fail on
                 // existing duplicates — gated (requires_approval), like SET NOT NULL.
                 decl.lower_add_constraint(table, &cname, &body, true)
@@ -4166,8 +4253,10 @@ impl IrAuthor {
                         "validated non-Postgres addConstraint(check) reached lower",
                     ));
                 }
-                let cname =
-                    name.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                let cname = name.map_or_else(
+                    || derived_check_constraint_name(table, expr),
+                    str::to_string,
+                );
                 let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
                 let mut body = format!("CHECK ({rendered})");
                 if not_valid == &Some(true) {
@@ -4191,7 +4280,6 @@ impl IrAuthor {
         };
         Ok(vec![mig])
     }
-
 }
 
 /// **Test-only** textual `;\n` split, retained for the reassembly assertions in
@@ -4325,7 +4413,11 @@ fn render_sequence_op(
                 down: None,
             })
         }
-        Op::DropSequence { name, existence_guard, .. } => {
+        Op::DropSequence {
+            name,
+            existence_guard,
+            ..
+        } => {
             let qname = pg_sequence_qname(eff_schema, name)?;
             let mut up = String::from("DROP SEQUENCE ");
             if matches!(existence_guard, Some(ExistenceGuard::IfExists)) {
@@ -4338,7 +4430,9 @@ fn render_sequence_op(
                 down: None,
             })
         }
-        _ => Err(IrLowerError::UnsupportedOp("non-sequence op routed to sequence renderer")),
+        _ => Err(IrLowerError::UnsupportedOp(
+            "non-sequence op routed to sequence renderer",
+        )),
     }
 }
 
@@ -4353,7 +4447,9 @@ fn render_comment_op(
         ));
     }
     let Op::Comment { target, comment } = op else {
-        return Err(IrLowerError::UnsupportedOp("non-comment op routed to comment renderer"));
+        return Err(IrLowerError::UnsupportedOp(
+            "non-comment op routed to comment renderer",
+        ));
     };
     let object = render_comment_target(target, eff_schema)?;
     let value = comment
@@ -4387,10 +4483,7 @@ fn pg_comment_qname(kind: &'static str, schema: &str, name: &str) -> Result<Stri
     ))
 }
 
-fn render_comment_target(
-    target: &CommentTarget,
-    eff_schema: &str,
-) -> Result<String, IrLowerError> {
+fn render_comment_target(target: &CommentTarget, eff_schema: &str) -> Result<String, IrLowerError> {
     let schema = target.schema().unwrap_or(eff_schema);
     Ok(match target {
         CommentTarget::Table { name, .. } => {
@@ -4500,14 +4593,23 @@ fn render_view_op(
             let mut up = renderer.view_replace_prelude(&qname, replace);
             up.push(create);
 
-            let drop_kw = if materialized { "DROP MATERIALIZED VIEW" } else { "DROP VIEW" };
+            let drop_kw = if materialized {
+                "DROP MATERIALIZED VIEW"
+            } else {
+                "DROP VIEW"
+            };
             Ok(ViewStatement {
                 name: format!("create_view_{name}"),
                 up,
                 down: Some(format!("{drop_kw} IF EXISTS {qname}")),
             })
         }
-        Op::DropView { name, existence_guard, materialized, .. } => {
+        Op::DropView {
+            name,
+            existence_guard,
+            materialized,
+            ..
+        } => {
             let materialized = materialized.unwrap_or(false);
             let renderer = crate::render::renderer::renderer(dialect);
             renderer.validate_view_materialized(materialized)?;
@@ -4527,7 +4629,9 @@ fn render_view_op(
                 down: None,
             })
         }
-        _ => Err(IrLowerError::UnsupportedOp("non-view op routed to view renderer")),
+        _ => Err(IrLowerError::UnsupportedOp(
+            "non-view op routed to view renderer",
+        )),
     }
 }
 
@@ -4594,8 +4698,10 @@ fn render_select_ast(
     }
     if let Some(order_by) = &select.order_by {
         if !order_by.is_empty() {
-            let items: Result<Vec<_>, _> =
-                order_by.iter().map(|item| render_order_item(item, dialect)).collect();
+            let items: Result<Vec<_>, _> = order_by
+                .iter()
+                .map(|item| render_order_item(item, dialect))
+                .collect();
             sql.push_str(" ORDER BY ");
             sql.push_str(&items?.join(", "));
         }
@@ -4606,11 +4712,7 @@ fn render_select_ast(
     Ok(sql)
 }
 
-fn render_join(
-    join: &Join,
-    eff_schema: &str,
-    dialect: SqlDialect,
-) -> Result<String, IrLowerError> {
+fn render_join(join: &Join, eff_schema: &str, dialect: SqlDialect) -> Result<String, IrLowerError> {
     Ok(format!(
         "{} JOIN {} ON {}",
         join.kind.as_sql(),
@@ -4624,7 +4726,10 @@ fn render_select_item(item: &SelectItem, dialect: SqlDialect) -> Result<String, 
         SelectItem::ColRef { table, name, alias } => {
             (render_col_ref(table.as_deref(), name, dialect)?, alias)
         }
-        SelectItem::Expr { expr, alias } => (crate::render::dml::render_expr_inline(expr, dialect)?, alias),
+        SelectItem::Expr { expr, alias } => (
+            crate::render::dml::render_expr_inline(expr, dialect)?,
+            alias,
+        ),
     };
     if let Some(alias) = alias {
         sql.push_str(" AS ");
@@ -4642,7 +4747,9 @@ fn render_order_item(item: &OrderItem, dialect: SqlDialect) -> Result<String, Ir
         OrderItem::ColRef { table, name, dir } => {
             (render_col_ref(table.as_deref(), name, dialect)?, *dir)
         }
-        OrderItem::Expr { expr, dir } => (crate::render::dml::render_expr_inline(expr, dialect)?, *dir),
+        OrderItem::Expr { expr, dir } => {
+            (crate::render::dml::render_expr_inline(expr, dialect)?, *dir)
+        }
     };
     if let Some(dir) = dir {
         sql.push(' ');
@@ -4709,9 +4816,11 @@ pub(crate) fn render_sqlite_trigger_op(
             ..
         } => {
             if events.is_empty() {
-                return Err(IrLowerError::Vendor(crate::render::vendor::VendorError::EmptyList {
-                    what: "trigger events",
-                }));
+                return Err(IrLowerError::Vendor(
+                    crate::render::vendor::VendorError::EmptyList {
+                        what: "trigger events",
+                    },
+                ));
             }
             if events.iter().any(|e| matches!(e, TriggerEvent::Truncate))
                 && !SqlDialect::Sqlite.supports(Capability::TriggerTruncateEvent)
@@ -4747,15 +4856,20 @@ pub(crate) fn render_sqlite_trigger_op(
                 });
             }
             if statements.is_empty() {
-                return Err(IrLowerError::Vendor(crate::render::vendor::VendorError::EmptyList {
-                    what: "trigger body statements",
-                }));
+                return Err(IrLowerError::Vendor(
+                    crate::render::vendor::VendorError::EmptyList {
+                        what: "trigger body statements",
+                    },
+                ));
             }
 
             let qname = crate::render::dml::quote_bare_ident("trigger", name)?;
             let qtable = crate::render::dml::quote_bare_ident("table", table)?;
-            let events_sql =
-                events.iter().map(|e| e.as_sql()).collect::<Vec<_>>().join(" OR ");
+            let events_sql = events
+                .iter()
+                .map(|e| e.as_sql())
+                .collect::<Vec<_>>()
+                .join(" OR ");
             let mut up = format!(
                 "CREATE TRIGGER {qname} {} {events_sql} ON {qtable}",
                 timing.as_sql()
@@ -4772,7 +4886,13 @@ pub(crate) fn render_sqlite_trigger_op(
                 .map(|stmt| render_sqlite_trigger_stmt(stmt, eff_schema))
                 .collect();
             up.push_str(" BEGIN ");
-            up.push_str(&body?.into_iter().map(|s| format!("{s};")).collect::<Vec<_>>().join(" "));
+            up.push_str(
+                &body?
+                    .into_iter()
+                    .map(|s| format!("{s};"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             up.push_str(" END;");
             Ok(crate::render::vendor::VendorStatement {
                 name: format!("create_trigger_{name}_{table}"),
@@ -4780,7 +4900,12 @@ pub(crate) fn render_sqlite_trigger_op(
                 down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
             })
         }
-        Op::DropTrigger { name, table, if_exists, .. } => {
+        Op::DropTrigger {
+            name,
+            table,
+            if_exists,
+            ..
+        } => {
             let qname = crate::render::dml::quote_bare_ident("trigger", name)?;
             let mut up = String::from("DROP TRIGGER ");
             if if_exists.unwrap_or(false) {
@@ -4793,7 +4918,9 @@ pub(crate) fn render_sqlite_trigger_op(
                 down: None,
             })
         }
-        _ => Err(IrLowerError::UnsupportedOp("non-trigger op routed to trigger renderer")),
+        _ => Err(IrLowerError::UnsupportedOp(
+            "non-trigger op routed to trigger renderer",
+        )),
     }
 }
 
@@ -4815,22 +4942,33 @@ fn render_sqlite_trigger_stmt(
     eff_schema: &str,
 ) -> Result<String, IrLowerError> {
     match stmt {
-        TriggerStmt::Insert { table, columns, rows, schema } => {
+        TriggerStmt::Insert {
+            table,
+            columns,
+            rows,
+            schema,
+        } => {
             if columns.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::MalformedInsert {
-                    table: table.clone(),
-                    reason: "no columns".to_string(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no columns".to_string(),
+                    },
+                ));
             }
             if rows.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::MalformedInsert {
-                    table: table.clone(),
-                    reason: "no rows".to_string(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no rows".to_string(),
+                    },
+                ));
             }
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
-            let qcols: Result<Vec<_>, _> =
-                columns.iter().map(|c| crate::render::dml::quote_bare_ident("column", c)).collect();
+            let qcols: Result<Vec<_>, _> = columns
+                .iter()
+                .map(|c| crate::render::dml::quote_bare_ident("column", c))
+                .collect();
             let qcols = qcols?;
             let mut groups = Vec::with_capacity(rows.len());
             for (ri, row) in rows.iter().enumerate() {
@@ -4848,7 +4986,12 @@ fn render_sqlite_trigger_stmt(
                 }
                 let vals: Result<Vec<_>, _> = row
                     .iter()
-                    .map(|v| crate::render::dml::render_value_inline(v, crate::schema::query::SqlDialect::Sqlite))
+                    .map(|v| {
+                        crate::render::dml::render_value_inline(
+                            v,
+                            crate::schema::query::SqlDialect::Sqlite,
+                        )
+                    })
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
@@ -4858,12 +5001,19 @@ fn render_sqlite_trigger_stmt(
                 groups.join(", ")
             ))
         }
-        TriggerStmt::Update { table, set, r#where, schema } => {
+        TriggerStmt::Update {
+            table,
+            set,
+            r#where,
+            schema,
+        } => {
             if set.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::EmptySet {
-                    op: "update",
-                    table: table.clone(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::EmptySet {
+                        op: "update",
+                        table: table.clone(),
+                    },
+                ));
             }
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let mut assigns = Vec::with_capacity(set.len());
@@ -4883,7 +5033,12 @@ fn render_sqlite_trigger_stmt(
             }
             Ok(sql)
         }
-        TriggerStmt::Delete { table, r#where, limit, schema } => {
+        TriggerStmt::Delete {
+            table,
+            r#where,
+            limit,
+            schema,
+        } => {
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let pred = crate::render::dml::render_expr_inline(r#where, SqlDialect::Sqlite)?;
             Ok(match limit {
@@ -4899,9 +5054,11 @@ fn render_sqlite_trigger_stmt(
             "SELECT {}",
             crate::render::dml::render_expr_inline(expr, SqlDialect::Sqlite)?
         )),
-        TriggerStmt::Raise { level: RaiseLevel::Ignore, message: _, .. } => {
-            Ok("SELECT RAISE(IGNORE)".to_string())
-        }
+        TriggerStmt::Raise {
+            level: RaiseLevel::Ignore,
+            message: _,
+            ..
+        } => Ok("SELECT RAISE(IGNORE)".to_string()),
         TriggerStmt::Raise { level, message, .. } => Ok(format!(
             "SELECT RAISE({},{})",
             level.as_sqlite_sql(),
@@ -4967,7 +5124,12 @@ fn empty_expand_sentinel_id(
 ) -> crate::model::migration::MigrationId {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    let crate::render::expand_contract::OnlineIntent::RenameColumn { table, from, to, ty } = &ec.intent;
+    let crate::render::expand_contract::OnlineIntent::RenameColumn {
+        table,
+        from,
+        to,
+        ty,
+    } = &ec.intent;
     for field in [table.as_str(), from.as_str(), to.as_str(), ty.as_str()] {
         h.update((field.len() as u64).to_be_bytes());
         h.update(field.as_bytes());
@@ -4981,7 +5143,9 @@ fn empty_expand_sentinel_id(
 /// fix (the release-safe property: the same broken plan yields the SAME id) can be
 /// asserted in a `cfg(test)` (= debug) build. Production code never calls this.
 #[cfg(test)]
-fn plan_step_version_empty_expand_sentinel(step: &PlanStep) -> crate::model::migration::MigrationId {
+fn plan_step_version_empty_expand_sentinel(
+    step: &PlanStep,
+) -> crate::model::migration::MigrationId {
     match step {
         PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => empty_expand_sentinel_id(ec),
         other => plan_step_version(other),
@@ -5086,7 +5250,9 @@ fn ddl_step_version(op_index: usize, kind: &str, up: &str) -> crate::model::migr
 }
 
 fn partition_collapse_render_error(reason: impl Into<String>) -> IrLowerError {
-    IrLowerError::DmlAssemble(crate::render::dml::DmlError::UnrenderableExpr(reason.into()))
+    IrLowerError::DmlAssemble(crate::render::dml::DmlError::UnrenderableExpr(
+        reason.into(),
+    ))
 }
 
 fn normalize_partition_string_bound_literal(value: &str) -> String {
@@ -5094,7 +5260,10 @@ fn normalize_partition_string_bound_literal(value: &str) -> String {
     if out.len() >= 20
         && out.as_bytes().get(4) == Some(&b'-')
         && out.as_bytes().get(7) == Some(&b'-')
-        && out.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b' ')
+        && out
+            .as_bytes()
+            .get(10)
+            .is_some_and(|b| *b == b'T' || *b == b' ')
     {
         out = out.replace('T', " ");
         if let Some(stripped) = out.strip_suffix('Z') {
@@ -5232,7 +5401,10 @@ pub(crate) fn create_index_snapshot(
     nulls_not_distinct: Option<bool>,
     dialect: SqlDialect,
 ) -> Result<IndexSnapshot, IrLowerError> {
-    if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
+    if dialect == SqlDialect::Mysql
+        && columns
+            .iter()
+            .any(|e| matches!(e, IndexElement::Expr { .. }))
     {
         return Err(IrLowerError::UnsupportedOp(
             "validated createIndex expression elements on MySQL reached lower",
@@ -5483,7 +5655,9 @@ fn apply_author_type_overrides_to_snapshot(
             continue;
         }
         let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
-            return Err(IrLowerError::UnsupportedOp("author type column folded away"));
+            return Err(IrLowerError::UnsupportedOp(
+                "author type column folded away",
+            ));
         };
         apply_author_type_override_to_column(table, &source.name, &source.ty, col, dialect)?;
     }
@@ -5501,7 +5675,9 @@ fn apply_author_type_override_to_column(
         return Ok(());
     };
     if col.name != column {
-        return Err(IrLowerError::UnsupportedOp("author type column folded away"));
+        return Err(IrLowerError::UnsupportedOp(
+            "author type column folded away",
+        ));
     }
     col.data_type = data_type.to_string();
     Ok(())
@@ -5521,8 +5697,12 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
-            source.default.as_ref()
+        let Some(
+            default @ (IrDefault::Expr { .. }
+            | IrDefault::Container { .. }
+            | IrDefault::Json { .. }
+            | IrDefault::Nextval { .. }),
+        ) = source.default.as_ref()
         else {
             continue;
         };
@@ -5531,7 +5711,14 @@ fn apply_structured_defaults_to_snapshot(
                 "createTable structured default column folded away",
             ));
         };
-        apply_structured_default_to_column(table, &source.name, &source.ty, Some(default), col, dialect)?;
+        apply_structured_default_to_column(
+            table,
+            &source.name,
+            &source.ty,
+            Some(default),
+            col,
+            dialect,
+        )?;
     }
     Ok(())
 }
@@ -5544,7 +5731,13 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(
+        default @ (IrDefault::Expr { .. }
+        | IrDefault::Container { .. }
+        | IrDefault::Json { .. }
+        | IrDefault::Nextval { .. }),
+    ) = default
+    else {
         return Ok(());
     };
     if col.name != column {
@@ -5580,7 +5773,10 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
+        IrDefault::Expr { .. }
+        | IrDefault::Container { .. }
+        | IrDefault::Json { .. }
+        | IrDefault::Nextval { .. } => None,
     }
 }
 
@@ -5651,19 +5847,20 @@ fn render_exclusion_element(
     dialect: SqlDialect,
 ) -> Result<String, IrLowerError> {
     let target = match &element.target {
-        ColumnOrExpr::Column { name } => crate::render::dml::quote_ident_for_dialect(
-            "column",
-            name,
-            dialect,
-        )
-        .map_err(IrLowerError::DmlAssemble)?,
+        ColumnOrExpr::Column { name } => {
+            crate::render::dml::quote_ident_for_dialect("column", name, dialect)
+                .map_err(IrLowerError::DmlAssemble)?
+        }
         ColumnOrExpr::Expr { expr } => {
             let expr = crate::render::dml::render_expr_inline(expr, dialect)
                 .map_err(IrLowerError::DmlAssemble)?;
             format!("({expr})")
         }
     };
-    Ok(format!("{target} WITH {}", exclusion_operator_sql(element.operator)))
+    Ok(format!(
+        "{target} WITH {}",
+        exclusion_operator_sql(element.operator)
+    ))
 }
 
 fn exclusion_method_sql(method: ExclusionMethod) -> &'static str {
@@ -5778,7 +5975,12 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             // The Layer-2 dialect() escape: collect refs from EVERY present
             // leg so a derived CHECK name is stable regardless of which dialect the
             // divergence resolves to at render time.
-            Expr::Dialectal { default, pg, sqlite, mysql } => {
+            Expr::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => {
                 for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
                     collect_col_refs(leg, out);
                 }
@@ -5803,9 +6005,9 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
 /// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
 /// stamped [`crate::render::existence_probe::GuardProbe::Constraint`] names the constraint the
 /// executor will see in the live `information_schema` / `pg_get_constraintdef`.
-    /// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
-    /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
-    /// PRIMARY KEY before lower, but it is handled for totality.
+/// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
+/// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
+/// PRIMARY KEY before lower, but it is handled for totality.
 fn ir_constraint_name_and_kind(
     table: &str,
     constraint: &IrConstraint,
@@ -5813,7 +6015,12 @@ fn ir_constraint_name_and_kind(
 ) -> (String, String) {
     let explicit = constraint.name.as_deref();
     match &constraint.kind {
-        IrConstraintKind::Fk { columns, references_table, references_columns, .. } => {
+        IrConstraintKind::Fk {
+            columns,
+            references_table,
+            references_columns,
+            ..
+        } => {
             // Reuse the shared FK snapshot so the name derivation is byte-identical
             // to `lower_add_constraint`'s `ir_fk_constraint_snapshot_for_columns` call.
             // Name derivation is independent of the referential actions and
@@ -5835,11 +6042,17 @@ fn ir_constraint_name_and_kind(
             (snap.name, "FOREIGN KEY".to_string())
         }
         IrConstraintKind::Unique { columns } => (
-            explicit.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string),
+            explicit.map_or_else(
+                || derived_constraint_name(table, columns, "key"),
+                str::to_string,
+            ),
             "UNIQUE".to_string(),
         ),
         IrConstraintKind::Check { expr, .. } => (
-            explicit.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string),
+            explicit.map_or_else(
+                || derived_check_constraint_name(table, expr),
+                str::to_string,
+            ),
             "CHECK".to_string(),
         ),
         IrConstraintKind::Exclusion { elements, .. } => (
@@ -5874,7 +6087,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(t, o)| (t.to_string(), o.to_string()))
+            .collect()
     }
 
     /// Extract the `Ddl` migrations from a lowered step list — the flat
@@ -5911,8 +6127,11 @@ mod tests {
     }
 
     fn platform_author(owner: &str, guard: &GuardConfig) -> IrAuthor {
-        IrAuthor::new("zero_migrate", owner, SqlDialect::Postgres)
-            .with_schema_scope(guard.schema_scope().expect("platform guard has a schema scope"))
+        IrAuthor::new("zero_migrate", owner, SqlDialect::Postgres).with_schema_scope(
+            guard
+                .schema_scope()
+                .expect("platform guard has a schema scope"),
+        )
     }
 
     fn validate_ir_platform(
@@ -5929,7 +6148,9 @@ mod tests {
     }
 
     fn migration_sql_pairs(migs: &[Migration]) -> Vec<(String, Option<String>)> {
-        migs.iter().map(|m| (m.up.clone(), m.down.clone())).collect()
+        migs.iter()
+            .map(|m| (m.up.clone(), m.down.clone()))
+            .collect()
     }
 
     /// Build a one-op `createTable` IR for the guard-per-fragment tests.
@@ -5945,10 +6166,10 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: None,
-            schema: None,
+                runtime_options: None,
+                schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -6031,9 +6252,7 @@ mod tests {
 
         let err = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
             .lower(&ir, &LiveSchema::default())
-            .expect_err(
-                "SQLite must reject non-PK identity through Capability::NonPkIdentity",
-            );
+            .expect_err("SQLite must reject non-PK identity through Capability::NonPkIdentity");
         assert!(matches!(
             err,
             IrLowerError::ColumnUnsupported {
@@ -6061,16 +6280,27 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
             constraints.push(IrConstraint {
                 name: Some("t_handle_uq".into()),
-                kind: IrConstraintKind::Unique { columns: vec!["handle".into()] },
+                kind: IrConstraintKind::Unique {
+                    columns: vec!["handle".into()],
+                },
             });
         }
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let migs = author.lower(&ir, &LiveSchema::default()).expect("lower createTable+unique");
+        let migs = author
+            .lower(&ir, &LiveSchema::default())
+            .expect("lower createTable+unique");
         let create = migs
             .iter()
             .find(|m| m.up.contains("CREATE TABLE"))
@@ -6128,7 +6358,10 @@ mod tests {
         let migs = author
             .lower(&ir, &LiveSchema::default())
             .expect("lower platform composite PK createTable");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("PRIMARY KEY (account_id, team)"),
             "top-level composite primary_key must render as a composite PK:\n{}",
@@ -6173,7 +6406,10 @@ mod tests {
         let migs = author
             .lower(&ir, &LiveSchema::default())
             .expect("lower platform null-PK createTable");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             !create.up.contains("PRIMARY KEY"),
             "primary_key:null must render no PRIMARY KEY clause:\n{}",
@@ -6206,9 +6442,9 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: None,
+                runtime_options: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -6273,7 +6509,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("app2".into());
@@ -6286,7 +6529,10 @@ mod tests {
             crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("\"app2\".\"t\""),
             "createTable with schema:app2 must qualify into \"app2\".\"t\"; up = {:?}",
@@ -6315,7 +6561,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // A case-VARIANT of the bound project schema — the gate folds it in.
@@ -6323,7 +6576,10 @@ mod tests {
         }
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("\"app1\".\"t\""),
             "a case-variant of the project schema must render the CANONICAL project \
@@ -6361,14 +6617,32 @@ mod tests {
                     name: "rank".into(),
                     ty: ColType::Int,
                     nullable: Some(false),
-                    default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Int(5),
+                    }),
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 TIrColumn {
                     name: "shard".into(),
                     ty: ColType::SmallInt,
                     nullable: Some(false),
-                    default: Some(IrDefault::Literal { value: IrScalar::Int(0) }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Int(0),
+                    }),
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -6379,7 +6653,14 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("9007199254740993".into()),
                     }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 TIrColumn {
                     name: "ratio".into(),
                     ty: ColType::Double,
@@ -6387,7 +6668,14 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 TIrColumn {
                     name: "ratio_real".into(),
                     ty: ColType::Real,
@@ -6395,7 +6683,14 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.25".into()),
                     }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
                 TIrColumn {
                     name: "addr".into(),
                     ty: ColType::Inet,
@@ -6403,12 +6698,22 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Str("192.0.2.1".into()),
                     }),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("DEFAULT 5"),
             "an integer column's DEFAULT must render; up = {:?}",
@@ -6455,14 +6760,26 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
-            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec!["dflt".into()]))
+            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
+                "dflt".into()
+            ]))
             .with_default_schema(Some("dflt".into()));
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("\"dflt\".\"t\""),
             "an op with no schema must render into the connection default; up = {:?}",
@@ -6488,7 +6805,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
         // qualifier, so the effective schema resolves to the foreign default "other".
@@ -6524,7 +6848,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
         // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
@@ -6560,18 +6891,26 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
         }
-        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
-            .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
-                "app1".into(),
-                "reporting".into(),
-            ]));
+        let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
+            crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "reporting".into()]),
+        );
         let migs = author.lower(&ir, &LiveSchema::default()).expect("lower");
-        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        let create = migs
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
         assert!(
             create.up.contains("\"reporting\".\"t\""),
             "an in-scope explicit qualifier must render into that schema; up = {:?}",
@@ -6595,7 +6934,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -6631,7 +6977,14 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // The op names the project schema explicitly — the implicit main target.
@@ -6645,7 +6998,9 @@ mod tests {
     /// Build a one-op `backfill` IR from JSON (`SafeU64` has no public ctor — the
     /// wire is its construction path). `schema` is the optional qualifier.
     fn backfill_ir(schema: Option<&str>) -> MigrationIr {
-        let schema_field = schema.map(|s| format!(r#","schema":"{s}""#)).unwrap_or_default();
+        let schema_field = schema
+            .map(|s| format!(r#","schema":"{s}""#))
+            .unwrap_or_default();
         let json = format!(
             r#"{{"ir_version":1,"name":"bf","owner_app":"app_a","ops":[
                 {{"op":"backfill","table":"t","cursorColumn":"id","batchSize":1000,
@@ -6775,13 +7130,25 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
-        if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
+        if let Op::CreateTable {
+            existence_guard, ..
+        } = &mut ir.ops[0]
+        {
             *existence_guard = Some(crate::model::ir::ExistenceGuard::IfNotExists);
         }
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
-        let migs = author.lower(&ir, &LiveSchema::default()).expect("guarded op now lowers");
+        let migs = author
+            .lower(&ir, &LiveSchema::default())
+            .expect("guarded op now lowers");
         // The createTable lowers to (at least) one DDL Migration; a unit must carry
         // the stamped Table probe with the right schema/table/direction.
         let probe = migs
@@ -6789,7 +7156,12 @@ mod tests {
             .find_map(|m| m.existence_guard.clone())
             .expect("a guarded createTable must stamp a probe on its Migration");
         match probe {
-            crate::model::probe::GuardProbe::Table { table, direction, expect_columns, .. } => {
+            crate::model::probe::GuardProbe::Table {
+                table,
+                direction,
+                expect_columns,
+                ..
+            } => {
                 assert_eq!(table, "t");
                 assert_eq!(direction, crate::model::probe::GuardDir::IfNotExists);
                 assert!(
@@ -6811,10 +7183,19 @@ mod tests {
             "vault",
             vec![TIrColumn {
                 name: "secret".into(),
-                ty: ColType::Encrypted { of: Box::new(ColType::String) },
+                ty: ColType::Encrypted {
+                    of: Box::new(ColType::String),
+                },
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -6833,7 +7214,9 @@ mod tests {
         );
         assert!(op0_frags.iter().all(|f| f.op_kind == "createTable"));
         assert!(
-            op0_frags.iter().any(|f| f.sql.contains("COMMENT ON COLUMN")),
+            op0_frags
+                .iter()
+                .any(|f| f.sql.contains("COMMENT ON COLUMN")),
             "the COMMENT sentinel is a SEPARATELY-guarded fragment"
         );
 
@@ -6845,7 +7228,10 @@ mod tests {
             .find(|m| m.up.contains("CREATE TABLE"))
             .expect("a CREATE migration");
         let reassembled = split_up_fragments(&create_mig.up).join(";\n");
-        assert_eq!(reassembled, create_mig.up, "reassembly must be byte-identical");
+        assert_eq!(
+            reassembled, create_mig.up,
+            "reassembly must be byte-identical"
+        );
     }
 
     // a DENIED fragment aborts the WHOLE lower with the op-index
@@ -6862,7 +7248,14 @@ mod tests {
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
@@ -6892,7 +7285,14 @@ mod tests {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
@@ -6900,10 +7300,16 @@ mod tests {
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
         let migs = ddl_migs(&steps);
-        assert!(!frags.is_empty(), "fragments are still attributed on SQLite");
+        assert!(
+            !frags.is_empty(),
+            "fragments are still attributed on SQLite"
+        );
         for m in &migs {
             let reassembled = split_up_fragments(&m.up).join(";\n");
-            assert_eq!(reassembled, m.up, "SQLite reassembly must be byte-identical");
+            assert_eq!(
+                reassembled, m.up,
+                "SQLite reassembly must be byte-identical"
+            );
         }
     }
 
@@ -6931,7 +7337,14 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::model::ir::IrScalar::Str(nasty.into()),
                 }),
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -7012,8 +7425,13 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let migs = author.lower(&ir_unique, &LiveSchema::default()).expect("lower");
-        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        let migs = author
+            .lower(&ir_unique, &LiveSchema::default())
+            .expect("lower");
+        let m = migs
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
         assert!(
             m.flags.destructive,
             "a unique-index drop must lower destructive (removes a data-integrity guarantee)"
@@ -7042,10 +7460,21 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let migs = author.lower(&ir_plain, &LiveSchema::default()).expect("lower");
-        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
-        assert!(!m.flags.destructive, "a plain index drop stays non-destructive");
-        assert!(!m.flags.requires_approval, "a plain index drop stays ungated");
+        let migs = author
+            .lower(&ir_plain, &LiveSchema::default())
+            .expect("lower");
+        let m = migs
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
+        assert!(
+            !m.flags.destructive,
+            "a plain index drop stays non-destructive"
+        );
+        assert!(
+            !m.flags.requires_approval,
+            "a plain index drop stays ungated"
+        );
     }
 
     /// Byte-compare a [`ColumnSnapshot`] including the EMISSION-ONLY facets that its
@@ -7086,7 +7515,9 @@ mod tests {
                 .add_column_snapshot(
                     "vault",
                     "secret",
-                    &ColType::Encrypted { of: Box::new(ColType::String) },
+                    &ColType::Encrypted {
+                        of: Box::new(ColType::String),
+                    },
                     None,
                     None,
                     None,
@@ -7119,7 +7550,11 @@ mod tests {
                 .find(|c| c.name == "secret")
                 .expect("differ secret column");
 
-            assert_col_byte_eq(&ir_col, differ_col, &format!("{dialect:?} encrypted addColumn"));
+            assert_col_byte_eq(
+                &ir_col,
+                differ_col,
+                &format!("{dialect:?} encrypted addColumn"),
+            );
             // The encrypted column actually CARRIES a sentinel (so the equality above
             // is a meaningful pin, not a None==None tautology).
             assert!(
@@ -7138,14 +7573,19 @@ mod tests {
     fn ir_author_createtable_snapshot_injects_system_fields_byte_equal_to_differ() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let author = IrAuthor::new("app", "app_a", dialect);
-            let user_cols = vec![
-                TIrColumn {
-                    name: "title".into(),
-                    ty: ColType::Text,
-                    nullable: Some(false),
-                    default: None,
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
-            ];
+            let user_cols = vec![TIrColumn {
+                name: "title".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }];
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
             // descriptor mapping → shared builder).
@@ -7212,7 +7652,9 @@ mod tests {
                         name: "settings".into(),
                         ty: ColType::Json,
                         nullable: None,
-                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Object }),
+                        default: Some(IrDefault::Container {
+                            kind: EmptyContainerKind::Object,
+                        }),
                         unique: None,
                         id_prefix: None,
                         case_sensitive: None,
@@ -7225,7 +7667,9 @@ mod tests {
                         name: "items".into(),
                         ty: ColType::Json,
                         nullable: None,
-                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
+                        default: Some(IrDefault::Container {
+                            kind: EmptyContainerKind::Array,
+                        }),
                         unique: None,
                         id_prefix: None,
                         case_sensitive: None,
@@ -7238,7 +7682,9 @@ mod tests {
                         name: "scopes".into(),
                         ty: ColType::TextArray,
                         nullable: None,
-                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
+                        default: Some(IrDefault::Container {
+                            kind: EmptyContainerKind::Array,
+                        }),
                         unique: None,
                         id_prefix: None,
                         case_sensitive: None,
@@ -7305,9 +7751,7 @@ mod tests {
                     name: "net_policy_limits_json".into(),
                     ty: ColType::Json,
                     nullable: None,
-                    default: Some(IrDefault::Json {
-                        value: value.clone(),
-                    }),
+                    default: Some(IrDefault::Json { value }),
                     unique: None,
                     id_prefix: None,
                     case_sensitive: None,
@@ -7438,15 +7882,22 @@ mod tests {
                     ty: ColType::Timestamp,
                     nullable: None,
                     default: Some(synth_default(crate::model::expr::SynthFn::Now)),
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: None,
-            schema: None,
+                runtime_options: None,
+                schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -7513,7 +7964,9 @@ mod tests {
                 column: "kind".into(),
                 ty: ColType::Text,
                 nullable: Some(false),
-                default: Some(IrDefault::Literal { value: crate::model::ir::IrScalar::Str("x".into()) }),
+                default: Some(IrDefault::Literal {
+                    value: crate::model::ir::IrScalar::Str("x".into()),
+                }),
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -7546,7 +7999,10 @@ mod tests {
                 table: "events".into(),
                 column: "kind".into(),
                 to_type: ColType::Text,
-                using: Some(Expr::ColRef { name: "kind".into(), table: None }),
+                using: Some(Expr::ColRef {
+                    name: "kind".into(),
+                    table: None,
+                }),
                 schema: None,
                 existence_guard: None,
             }],
@@ -7562,7 +8018,6 @@ mod tests {
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert!(err.reason.contains("setColumnType.using"));
-
     }
 
     #[test]
@@ -7577,7 +8032,9 @@ mod tests {
             ops: vec![Op::SetColumnDefault {
                 table: "events".into(),
                 column: "kind".into(),
-                value: IrDefault::Literal { value: IrScalar::Str("new".into()) },
+                value: IrDefault::Literal {
+                    value: IrScalar::Str("new".into()),
+                },
                 schema: None,
                 existence_guard: None,
             }],
@@ -7587,7 +8044,8 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&literal_ir, Dialect::Postgres, &[]).expect("literal setColumnDefault validates");
+        validate_ir(&literal_ir, Dialect::Postgres, &[])
+            .expect("literal setColumnDefault validates");
         let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower(&literal_ir, &LiveSchema::default())
             .expect("literal setColumnDefault lowers");
@@ -7617,12 +8075,15 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&synth_ir, Dialect::Postgres, &[]).expect("synth expr setColumnDefault validates");
+        validate_ir(&synth_ir, Dialect::Postgres, &[])
+            .expect("synth expr setColumnDefault validates");
         let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower(&synth_ir, &LiveSchema::default())
             .expect("synth expr setColumnDefault lowers");
         assert!(
-            migrations[0].up.contains("ALTER COLUMN \"at\" SET DEFAULT now()"),
+            migrations[0]
+                .up
+                .contains("ALTER COLUMN \"at\" SET DEFAULT now()"),
             "synth expr default must render as SET DEFAULT, got {}",
             migrations[0].up
         );
@@ -7669,7 +8130,10 @@ mod tests {
             checksum: None,
         };
         let migs = author.lower(&ir_understated, &live).expect("lower");
-        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        let m = migs
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
         assert!(
             m.flags.destructive,
             "a drop of a LIVE-unique index must lower destructive even when the IR hint says unique:false"
@@ -7682,8 +8146,13 @@ mod tests {
         // The SAME drop with an EMPTY live set (no introspection) falls back to the
         // hint alone — `unique:false` ⇒ ungated. The live fact, when present, is what
         // adds the gate; the hint-only fallback is never LESS strict than the hint.
-        let migs_no_live = author.lower(&ir_understated, &LiveSchema::default()).expect("lower");
-        let m = migs_no_live.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        let migs_no_live = author
+            .lower(&ir_understated, &LiveSchema::default())
+            .expect("lower");
+        let m = migs_no_live
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
         assert!(
             !m.flags.destructive && !m.flags.requires_approval,
             "with no live facts, the gate falls back to the (false) hint — ungated"
@@ -7710,7 +8179,10 @@ mod tests {
             checksum: None,
         };
         let migs = author.lower(&ir_absent_hint, &live).expect("lower");
-        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        let m = migs
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
         assert!(
             m.flags.destructive && m.flags.requires_approval,
             "a drop of a LIVE-unique index with no hint must STILL be gated by the live fact"
@@ -7777,7 +8249,10 @@ mod tests {
             checksum: None,
         };
         let migs = author.lower(&understated, &live).expect("lower");
-        let m = migs.iter().find(|m| m.up.contains("DROP INDEX")).expect("a DROP INDEX");
+        let m = migs
+            .iter()
+            .find(|m| m.up.contains("DROP INDEX"))
+            .expect("a DROP INDEX");
         assert!(
             m.flags.destructive && m.flags.requires_approval,
             "an understated drop of a descriptor-unique index must STILL be gated on SQLite \
@@ -7807,8 +8282,7 @@ mod tests {
         // The pre-fix shape wrapped the to-collision check in a SECOND fallible lookup
         // whose None arm could silently skip the guard. Assembled from fragments so this
         // test's own source does not self-trip the scan.
-        let prohibited =
-            format!("if let Some(snap) = live.{}.get", "table_snapshots");
+        let prohibited = format!("if let Some(snap) = live.{}.get", "table_snapshots");
         // The implementation of `lower_rename` is the only place this shape could live;
         // the guard now reuses the fail-closed `live_snapshot` binding instead. The scan
         // is over the whole module (the impl + tests); the only `if let Some(.. =
@@ -7849,7 +8323,8 @@ mod tests {
             )
             .expect("a fresh createTable by its declarer loads + lowers");
         assert!(
-            migs.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")),
+            migs.iter()
+                .any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")),
             "lowering must emit the CREATE TABLE"
         );
     }
@@ -7906,10 +8381,15 @@ mod tests {
                 &guard_cfg,
                 Some(&profile),
             )
-            .expect_err("a fragment outside the confined schema must be denied via the wired entry");
+            .expect_err(
+                "a fragment outside the confined schema must be denied via the wired entry",
+            );
         match err {
             LoadAndLowerGuardedError::Lower(IrGuardedLowerError::Denied(d)) => {
-                assert_eq!(d.op_index, 0, "the denial attributes to op #0 through the deploy entry");
+                assert_eq!(
+                    d.op_index, 0,
+                    "the denial attributes to op #0 through the deploy entry"
+                );
                 assert_eq!(d.op_kind, "createTable");
             }
             other => panic!("expected a per-fragment Denied via the guarded entry, got: {other}"),
@@ -7936,8 +8416,15 @@ mod tests {
                 Some(&profile),
             )
             .expect("a clean createTable loads + guarded-lowers");
-        assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
-        assert!(out.migrations().iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
+        assert_eq!(
+            out.created_tables,
+            vec!["fresh".to_string()],
+            "the createTable is reported"
+        );
+        assert!(out
+            .migrations()
+            .iter()
+            .any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
         assert!(!out.fragments.is_empty(), "fragments are attributed");
     }
 
@@ -7990,8 +8477,16 @@ mod tests {
             vec!["platform_apps".to_string(), "platform_registry".to_string()],
             "created table reporting must use the same helper as ownership registration"
         );
-        let sql = out.migrations().iter().map(|m| m.up.as_str()).collect::<Vec<_>>().join(";\n");
-        assert!(sql.contains("CREATE TABLE \"zero_migrate\".\"platform_registry\""), "{sql}");
+        let sql = out
+            .migrations()
+            .iter()
+            .map(|m| m.up.as_str())
+            .collect::<Vec<_>>()
+            .join(";\n");
+        assert!(
+            sql.contains("CREATE TABLE \"zero_migrate\".\"platform_registry\""),
+            "{sql}"
+        );
         assert!(sql.contains("PRIMARY KEY (app_id, route)"), "{sql}");
         assert!(sql.contains("ADD CONSTRAINT"), "{sql}");
         assert!(sql.contains("\"platform_registry_app_fk\""), "{sql}");
@@ -8001,7 +8496,10 @@ mod tests {
         assert!(sql.contains("FORCE ROW LEVEL SECURITY"), "{sql}");
         assert!(sql.contains("CREATE POLICY"), "{sql}");
         assert!(sql.contains("\"tenant_isolation\""), "{sql}");
-        assert!(sql.contains("COMMENT ON TABLE \"zero_migrate\".\"platform_registry\""), "{sql}");
+        assert!(
+            sql.contains("COMMENT ON TABLE \"zero_migrate\".\"platform_registry\""),
+            "{sql}"
+        );
         assert!(sql.contains("CREATE TRIGGER"), "{sql}");
         assert!(sql.contains("\"platform_registry_touch_trg\""), "{sql}");
     }
@@ -8074,7 +8572,9 @@ mod tests {
             .expect("first file creates the platform table");
         assert_eq!(first.created_tables, vec!["platform_registry".to_string()]);
         for table in first.created_tables {
-            owners.entry(table).or_insert_with(|| "platform".to_string());
+            owners
+                .entry(table)
+                .or_insert_with(|| "platform".to_string());
         }
 
         platform_author("platform", &guard)
@@ -8098,14 +8598,26 @@ mod tests {
     // Migrations carried `Checksum::of(up,down)` — a PG-specific rendered-SQL hash).
     #[test]
     fn ir_plan_anchor_is_of_ir_not_rendered_sql() {
-        let ir = create_table_ir("widgets", vec![TIrColumn {
-            name: "title".into(),
-            ty: ColType::Text,
-            nullable: Some(false),
-            default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+        let ir = create_table_ir(
+            "widgets",
+            vec![TIrColumn {
+                name: "title".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
+        let plan = author
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("lower_plan");
 
         // The authoritative op-list anchor (server-stamped owner already on `ir`).
         let expected = crate::model::migration::Checksum::of_ir(
@@ -8147,7 +8659,10 @@ mod tests {
                 );
             }
         }
-        assert!(steps >= 1, "the createTable lowers to at least one Ddl step");
+        assert!(
+            steps >= 1,
+            "the createTable lowers to at least one Ddl step"
+        );
     }
 
     // Regression: the op-list drift anchor is DIALECT-NEUTRAL — the SAME IR envelope
@@ -8157,12 +8672,22 @@ mod tests {
     // DIVERGES (PG `CREATE TABLE app.widgets` vs SQLite `CREATE TABLE "widgets"`).
     #[test]
     fn ir_plan_anchor_is_dialect_neutral_pg_eq_sqlite() {
-        let ir = create_table_ir("widgets", vec![TIrColumn {
-            name: "title".into(),
-            ty: ColType::Text,
-            nullable: Some(false),
-            default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+        let ir = create_table_ir(
+            "widgets",
+            vec![TIrColumn {
+                name: "title".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
         let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("pg lower_plan");
@@ -8183,7 +8708,10 @@ mod tests {
             PlanStep::Ddl(m) => m.up.clone(),
             _ => unreachable!(),
         };
-        assert_ne!(pg_up, sqlite_up, "the rendered SQL DOES diverge per dialect — only the anchor is shared");
+        assert_ne!(
+            pg_up, sqlite_up,
+            "the rendered SQL DOES diverge per dialect — only the anchor is shared"
+        );
     }
 
     // Regression: editing the authoring op list (a `.ts` edit) changes the op list
@@ -8192,13 +8720,45 @@ mod tests {
     // plan anchors.
     #[test]
     fn ir_plan_anchor_changes_when_op_list_changes() {
-        let a = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
-        let b = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+        let a = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "c".into(),
+                ty: ColType::Text,
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+        let b = create_table_ir(
+            "t",
+            vec![TIrColumn {
+                name: "c".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
-        let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");
+        let pa = author
+            .lower_plan(&a, &LiveSchema::default())
+            .expect("lower a");
+        let pb = author
+            .lower_plan(&b, &LiveSchema::default())
+            .expect("lower b");
         assert_ne!(
             pa.checksum.as_str(),
             pb.checksum.as_str(),
@@ -8245,12 +8805,22 @@ mod tests {
         let v1 = dml_step_version(1, "app_a", "update", "UPDATE t SET …", &binds);
 
         // Deterministic: re-lowering the identical (op_index, content) is the SAME id.
-        assert_eq!(v0, v0_again, "same op_index + content must be deterministic (idempotent re-deploy)");
+        assert_eq!(
+            v0, v0_again,
+            "same op_index + content must be deterministic (idempotent re-deploy)"
+        );
         // Distinct: two byte-identical ops at positions 0 and 1 must NOT collide.
-        assert_ne!(v0, v1, "distinct plan positions must mint distinct versions");
+        assert_ne!(
+            v0, v1,
+            "distinct plan positions must mint distinct versions"
+        );
         // A re-authored op (changed binds) at the same position is still a fresh id.
-        let v0_diff = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &[BindValue::Int(8)]);
-        assert_ne!(v0, v0_diff, "changed binds must mint a fresh id (no false resume)");
+        let v0_diff =
+            dml_step_version(0, "app_a", "update", "UPDATE t SET …", &[BindValue::Int(8)]);
+        assert_ne!(
+            v0, v0_diff,
+            "changed binds must mint a fresh id (no false resume)"
+        );
     }
 
     // Edge case: `plan_step_version` of a `PgExpandContract` whose `expand` chain is
@@ -8331,9 +8901,16 @@ mod tests {
     fn rename_table_lowers_to_direct_alter_pg() {
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let migs = author
-            .lower(&rename_table_ir("accounts", "members"), &LiveSchema::default())
+            .lower(
+                &rename_table_ir("accounts", "members"),
+                &LiveSchema::default(),
+            )
             .expect("lower renameTable (PG)");
-        assert_eq!(migs.len(), 1, "a table rename is ONE direct ALTER, not an expand-contract sequence");
+        assert_eq!(
+            migs.len(),
+            1,
+            "a table rename is ONE direct ALTER, not an expand-contract sequence"
+        );
         let m = &migs[0];
         assert_eq!(
             m.up, r#"ALTER TABLE "app"."accounts" RENAME TO "members""#,
@@ -8344,8 +8921,14 @@ mod tests {
             Some(r#"ALTER TABLE "app"."members" RENAME TO "accounts""#),
             "PG down is the inverse rename"
         );
-        assert!(m.flags.requires_approval, "a table rename is backward-incompatible — operator-gated");
-        assert!(!m.flags.destructive, "a table rename is reversible — NOT data-loss destructive");
+        assert!(
+            m.flags.requires_approval,
+            "a table rename is backward-incompatible — operator-gated"
+        );
+        assert!(
+            !m.flags.destructive,
+            "a table rename is reversible — NOT data-loss destructive"
+        );
         assert!(
             !m.up.contains("ADD COLUMN") && !m.up.contains("TRIGGER"),
             "a table rename must NOT route through the online column expand-contract path"
@@ -8358,7 +8941,10 @@ mod tests {
     fn rename_table_lowers_to_direct_alter_sqlite() {
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let migs = author
-            .lower(&rename_table_ir("accounts", "members"), &LiveSchema::default())
+            .lower(
+                &rename_table_ir("accounts", "members"),
+                &LiveSchema::default(),
+            )
             .expect("lower renameTable (SQLite)");
         assert_eq!(migs.len(), 1, "one direct ALTER on the SQLite leg too");
         let m = &migs[0];

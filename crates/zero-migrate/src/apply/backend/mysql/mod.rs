@@ -44,12 +44,12 @@ use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
+use crate::driver::SqlSession;
 use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
-use crate::driver::SqlSession;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
 ///
@@ -167,10 +167,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         journal_sql::applied(self.conn, cfg).await
     }
 
-    async fn superseded_versions(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<String>, JournalError> {
+    async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
         journal_sql::superseded_versions(self.conn, cfg).await
     }
 
@@ -193,7 +190,9 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // repeatable-exemption / kind-mismatch / tamper rules never diverge across
         // dialects.
         let applied = journal_sql::applied(self.conn, cfg).await?;
-        Ok(crate::apply::drift::compare_applied_to_set(&applied, migrations))
+        Ok(crate::apply::drift::compare_applied_to_set(
+            &applied, migrations,
+        ))
     }
 
     async fn snapshot_schema(&self, _cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
@@ -360,8 +359,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use crate::model::migration::{Checksum, MigrationFlags};
     use crate::driver::{Bind, DbError, Row, Value};
+    use crate::model::migration::{Checksum, MigrationFlags};
     use std::cell::RefCell;
 
     /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of
@@ -515,8 +514,14 @@ mod render_tests {
         let backend = MysqlBackend::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
-        backend.acquire_project_lock(&cfg).await.expect("acquire GET_LOCK");
-        backend.release_project_lock(&cfg).await.expect("release RELEASE_LOCK");
+        backend
+            .acquire_project_lock(&cfg)
+            .await
+            .expect("acquire GET_LOCK");
+        backend
+            .release_project_lock(&cfg)
+            .await
+            .expect("release RELEASE_LOCK");
 
         let log = rec.log.borrow();
         assert!(
@@ -533,10 +538,9 @@ mod render_tests {
         );
         // The derived lock name crossed the seam as a bound Text, never interpolated.
         assert!(
-            rec.binds
-                .borrow()
+            rec.binds.borrow().iter().any(|b| b
                 .iter()
-                .any(|b| b.iter().any(|v| matches!(v, Bind::Text(t) if t == "zero_migrate:prj_x"))),
+                .any(|v| matches!(v, Bind::Text(t) if t == "zero_migrate:prj_x"))),
             "the project lock name is bound, not interpolated: {:?}",
             rec.binds.borrow()
         );
@@ -554,7 +558,10 @@ mod render_tests {
         let backend = MysqlBackend::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
-        backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .expect("ensure_journal DDL");
 
         let log = rec.log.borrow();
         let all = log.join("\n");
@@ -650,7 +657,9 @@ mod render_tests {
         );
         // The inflight marker is cleared with a ? placeholder.
         assert!(
-            all.contains("DELETE FROM `proj_x_migrations`.schema_migrations_inflight WHERE version = ?"),
+            all.contains(
+                "DELETE FROM `proj_x_migrations`.schema_migrations_inflight WHERE version = ?"
+            ),
             "inflight clear is a DELETE ... WHERE version = ?: {all}"
         );
         // No Postgres `$N` placeholders anywhere on the MySQL write path.

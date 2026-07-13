@@ -62,8 +62,8 @@
 //! the table + column names), so re-authoring the same intent yields identical
 //! `Expand` checksums — exactly like [`crate::plan::author`]'s index-name determinism.
 
-use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
 use crate::model::backfill::BackfillSpec;
+use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
 
 /// A high-level online-migration intent the [`ExpandContractAuthor`] expands
 /// into an ordered, phased [`Migration`] sequence.
@@ -314,10 +314,7 @@ impl ExpandContractAuthor {
     /// # Errors
     /// [`ExpandContractError::Invalid`] for an empty table/column name, a `from`
     /// equal to `to`, or an empty type.
-    pub fn author(
-        &self,
-        intent: &OnlineIntent,
-    ) -> Result<ExpandContractPlan, ExpandContractError> {
+    pub fn author(&self, intent: &OnlineIntent) -> Result<ExpandContractPlan, ExpandContractError> {
         match intent {
             OnlineIntent::RenameColumn {
                 table,
@@ -481,9 +478,8 @@ impl ExpandContractAuthor {
         );
 
         // ---- C1: DROP TRIGGER + DROP FUNCTION (gated, depends_on E2) ----
-        let c1_up = format!(
-            "DROP TRIGGER IF EXISTS {trg_q} ON {tbl_q}; DROP FUNCTION IF EXISTS {fn_q}()"
-        );
+        let c1_up =
+            format!("DROP TRIGGER IF EXISTS {trg_q} ON {tbl_q}; DROP FUNCTION IF EXISTS {fn_q}()");
         let c1 = self.make(
             &format!("contract_drop_dual_write_{table}_{from}_{to}"),
             c1_up,
@@ -621,13 +617,7 @@ impl ExpandContractAuthor {
 /// The only-`from` arm is `IS DISTINCT FROM`-guarded (NULL-safe). The else arm
 /// is the total catch-all; when nothing changed it is a no-op self-copy, so an
 /// UPDATE that touches neither column is not amplified.
-fn build_dual_write_sql(
-    fn_q: &str,
-    trg_q: &str,
-    tbl_q: &str,
-    from_q: &str,
-    to_q: &str,
-) -> String {
+fn build_dual_write_sql(fn_q: &str, trg_q: &str, tbl_q: &str, from_q: &str, to_q: &str) -> String {
     // The function body. `$zsdw$` dollar-quote so embedded SQL needs no escaping.
     // BEGIN … RETURN NEW: a BEFORE trigger mutates NEW in place (never re-issues
     // a write → no recursion).
@@ -863,19 +853,48 @@ mod tests {
         // re-lower of the identical IR envelope on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
-        assert_eq!(p1.trigger_version, p2.trigger_version, "E2 obligation key is deterministic");
+        assert_eq!(
+            p1.trigger_version, p2.trigger_version,
+            "E2 obligation key is deterministic"
+        );
         for (a, b) in p1.expand.iter().zip(&p2.expand) {
-            assert_eq!(a.version, b.version, "expand sub-step id must be deterministic: {}", a.name);
+            assert_eq!(
+                a.version, b.version,
+                "expand sub-step id must be deterministic: {}",
+                a.name
+            );
             assert_eq!(a.up, b.up, "expand up SQL must be byte-stable: {}", a.name);
             assert_eq!(a.down, b.down, "expand down SQL must be byte-stable");
-            assert_eq!(a.depends_on, b.depends_on, "expand depends_on must be deterministic");
-            assert_eq!(a.checksum, b.checksum, "expand checksum must be stable: {}", a.name);
+            assert_eq!(
+                a.depends_on, b.depends_on,
+                "expand depends_on must be deterministic"
+            );
+            assert_eq!(
+                a.checksum, b.checksum,
+                "expand checksum must be stable: {}",
+                a.name
+            );
         }
         for (a, b) in p1.contract.iter().zip(&p2.contract) {
-            assert_eq!(a.version, b.version, "contract sub-step id must be deterministic: {}", a.name);
-            assert_eq!(a.up, b.up, "contract up SQL must be byte-stable: {}", a.name);
-            assert_eq!(a.depends_on, b.depends_on, "contract depends_on must be deterministic");
-            assert_eq!(a.checksum, b.checksum, "contract checksum must be stable: {}", a.name);
+            assert_eq!(
+                a.version, b.version,
+                "contract sub-step id must be deterministic: {}",
+                a.name
+            );
+            assert_eq!(
+                a.up, b.up,
+                "contract up SQL must be byte-stable: {}",
+                a.name
+            );
+            assert_eq!(
+                a.depends_on, b.depends_on,
+                "contract depends_on must be deterministic"
+            );
+            assert_eq!(
+                a.checksum, b.checksum,
+                "contract checksum must be stable: {}",
+                a.name
+            );
         }
         assert_eq!(p1.backfill.backfill_id(), p2.backfill.backfill_id());
     }
@@ -894,7 +913,10 @@ mod tests {
         // All five sub-step ids are distinct.
         let mut seen = std::collections::HashSet::new();
         for m in p1.all() {
-            assert!(seen.insert(m.version.as_str().to_string()), "sub-step ids must be distinct");
+            assert!(
+                seen.insert(m.version.as_str().to_string()),
+                "sub-step ids must be distinct"
+            );
         }
         // A DIFFERENT rename (different `to`) gets a different obligation key.
         let other = author()
@@ -958,7 +980,10 @@ mod tests {
                 ty: "text; CREATE TABLE control.evil(x int)".into(),
             })
             .expect_err("a type with a ';' second statement must be rejected");
-        assert!(matches!(err, ExpandContractError::Invalid(_)), "got {err:?}");
+        assert!(
+            matches!(err, ExpandContractError::Invalid(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1039,8 +1064,16 @@ mod tests {
         // both E2.up (CREATE) and E2.down (DROP) identically.
         let fn_name = dual_write_fn_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
         let trg_name = dual_write_trg_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
-        assert!(fn_name.len() <= PG_MAX_IDENT_BYTES, "fn {} bytes", fn_name.len());
-        assert!(trg_name.len() <= PG_MAX_IDENT_BYTES, "trg {} bytes", trg_name.len());
+        assert!(
+            fn_name.len() <= PG_MAX_IDENT_BYTES,
+            "fn {} bytes",
+            fn_name.len()
+        );
+        assert!(
+            trg_name.len() <= PG_MAX_IDENT_BYTES,
+            "trg {} bytes",
+            trg_name.len()
+        );
         assert!(e2.up.contains(&fn_name), "up must use capped fn name");
         assert!(e2.down.as_ref().unwrap().contains(&fn_name));
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));

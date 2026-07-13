@@ -139,7 +139,7 @@ pub fn classify(sql: &str) -> Result<Vec<StatementClass>, ParseError> {
 }
 
 /// Extract top-level `DROP INDEX` targets from raw SQL using the same real
-/// PostgreSQL parse tree the guard consumes.
+/// `PostgreSQL` parse tree the guard consumes.
 ///
 /// SQL text cannot say whether an index is unique; callers with a live database
 /// can use these names to resolve `pg_index.indisunique` at apply/review time.
@@ -150,8 +150,7 @@ pub fn drop_index_targets(sql: &str) -> Result<Vec<DropIndexTarget>, ParseError>
     let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
     let mut out = Vec::new();
     for raw_stmt in &parsed.protobuf.stmts {
-        let Some(NodeEnum::DropStmt(drop)) =
-            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        let Some(NodeEnum::DropStmt(drop)) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
         else {
             continue;
         };
@@ -197,7 +196,7 @@ pub fn raw_sql_requires_index_drop_approval(sql: &str) -> Result<bool, ParseErro
     Ok(false)
 }
 
-fn is_top_level_drop_index(node: &NodeEnum) -> bool {
+const fn is_top_level_drop_index(node: &NodeEnum) -> bool {
     matches!(node, NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32)
 }
 
@@ -217,7 +216,7 @@ fn node_is_opaque_execution_carrier(node: &NodeEnum) -> bool {
     }
 }
 
-fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
+const fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
     match node {
         NodeRef::DoStmt(_) | NodeRef::CreateFunctionStmt(_) => true,
         NodeRef::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
@@ -229,9 +228,15 @@ fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
 /// reported `stmt_location`/`stmt_len` (byte offsets into the input). A zero
 /// `stmt_len` (single trailing statement) means "to end of input".
 fn raw_statement_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
-    let start = usize::try_from(raw_stmt.stmt_location).unwrap_or(0).min(sql.len());
+    let start = usize::try_from(raw_stmt.stmt_location)
+        .unwrap_or(0)
+        .min(sql.len());
     let len = usize::try_from(raw_stmt.stmt_len).unwrap_or(0);
-    let end = if len == 0 { sql.len() } else { (start + len).min(sql.len()) };
+    let end = if len == 0 {
+        sql.len()
+    } else {
+        (start + len).min(sql.len())
+    };
     sql.get(start..end).unwrap_or("").trim().to_string()
 }
 
@@ -477,11 +482,11 @@ fn alter_table_is_non_destructive(at: &protobuf::AlterTableStmt) -> bool {
     })
 }
 
-fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
+const fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
     Some("UPDATE")
 }
 
-fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
+const fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
     Some("DELETE")
 }
 
@@ -533,7 +538,7 @@ fn destructive_alter_table_cmd_json_operation(body: &Value) -> Option<&'static s
     json_i32_field(body, "subtype").and_then(destructive_alter_table_subtype_operation)
 }
 
-fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
+const fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
     if subtype == AlterTableType::AtDropColumn as i32 {
         Some("DROP COLUMN")
     } else if subtype == AlterTableType::AtDropConstraint as i32 {

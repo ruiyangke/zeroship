@@ -17,11 +17,11 @@ use crate::model::capability::{SealApplier, VendorCapabilities};
 // in-crate test suite (its production caller was removed), so these imports ride
 // behind `cfg(test)`.
 #[cfg(test)]
-use std::time::Duration;
-#[cfg(test)]
 use crate::conn::ExecutorConfig;
 #[cfg(test)]
 use crate::guard::GuardConfig;
+#[cfg(test)]
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -458,11 +458,7 @@ impl PolicyCapabilities {
                 ceiling.function,
                 draft.function,
             )?,
-            raw_sql: meet_bool_permission(
-                "capabilities.raw_sql",
-                ceiling.raw_sql,
-                draft.raw_sql,
-            )?,
+            raw_sql: meet_bool_permission("capabilities.raw_sql", ceiling.raw_sql, draft.raw_sql)?,
             raw_view_body: meet_bool_permission(
                 "capabilities.raw_view_body",
                 ceiling.raw_view_body,
@@ -508,11 +504,7 @@ pub struct RoleCapabilityConfig {
 impl RoleCapabilityConfig {
     fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
         Ok(Self {
-            allow: meet_bool_permission(
-                "capabilities.role.allow",
-                ceiling.allow,
-                draft.allow,
-            )?,
+            allow: meet_bool_permission("capabilities.role.allow", ceiling.allow, draft.allow)?,
             attrs: meet_role_attribute_permission_set(
                 "capabilities.role.attrs",
                 &ceiling.attrs,
@@ -674,11 +666,7 @@ where
     .map_err(<D::Error as serde::de::Error>::custom)
 }
 
-fn validate_timeout_ms(
-    value: u64,
-    knob: &'static str,
-    ceiling_ms: u64,
-) -> Result<u64, SealError> {
+fn validate_timeout_ms(value: u64, knob: &'static str, ceiling_ms: u64) -> Result<u64, SealError> {
     if value == 0 {
         return Err(SealError::InvalidTimeout {
             knob,
@@ -711,11 +699,7 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn meet_bool_permission(
-    knob: &'static str,
-    ceiling: bool,
-    draft: bool,
-) -> Result<bool, SealError> {
+fn meet_bool_permission(knob: &'static str, ceiling: bool, draft: bool) -> Result<bool, SealError> {
     if draft && !ceiling {
         return Err(SealError::PolicyExceedsCeiling { knob });
     }
@@ -790,7 +774,11 @@ impl IndexCreation {
     }
 
     const fn tightest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 
     const fn is_looser_than(self, ceiling: Self) -> bool {
@@ -821,7 +809,11 @@ impl TableRewrite {
     }
 
     const fn tightest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 
     const fn is_looser_than(self, ceiling: Self) -> bool {
@@ -868,7 +860,9 @@ impl DataSecurityConfig {
     /// instead of silently clamped.
     pub fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
         if ceiling.destructive_ops != DestructiveOps::RequireApproval
-            && draft.destructive_ops.is_looser_than(ceiling.destructive_ops)
+            && draft
+                .destructive_ops
+                .is_looser_than(ceiling.destructive_ops)
         {
             return Err(SealError::PolicyExceedsCeiling {
                 knob: "data_security.destructive_ops",
@@ -935,29 +929,121 @@ pub struct PolicyKnobSemantics {
 }
 
 const POLICY_KNOB_SEMANTICS: &[PolicyKnobSemantics] = &[
-    PolicyKnobSemantics { key: "capabilities.extension", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.schema", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.role.allow", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.role.attrs", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Intersection },
-    PolicyKnobSemantics { key: "capabilities.grant", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.rls", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.partition", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.policy", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.function", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.raw_sql", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.raw_view_body", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.materialized_view", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.cross_schema", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
-    PolicyKnobSemantics { key: "capabilities.extensions", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Intersection },
-    PolicyKnobSemantics { key: "capabilities.schemas", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Intersection },
-    PolicyKnobSemantics { key: "operational.table_rewrite", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
-    PolicyKnobSemantics { key: "operational.index_creation", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
-    PolicyKnobSemantics { key: "operational.lock_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::MinNonZero },
-    PolicyKnobSemantics { key: "operational.statement_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::MinNonZero },
-    PolicyKnobSemantics { key: "data_security.require_rls", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Or },
-    PolicyKnobSemantics { key: "data_security.no_hard_delete", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Or },
-    PolicyKnobSemantics { key: "data_security.sensitive_columns", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Union },
-    PolicyKnobSemantics { key: "data_security.destructive_ops", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
+    PolicyKnobSemantics {
+        key: "capabilities.extension",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.schema",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.role.allow",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.role.attrs",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Intersection,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.grant",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.rls",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.partition",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.policy",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.function",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.raw_sql",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.raw_view_body",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.materialized_view",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.cross_schema",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::And,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.extensions",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Intersection,
+    },
+    PolicyKnobSemantics {
+        key: "capabilities.schemas",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Intersection,
+    },
+    PolicyKnobSemantics {
+        key: "operational.table_rewrite",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Min,
+    },
+    PolicyKnobSemantics {
+        key: "operational.index_creation",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Min,
+    },
+    PolicyKnobSemantics {
+        key: "operational.lock_timeout_ms",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::MinNonZero,
+    },
+    PolicyKnobSemantics {
+        key: "operational.statement_timeout_ms",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::MinNonZero,
+    },
+    PolicyKnobSemantics {
+        key: "data_security.require_rls",
+        polarity: PolicyPolarity::Obligation,
+        meet: PolicyMeet::Or,
+    },
+    PolicyKnobSemantics {
+        key: "data_security.no_hard_delete",
+        polarity: PolicyPolarity::Obligation,
+        meet: PolicyMeet::Or,
+    },
+    PolicyKnobSemantics {
+        key: "data_security.sensitive_columns",
+        polarity: PolicyPolarity::Obligation,
+        meet: PolicyMeet::Union,
+    },
+    PolicyKnobSemantics {
+        key: "data_security.destructive_ops",
+        polarity: PolicyPolarity::Permission,
+        meet: PolicyMeet::Min,
+    },
 ];
 
 /// The only guard-compatible postures a sealed shared-infra profile can lower to.
@@ -1007,14 +1093,12 @@ impl SealedEffectiveProfile {
     #[cfg(test)]
     fn to_guard_config(&self) -> GuardConfig {
         match self.posture {
-            SealedPosture::Confined => {
-                GuardConfig::confined(self.project_schema.clone())
-                    .with_extension_allowlist(self.capabilities.extensions.clone())
-                    .with_data_security(
-                        self.data_security.require_rls,
-                        self.data_security.destructive_ops,
-                    )
-            }
+            SealedPosture::Confined => GuardConfig::confined(self.project_schema.clone())
+                .with_extension_allowlist(self.capabilities.extensions.clone())
+                .with_data_security(
+                    self.data_security.require_rls,
+                    self.data_security.destructive_ops,
+                ),
             SealedPosture::Platform => {
                 let cap = SealApplier::new();
                 GuardConfig::platform(
@@ -1182,7 +1266,10 @@ impl SealedProfile {
         validate_mac_key(key)?;
         let effective_profile = PolicyProfile::meet_ceiling_draft(&ceiling, &draft)?;
         let mut sealed = Self {
-            effective: SealedEffectiveProfile::from_profile(project_schema.into(), effective_profile)?,
+            effective: SealedEffectiveProfile::from_profile(
+                project_schema.into(),
+                effective_profile,
+            )?,
             nonce,
             issued_at,
             ceiling_version,
@@ -1279,7 +1366,6 @@ impl SealedProfile {
         Ok(())
     }
 
-
     #[cfg(test)]
     fn tamper_first_nonce_byte(&mut self) {
         if let Some(first) = self.nonce.first_mut() {
@@ -1295,8 +1381,7 @@ impl SealedProfile {
 
     fn build_mac(&self, key: &[u8]) -> Result<HmacSha256, SealError> {
         validate_mac_key(key)?;
-        let mut mac =
-            HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
         let payload = SealPayload {
             effective: SealPayloadEffective {
                 posture: self.effective.posture.into(),
@@ -1444,9 +1529,7 @@ impl SealVerifier {
         now_unix_secs: u64,
     ) -> Result<Self, SealError> {
         let mut verifier = Self::new(key, current_ceiling_version)?;
-        verifier.now_override = Some(Arc::new(std::sync::atomic::AtomicU64::new(
-            now_unix_secs,
-        )));
+        verifier.now_override = Some(Arc::new(std::sync::atomic::AtomicU64::new(now_unix_secs)));
         Ok(verifier)
     }
 
@@ -1527,7 +1610,9 @@ pub enum SealError {
         max_age_secs: u64,
     },
     /// The sealed profile was issued after the verifier's wall clock.
-    #[error("sealed profile issued_at {issued_at} is in the future relative to verifier time {now}")]
+    #[error(
+        "sealed profile issued_at {issued_at} is in the future relative to verifier time {now}"
+    )]
     IssuedInFuture {
         /// Issued-at timestamp embedded in the seal.
         issued_at: u64,
@@ -1738,9 +1823,10 @@ mod tests {
                 && c.kind == "PRIMARY KEY"
                 && c.definition == "PRIMARY KEY (id)"
         }));
-        assert!(snapshot.indexes.iter().any(|idx| {
-            idx.name == "widgets_pkey" && idx.unique && idx.columns == ["id"]
-        }));
+        assert!(snapshot
+            .indexes
+            .iter()
+            .any(|idx| { idx.name == "widgets_pkey" && idx.unique && idx.columns == ["id"] }));
     }
 
     #[test]
@@ -1876,7 +1962,10 @@ mod tests {
             ..DataSecurityConfig::default()
         };
         let effective = DataSecurityConfig::meet_ceiling_draft(&ceiling, &tight_draft).unwrap();
-        assert!(effective.require_rls, "ceiling require_rls must survive draft=false");
+        assert!(
+            effective.require_rls,
+            "ceiling require_rls must survive draft=false"
+        );
         assert_eq!(effective.destructive_ops, DestructiveOps::Forbid);
 
         let ceiling = DataSecurityConfig {
@@ -1920,8 +2009,14 @@ mod tests {
 
         assert_eq!(effective.operational.lock_timeout_ms, 1_000);
         assert!(effective.data_security.require_rls);
-        assert_eq!(effective.data_security.destructive_ops, DestructiveOps::Forbid);
-        assert_eq!(effective.vendor_capabilities(), VendorCapabilities::confined());
+        assert_eq!(
+            effective.data_security.destructive_ops,
+            DestructiveOps::Forbid
+        );
+        assert_eq!(
+            effective.vendor_capabilities(),
+            VendorCapabilities::confined()
+        );
 
         let sealed = crate::seal_effective_profile(effective, "app", KEY, 7)
             .expect("composed effective profile should seal through the public seam");
@@ -1982,10 +2077,7 @@ mod tests {
         op.apply_to_executor_config(&mut exec_cfg);
 
         assert_eq!(exec_cfg.pg.lock_timeout, Duration::from_millis(500));
-        assert_eq!(
-            exec_cfg.pg.statement_timeout,
-            Duration::from_millis(1_000)
-        );
+        assert_eq!(exec_cfg.pg.statement_timeout, Duration::from_millis(1_000));
     }
 
     #[test]
@@ -2003,7 +2095,10 @@ mod tests {
         .unwrap();
         sealed.verify(&verifier_at(VERIFY_NOW, 7)).unwrap();
         assert_eq!(sealed.posture(), SealedPosture::Platform);
-        assert_eq!(sealed.effective.system_shape, TableSystemShapePolicy::platform());
+        assert_eq!(
+            sealed.effective.system_shape,
+            TableSystemShapePolicy::platform()
+        );
     }
 
     #[test]
@@ -2048,7 +2143,7 @@ mod tests {
             Err(SealError::ReplayedNonce)
         ));
 
-        let cloned_verifier = verifier.clone();
+        let cloned_verifier = verifier;
         assert!(matches!(
             sealed.verify(&cloned_verifier),
             Err(SealError::ReplayedNonce)
@@ -2429,7 +2524,9 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("sealed require_rls profile must fail-close pgRaw table creation; got {other:?}"),
+            other => panic!(
+                "sealed require_rls profile must fail-close pgRaw table creation; got {other:?}"
+            ),
         }
     }
 
@@ -2440,15 +2537,7 @@ mod tests {
         profile.capabilities.raw_sql = true;
 
         assert!(matches!(
-            SealedProfile::mint(
-                &cap,
-                profile,
-                "app",
-                KEY,
-                b"nonce-1".to_vec(),
-                ISSUED_AT,
-                7,
-            ),
+            SealedProfile::mint(&cap, profile, "app", KEY, b"nonce-1".to_vec(), ISSUED_AT, 7,),
             Err(SealError::UnsupportedProfileKnob {
                 knob: "capabilities.granular"
             })
@@ -2457,8 +2546,8 @@ mod tests {
 
     #[test]
     fn sealed_profile_type_has_no_trusted_posture() {
-        let sealed = crate::seal_effective_profile(PolicyProfile::platform(), "app", KEY, 7)
-            .unwrap();
+        let sealed =
+            crate::seal_effective_profile(PolicyProfile::platform(), "app", KEY, 7).unwrap();
         match sealed.posture() {
             SealedPosture::Confined | SealedPosture::Platform => {}
         }

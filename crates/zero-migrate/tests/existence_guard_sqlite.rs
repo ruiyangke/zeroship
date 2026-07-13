@@ -1,40 +1,39 @@
 //! Faithful e2e for the executor-side existence-guard catalog
-//! probe on REAL SQLite (temp-file backend). Each test builds a guarded `op.*` IR,
-//! lowers it through the REAL `IrAuthor` (SQLite dialect, which stamps the
+//! probe on REAL `SQLite` (temp-file backend). Each test builds a guarded `op.*` IR,
+//! lowers it through the REAL `IrAuthor` (`SQLite` dialect, which stamps the
 //! `GuardProbe` onto the lowered `Migration`), and applies it through the REAL
 //! `SqliteBackend::apply_one` — the same per-migration apply seam
 //! `execute_pending` drives under the held lock. No shims.
 //!
 //! SQLite-supported guarded ops (addConstraint/alterColumn/dropConstraint are
-//! PG-only at lower — they route through the rebuild on SQLite, so they are not
+//! PG-only at lower — they route through the rebuild on `SQLite`, so they are not
 //! stand-alone-guardable here):
-//! - addColumn ifNotExists: absent → runs; present+matching → SatisfiedNoop (no
+//! - addColumn ifNotExists: absent → runs; present+matching → `SatisfiedNoop` (no
 //!   duplicate-column error, version journaled); present+divergent type →
 //!   `ExistenceGuardDrift` naming `data_type`, nothing applied.
 //! - createTable ifNotExists: present+extra-live-column → fail closed.
-//! - dropColumn ifExists: present → drops + journaled; absent → SatisfiedNoop.
-//! - dropTable ifExists: absent → SatisfiedNoop journaled.
+//! - dropColumn ifExists: present → drops + journaled; absent → `SatisfiedNoop`.
+//! - dropTable ifExists: absent → `SatisfiedNoop` journaled.
 //!
-//! Plus the SQLite affinity-fold compare (F1): the PG-spelled snapshot data_type is
-//! folded to the SQLite affinity (`sqlite_canonical_type`) before compare — exactly
+//! Plus the `SQLite` affinity-fold compare (F1): the PG-spelled snapshot `data_type` is
+//! folded to the `SQLite` affinity (`sqlite_canonical_type`) before compare — exactly
 //! as the differ does — so a guarded createTable/addColumn re-run is idempotent for
 //! every type (timestamp/jsonb/text/ref all fold to the `text` affinity and match),
 //! while a GENUINE affinity change (string→number, text↔real) still fails closed.
 
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::apply::executor::ApplyError;
-use zero_migrate::model::ir::{
-    ColType, ExistenceGuard, IrColumn, MigrationIr, Op, SelectAst, SelectItem, TableRef,
-    ViewQuery,
-};
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::apply::journal::Phase;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::{resolve_create_table_policy, PolicyProfile, SqliteBackend};
-use zero_migrate::schema::query::SqlDialect;
 use std::path::PathBuf;
 use tempfile::TempDir;
+use zero_migrate::apply::backend::MigrationBackend;
+use zero_migrate::apply::executor::ApplyError;
+use zero_migrate::apply::journal::Phase;
+use zero_migrate::conn::ExecutorConfig;
+use zero_migrate::model::ir::{
+    ColType, ExistenceGuard, IrColumn, MigrationIr, Op, SelectAst, SelectItem, TableRef, ViewQuery,
+};
+use zero_migrate::model::migration::Migration;
+use zero_migrate::render::lower::{IrAuthor, LiveSchema};
+use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{resolve_create_table_policy, PolicyProfile, SqliteBackend};
 
 struct Paths {
     _dir: TempDir,
@@ -46,7 +45,11 @@ fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
     let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -57,9 +60,9 @@ fn cfg() -> ExecutorConfig {
     ExecutorConfig::new("prj_test", "main")
 }
 
-/// Lower a guarded IR op through the REAL `IrAuthor` (SQLite dialect). Returns the
+/// Lower a guarded IR op through the REAL `IrAuthor` (`SQLite` dialect). Returns the
 /// lowered migrations (with the `GuardProbe` stamped). The bound project schema is
-/// `main` (the SQLite implicit target).
+/// `main` (the `SQLite` implicit target).
 fn lower(op: Op) -> Vec<Migration> {
     let ir = MigrationIr {
         ir_version: 2,
@@ -75,7 +78,9 @@ fn lower(op: Op) -> Vec<Migration> {
     let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
         .expect("guard test IR resolves");
     let author = IrAuthor::new("main", "app_test", SqlDialect::Sqlite);
-    author.lower(&ir, &LiveSchema::default()).expect("guarded op lowers")
+    author
+        .lower(&ir, &LiveSchema::default())
+        .expect("guarded op lowers")
 }
 
 async fn apply_one(be: &SqliteBackend, m: &Migration) -> Result<(), ApplyError> {
@@ -85,13 +90,27 @@ async fn apply_one(be: &SqliteBackend, m: &Migration) -> Result<(), ApplyError> 
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
-    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }
+    IrColumn {
+        name: name.into(),
+        ty,
+        nullable: Some(true),
+        default: None,
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    }
 }
 
 async fn table_has_column(be: &SqliteBackend, table: &str, column: &str) -> bool {
     let rows = be
         .actor()
-        .query(&format!("SELECT name FROM pragma_table_info('{table}') WHERE name = '{column}'"))
+        .query(&format!(
+            "SELECT name FROM pragma_table_info('{table}') WHERE name = '{column}'"
+        ))
         .await
         .expect("pragma table_info");
     !rows.is_empty()
@@ -120,12 +139,14 @@ async fn view_exists(be: &SqliteBackend, name: &str) -> bool {
 }
 
 /// Does an index of this name PHYSICALLY exist on `table`? Probes
-/// `PRAGMA index_list(table)` (the SQLite analogue of the PG `pg_indexes`
+/// `PRAGMA index_list(table)` (the `SQLite` analogue of the PG `pg_indexes`
 /// helper). `unique_only` further asserts the index is unique.
 async fn index_exists(be: &SqliteBackend, table: &str, index: &str, unique_only: bool) -> bool {
     let rows = be
         .actor()
-        .query(&format!("SELECT name, \"unique\" FROM pragma_index_list('{table}')"))
+        .query(&format!(
+            "SELECT name, \"unique\" FROM pragma_index_list('{table}')"
+        ))
         .await
         .expect("pragma index_list");
     rows.iter().any(|r| {
@@ -163,10 +184,10 @@ async fn add_column_ifnotexists_absent_runs() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -213,10 +234,10 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -258,7 +279,10 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
             .await
             .expect("a present TEXT-affinity column is an idempotent satisfied no-op (F1)");
     }
-    assert!(table_has_column(&be, "t", "email").await, "column still present");
+    assert!(
+        table_has_column(&be, "t", "email").await,
+        "column still present"
+    );
     assert!(journaled(&be, &v).await, "satisfied no-op still journals");
 }
 
@@ -276,10 +300,10 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -298,7 +322,9 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         schema: None,
         existence_guard: None,
     }) {
-        apply_one(&be, &m).await.expect("add the integer column unguarded");
+        apply_one(&be, &m)
+            .await
+            .expect("add the integer column unguarded");
     }
 
     let migs = lower(Op::AddColumn {
@@ -344,10 +370,10 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -368,7 +394,9 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         schema: None,
         existence_guard: None,
     }) {
-        apply_one(&be, &m).await.expect("add the live string column unguarded");
+        apply_one(&be, &m)
+            .await
+            .expect("add the live string column unguarded");
     }
 
     // Guarded add declaring a REF (a different SDK facet that also folds to the `text`
@@ -377,7 +405,9 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     let migs = lower(Op::AddColumn {
         table: "t".into(),
         column: "owner".into(),
-        ty: ColType::Ref { references: "people".into() },
+        ty: ColType::Ref {
+            references: "people".into(),
+        },
         nullable: Some(true),
         default: None,
         case_sensitive: None,
@@ -394,7 +424,10 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
             .await
             .expect("a within-TEXT-affinity facet change is an idempotent no-op on SQLite (F1)");
     }
-    assert!(table_has_column(&be, "t", "owner").await, "owner column still present");
+    assert!(
+        table_has_column(&be, "t", "owner").await,
+        "owner column still present"
+    );
     assert!(journaled(&be, &v).await, "satisfied no-op still journals");
 }
 
@@ -410,10 +443,10 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -432,7 +465,9 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         schema: None,
         existence_guard: None,
     }) {
-        apply_one(&be, &m).await.expect("add divergent-type column unguarded");
+        apply_one(&be, &m)
+            .await
+            .expect("add divergent-type column unguarded");
     }
 
     // Guarded addColumn declaring text over the live integer column → FailDrift.
@@ -451,7 +486,9 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let v = migs[0].version.as_str().to_string();
-    let err = apply_one(&be, &migs[0]).await.expect_err("divergent type fails closed");
+    let err = apply_one(&be, &migs[0])
+        .await
+        .expect_err("divergent type fails closed");
     let (object, field) = expect_drift(err);
     assert_eq!(field, "data_type");
     assert!(object.contains("email"), "names the column: {object}");
@@ -473,10 +510,10 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -493,13 +530,15 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
-    let err = apply_one(&be, &migs[0]).await.expect_err("wider live table fails closed");
+    let err = apply_one(&be, &migs[0])
+        .await
+        .expect_err("wider live table fails closed");
     let (_, field) = expect_drift(err);
     // Fail-closed either way: the extra live column makes the table wider than
     // declared (`columns`), and the SQLite system-`id` column's introspected
@@ -526,10 +565,10 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -546,7 +585,10 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     for m in &migs {
         apply_one(&be, m).await.expect("drop present column runs");
     }
-    assert!(!table_has_column(&be, "t", "legacy").await, "column dropped");
+    assert!(
+        !table_has_column(&be, "t", "legacy").await,
+        "column dropped"
+    );
     assert!(journaled(&be, &v).await);
 
     // absent → SatisfiedNoop (fresh version over the now-absent column).
@@ -558,22 +600,24 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     });
     let v2 = migs2[0].version.as_str().to_string();
     for m in &migs2 {
-        apply_one(&be, m).await.expect("drop absent column is a satisfied no-op");
+        apply_one(&be, m)
+            .await
+            .expect("drop absent column is a satisfied no-op");
     }
     assert!(journaled(&be, &v2).await, "satisfied no-op journals");
 }
 
 /// **F1 regression (the headline finding)** — a guarded `createTable ifNotExists`
-/// RE-RUN on SQLite must be an idempotent no-op. Before the fix the Table probe's
-/// `expect_columns` data_type was the PG spelling (`field_data_type` always maps via
+/// RE-RUN on `SQLite` must be an idempotent no-op. Before the fix the Table probe's
+/// `expect_columns` `data_type` was the PG spelling (`field_data_type` always maps via
 /// the PG dialect), so a timestamp system column read as `timestamp with time zone`
-/// while the live SQLite catalog reports the `text` affinity. `decide_table`'s raw
+/// while the live `SQLite` catalog reports the `text` affinity. `decide_table`'s raw
 /// `expect != live` compare therefore hard-FailDrifted (`ExistenceGuardDrift` naming
 /// `column t.created_at` / `data_type`) on EVERY re-deploy — every table carries
-/// created_at/updated_at/deleted_at timestamps, so NO guarded SQLite createTable was
+/// `created_at/updated_at/deleted_at` timestamps, so NO guarded `SQLite` createTable was
 /// idempotent. After the fix the decider folds both sides through
 /// `sqlite_canonical_type` (timestamp/jsonb/text → `text` affinity) and the Table
-/// leg verifies presence+affinity only, so the re-run is a SatisfiedNoop.
+/// leg verifies presence+affinity only, so the re-run is a `SatisfiedNoop`.
 ///
 /// RED pre-fix: the second apply returns `ExistenceGuardDrift { data_type }`.
 #[compio::test]
@@ -584,26 +628,37 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     // system fields (id text, created_at/updated_at/deleted_at timestamps, …).
     let make_op = || Op::CreateTable {
         name: "t".into(),
-        columns: vec![col("title", ColType::String), col("happened", ColType::Timestamp)],
+        columns: vec![
+            col("title", ColType::String),
+            col("happened", ColType::Timestamp),
+        ],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
     // First apply: creates the table + secondary indexes.
     let steps1 = lower(make_op());
     for m in &steps1 {
-        apply_one(&be, m).await.expect("fresh guarded create applies");
+        apply_one(&be, m)
+            .await
+            .expect("fresh guarded create applies");
     }
     assert!(table_exists(&be, "t").await, "table created");
-    assert!(table_has_column(&be, "t", "title").await, "title column present");
-    assert!(table_has_column(&be, "t", "happened").await, "timestamp column present");
+    assert!(
+        table_has_column(&be, "t", "title").await,
+        "title column present"
+    );
+    assert!(
+        table_has_column(&be, "t", "happened").await,
+        "timestamp column present"
+    );
 
     // RE-RUN: a fresh lowering of the SAME guarded create over the now-present table
     // must be an idempotent no-op — the CREATE TABLE unit SatisfiedNoops (presence +
@@ -624,29 +679,35 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
         );
     }
     // The columns physically survive the re-run (nothing churned/dropped).
-    assert!(table_has_column(&be, "t", "title").await, "title survives re-run");
-    assert!(table_has_column(&be, "t", "happened").await, "timestamp survives re-run");
+    assert!(
+        table_has_column(&be, "t", "title").await,
+        "title survives re-run"
+    );
+    assert!(
+        table_has_column(&be, "t", "happened").await,
+        "timestamp survives re-run"
+    );
 }
 
-/// **Regression — SQLite multi-unit secondary-index physical existence.**
+/// **Regression — `SQLite` multi-unit secondary-index physical existence.**
 /// A guarded `createTable ifNotExists` with a `unique:true` field lowers to
-/// MULTIPLE units on SQLite too: the CREATE TABLE (which inlines the system-field
+/// MULTIPLE units on `SQLite` too: the CREATE TABLE (which inlines the system-field
 /// indexes) PLUS a SEPARATE `CREATE INDEX` unit for the unique field's index
-/// (`lower_create_table` skips only the SYSTEM-field indexes on SQLite —
+/// (`lower_create_table` skips only the SYSTEM-field indexes on `SQLite` —
 /// declarative.rs:4587 — every other non-PK index, including a `unique:true`
 /// field's, is its own guarded `CREATE INDEX` unit; declarative.rs:4583-4604).
 ///
 /// Before the fix the SAME `Table` probe was stamped on EVERY unit, so once
 /// unit 0 created the table, the index unit saw the table PRESENT + base columns
-/// matching → SatisfiedNoop → the unique index was SILENTLY SKIPPED (but journaled
+/// matching → `SatisfiedNoop` → the unique index was SILENTLY SKIPPED (but journaled
 /// completed). This asserts the unique index PHYSICALLY exists (via
 /// `PRAGMA index_list`) after a fresh guarded create, and that a RE-RUN is an
-/// idempotent no-op with the index surviving — the SQLite leg of the fix that
+/// idempotent no-op with the index surviving — the `SQLite` leg of the fix that
 /// the PG `create_table_ifnotexists_fresh_creates_all_secondary_indexes_…` test
 /// covers on the PG leg.
 ///
 /// RED pre-fix: the per-unit object-scoped probe does not exist, the index unit
-/// SatisfiedNoops on the table's presence, so `index_exists(… "t_email_key", …)`
+/// `SatisfiedNoops` on the table's presence, so `index_exists(… "t_email_key", …)`
 /// is false.
 #[compio::test]
 async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_reruns_idempotent() {
@@ -662,15 +723,22 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
             ty: ColType::String,
             nullable: Some(true),
             default: None,
-            unique: Some(true), id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: Some(true),
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
@@ -685,16 +753,25 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
         steps1.len()
     );
     for m in &steps1 {
-        apply_one(&be, m).await.expect("fresh guarded create applies");
+        apply_one(&be, m)
+            .await
+            .expect("fresh guarded create applies");
     }
     assert!(table_exists(&be, "t").await, "table created");
-    assert!(table_has_column(&be, "t", "email").await, "email column present");
+    assert!(
+        table_has_column(&be, "t", "email").await,
+        "email column present"
+    );
     assert!(
         index_exists(&be, "t", "t_email_key", true).await,
         "the unique:true field's index must PHYSICALLY exist (C1: it was silently skipped)"
     );
     for m in &steps1 {
-        assert!(journaled(&be, m.version.as_str()).await, "unit {} journaled", m.version.as_str());
+        assert!(
+            journaled(&be, m.version.as_str()).await,
+            "unit {} journaled",
+            m.version.as_str()
+        );
     }
 
     // RE-RUN: a fresh lowering of the SAME guarded create over the now-present
@@ -722,7 +799,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
 
 /// **F1 regression — addColumn re-run for a timestamp column.** A guarded
 /// `addColumn ifNotExists` of a timestamp column, re-run over the now-present
-/// column, must be a SatisfiedNoop (not a false `timestamp with time zone != text`
+/// column, must be a `SatisfiedNoop` (not a false `timestamp with time zone != text`
 /// drift). The timestamp is NOT a within-text-affinity SDK-facet ambiguity that the
 /// Column-leg guards (that is for string↔ref/date authored as a bare string); a
 /// timestamp authored as a timestamp folds to the `text` affinity and matches.
@@ -737,10 +814,10 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -761,9 +838,14 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     for m in &migs1 {
-        apply_one(&be, m).await.expect("guarded addColumn(timestamp) runs");
+        apply_one(&be, m)
+            .await
+            .expect("guarded addColumn(timestamp) runs");
     }
-    assert!(table_has_column(&be, "t", "happened").await, "timestamp column created");
+    assert!(
+        table_has_column(&be, "t", "happened").await,
+        "timestamp column created"
+    );
 
     // RE-RUN: present + matching affinity → SatisfiedNoop, NOT a false drift.
     let migs2 = lower(Op::AddColumn {
@@ -801,7 +883,9 @@ async fn drop_table_ifexists_absent_noops() {
     });
     let v = migs[0].version.as_str().to_string();
     for m in &migs {
-        apply_one(&be, m).await.expect("drop absent table is a satisfied no-op");
+        apply_one(&be, m)
+            .await
+            .expect("drop absent table is a satisfied no-op");
     }
     assert!(!table_exists(&be, "ghost").await);
     assert!(journaled(&be, &v).await, "satisfied no-op journals");
@@ -819,10 +903,10 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -833,8 +917,12 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
-                from: TableRef { name: "t".into(), schema: None, alias: None },
+            select: Box::new(SelectAst {
+                from: TableRef {
+                    name: "t".into(),
+                    schema: None,
+                    alias: None,
+                },
                 projection: vec![SelectItem::ColRef {
                     table: None,
                     name: "name".into(),
@@ -846,7 +934,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
                 having: None,
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace: None,
         materialized: None,
@@ -876,7 +964,9 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     });
     let v2 = migs2[0].version.as_str().to_string();
     for m in &migs2 {
-        apply_one(&be, m).await.expect("drop absent view is a satisfied no-op");
+        apply_one(&be, m)
+            .await
+            .expect("drop absent view is a satisfied no-op");
     }
     assert!(!view_exists(&be, "active_v").await, "view remains absent");
     assert!(journaled(&be, &v2).await, "satisfied no-op journals");

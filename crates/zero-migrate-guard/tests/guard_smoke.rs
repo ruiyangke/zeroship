@@ -49,7 +49,10 @@ fn confined_denies_a_cross_schema_reference() {
         .check("CREATE TABLE other_tenant.secrets (id int)")
         .expect_err("a non-confined schema reference is a cross-tenant violation");
     assert!(
-        matches!(err, GuardError::CrossSchema { .. } | GuardError::Denied { .. }),
+        matches!(
+            err,
+            GuardError::CrossSchema { .. } | GuardError::Denied { .. }
+        ),
         "expected a cross-schema/deny error, got {err:?}"
     );
 }
@@ -66,5 +69,8 @@ fn analysis_reexports_are_reachable() {
     let advisories = zero_migrate_guard::analyze::analyze("CREATE INDEX i ON app1.t (a)");
     let _ = advisories; // shape-only: analysis never denies.
     let classified = zero_migrate_guard::classify::classify("SELECT 1");
-    assert!(classified.is_ok(), "a plain SELECT must classify without a parse error");
+    assert!(
+        classified.is_ok(),
+        "a plain SELECT must classify without a parse error"
+    );
 }

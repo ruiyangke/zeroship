@@ -23,13 +23,10 @@
 //! if a caller hand-built a plan, the executor still independently denies the
 //! dangerous surface and confines execution. The engine never disables those.
 
-
-pub use crate::approval::Approval;
 use crate::apply::backend::MigrationBackend;
+use crate::apply::executor::{self, ApplyError, ApplyOutcome, LockMode, RollbackError};
+pub use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
-use crate::apply::executor::{
-    self, ApplyError, ApplyOutcome, LockMode, RollbackError,
-};
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
 use crate::model::migration::Migration;
 use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
@@ -570,8 +567,15 @@ impl MigrationEngine {
 
         // The single shared orchestrator. The outer project lock is already held,
         // so every inner sub-batch re-enters it with `LockMode::AlreadyHeld`.
-        self.apply_plan(&steps, approval, backend, exec_cfg, applied_by, LockMode::AlreadyHeld)
-            .await
+        self.apply_plan(
+            &steps,
+            approval,
+            backend,
+            exec_cfg,
+            applied_by,
+            LockMode::AlreadyHeld,
+        )
+        .await
     }
 
     /// **The single shared plan orchestrator (`op.*` DSL).**
@@ -633,7 +637,9 @@ impl MigrationEngine {
         // refusal of a second renameColumn on the pending table (its EXPAND step
         // names the table) and never under-fires for the SQLite leg (always empty
         // outstanding set).
-        let touched: Vec<String> = crate::render::step::tables_touched_by(steps).into_iter().collect();
+        let touched: Vec<String> = crate::render::step::tables_touched_by(steps)
+            .into_iter()
+            .collect();
         self.apply_plan_with_touched(
             steps, &touched, approval, backend, exec_cfg, applied_by, lock_mode,
         )
@@ -812,7 +818,10 @@ impl MigrationEngine {
         steps: &[PlanStep],
         touched_tables: &[String],
         depends_on: &[String],
-        resolve: &[(crate::apply::journal::PendingContract, crate::apply::journal::Resolution)],
+        resolve: &[(
+            crate::apply::journal::PendingContract,
+            crate::apply::journal::Resolution,
+        )],
         approval: Approval,
         scope: &crate::approval::ApprovalScope,
         backend: &B,
@@ -847,8 +856,16 @@ impl MigrationEngine {
         // EVERY exit path (success or error) before returning.
         let result = self
             .apply_plan_locked(
-                steps, touched_tables, depends_on, resolve, approval, scope, backend, exec_cfg,
-                applied_by, recovery_scope,
+                steps,
+                touched_tables,
+                depends_on,
+                resolve,
+                approval,
+                scope,
+                backend,
+                exec_cfg,
+                applied_by,
+                recovery_scope,
             )
             .await;
         if we_hold_lock {
@@ -857,15 +874,14 @@ impl MigrationEngine {
             // body error is not masked-but-lost data; we still log it.
             let unlock = backend.release_project_lock(exec_cfg).await;
             return match result {
-                Ok(o) => unlock.map(|()| o).map_err(|e| {
-                    DeclarativeApplyError::Plain(EngineError::Apply(e))
-                }),
+                Ok(o) => unlock
+                    .map(|()| o)
+                    .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e))),
                 Err(e) => Err(e),
             };
         }
         result
     }
-
 
     /// The plan body, run with the project lock already held (either because the
     /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
@@ -877,7 +893,10 @@ impl MigrationEngine {
         steps: &[PlanStep],
         touched_tables: &[String],
         depends_on: &[String],
-        explicit_resolve: &[(crate::apply::journal::PendingContract, crate::apply::journal::Resolution)],
+        explicit_resolve: &[(
+            crate::apply::journal::PendingContract,
+            crate::apply::journal::Resolution,
+        )],
         approval: Approval,
         scope: &crate::approval::ApprovalScope,
         backend: &B,
@@ -1111,7 +1130,11 @@ impl MigrationEngine {
                 depends_on.iter().map(String::as_str).collect();
             for s in steps {
                 if let PlanStep::Ddl(m) = s {
-                    declared_deps.extend(m.depends_on.iter().map(crate::model::migration::MigrationId::as_str));
+                    declared_deps.extend(
+                        m.depends_on
+                            .iter()
+                            .map(crate::model::migration::MigrationId::as_str),
+                    );
                 }
             }
             for pc in &outstanding {
@@ -1202,9 +1225,7 @@ impl MigrationEngine {
                     // (`engine.rs:491-503`): approval gate + net-applied-skip +
                     // `rebuild_one`.
                     if approval != Approval::Approved {
-                        return Err(DeclarativeApplyError::Plain(
-                            EngineError::ApprovalRequired,
-                        ));
+                        return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
                     }
                     // Read the net-applied set FIRST, so an already-applied rebuild
                     // idempotently no-ops BEFORE the scope gate: an
@@ -1218,7 +1239,9 @@ impl MigrationEngine {
                                 .await
                                 .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
                                 .into_iter()
-                                .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
+                                .filter(|e| {
+                                    matches!(e.phase, crate::apply::journal::Phase::Completed)
+                                })
                                 .map(|e| e.version)
                                 .collect(),
                         );
@@ -1246,7 +1269,9 @@ impl MigrationEngine {
                     if let Some(v) = steps[i].approval_scope_version() {
                         if !scope.admits(v) {
                             return Err(DeclarativeApplyError::Plain(
-                                EngineError::ApprovalNotScoped { version: v.to_string() },
+                                EngineError::ApprovalNotScoped {
+                                    version: v.to_string(),
+                                },
                             ));
                         }
                     }
@@ -1290,7 +1315,9 @@ impl MigrationEngine {
                     if let Some(v) = steps[i].approval_scope_version() {
                         if !scope.admits(v) {
                             return Err(DeclarativeApplyError::Plain(
-                                EngineError::ApprovalNotScoped { version: v.to_string() },
+                                EngineError::ApprovalNotScoped {
+                                    version: v.to_string(),
+                                },
                             ));
                         }
                     }
@@ -1335,7 +1362,10 @@ impl MigrationEngine {
                     // backend (the migrator has no meta-schema grant) so a creator
                     // migration cannot forge or suppress it.
                     let crate::render::expand_contract::OnlineIntent::RenameColumn {
-                        table, from, to, ty,
+                        table,
+                        from,
+                        to,
+                        ty,
                     } = &rename.intent;
                     let pending_version = rename.trigger_version.as_str().to_string();
                     // The rename's PLAN-GROUP version — the stable identity the
@@ -1348,10 +1378,10 @@ impl MigrationEngine {
                     // empty expand chain (an internal invariant violation): fall back
                     // to the pending_version so the obligation still records SOME
                     // stable key rather than panicking the deploy.
-                    let plan_version = rename
-                        .expand
-                        .first()
-                        .map_or_else(|| pending_version.clone(), |e1| e1.version.as_str().to_string());
+                    let plan_version = rename.expand.first().map_or_else(
+                        || pending_version.clone(),
+                        |e1| e1.version.as_str().to_string(),
+                    );
                     let already_outstanding = outstanding
                         .iter()
                         .any(|pc| pc.pending_version == pending_version)
@@ -1440,9 +1470,7 @@ impl MigrationEngine {
                     // The executor-layer `run_dml_step` re-runs this gate as defense
                     // in depth.
                     if steps[i].is_destructive() && approval != Approval::Approved {
-                        return Err(DeclarativeApplyError::Plain(
-                            EngineError::ApprovalRequired,
-                        ));
+                        return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
                     }
                     // **Per-version scope (anti-bypass).** A destructive DML (a
                     // `delete`) under `ApprovalScope::Versions` runs ONLY if the
@@ -1457,8 +1485,17 @@ impl MigrationEngine {
                     }
                     let ran = backend
                         .run_dml_step(
-                            exec_cfg, version, name, template, binds, *destructive, owner_app,
-                            approval, scope, applied_by, next_lock,
+                            exec_cfg,
+                            version,
+                            name,
+                            template,
+                            binds,
+                            *destructive,
+                            owner_app,
+                            approval,
+                            scope,
+                            applied_by,
+                            next_lock,
                         )
                         .await
                         .map_err(EngineError::Apply)?;
@@ -1627,8 +1664,7 @@ impl MigrationEngine {
         // Gate 3: delegate to the executor, which re-runs the guard + role
         // (defense in depth). Reconstruct the migration set from the plan's
         // passing items (denied is empty here, so items == the full input set).
-        let migrations: Vec<Migration> =
-            plan.items.iter().map(|p| p.migration.clone()).collect();
+        let migrations: Vec<Migration> = plan.items.iter().map(|p| p.migration.clone()).collect();
         // Forward the approval decision: the executor re-runs its OWN destructive
         // gate (defense in depth), so the gate here is additional,
         // not a replacement.
@@ -1751,7 +1787,8 @@ impl MigrationEngine {
         // gate (EngineError::Denied), independent of the manifest check. The lock is
         // only ever taken AFTER the manifest passes.
         let plan = self.plan(migrations, guard_cfg);
-        self.apply(&plan, approval, backend, exec_cfg, applied_by).await
+        self.apply(&plan, approval, backend, exec_cfg, applied_by)
+            .await
     }
 
     /// As [`apply_verified`](Self::apply_verified), but threads a
@@ -1864,9 +1901,6 @@ impl MigrationEngine {
             .dry_run_declarative(plan, desired, exec_cfg, shadow_cfg, applied_by)
             .await
     }
-
-
-
 }
 
 /// **The SHARED contract-apply recognizer.** Decide whether a
@@ -1905,12 +1939,14 @@ pub fn recognizes_contract_apply(
         project_schema.to_string(),
         "discharge-recognize",
     );
-    let Ok(plan) = author.author(&crate::render::expand_contract::OnlineIntent::RenameColumn {
-        table: pc.table.clone(),
-        from: pc.from_col.clone(),
-        to: pc.to_col.clone(),
-        ty: pc.ty.clone(),
-    }) else {
+    let Ok(plan) = author.author(
+        &crate::render::expand_contract::OnlineIntent::RenameColumn {
+            table: pc.table.clone(),
+            from: pc.from_col.clone(),
+            to: pc.to_col.clone(),
+            ty: pc.ty.clone(),
+        },
+    ) else {
         return false;
     };
     if pc.contract_versions.len() != plan.contract.len() {
@@ -1977,8 +2013,12 @@ impl DeclarativeDeployPlan {
     /// how this set is sliced and stable for a given generated plan instance.
     #[must_use]
     pub fn effective_set(&self) -> Vec<Migration> {
-        let mut set: Vec<Migration> =
-            self.plain.items.iter().map(|p| p.migration.clone()).collect();
+        let mut set: Vec<Migration> = self
+            .plain
+            .items
+            .iter()
+            .map(|p| p.migration.clone())
+            .collect();
         for rename in &self.renames {
             set.extend(rename.all());
         }
@@ -2103,7 +2143,9 @@ pub enum OnlineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor};
+    use crate::plan::author::{
+        AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
+    };
 
     fn guard_cfg() -> GuardConfig {
         GuardConfig::confined("proj_acme")
@@ -2169,7 +2211,11 @@ mod tests {
             )
             .unwrap();
         let plan = MigrationEngine::new().plan(std::slice::from_ref(&evil), &guard_cfg());
-        assert_eq!(plan.items.len(), 0, "denied migration is not a planned item");
+        assert_eq!(
+            plan.items.len(),
+            0,
+            "denied migration is not a planned item"
+        );
         assert_eq!(plan.denied.len(), 1);
         assert_eq!(plan.denied[0].0, evil.version.as_str());
         assert!(!plan.is_appliable());
@@ -2181,7 +2227,9 @@ mod tests {
         let a = raw
             .wrap("rce", "COPY \"proj_acme\".\"t\" TO PROGRAM 'sh'", None)
             .unwrap();
-        let b = raw.wrap("xtenant", "SELECT * FROM control.users", None).unwrap();
+        let b = raw
+            .wrap("xtenant", "SELECT * FROM control.users", None)
+            .unwrap();
         let plan = MigrationEngine::new().plan(&[a, b], &guard_cfg());
         assert_eq!(plan.denied.len(), 2, "both denials surface");
     }

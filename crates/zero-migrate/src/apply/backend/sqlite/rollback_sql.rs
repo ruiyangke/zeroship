@@ -104,10 +104,7 @@ async fn run_rollback_txn(
 
     // 1. BEGIN IMMEDIATE under engine mode (the engine owns txn boundaries; the
     // creator `down` in CreatorUp can never open/close a transaction).
-    actor
-        .set_mode(Mode::EngineJournal)
-        .await
-        .map_err(rb_err)?;
+    actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
     actor.exec("BEGIN IMMEDIATE").await.map_err(rb_err)?;
 
     let result = async {
@@ -140,10 +137,7 @@ async fn run_rollback_txn(
 
     match result {
         Ok(()) => {
-            actor
-                .set_mode(Mode::EngineJournal)
-                .await
-                .map_err(rb_err)?;
+            actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
             actor.exec("COMMIT").await.map_err(rb_err)?;
             Ok(())
         }
@@ -151,10 +145,7 @@ async fn run_rollback_txn(
             // Roll back so a denied/failed `down` never leaves a partial journal.
             // Same discipline as apply: the AUTOCOMMIT state — not the ROLLBACK
             // result — is the wedge signal.
-            actor
-                .set_mode(Mode::EngineJournal)
-                .await
-                .map_err(rb_err)?;
+            actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
             let rb = actor.exec("ROLLBACK").await;
             match actor.is_autocommit().await {
                 Ok(true) => Err(RollbackError::Backend(format!(
@@ -322,7 +313,10 @@ fn normalize_ws(s: &str) -> String {
     }
     // Wrap the matched keywords with leading/trailing spaces so `.contains(" ADD ")`
     // matches a token at the start too.
-    let collapsed: String = without_comments.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed: String = without_comments
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(" {collapsed} ")
 }
 
@@ -335,13 +329,22 @@ mod tests {
         assert_eq!(down_needs_rebuild("DROP TABLE users;"), None);
         assert_eq!(down_needs_rebuild("DROP TABLE \"users\";"), None);
         assert_eq!(down_needs_rebuild("DROP INDEX ix_users_email;"), None);
-        assert_eq!(down_needs_rebuild("ALTER TABLE users DROP COLUMN nickname;"), None);
-        assert_eq!(down_needs_rebuild("ALTER TABLE users RENAME TO people;"), None);
+        assert_eq!(
+            down_needs_rebuild("ALTER TABLE users DROP COLUMN nickname;"),
+            None
+        );
+        assert_eq!(
+            down_needs_rebuild("ALTER TABLE users RENAME TO people;"),
+            None
+        );
         assert_eq!(
             down_needs_rebuild("ALTER TABLE users RENAME COLUMN a TO b;"),
             None
         );
-        assert_eq!(down_needs_rebuild("ALTER TABLE users ADD COLUMN re_added TEXT;"), None);
+        assert_eq!(
+            down_needs_rebuild("ALTER TABLE users ADD COLUMN re_added TEXT;"),
+            None
+        );
         // Multi-statement additive down.
         assert_eq!(
             down_needs_rebuild("DROP INDEX ix; ALTER TABLE t DROP COLUMN c;"),

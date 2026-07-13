@@ -1,7 +1,7 @@
 //! Checksum byte-stability + `Checksum::of_ir` determinism/sensitivity.
 //!
-//! Two front doors fold into the SAME `fold_common` tail (flags + owner_app +
-//! depends_on + supersedes + preconditions). `Checksum::of` folds `up`/`down`
+//! Two front doors fold into the SAME `fold_common` tail (flags + `owner_app` +
+//! `depends_on` + supersedes + preconditions). `Checksum::of` folds `up`/`down`
 //! then `fold_common`; `Checksum::of_ir` folds the canonical op-list (RFC 8785
 //! JCS per op, length-prefixed, in op order) then the SAME `fold_common`.
 //!
@@ -10,12 +10,12 @@
 //! against the PRE-`fold_common`-extraction code and MUST stay equal after the
 //! pure refactor — proving the `fold_common` lift is byte-preserving.
 
-use zero_migrate::{
-    BinaryOp, Checksum, ChecksumInput, Expr, MigrationFlags, MigrationId, OnlinePhase,
-};
 use zero_migrate::model::ir::{
     CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
     IrValue, Op,
+};
+use zero_migrate::{
+    BinaryOp, Checksum, ChecksumInput, Expr, MigrationFlags, MigrationId, OnlinePhase,
 };
 
 // ---------------------------------------------------------------------------
@@ -68,8 +68,7 @@ fn checksum_of_byte_stable_golden() {
     // allowed and every golden is updated in the SAME patch). If this ever
     // changes WITHOUT a corresponding flags-shape change, the checksum wire
     // format drifted unintentionally.
-    const EXPECTED: &str =
-        "61075be9920f5cf0e7acde1de5981e6688001ed0ff5e1b7e0033aac560a402cf";
+    const EXPECTED: &str = "61075be9920f5cf0e7acde1de5981e6688001ed0ff5e1b7e0033aac560a402cf";
     assert_eq!(
         Checksum::of(&input).as_str(),
         EXPECTED,
@@ -115,14 +114,21 @@ fn checksum_of_ir_byte_stable_golden() {
                 ty: zero_migrate::model::ir::ColType::Int,
                 nullable: Some(false),
                 default: None,
-                unique: Some(true), id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: Some(true),
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -147,8 +153,7 @@ fn checksum_of_ir_byte_stable_golden() {
     // every golden updated in the SAME patch. NB: `typed_checksum` (the JS-builder
     // anchor) reuses this same Rust serialization, so there is no separate JS
     // serializer to bump.
-    const EXPECTED: &str =
-        "be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f";
+    const EXPECTED: &str = "be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),
@@ -202,35 +207,14 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     };
 
     let ops1 = vec![add_a.clone(), add_b.clone()];
-    let c1 = Checksum::of_ir(
-        &CanonicalOpList(&ops1),
-        &flags,
-        owner,
-        &[],
-        &[],
-        &[],
-    );
+    let c1 = Checksum::of_ir(&CanonicalOpList(&ops1), &flags, owner, &[], &[], &[]);
     // Deterministic.
-    let c1b = Checksum::of_ir(
-        &CanonicalOpList(&ops1),
-        &flags,
-        owner,
-        &[],
-        &[],
-        &[],
-    );
+    let c1b = Checksum::of_ir(&CanonicalOpList(&ops1), &flags, owner, &[], &[], &[]);
     assert_eq!(c1, c1b, "of_ir must be deterministic");
 
     // Order-sensitive: reordering the two ops changes the checksum.
-    let ops_rev = vec![add_b.clone(), add_a.clone()];
-    let c_rev = Checksum::of_ir(
-        &CanonicalOpList(&ops_rev),
-        &flags,
-        owner,
-        &[],
-        &[],
-        &[],
-    );
+    let ops_rev = vec![add_b, add_a];
+    let c_rev = Checksum::of_ir(&CanonicalOpList(&ops_rev), &flags, owner, &[], &[], &[]);
     assert_ne!(c1, c_rev, "of_ir must be order-sensitive");
 
     // Distinct front door: of_ir over ops != of over rendered SQL with the
@@ -251,26 +235,19 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     );
 
     // The common tail still folds: same ops, different owner => different hash.
-    let c_other_owner = Checksum::of_ir(
-        &CanonicalOpList(&ops1),
-        &flags,
-        "app_other",
-        &[],
-        &[],
-        &[],
+    let c_other_owner =
+        Checksum::of_ir(&CanonicalOpList(&ops1), &flags, "app_other", &[], &[], &[]);
+    assert_ne!(
+        c1, c_other_owner,
+        "fold_common tail must still fold owner_app"
     );
-    assert_ne!(c1, c_other_owner, "fold_common tail must still fold owner_app");
 
     // …and deps/supersedes still fold via fold_common.
-    let c_with_dep = Checksum::of_ir(
-        &CanonicalOpList(&ops1),
-        &flags,
-        owner,
-        &[dep()],
-        &[],
-        &[],
+    let c_with_dep = Checksum::of_ir(&CanonicalOpList(&ops1), &flags, owner, &[dep()], &[], &[]);
+    assert_ne!(
+        c1, c_with_dep,
+        "fold_common tail must still fold depends_on"
     );
-    assert_ne!(c1, c_with_dep, "fold_common tail must still fold depends_on");
 }
 
 #[test]
@@ -300,15 +277,15 @@ fn checksum_of_ir_includes_table_check_expr() {
                         lhs: Box::new(Expr::col("a")),
                         rhs: Box::new(Expr::lit(IrScalar::Int(rhs))),
                     },
-                
+
                     not_valid: None,
                 },
             }],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -322,14 +299,7 @@ fn checksum_of_ir_includes_table_check_expr() {
     assert_eq!(c1, c1b, "CHECK-bearing IR checksum must be deterministic");
 
     let changed_ops = vec![check_op(1)];
-    let changed = Checksum::of_ir(
-        &CanonicalOpList(&changed_ops),
-        &flags,
-        owner,
-        &[],
-        &[],
-        &[],
-    );
+    let changed = Checksum::of_ir(&CanonicalOpList(&changed_ops), &flags, owner, &[], &[], &[]);
     assert_ne!(
         c1, changed,
         "changing only a table-level CHECK expression must change Checksum::of_ir"
@@ -463,7 +433,7 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
 }
 
 /// Dialect-stability (spec line 1267): a portable migration's `of_ir` is
-/// IDENTICAL across the PG and SQLite renders, because `of_ir` is dialect-neutral
+/// IDENTICAL across the PG and `SQLite` renders, because `of_ir` is dialect-neutral
 /// by construction (no dialect parameter; it hashes the neutral op list + the
 /// derived-then-overridden flags). This pins the single-artifact / single-checksum
 /// invariant so a future `IrAuthor` that leaks per-dialect *lowered* flags into
@@ -502,10 +472,10 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         using: None,
         r#where: None,
 
-    include: Vec::new(),
-    with: None,
-    only: None,
-    concurrently: Some(true),
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: Some(true),
         schema: None,
         existence_guard: None,
         nulls_not_distinct: None,
@@ -525,9 +495,18 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     // LOWERED flags (SQLite forcing transactional:true) into the hash, the two
     // renders WOULD diverge — demonstrating exactly the invariant break the
     // of_ir doc forbids, and proving this test is load-bearing (not vacuous).
-    let sqlite_lowered_flags = MigrationFlags { transactional: true, ..neutral_flags };
-    let sqlite_render_buggy =
-        Checksum::of_ir(&CanonicalOpList(&ops), &sqlite_lowered_flags, owner, &[], &[], &[]);
+    let sqlite_lowered_flags = MigrationFlags {
+        transactional: true,
+        ..neutral_flags
+    };
+    let sqlite_render_buggy = Checksum::of_ir(
+        &CanonicalOpList(&ops),
+        &sqlite_lowered_flags,
+        owner,
+        &[],
+        &[],
+        &[],
+    );
     assert_ne!(
         pg_render, sqlite_render_buggy,
         "leaking per-dialect lowered flags into of_ir WOULD break the single-checksum \
@@ -567,7 +546,7 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
                     on_update,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -606,7 +585,7 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
 }
 
 /// JCS key-order independence: building the same logical op two ways (here via
-/// a CreateTable with columns in a fixed order) is stable, and the canonical
+/// a `CreateTable` with columns in a fixed order) is stable, and the canonical
 /// encoding does not depend on Rust struct field declaration order — it sorts
 /// keys. (Sanity that the JCS encoder sorts object keys.)
 #[test]
@@ -620,15 +599,22 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
             ty: zero_migrate::model::ir::ColType::Int,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     };
     let v = vec![ct];

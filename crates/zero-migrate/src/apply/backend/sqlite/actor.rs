@@ -148,9 +148,7 @@ enum Command {
     },
     /// Report whether the connection is in autocommit mode (no open transaction).
     /// Used to detect a wedged connection after a failed `up` + ROLLBACK.
-    IsAutocommit {
-        reply: flume::Sender<bool>,
-    },
+    IsAutocommit { reply: flume::Sender<bool> },
     /// Stop the worker (drops the connection, WAL-checkpoints on close).
     Shutdown,
 }

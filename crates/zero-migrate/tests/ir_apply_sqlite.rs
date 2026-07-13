@@ -1,21 +1,21 @@
-//! Faithful e2e for the creator IR envelope path on the SQLite leg,
+//! Faithful e2e for the creator IR envelope path on the `SQLite` leg,
 //! driven through the REAL fail-closed LOAD GATE + lower (`IrAuthor::load_and_lower`)
-//! and APPLIED on a real temp-file SQLite backend via the engine.
+//! and APPLIED on a real temp-file `SQLite` backend via the engine.
 //!
-//! This is the SQLite peer of the PG deploy e2e:
+//! This is the `SQLite` peer of the PG deploy e2e:
 //! a valid IR envelope lowers + applies (the table exists, the migration journals),
 //! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
-//! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
-//! any apply. No shims, no PG-gating: the real SQLite runtime.
+//! against a `SQLite` target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
+//! any apply. No shims, no PG-gating: the real `SQLite` runtime.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::{
-    apply::executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LoadAndLowerError, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect, SqliteBackend,
-    resolve_create_table_policy,
+    apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr, PolicyProfile,
+    SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -31,7 +31,11 @@ fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
     let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -43,7 +47,10 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(t, o)| (t.to_string(), o.to_string()))
+        .collect()
 }
 
 fn resolved_envelope_json(raw: &str) -> String {
@@ -60,12 +67,14 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
     let p = paths("ir_apply");
     let be = backend(&p);
 
-    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_notes","ops":[
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"create_notes","ops":[
         {"op":"createTable","name":"notes","columns":[
             {"name":"title","type":"text","nullable":false},
             {"name":"body","type":"text"}
         ]}
-    ]}"#);
+    ]}"#,
+    );
 
     // The REAL fail-closed gate + lower, SQLite dialect.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
@@ -78,7 +87,11 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
     let engine = MigrationEngine::new();
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let plan = engine.plan(&migrations, &guard_cfg);
-    assert!(plan.denied.is_empty(), "no denials on a clean IR set: {:?}", plan.denied);
+    assert!(
+        plan.denied.is_empty(),
+        "no denials on a clean IR set: {:?}",
+        plan.denied
+    );
     let outcome = engine
         .apply(&plan, Approval::None, &be, &exec_cfg(), "deploy-ir")
         .await
@@ -91,7 +104,11 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
         .query("SELECT name FROM sqlite_master WHERE type='table' AND name='notes'")
         .await
         .expect("sqlite_master probe");
-    assert_eq!(rows.len(), 1, "the IR-created 'notes' table must exist on SQLite");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the IR-created 'notes' table must exist on SQLite"
+    );
 }
 
 // L7/M15: `date` is an honest portable column type. The SQLite leg stores it as
@@ -101,25 +118,33 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     let p = paths("ir_date_apply");
     let be = backend(&p);
 
-    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_events","ops":[
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"create_events","ops":[
         {"op":"createTable","name":"events","columns":[
             {"name":"happened_on","type":"date","nullable":false}
         ]}
-    ]}"#);
+    ]}"#,
+    );
 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
         .expect("date columns must validate and lower on SQLite");
     assert!(
-        migrations.iter().any(|m| m.up.contains("\"happened_on\" TEXT NOT NULL")),
+        migrations
+            .iter()
+            .any(|m| m.up.contains("\"happened_on\" TEXT NOT NULL")),
         "SQLite date column must render with TEXT affinity: {migrations:#?}"
     );
 
     let engine = MigrationEngine::new();
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let plan = engine.plan(&migrations, &guard_cfg);
-    assert!(plan.denied.is_empty(), "no denials on a date-column IR set: {:?}", plan.denied);
+    assert!(
+        plan.denied.is_empty(),
+        "no denials on a date-column IR set: {:?}",
+        plan.denied
+    );
     engine
         .apply(&plan, Approval::None, &be, &exec_cfg(), "deploy-ir")
         .await
@@ -150,12 +175,14 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
     let be = backend(&p);
 
     // The JSON `\n` escape yields the literal three-byte run `a ; \n b ; c`.
-    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_docs","ops":[
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"create_docs","ops":[
         {"op":"createTable","name":"docs","columns":[
             {"name":"note","type":"text","nullable":false,
              "default":{"literal":{"value":"a;\nb;c"}}}
         ]}
-    ]}"#);
+    ]}"#,
+    );
 
     // The REAL fail-closed gate + GUARDED lower (the production deploy entry).
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
@@ -198,7 +225,10 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
         )
         .await
         .expect("apply the guarded ;\\n-default IR on SQLite");
-    assert!(!outcome.applied.applied.is_empty(), "the IR migration must apply");
+    assert!(
+        !outcome.applied.applied.is_empty(),
+        "the IR migration must apply"
+    );
 
     // The table exists and the stored CREATE SQL preserved the embedded `;\n`.
     let create_sql = be
@@ -206,7 +236,11 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
         .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='docs'")
         .await
         .expect("sqlite_master probe");
-    assert_eq!(create_sql.len(), 1, "the IR-created 'docs' table must exist on SQLite");
+    assert_eq!(
+        create_sql.len(),
+        1,
+        "the IR-created 'docs' table must exist on SQLite"
+    );
 
     // The default really drives an INSERT: a row that omits `note` gets `a;\nb;c`.
     be.actor()

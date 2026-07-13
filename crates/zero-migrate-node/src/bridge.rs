@@ -55,7 +55,7 @@ use crate::wire::{
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
-/// two NETWORK dialects reach the host driver — SQLite is in-process rusqlite and
+/// two NETWORK dialects reach the host driver — `SQLite` is in-process rusqlite and
 /// never crosses the seam, so it is not a host-apply target.
 #[derive(Debug, Clone, Copy)]
 enum ApplyDialect {
@@ -88,13 +88,15 @@ impl ApplyDialect {
 
 /// The IR-format version this addon was built against (fail-closed floor).
 #[napi(js_name = "irVersion")]
-pub fn ir_version() -> u32 {
+#[must_use]
+pub const fn ir_version() -> u32 {
     api::current_ir_version()
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate). Returns a
 /// typed [`LoadVerifyReply`]; never throws for a malformed document.
 #[napi(js_name = "loadVerify")]
+#[must_use]
 pub fn load_verify(
     envelope_json: String,
     deploying_app: String,
@@ -128,8 +130,8 @@ type HostDriverFn = Function<'static, (JsRequest, DoneFn), ()>;
 /// The TSFN's `CallJsBackArgs`: the JS host driver is invoked as
 /// `hostDriver(request, done)`.
 type HostTsfn = ThreadsafeFunction<
-    VerbCall, // T — payload crossing to the JS thread
-    (),       // Return — the host callback returns void; it calls `done` instead
+    VerbCall,            // T — payload crossing to the JS thread
+    (),                  // Return — the host callback returns void; it calls `done` instead
     (JsRequest, DoneFn), // CallJsBackArgs
     Status,
     false, // CalleeHandled = false: we surface driver errors via `done(err, …)`
@@ -166,10 +168,12 @@ impl VerbDispatch for TsfnDispatch {
         // Park the (single-threaded) engine future on the oneshot the `done`
         // callback fires from the JS thread. Awaiting a `oneshot::Receiver` — NEVER
         // a JS Promise — keeps the reactor-less block_on sufficient.
-        rx.await.unwrap_or(Err(JsError {
-            message: "host driver dropped the `done` callback without replying".to_string(),
-            code: None,
-        }))
+        rx.await.unwrap_or_else(|_| {
+            Err(JsError {
+                message: "host driver dropped the `done` callback without replying".to_string(),
+                code: None,
+            })
+        })
     }
 }
 
@@ -227,7 +231,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
 }
 
 /// Detach a `Function<'_>`'s borrow of a per-call `Env` into a `Function<'static>`
-/// via a raw napi_value round-trip. Sound because the `napi_value` outlives the
+/// via a raw `napi_value` round-trip. Sound because the `napi_value` outlives the
 /// native call boundary (it is handed to JS / stored in the TSFN payload) — the same
 /// round-trip napi's own return codegen performs.
 fn detach_function<Args, Ret>(
@@ -239,8 +243,9 @@ where
     Ret: FromNapiValue + 'static,
 {
     let raw = unsafe { <Function<Args, Ret> as ToNapiValue>::to_napi_value(env.raw(), f)? };
-    let detached =
-        unsafe { <Function<'static, Args, Ret> as FromNapiValue>::from_napi_value(env.raw(), raw)? };
+    let detached = unsafe {
+        <Function<'static, Args, Ret> as FromNapiValue>::from_napi_value(env.raw(), raw)?
+    };
     Ok(detached)
 }
 
@@ -320,7 +325,7 @@ fn status_reply(s: &MigrationStatus) -> StatusReply {
 
 /// The wire spelling of a [`HistoryKind`] — the single home of the mapping (was a
 /// closure-local `match` in the `history` entrypoint).
-fn history_kind_str(kind: HistoryKind) -> &'static str {
+const fn history_kind_str(kind: HistoryKind) -> &'static str {
     match kind {
         HistoryKind::Completed => "applied",
         HistoryKind::RolledBack => "rolled_back",
@@ -365,7 +370,9 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 #[napi(ts_return_type = "Promise<ApplyReply>")]
 pub fn apply_ir(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: ApplyRequest,
 ) -> Result<Object<'static>> {
@@ -404,7 +411,11 @@ pub fn apply_ir(
         applied_by,
         ..
     } = req;
-    let approval = if approved { Approval::Approved } else { Approval::None };
+    let approval = if approved {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
 
     run_verb(env, host_driver, move |session| async move {
         let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
@@ -414,7 +425,11 @@ pub fn apply_ir(
         let out = match target {
             ApplyDialect::Postgres => {
                 zero_migrate::apply::executor::apply(
-                    &session, &cfg, &migrations, approval, &applied_by,
+                    &session,
+                    &cfg,
+                    &migrations,
+                    approval,
+                    &applied_by,
                 )
                 .await
             }
@@ -448,7 +463,9 @@ fn owner_app_project(project_schema: &str) -> String {
 #[napi(ts_return_type = "Promise<StatusReply>")]
 pub fn status(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: StatusRequest,
 ) -> Result<Object<'static>> {
@@ -478,7 +495,9 @@ pub fn status(
 #[napi(ts_return_type = "Promise<HistoryReply>")]
 pub fn history(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: HistoryRequest,
 ) -> Result<Object<'static>> {

@@ -29,17 +29,15 @@ use pg_query::protobuf::{self, ObjectType};
 use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
-use crate::analysis::classify::{
-    classify, DataSecurityClass, DdlKind, ParseError, StatementClass,
-};
-use zero_migrate_ir::capability::{OperatorCapability, VendorCapabilities};
-use zero_migrate_ir::ir::{MigrationIr, Op};
-use zero_migrate_ir::migration::MigrationFlags;
-use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
-use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::dialect::SqlDialect;
+use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
 use denylist::rule;
 use serde_json::Value;
+use zero_migrate_ir::capability::{OperatorCapability, VendorCapabilities};
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::ir::{MigrationIr, Op};
+use zero_migrate_ir::migration::MigrationFlags;
+use zero_migrate_ir::policy::DestructiveOps;
+use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
 
 /// Stable data-security policy rule ids. These are policy decisions layered on
 /// the guard, not deny-list parser rules.
@@ -103,16 +101,16 @@ pub struct GuardConfig {
     destructive_ops: DestructiveOps,
     /// PRIVATE (PHASE 4). The target SQL dialect this guard config is for.
     ///
-    /// - `Postgres` (the default) — the libpg_query line-1 guard runs
+    /// - `Postgres` (the default) — the `libpg_query` line-1 guard runs
     ///   ([`SqlGuard::check`] parses + deny-walks the SQL). Every pre-PHASE-4
     ///   call site keeps this dialect, byte-identical.
     /// - `Sqlite` — the **descriptor-diff-only** Confined path:
-    ///   `libpg_query` cannot parse SQLite, so there is NO line-1 parse guard;
+    ///   `libpg_query` cannot parse `SQLite`, so there is NO line-1 parse guard;
     ///   the line-2 defense is the `SqliteBackend`'s runtime authorizer. The
-    ///   Confined SQLite path accepts ONLY descriptor-diff-generated DDL — an
+    ///   Confined `SQLite` path accepts ONLY descriptor-diff-generated DDL — an
     ///   untrusted RAW SQL string presented to [`SqlGuard::check`] is REFUSED
     ///   fail-closed (it must come from the descriptor emitter). `Platform` is a
-    ///   PG-only posture → it fail-closes to `Confined` on SQLite
+    ///   PG-only posture → it fail-closes to `Confined` on `SQLite`
     ///   ([`GuardConfig::for_dialect`]).
     dialect: SqlDialect,
 }
@@ -136,12 +134,12 @@ impl GuardConfig {
         }
     }
 
-    /// PHASE 4 — the Confined **SQLite** config. Like
-    /// [`GuardConfig::confined`] but for the SQLite dialect: there is NO
-    /// libpg_query line-1 guard (it cannot parse SQLite); the line-2 defense is
+    /// PHASE 4 — the Confined **`SQLite`** config. Like
+    /// [`GuardConfig::confined`] but for the `SQLite` dialect: there is NO
+    /// `libpg_query` line-1 guard (it cannot parse `SQLite`); the line-2 defense is
     /// the `SqliteBackend`'s runtime authorizer, and authoring is
     /// descriptor-diff-only. [`SqlGuard::check`] on this config REFUSES an
-    /// untrusted raw SQL string (fail-closed): the only legitimate SQLite DDL
+    /// untrusted raw SQL string (fail-closed): the only legitimate `SQLite` DDL
     /// comes from the descriptor emitter, never a hand-written string. Needs no
     /// token — Confined is the safe default anyone may construct.
     #[must_use]
@@ -158,10 +156,10 @@ impl GuardConfig {
         }
     }
 
-    /// Confined **MySQL** config. MySQL live apply accepts descriptor-generated
-    /// DDL through the MySQL backend; raw SQL still has no MySQL parser/deny-walk
+    /// Confined **`MySQL`** config. `MySQL` live apply accepts descriptor-generated
+    /// DDL through the `MySQL` backend; raw SQL still has no `MySQL` parser/deny-walk
     /// and is refused by [`SqlGuard::check`] instead of being mis-vetted by
-    /// libpg_query.
+    /// `libpg_query`.
     #[must_use]
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
         Self {
@@ -177,16 +175,16 @@ impl GuardConfig {
     }
 
     /// PHASE 4 — fail-closed dialect selection. Returns the guard config
-    /// appropriate for `dialect`, mapping the requested profile down where SQLite
+    /// appropriate for `dialect`, mapping the requested profile down where `SQLite`
     /// has no equivalent:
     ///
     /// - `Postgres` → `self` unchanged (every profile is valid on PG).
-    /// - `Sqlite` → **always Confined SQLite**. `Platform` is a PG-only posture
-    ///   (the widened multi-schema allowlist has no SQLite analog — `main` IS the
-    ///   one app file), so a Platform config fail-closes to Confined SQLite; a
-    ///   Confined or Trusted config likewise becomes Confined SQLite (Trusted's
+    /// - `Sqlite` → **always Confined `SQLite`**. `Platform` is a PG-only posture
+    ///   (the widened multi-schema allowlist has no `SQLite` analog — `main` IS the
+    ///   one app file), so a Platform config fail-closes to Confined `SQLite`; a
+    ///   Confined or Trusted config likewise becomes Confined `SQLite` (Trusted's
     ///   relaxed authorizer is a separate `SqliteBackend` concern, not a guard
-    ///   one). This is the design's "Platform → fail-closed Confined on SQLite".
+    ///   one). This is the design's "Platform → fail-closed Confined on `SQLite`".
     #[must_use]
     pub fn for_dialect(self, dialect: SqlDialect) -> Self {
         match dialect {
@@ -232,7 +230,7 @@ impl GuardConfig {
     /// This builder is safe to expose because it can only add validation/denial
     /// obligations to whatever trust posture the caller can already construct.
     #[must_use]
-    pub fn with_data_security(
+    pub const fn with_data_security(
         mut self,
         require_rls: bool,
         destructive_ops: DestructiveOps,
@@ -285,7 +283,7 @@ impl GuardConfig {
     /// inert empty shapes so the struct stays uniform. This is the single place
     /// `TrustProfile::Trusted` is named.
     #[must_use]
-    pub fn trusted(_cap: &OperatorCapability) -> Self {
+    pub const fn trusted(_cap: &OperatorCapability) -> Self {
         Self {
             trust: TrustProfile::Trusted,
             capabilities: VendorCapabilities::operator(),
@@ -304,21 +302,21 @@ impl GuardConfig {
 
     /// PHASE 4 — the target SQL dialect this guard config vets.
     #[must_use]
-    pub(crate) fn dialect(&self) -> SqlDialect {
+    pub(crate) const fn dialect(&self) -> SqlDialect {
         self.dialect
     }
 
     /// The trust posture the guard internals consult. `pub`: the engine's
     /// IR-lower path reads it to decide the data-security gate.
     #[must_use]
-    pub fn trust(&self) -> TrustProfile {
+    pub const fn trust(&self) -> TrustProfile {
         self.trust
     }
 
     /// The config-loaded capability composition the guard uses for its widened
     /// statement classes.
     #[must_use]
-    pub fn vendor_capabilities(&self) -> &VendorCapabilities {
+    pub const fn vendor_capabilities(&self) -> &VendorCapabilities {
         &self.capabilities
     }
 
@@ -476,21 +474,21 @@ pub enum GuardError {
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     /// PHASE 4 — a raw SQL string was presented to [`SqlGuard::check`] on the
-    /// Confined **SQLite** path, which accepts ONLY descriptor-diff-generated DDL.
-    /// `libpg_query` cannot vet SQLite, so there is no line-1
-    /// parse guard for raw SQLite SQL; the only safe SQLite DDL comes from the
+    /// Confined **`SQLite`** path, which accepts ONLY descriptor-diff-generated DDL.
+    /// `libpg_query` cannot vet `SQLite`, so there is no line-1
+    /// parse guard for raw `SQLite` SQL; the only safe `SQLite` DDL comes from the
     /// engine's descriptor emitter (validated at the author boundary, line-2
     /// enforced by the `SqliteBackend` authorizer). A hand-written / untrusted
-    /// SQLite SQL string is therefore refused fail-closed.
+    /// `SQLite` SQL string is therefore refused fail-closed.
     #[error(
         "raw SQL is not accepted on the Confined SQLite path: SQLite migrations \
          must be descriptor-diff-generated (libpg_query cannot vet SQLite; the \
          SqliteBackend authorizer is the line-2 defense)"
     )]
     SqliteRawSqlRejected,
-    /// A raw SQL string was presented to the Postgres guard on the MySQL path.
-    /// MySQL has no parser/deny-walk in this crate, so raw SQL is refused
-    /// fail-closed instead of being mis-vetted by libpg_query.
+    /// A raw SQL string was presented to the Postgres guard on the `MySQL` path.
+    /// `MySQL` has no parser/deny-walk in this crate, so raw SQL is refused
+    /// fail-closed instead of being mis-vetted by `libpg_query`.
     #[error(
         "raw SQL is not accepted on the MySQL path: MySQL migrations must be \
          descriptor-generated because no MySQL parser/deny-walk is available"
@@ -657,11 +655,7 @@ impl SqlGuard {
     /// best-effort parseable as SQL, so this intentionally reuses the existing body
     /// scanner: parse what can be parsed, inspect dynamic SQL literals, then token
     /// scan for deny-listed names.
-    pub fn check_raw_island_body_backstop(
-        &self,
-        body: &str,
-        raw: &str,
-    ) -> Result<(), GuardError> {
+    pub fn check_raw_island_body_backstop(&self, body: &str, raw: &str) -> Result<(), GuardError> {
         self.check_body_text(body, raw)
     }
 
@@ -1097,11 +1091,7 @@ impl SqlGuard {
     /// non-project schema is denied. `name` is the funcname/objname list of
     /// protobuf String nodes; an unqualified name (single part) is fine — it
     /// resolves under the pinned `search_path`.
-    fn check_func_def_target(
-        &self,
-        name: &[protobuf::Node],
-        raw: &str,
-    ) -> Result<(), GuardError> {
+    fn check_func_def_target(&self, name: &[protobuf::Node], raw: &str) -> Result<(), GuardError> {
         let parts: Vec<&str> = name
             .iter()
             .filter_map(|n| match n.node.as_ref() {
@@ -1416,9 +1406,7 @@ impl SqlGuard {
         //     uses an `%I` identifier template — any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
-        if let Some(schema) =
-            foreign_schema_literal_in_body(body, &self.cfg.schemas)
-        {
+        if let Some(schema) = foreign_schema_literal_in_body(body, &self.cfg.schemas) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -1632,11 +1620,11 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 /// `plan()`/`apply` only read `destructive` (to drive the destructive/approval
 /// gate) and `advisories` (to surface operational footguns) — see
 /// [`crate::engine::MigrationEngine::plan`]. Deliberately **does not** carry the
-/// PG-specific `classes: Vec<StatementClass>` (the libpg_query `DdlKind`
+/// PG-specific `classes: Vec<StatementClass>` (the `libpg_query` `DdlKind`
 /// vocabulary): that stays *inside* the PG guard ([`SqlGuard`]/[`GuardReport`]),
-/// because a non-PG engine (SQLite descriptor diff, a future non-PG parser) has no
+/// because a non-PG engine (`SQLite` descriptor diff, a future non-PG parser) has no
 /// `DdlKind` to populate. Keeping the neutral seam free of PG vocabulary is
-/// what lets a new engine bring its own line-1 without inheriting libpg_query.
+/// what lets a new engine bring its own line-1 without inheriting `libpg_query`.
 ///
 /// The PG-only consumers of `classes` ([`flags_for`], the author/submit/loader
 /// flag derivation, the `guard_security` matrix) keep calling [`SqlGuard::check`]
@@ -1648,7 +1636,7 @@ pub struct GuardOutcome {
     pub destructive: bool,
     /// Operational [`Advisory`](crate::analyze::Advisory)s (lock-heavy ops,
     /// backward-incompatible shapes, missing FK indexes, …). Advisory-only —
-    /// never deny or gate. Empty for engines that emit none (e.g. SQLite's
+    /// never deny or gate. Empty for engines that emit none (e.g. `SQLite`'s
     /// descriptor path).
     pub advisories: Vec<Advisory>,
 }
@@ -1657,12 +1645,12 @@ pub struct GuardOutcome {
 /// selects it by dialect (`if dialect == Sqlite`) — it asks [`guard_for`] and
 /// runs whatever line-1 that engine brings.
 ///
-/// - **Postgres** ([`PgGuard`]) — the libpg_query parse + deny-list + classify +
+/// - **Postgres** ([`PgGuard`]) — the `libpg_query` parse + deny-list + classify +
 ///   analyze ([`SqlGuard`]), mapped onto the neutral [`GuardOutcome`].
-/// - **SQLite** ([`SqliteDescriptorGuard`]) — the descriptor-diff path is trusted
+/// - **`SQLite`** ([`SqliteDescriptorGuard`]) — the descriptor-diff path is trusted
 ///   by construction (validated at the author boundary, line-2 enforced by the
 ///   `SqliteBackend` authorizer at apply), so `check` returns the **empty/clean**
-///   outcome. The raw-untrusted-SQL fail-closed (libpg_query cannot vet SQLite)
+///   outcome. The raw-untrusted-SQL fail-closed (`libpg_query` cannot vet `SQLite`)
 ///   lives on [`SqlGuard::check`] itself — if the PG guard is ever mis-handed a
 ///   SQLite-keyed config it returns [`GuardError::SqliteRawSqlRejected`] rather
 ///   than mis-parsing (the existing defensive property).
@@ -1677,12 +1665,12 @@ pub trait MigrationGuard {
     ///
     /// # Errors
     /// Engine-specific: PG surfaces [`GuardError::Denied`] /
-    /// [`GuardError::CrossSchema`] / [`GuardError::Parse`]; SQLite's descriptor
+    /// [`GuardError::CrossSchema`] / [`GuardError::Parse`]; `SQLite`'s descriptor
     /// path does not deny (it trusts), so its `check` is infallible in practice.
     fn check(&self, up: &str) -> Result<GuardOutcome, GuardError>;
 }
 
-/// The Postgres line-1: the existing [`SqlGuard`] (libpg_query deny-list +
+/// The Postgres line-1: the existing [`SqlGuard`] (`libpg_query` deny-list +
 /// cross-schema confinement + classify + analyze) behind [`MigrationGuard`].
 /// Behavior-identical to calling [`SqlGuard::check`] — `check` only drops the
 /// PG-specific `classes` from the returned report (the neutral seam).
@@ -1716,11 +1704,11 @@ impl MigrationGuard for PgGuard {
     }
 }
 
-/// The SQLite line-1: the descriptor-diff path is **trusted by construction**.
+/// The `SQLite` line-1: the descriptor-diff path is **trusted by construction**.
 ///
-/// SQLite migrations are produced ONLY by the declarative differ
-/// ([`crate::render::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL SQLite
-/// author. libpg_query cannot parse SQLite, so there is no string deny-list to
+/// `SQLite` migrations are produced ONLY by the declarative differ
+/// ([`crate::render::declarative::DeclarativeAuthor::diff`]) — there is no raw-SQL `SQLite`
+/// author. `libpg_query` cannot parse `SQLite`, so there is no string deny-list to
 /// run; the line-1 vet is the descriptor emitter at the author boundary and the
 /// line-2 defense is the `SqliteBackend`'s runtime authorizer applied per
 /// statement at execution. So `check` returns the **empty**
@@ -1728,14 +1716,14 @@ impl MigrationGuard for PgGuard {
 /// executor's `run_string_guard == false` skip, now expressed as a per-engine
 /// guard instead of an `if dialect == Sqlite` branch.
 ///
-/// (The raw-untrusted-SQL fail-closed — refusing a hand-written SQLite string
+/// (The raw-untrusted-SQL fail-closed — refusing a hand-written `SQLite` string
 /// handed to the *PG* guard — stays on [`SqlGuard::check`] as
 /// [`GuardError::SqliteRawSqlRejected`]; that defensive property is unchanged.)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqliteDescriptorGuard;
 
 impl SqliteDescriptorGuard {
-    /// Construct the SQLite descriptor guard (stateless).
+    /// Construct the `SQLite` descriptor guard (stateless).
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -1755,9 +1743,9 @@ impl MigrationGuard for SqliteDescriptorGuard {
 /// Select the per-engine line-1 [`MigrationGuard`] for a [`GuardConfig`]'s
 /// dialect.
 ///
-/// Postgres → [`PgGuard`] (libpg_query deny-list); SQLite → [`SqliteDescriptorGuard`]
+/// Postgres → [`PgGuard`] (`libpg_query` deny-list); `SQLite` → [`SqliteDescriptorGuard`]
 /// (trusted descriptor path). This replaces the `if dialect == Sqlite` branch in
-/// `plan()` — the core no longer knows SQLite by name; it asks for the dialect's
+/// `plan()` — the core no longer knows `SQLite` by name; it asks for the dialect's
 /// guard and runs it uniformly.
 #[must_use]
 pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
@@ -1799,7 +1787,13 @@ pub fn check_ir_data_security_policy(
         op: &'a Op,
         out: &mut Vec<(usize, &'a Op)>,
     ) {
-        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
             let own = match cfg.dialect() {
                 SqlDialect::Postgres => pg.as_deref(),
                 SqlDialect::Sqlite => sqlite.as_deref(),
@@ -1882,7 +1876,12 @@ pub fn check_ir_data_security_policy(
                 }
             }
             Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
-            Op::DropTable { table, schema, .. } | Op::DropPartition { name: table, schema, .. } => {
+            Op::DropTable { table, schema, .. }
+            | Op::DropPartition {
+                name: table,
+                schema,
+                ..
+            } => {
                 let key = table_key_for_policy(cfg, schema, table);
                 tables
                     .entry(key)
@@ -1899,7 +1898,9 @@ pub fn check_ir_data_security_policy(
                         table: table.clone(),
                     });
             }
-            Op::RenameTable { table, to, schema, .. } => {
+            Op::RenameTable {
+                table, to, schema, ..
+            } => {
                 let from = table_key_for_policy(cfg, schema, table);
                 let to_key = table_key_for_policy(cfg, schema, to);
                 if let Some(mut state) = tables.remove(&from) {
@@ -1986,7 +1987,7 @@ fn is_safe_drop_object(remove_type: i32) -> bool {
 
 /// Whether the loaded capability composition admits a DROP object class beyond
 /// [`is_safe_drop_object`] (the `.down.sql`-only reverses).
-fn platform_drop_object_allowed(remove_type: i32, caps: &VendorCapabilities) -> bool {
+const fn platform_drop_object_allowed(remove_type: i32, caps: &VendorCapabilities) -> bool {
     if remove_type == ObjectType::ObjectRole as i32 {
         return caps.allow_role;
     }
@@ -2913,7 +2914,10 @@ fn owned_by_schema(v: Option<&Value>) -> Option<String> {
 fn qualified_list_parts(v: Option<&Value>) -> Option<Vec<String>> {
     let arr = match v {
         Some(Value::Array(a)) => a.as_slice(),
-        Some(obj) => match obj.get("node").and_then(|n| n.get("List")).and_then(|l| l.get("items"))
+        Some(obj) => match obj
+            .get("node")
+            .and_then(|n| n.get("List"))
+            .and_then(|l| l.get("items"))
         {
             Some(Value::Array(a)) => a.as_slice(),
             _ => return None,
@@ -3011,6 +3015,7 @@ fn def_elem_string_args(args: &[protobuf::Node]) -> Vec<String> {
 /// adjacent multi-byte char and let the backstop's word-scan miss it. The primary
 /// defense is the `pg_query` parse + least-priv role; this is the body token-scan
 /// backstop, so its extraction must be byte-faithful.
+#[must_use]
 pub fn extract_string_literals(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     // (byte_offset, char) pairs so we can index forward over the source faithfully.
@@ -3074,9 +3079,15 @@ fn body_contains_superuser_role_escalation(lower: &str) -> bool {
 
 /// Slice the original source for a statement using its byte offsets.
 fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
-    let start = usize::try_from(raw_stmt.stmt_location).unwrap_or(0).min(sql.len());
+    let start = usize::try_from(raw_stmt.stmt_location)
+        .unwrap_or(0)
+        .min(sql.len());
     let len = usize::try_from(raw_stmt.stmt_len).unwrap_or(0);
-    let end = if len == 0 { sql.len() } else { (start + len).min(sql.len()) };
+    let end = if len == 0 {
+        sql.len()
+    } else {
+        (start + len).min(sql.len())
+    };
     sql.get(start..end).unwrap_or("").trim().to_string()
 }
 

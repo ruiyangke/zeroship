@@ -80,20 +80,31 @@ fn parse_sidecar() -> Vec<SidecarRow> {
             rows.push(std::collections::BTreeMap::new());
             continue;
         }
-        let (key, rest) = line
-            .split_once('=')
-            .unwrap_or_else(|| panic!("dialect-support.toml:{}: not a key = value line: {raw:?}", i + 1));
+        let (key, rest) = line.split_once('=').unwrap_or_else(|| {
+            panic!(
+                "dialect-support.toml:{}: not a key = value line: {raw:?}",
+                i + 1
+            )
+        });
         let key = key.trim().to_string();
         // strip an optional trailing `# comment`, then the surrounding quotes.
         let value_part = rest.split('#').next().unwrap_or("").trim();
         let value = value_part
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or_else(|| panic!("dialect-support.toml:{}: value is not a quoted string: {raw:?}", i + 1))
+            .unwrap_or_else(|| {
+                panic!(
+                    "dialect-support.toml:{}: value is not a quoted string: {raw:?}",
+                    i + 1
+                )
+            })
             .to_string();
-        let cur = rows
-            .last_mut()
-            .unwrap_or_else(|| panic!("dialect-support.toml:{}: key before any [[row]] header", i + 1));
+        let cur = rows.last_mut().unwrap_or_else(|| {
+            panic!(
+                "dialect-support.toml:{}: key before any [[row]] header",
+                i + 1
+            )
+        });
         cur.insert(key, value);
     }
     rows.into_iter()
@@ -107,7 +118,7 @@ fn parse_sidecar() -> Vec<SidecarRow> {
         .collect()
 }
 
-fn disposition_token(disposition: Disposition) -> &'static str {
+const fn disposition_token(disposition: Disposition) -> &'static str {
     match disposition {
         Disposition::Portable => "portable",
         Disposition::TransparentDegradable => "transparentDegradable",
@@ -122,9 +133,10 @@ fn schema_path() -> PathBuf {
 
 /// The `Op` discriminant tokens the schema declares (the 54-op wire contract).
 fn schema_op_tags() -> BTreeSet<String> {
-    let schema: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"))
-            .expect("parse ir-envelope.schema.json");
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"),
+    )
+    .expect("parse ir-envelope.schema.json");
     schema
         .get("$defs")
         .and_then(|d| d.get("Op"))
@@ -144,12 +156,20 @@ fn schema_op_tags() -> BTreeSet<String> {
 }
 
 fn col_ref() -> Expr {
-    Expr::ColRef { name: "x".into(), table: None }
+    Expr::ColRef {
+        name: "x".into(),
+        table: None,
+    }
 }
 
 /// A minimal `IrColumn` with the given type / default / identity facets. Only the
 /// facets `support()` inspects (default, identity) matter here.
-fn column(name: &str, ty: ColType, default: Option<IrDefault>, identity: Option<IdentityCol>) -> IrColumn {
+fn column(
+    name: &str,
+    ty: ColType,
+    default: Option<IrDefault>,
+    identity: Option<IdentityCol>,
+) -> IrColumn {
     IrColumn {
         name: name.into(),
         ty,
@@ -210,7 +230,12 @@ fn fk(columns: Vec<&str>, references_columns: Vec<&str>) -> IrConstraintKind {
     }
 }
 
-fn create_index(elements: Vec<IndexElement>, using: Option<IndexMethod>, r#where: Option<Expr>, include: Vec<String>) -> Op {
+fn create_index(
+    elements: Vec<IndexElement>,
+    using: Option<IndexMethod>,
+    r#where: Option<Expr>,
+    include: Vec<String>,
+) -> Op {
     Op::CreateIndex {
         table: "t".into(),
         columns: elements,
@@ -243,7 +268,7 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "t".into(),
                     schema: None,
@@ -256,7 +281,7 @@ fn structured_view(name: &str, materialized: Option<bool>, replace: Option<bool>
                 having: None,
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace,
         materialized,
@@ -282,7 +307,7 @@ fn trigger(
     }
 }
 
-fn body(statements: Vec<TriggerStmt>) -> TriggerAction {
+const fn body(statements: Vec<TriggerStmt>) -> TriggerAction {
     TriggerAction::Body { statements }
 }
 
@@ -292,6 +317,9 @@ fn select_stmt() -> TriggerStmt {
 
 /// The representative corpus: `(kind, variant, Op)`. Payload-dependent ops carry
 /// one entry per distinct `support()` branch (see file header).
+// Intentional `Vec::new()` + per-op `push` for line-by-line readability of the
+// hand-authored corpus; folding the first push into `vec![]` buys nothing here.
+#[allow(clippy::vec_init_then_push)]
 fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     let mut c: Vec<(&'static str, &'static str, Op)> = Vec::new();
 
@@ -725,7 +753,11 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     ));
 
     // ── createTable — one entry per support() branch ─────────────────────────
-    c.push(("createTable", "base", plain_table("t", vec![column("id", ColType::BigInt, None, None)], None)));
+    c.push((
+        "createTable",
+        "base",
+        plain_table("t", vec![column("id", ColType::BigInt, None, None)], None),
+    ));
     c.push((
         "createTable",
         "partitioned",
@@ -790,14 +822,23 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "createTable",
         "nextvalDefault",
-        plain_table("t", vec![column("id", ColType::BigInt, Some(nextval_default()), None)], None),
+        plain_table(
+            "t",
+            vec![column("id", ColType::BigInt, Some(nextval_default()), None)],
+            None,
+        ),
     ));
     c.push((
         "createTable",
         "identityAlways",
         plain_table(
             "t",
-            vec![column("id", ColType::BigInt, None, Some(IdentityCol { always: true }))],
+            vec![column(
+                "id",
+                ColType::BigInt,
+                None,
+                Some(IdentityCol { always: true }),
+            )],
             Some(vec!["id".into()]),
         ),
     ));
@@ -809,7 +850,12 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             "t",
             vec![
                 column("id", ColType::BigInt, None, None),
-                column("seq", ColType::BigInt, None, Some(IdentityCol { always: false })),
+                column(
+                    "seq",
+                    ColType::BigInt,
+                    None,
+                    Some(IdentityCol { always: false }),
+                ),
             ],
             Some(vec!["id".into()]),
         ),
@@ -831,20 +877,42 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         existence_guard: None,
     };
     c.push(("addColumn", "base", add_column(None, None)));
-    c.push(("addColumn", "identity", add_column(None, Some(IdentityCol { always: false }))));
-    c.push(("addColumn", "nextvalDefault", add_column(Some(nextval_default()), None)));
+    c.push((
+        "addColumn",
+        "identity",
+        add_column(None, Some(IdentityCol { always: false })),
+    ));
+    c.push((
+        "addColumn",
+        "nextvalDefault",
+        add_column(Some(nextval_default()), None),
+    ));
 
     // ── createIndex ──────────────────────────────────────────────────────────
-    c.push(("createIndex", "base", create_index(vec![column_element("a")], None, None, vec![])));
+    c.push((
+        "createIndex",
+        "base",
+        create_index(vec![column_element("a")], None, None, vec![]),
+    ));
     c.push((
         "createIndex",
         "pgOnlyMethodOrFeature",
-        create_index(vec![column_element("a")], Some(IndexMethod::Gin), None, vec![]),
+        create_index(
+            vec![column_element("a")],
+            Some(IndexMethod::Gin),
+            None,
+            vec![],
+        ),
     ));
     c.push((
         "createIndex",
         "exprElement",
-        create_index(vec![IndexElement::Expr { expr: col_ref() }], None, None, vec![]),
+        create_index(
+            vec![IndexElement::Expr { expr: col_ref() }],
+            None,
+            None,
+            vec![],
+        ),
     ));
     c.push((
         "createIndex",
@@ -886,7 +954,11 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             kind: EmptyContainerKind::Object,
         }),
     ));
-    c.push(("setColumnDefault", "nextval", set_col_default(nextval_default())));
+    c.push((
+        "setColumnDefault",
+        "nextval",
+        set_col_default(nextval_default()),
+    ));
 
     // ── renameColumn ─────────────────────────────────────────────────────────
     let rename_column = |guard: Option<zero_migrate::model::ir::ExistenceGuard>| Op::RenameColumn {
@@ -905,16 +977,25 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     ));
 
     // ── addConstraint ────────────────────────────────────────────────────────
-    c.push(("addConstraint", "fkSimple", add_constraint(fk(vec!["a"], vec!["id"]))));
+    c.push((
+        "addConstraint",
+        "fkSimple",
+        add_constraint(fk(vec!["a"], vec!["id"])),
+    ));
     c.push((
         "addConstraint",
         "unique",
-        add_constraint(IrConstraintKind::Unique { columns: vec!["a".into()] }),
+        add_constraint(IrConstraintKind::Unique {
+            columns: vec!["a".into()],
+        }),
     ));
     c.push((
         "addConstraint",
         "check",
-        add_constraint(IrConstraintKind::Check { expr: col_ref(), not_valid: None }),
+        add_constraint(IrConstraintKind::Check {
+            expr: col_ref(),
+            not_valid: None,
+        }),
     ));
     c.push((
         "addConstraint",
@@ -927,8 +1008,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             initially_deferred: None,
         }),
     ));
-    c.push(("addConstraint", "fkComposite", add_constraint(fk(vec!["a", "b"], vec!["id", "x"]))));
-    c.push(("addConstraint", "fkNonId", add_constraint(fk(vec!["a"], vec!["other_col"]))));
+    c.push((
+        "addConstraint",
+        "fkComposite",
+        add_constraint(fk(vec!["a", "b"], vec!["id", "x"])),
+    ));
+    c.push((
+        "addConstraint",
+        "fkNonId",
+        add_constraint(fk(vec!["a"], vec!["other_col"])),
+    ));
     c.push((
         "addConstraint",
         "fkNotValid",
@@ -943,7 +1032,11 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             not_valid: Some(true),
         }),
     ));
-    c.push(("addConstraint", "fkNoLocalColumn", add_constraint(fk(vec![], vec!["id"]))));
+    c.push((
+        "addConstraint",
+        "fkNoLocalColumn",
+        add_constraint(fk(vec![], vec!["id"])),
+    ));
 
     // ── insert ───────────────────────────────────────────────────────────────
     let insert = |on_conflict: Option<zero_migrate::model::ir::IrOnConflict>| Op::Insert {
@@ -965,8 +1058,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
 
     // ── createView / dropView ────────────────────────────────────────────────
     c.push(("createView", "base", structured_view("v", None, None)));
-    c.push(("createView", "materialized", structured_view("v", Some(true), None)));
-    c.push(("createView", "materializedReplace", structured_view("v", Some(true), Some(true))));
+    c.push((
+        "createView",
+        "materialized",
+        structured_view("v", Some(true), None),
+    ));
+    c.push((
+        "createView",
+        "materializedReplace",
+        structured_view("v", Some(true), Some(true)),
+    ));
     c.push((
         "dropView",
         "base",
@@ -998,7 +1099,11 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         not_null: None,
     };
     c.push(("createDomain", "base", create_domain(None)));
-    c.push(("createDomain", "nextvalDefault", create_domain(Some(nextval_default()))));
+    c.push((
+        "createDomain",
+        "nextvalDefault",
+        create_domain(Some(nextval_default())),
+    ));
 
     // ── createRole ───────────────────────────────────────────────────────────
     let create_role = |superuser: Option<bool>, if_not_exists: Option<bool>| Op::CreateRole {
@@ -1014,7 +1119,11 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         if_not_exists,
     };
     c.push(("createRole", "base", create_role(None, None)));
-    c.push(("createRole", "superuserIfNotExists", create_role(Some(true), Some(true))));
+    c.push((
+        "createRole",
+        "superuserIfNotExists",
+        create_role(Some(true), Some(true)),
+    ));
 
     // ── createTrigger — one entry per support() branch ───────────────────────
     c.push((
@@ -1031,17 +1140,35 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "createTrigger",
         "bodySimple",
-        trigger(vec![TriggerEvent::Insert], TriggerTiming::Before, ForEach::Row, body(vec![select_stmt()]), None),
+        trigger(
+            vec![TriggerEvent::Insert],
+            TriggerTiming::Before,
+            ForEach::Row,
+            body(vec![select_stmt()]),
+            None,
+        ),
     ));
     c.push((
         "createTrigger",
         "bodyTruncateEvent",
-        trigger(vec![TriggerEvent::Truncate], TriggerTiming::Before, ForEach::Row, body(vec![select_stmt()]), None),
+        trigger(
+            vec![TriggerEvent::Truncate],
+            TriggerTiming::Before,
+            ForEach::Row,
+            body(vec![select_stmt()]),
+            None,
+        ),
     ));
     c.push((
         "createTrigger",
         "bodyStatementLevel",
-        trigger(vec![TriggerEvent::Insert], TriggerTiming::Before, ForEach::Statement, body(vec![select_stmt()]), None),
+        trigger(
+            vec![TriggerEvent::Insert],
+            TriggerTiming::Before,
+            ForEach::Statement,
+            body(vec![select_stmt()]),
+            None,
+        ),
     ));
     c.push((
         "createTrigger",
@@ -1057,12 +1184,24 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "createTrigger",
         "bodyInsteadOf",
-        trigger(vec![TriggerEvent::Insert], TriggerTiming::InsteadOf, ForEach::Row, body(vec![select_stmt()]), None),
+        trigger(
+            vec![TriggerEvent::Insert],
+            TriggerTiming::InsteadOf,
+            ForEach::Row,
+            body(vec![select_stmt()]),
+            None,
+        ),
     ));
     c.push((
         "createTrigger",
         "bodyWhen",
-        trigger(vec![TriggerEvent::Insert], TriggerTiming::Before, ForEach::Row, body(vec![select_stmt()]), Some(col_ref())),
+        trigger(
+            vec![TriggerEvent::Insert],
+            TriggerTiming::Before,
+            ForEach::Row,
+            body(vec![select_stmt()]),
+            Some(col_ref()),
+        ),
     ));
     c.push((
         "createTrigger",

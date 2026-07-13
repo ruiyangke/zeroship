@@ -234,7 +234,9 @@ fn canonical_index_sql_text(s: &str) -> String {
         }
         let safe_bare = !ident.is_empty()
             && ident.starts_with(|c: char| c == '_' || c.is_ascii_lowercase())
-            && ident.chars().all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+            && ident
+                .chars()
+                .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
         if closed && safe_bare {
             out.push_str(&ident);
         } else {
@@ -266,7 +268,10 @@ pub(crate) fn index_elements_canonically_eq(
                     order: order_b,
                     ..
                 },
-            ) => a == b && canonical_index_sort_order(*order_a) == canonical_index_sort_order(*order_b),
+            ) => {
+                a == b
+                    && canonical_index_sort_order(*order_a) == canonical_index_sort_order(*order_b)
+            }
             (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
                 canonical_index_sql_text(a) == canonical_index_sql_text(b)
             }
@@ -367,7 +372,10 @@ impl std::hash::Hash for IndexSnapshot {
             }
         }
         self.access_method.hash(state);
-        self.predicate.as_deref().map(canonical_index_sql_text).hash(state);
+        self.predicate
+            .as_deref()
+            .map(canonical_index_sql_text)
+            .hash(state);
         self.include.hash(state);
         self.with.hash(state);
         self.only.hash(state);
@@ -383,7 +391,11 @@ impl IndexSnapshot {
         Self {
             name: name.into(),
             unique,
-            elements: columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
+            elements: columns
+                .iter()
+                .cloned()
+                .map(IndexElementSnapshot::column)
+                .collect(),
             columns,
             access_method: "btree".to_string(),
             predicate: None,
@@ -466,8 +478,7 @@ pub struct ViewSnapshot {
 
 impl PartialEq for ViewSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.materialized == other.materialized
-            && self.comment == other.comment
+        self.materialized == other.materialized && self.comment == other.comment
     }
 }
 impl Eq for ViewSnapshot {}
@@ -547,10 +558,7 @@ fn sequence_default_max_value(as_type: SequenceDataTypeSnapshot, increment: Safe
     }
 }
 
-fn normalize_sequence_bound(
-    default: i64,
-    value: i64,
-) -> Result<Option<SafeI64>, String> {
+fn normalize_sequence_bound(default: i64, value: i64) -> Result<Option<SafeI64>, String> {
     if value == default {
         Ok(None)
     } else {

@@ -1,9 +1,7 @@
 //! Resolve profile-managed table shape into explicit `createTable` IR.
 
 use crate::model::expr::{Expr, SynthFn};
-use crate::model::ir::{
-    ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op,
-};
+use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op};
 use crate::model::profile::{PolicyProfile, TablePrimaryKeyPolicy};
 
 /// Error raised while applying a [`PolicyProfile`]'s table system shape.
@@ -28,7 +26,9 @@ pub enum TableShapeError {
         data_type: String,
     },
     /// A confined/profile-owned primary key would silently discard an author PK.
-    #[error("createTable {table:?} declares an author primaryKey under a profile-owned table shape")]
+    #[error(
+        "createTable {table:?} declares an author primaryKey under a profile-owned table shape"
+    )]
     AuthorPrimaryKeyForbidden {
         /// Table being resolved.
         table: String,
@@ -44,7 +44,9 @@ pub enum TableShapeError {
         message: String,
     },
     /// The `id` prefix declaration carried a facet the fold would lose.
-    #[error("createTable {table:?} declares id as a system-prefix field with unsupported modifiers")]
+    #[error(
+        "createTable {table:?} declares id as a system-prefix field with unsupported modifiers"
+    )]
     InvalidIdPrefixDeclaration {
         /// Table being resolved.
         table: String,
@@ -147,25 +149,27 @@ fn resolve_create_table(
         TablePrimaryKeyPolicy::Author(_) => primary_key.clone(),
     };
 
-    indexes.extend(shape.indexes.iter().map(|idx| IrIndex {
-        name: None,
-        columns: idx
-            .columns
-            .iter()
-            .map(|name| IndexElement::Column {
-                name: name.clone(),
-                order: None,
-                opclass: None,
-                collation: None,
-            })
-            .collect(),
-        unique: None,
-        using: None,
-        r#where: None,
-        include: Vec::new(),
-        with: None,
-        only: None,
-        nulls_not_distinct: None,
+    indexes.extend(shape.indexes.iter().map(|idx| {
+        IrIndex {
+            name: None,
+            columns: idx
+                .columns
+                .iter()
+                .map(|name| IndexElement::Column {
+                    name: name.clone(),
+                    order: None,
+                    opclass: None,
+                    collation: None,
+                })
+                .collect(),
+            unique: None,
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        }
     }));
 
     Ok(())
@@ -207,7 +211,10 @@ fn is_id_prefix_declaration(column: &IrColumn) -> bool {
 fn is_id_identity_replacement(column: &IrColumn) -> bool {
     column.name == "id"
         && column.identity.is_some()
-        && matches!(column.ty, ColType::SmallInt | ColType::Int | ColType::BigInt)
+        && matches!(
+            column.ty,
+            ColType::SmallInt | ColType::Int | ColType::BigInt
+        )
 }
 
 fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), TableShapeError> {
@@ -320,7 +327,11 @@ pub(crate) fn resolved_create_table_matches_profile(
         let Some(actual_cols) = actual_cols else {
             return Ok(false);
         };
-        let expected_cols = expected.columns.iter().map(String::as_str).collect::<Vec<_>>();
+        let expected_cols = expected
+            .columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         if actual_cols != expected_cols
             || actual.unique.unwrap_or(false)
             || actual.using.is_some()
@@ -348,7 +359,7 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ir::{CanonicalOpList, CURRENT_IR_VERSION, MigrationIr};
+    use crate::model::ir::{CanonicalOpList, MigrationIr, CURRENT_IR_VERSION};
     use crate::model::profile::PolicyProfile;
     use crate::{Checksum, MigrationFlags};
 
@@ -394,9 +405,11 @@ mod tests {
 
     #[test]
     fn confined_prepends_system_shape_and_pk() {
-        let resolved =
-            resolve_create_table_policy(&ir(vec![text_col("title")], None), &PolicyProfile::confined())
-                .expect("resolve");
+        let resolved = resolve_create_table_policy(
+            &ir(vec![text_col("title")], None),
+            &PolicyProfile::confined(),
+        )
+        .expect("resolve");
         let Op::CreateTable {
             columns,
             primary_key,
@@ -441,7 +454,10 @@ mod tests {
 
     #[test]
     fn platform_preserves_author_shape() {
-        let input = ir(vec![text_col("id"), text_col("team")], Some(vec!["id".into()]));
+        let input = ir(
+            vec![text_col("id"), text_col("team")],
+            Some(vec!["id".into()]),
+        );
         let resolved = resolve_create_table_policy(&input, &PolicyProfile::platform())
             .expect("platform is a no-op");
         assert_eq!(resolved, input);
@@ -449,9 +465,11 @@ mod tests {
 
     #[test]
     fn system_column_collision_is_rejected_except_id_prefix() {
-        let err =
-            resolve_create_table_policy(&ir(vec![text_col("created_at")], None), &PolicyProfile::confined())
-                .expect_err("created_at collision");
+        let err = resolve_create_table_policy(
+            &ir(vec![text_col("created_at")], None),
+            &PolicyProfile::confined(),
+        )
+        .expect_err("created_at collision");
         assert!(matches!(
             err,
             TableShapeError::SystemColumnCollision { column, .. } if column == "created_at"
@@ -462,9 +480,11 @@ mod tests {
         id.nullable = Some(false);
         id.default = Some(gen_random_uuid_default());
         id.id_prefix = Some("post".into());
-        let resolved =
-            resolve_create_table_policy(&ir(vec![id], Some(vec!["id".into()])), &PolicyProfile::confined())
-                .expect("id prefix folds");
+        let resolved = resolve_create_table_policy(
+            &ir(vec![id], Some(vec!["id".into()])),
+            &PolicyProfile::confined(),
+        )
+        .expect("id prefix folds");
         let Op::CreateTable { columns, .. } = &resolved.ops[0] else {
             panic!("create op")
         };

@@ -2,22 +2,22 @@
 //!
 //! Pins the per-engine line-1 seam that replaced the three `if dialect == Sqlite`
 //! guard branches (engine.rs `plan()`, executor.rs apply FIRST PASS, the
-//! `SqlGuard::check` SQLite arm):
+//! `SqlGuard::check` `SQLite` arm):
 //!
 //! - `PgGuard` (the Postgres line-1) still **denies** exactly the deny-list set
 //!   it did before — COPY … PROGRAM (RCE) and a `CREATE EXTENSION` outside the
 //!   allowlist — and still **passes** benign DDL, now through the neutral
 //!   `GuardOutcome` (no PG-specific `classes` on the seam).
-//! - `SqliteDescriptorGuard` (the SQLite line-1) **trusts** descriptor-diff DDL
+//! - `SqliteDescriptorGuard` (the `SQLite` line-1) **trusts** descriptor-diff DDL
 //!   (its `check` returns the empty clean outcome) — the apply/plan path on
-//!   SQLite feeds it descriptor-generated DDL, which must NOT be rejected.
+//!   `SQLite` feeds it descriptor-generated DDL, which must NOT be rejected.
 //! - The raw-untrusted-SQLite-SQL fail-closed survives on `SqlGuard` itself: a
-//!   SQLite-keyed `SqlGuard` (the PG guard mis-handed a SQLite config) still
+//!   SQLite-keyed `SqlGuard` (the PG guard mis-handed a `SQLite` config) still
 //!   refuses with `SqliteRawSqlRejected` rather than mis-parsing — the defensive
-//!   property the engine no longer relies on (it routes SQLite through
+//!   property the engine no longer relies on (it routes `SQLite` through
 //!   `SqliteDescriptorGuard`), kept as a backstop for the wrong caller.
 //! - `guard_for` selects the right per-engine guard by dialect, with no by-name
-//!   SQLite knowledge in the core.
+//!   `SQLite` knowledge in the core.
 
 use zero_migrate::guard::{
     guard_for, GuardConfig, GuardError, MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
@@ -91,7 +91,10 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
     let outcome = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect("descriptor-generated SQLite DDL is trusted — empty clean outcome");
-    assert!(!outcome.destructive, "trusted descriptor path: not destructive");
+    assert!(
+        !outcome.destructive,
+        "trusted descriptor path: not destructive"
+    );
     assert!(
         outcome.advisories.is_empty(),
         "trusted descriptor path: no advisories"

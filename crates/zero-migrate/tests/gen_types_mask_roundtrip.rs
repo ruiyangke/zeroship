@@ -20,7 +20,7 @@
 //!      sentinel + `_masked` sibling (closing the runtime masking-fidelity gap too).
 //!
 //! This test PINS the round-trip: a standalone mask authored on a plaintext column
-//! SURVIVES descriptors → ops → fold and reappears on the recovered FieldDef. (The
+//! SURVIVES descriptors → ops → fold and reappears on the recovered `FieldDef`. (The
 //! live-PG `zero-migrate:mask` sentinel round-trip is pinned by `mask_addcol_pg.rs`.)
 
 use zero_migrate::render::declarative::{
@@ -47,7 +47,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
         owner_app: "app_gap".to_string(),
         fields: vec![standalone_masked_field()],
         indexes: Vec::new(),
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
 
     // AUTHORED side: the declarative descriptor carries the mask.
@@ -64,9 +64,9 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
 
     // RECOVERED: the standalone mask now SURVIVES the op.* fold (carried on the IR,
     // re-derived into the FieldDescriptor, and emitted on the recovered FieldDef).
-    let mask = ssn
-        .get("mask")
-        .unwrap_or_else(|| panic!("standalone .mask() must round-trip through the op.* fold; got: {ssn}"));
+    let mask = ssn.get("mask").unwrap_or_else(|| {
+        panic!("standalone .mask() must round-trip through the op.* fold; got: {ssn}")
+    });
     assert_eq!(
         mask.get("kind").and_then(|v| v.as_str()),
         Some("last4"),

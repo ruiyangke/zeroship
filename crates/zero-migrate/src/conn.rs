@@ -7,15 +7,13 @@
 
 use std::time::Duration;
 
-
 /// Error opening a migrator connection.
 ///
 /// Compiles as an (uninhabited) enum — the connection is now supplied by the
 /// host through the `SqlSession` seam, so no in-crate connect path exists to
 /// construct it.
 #[derive(Debug, thiserror::Error)]
-pub enum ConnectError {
-}
+pub enum ConnectError {}
 
 /// The **Postgres confinement parameters** — the per-engine apply-confinement
 /// strategy inputs that are PG-shaped and meaningless to a non-PG engine
@@ -231,11 +229,13 @@ impl ExecutorConfig {
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
         match (self.trust, self.operator_cap.as_ref()) {
-            (crate::model::policy::TrustProfile::Platform, Some(cap)) => crate::guard::GuardConfig::platform(
-                cap,
-                self.platform_schemas.clone(),
-                self.platform_exts.clone(),
-            ),
+            (crate::model::policy::TrustProfile::Platform, Some(cap)) => {
+                crate::guard::GuardConfig::platform(
+                    cap,
+                    self.platform_schemas.clone(),
+                    self.platform_exts.clone(),
+                )
+            }
             #[cfg(test)]
             (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
                 crate::guard::GuardConfig::trusted(cap)
@@ -294,8 +294,14 @@ impl ExecutorConfig {
     /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
     /// sole Trusted producer was retired into the `zero-migrate-engine` TS CLI.
     /// The token stays the in-crate enforcement primitive.
+    // `#[allow(dead_code)]`: the sole in-crate consumer (the Track-A live-Postgres
+    // Trusted-apply tests) is gated behind a running DB and currently absent, but
+    // this `pub(crate)` ctor stays as the pinned in-crate Trusted-config primitive
+    // (a separate integration crate cannot construct one — see the T8 trybuild
+    // boundary), so it must not be deleted.
     #[must_use]
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn trusted(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
@@ -356,12 +362,13 @@ impl ExecutorConfig {
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
         let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
         match self.trust {
-            crate::model::policy::TrustProfile::Platform if !self.platform_schemas.is_empty() => self
-                .platform_schemas
-                .iter()
-                .map(|s| quote(s))
-                .collect::<Result<Vec<_>, _>>()
-                .map(|parts| parts.join(", ")),
+            crate::model::policy::TrustProfile::Platform if !self.platform_schemas.is_empty() => {
+                self.platform_schemas
+                    .iter()
+                    .map(|s| quote(s))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|parts| parts.join(", "))
+            }
             // Confined / Trusted: the project schema is first (the sole writable
             // resolution target — `CREATE TABLE foo` lands here, not in an
             // extension schema), followed by the extension schema(s) so an
@@ -393,5 +400,3 @@ impl ExecutorConfig {
         u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 }
-
-

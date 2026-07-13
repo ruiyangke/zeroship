@@ -130,7 +130,10 @@ fn is_fts5_shadow_table(name: &str, raw_names: &[String]) -> bool {
 pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnapshot, DriftError> {
     // Engine mode: the introspection reads sqlite_master + issues PRAGMAs, both of
     // which CreatorUp denies. Read-only (no DDL, no writes).
-    actor.set_mode(Mode::EngineJournal).await.map_err(drift_err)?;
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(drift_err)?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
@@ -191,7 +194,11 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                     IndexSnapshot {
                         name: name.clone(),
                         unique: false,
-                        elements: columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
+                        elements: columns
+                            .iter()
+                            .cloned()
+                            .map(IndexElementSnapshot::column)
+                            .collect(),
                         columns,
                         access_method: "fts5".to_string(),
                         predicate: None,
@@ -249,12 +256,15 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         } else {
             None
         };
-        views.insert(name, ViewSnapshot {
-            materialized: false,
-            columns: None,
-            definition,
-            comment: None,
-        });
+        views.insert(
+            name,
+            ViewSnapshot {
+                materialized: false,
+                columns: None,
+                definition,
+                comment: None,
+            },
+        );
     }
 
     // Per-table: columns (PRAGMA table_info), indexes (PRAGMA index_list / index_info),
@@ -434,13 +444,20 @@ async fn introspect_indexes_and_unique(
             ))
             .await
             .map_err(drift_err)?;
-        let create_sql = sql_rows.first().and_then(|r| r.first()).and_then(Clone::clone);
+        let create_sql = sql_rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(Clone::clone);
         let (elements, predicate) = create_sql
             .as_deref()
             .and_then(parse_sqlite_index_shape)
             .unwrap_or_else(|| {
                 (
-                    columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
+                    columns
+                        .iter()
+                        .cloned()
+                        .map(IndexElementSnapshot::column)
+                        .collect(),
                     None,
                 )
             });
@@ -738,7 +755,9 @@ async fn introspect_foreign_keys(
         let ref_table = r.get(2).and_then(Clone::clone).unwrap_or_default();
         let from = r.get(3).and_then(Clone::clone).unwrap_or_default();
         let to = r.get(4).and_then(Clone::clone).unwrap_or_default();
-        let entry = by_id.entry(id).or_insert_with(|| (ref_table.clone(), Vec::new()));
+        let entry = by_id
+            .entry(id)
+            .or_insert_with(|| (ref_table.clone(), Vec::new()));
         entry.1.push((seq, from, to));
     }
 
@@ -926,7 +945,10 @@ mod tests {
     #[test]
     fn bare_ident_is_whole_word() {
         // `user` must not match inside `username`.
-        assert_eq!(find_bare_ident("CREATE TABLE t (username TEXT)", "user"), None);
+        assert_eq!(
+            find_bare_ident("CREATE TABLE t (username TEXT)", "user"),
+            None
+        );
         assert!(find_bare_ident("CREATE TABLE t (user TEXT)", "user").is_some());
     }
 }

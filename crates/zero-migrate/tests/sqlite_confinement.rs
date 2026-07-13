@@ -1,5 +1,5 @@
-//! Confinement proofs for the hardened SQLite migration backend.
-//! EVERY claim is proven against a REAL temp-file SQLite — never a shim.
+//! Confinement proofs for the hardened `SQLite` migration backend.
+//! EVERY claim is proven against a REAL temp-file `SQLite` — never a shim.
 //!
 //! Each `confine_*` test drives a creator `up` that attempts one escape and
 //! asserts it is DENIED (by the authorizer or DEFENSIVE), AND that the failure did
@@ -7,12 +7,12 @@
 //!
 //! Attacks proven denied:
 //!   (a) ATTACH an arbitrary file
-//!   (b) PRAGMA writable_schema=ON then a sqlite_master write
-//!   (c) SELECT load_extension(...)
-//!   (d) DROP TABLE "_mig".schema_migrations
+//!   (b) PRAGMA `writable_schema=ON` then a `sqlite_master` write
+//!   (c) SELECT `load_extension`(...)
+//!   (d) DROP TABLE "_`mig".schema_migrations`
 //!   (e) DROP TRIGGER on the _mig immutability trigger
-//!   (f) INSERT INTO "_mig".schema_migrations ... directly
-//!   (g) CREATE TRIGGER on app_tbl whose body writes _mig
+//!   (f) INSERT INTO "_`mig".schema_migrations` ... directly
+//!   (g) CREATE TRIGGER on `app_tbl` whose body writes _mig
 //!   (h) cross-tenant: a backend for app A cannot reach app B's file
 //! Plus: direct UPDATE/DELETE on _mig rejected by the trigger; DETACH denied;
 //! version floor satisfied.
@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::actor::SqliteActorError;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.
@@ -76,7 +78,7 @@ fn mig(up: &str) -> Migration {
 /// AUTHORIZER denials must assert `is_authorizer_denied()` SPECIFICALLY, so a test
 /// cannot green-pass on an unrelated `Exec` error. The looser acceptance is
 /// reserved for genuinely-defensive cases — e.g. the creator-trigger-targeting-
-/// `_mig` vector (g), whose qualified form is rejected by SQLite's PARSER, not the
+/// `_mig` vector (g), whose qualified form is rejected by `SQLite`'s PARSER, not the
 /// authorizer.
 #[derive(Clone, Copy)]
 enum DenyKind {
@@ -90,7 +92,7 @@ enum DenyKind {
 /// error (an authorizer "not authorized" if the authorizer catches it first, else a
 /// parser / "readonly" / "database is locked" class). Used by the
 /// `AuthorizerOrDefensive` cases.
-fn is_defensive_block(e: &SqliteActorError) -> bool {
+const fn is_defensive_block(e: &SqliteActorError) -> bool {
     matches!(e, SqliteActorError::Exec(_))
 }
 
@@ -229,7 +231,9 @@ async fn confine_c_load_extension_denied() {
     // and `evil.so` does not exist anyway.)
     let pc = paths("c_pc");
     let pbe = backend(&pc);
-    pbe.ensure_journal_sqlite().await.expect("bootstrap journal");
+    pbe.ensure_journal_sqlite()
+        .await
+        .expect("bootstrap journal");
     pbe.apply_one_additive(&mig("CREATE TABLE t AS SELECT abs(-1) AS x;"), "tester")
         .await
         .expect("CTAS with an allowlisted function must SUCCEED on the hardened backend");
@@ -352,7 +356,8 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
     );
     let net = be.applied_sqlite().await.expect("journal readable");
     assert!(
-        !net.iter().any(|e| e.version == "forged" || e.version == "forged2"),
+        !net.iter()
+            .any(|e| e.version == "forged" || e.version == "forged2"),
         "no creator trigger can forge a journal row under the main=app-file model"
     );
 }
@@ -377,7 +382,9 @@ async fn confine_h_cross_tenant_denied() {
     }
 
     let be = SqliteBackend::open(&a_app, &a_journal).expect("open A backend");
-    be.ensure_journal_sqlite().await.expect("bootstrap A journal");
+    be.ensure_journal_sqlite()
+        .await
+        .expect("bootstrap A journal");
 
     // A creator `up` on A tries to ATTACH B and read its secret — denied at the
     // ATTACH (no foreign alias can ever be bound on this connection).
@@ -409,8 +416,7 @@ async fn confine_i_creator_read_of_mig_journal_denied() {
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     // A creator `up` that copies the journal into an app table — the SELECT issues a
     // Read on `"_mig".schema_migrations`, which must be denied at prepare.
-    let attack =
-        "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
+    let attack = "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: the SAME read-into-table SUCCEEDS on a raw connection (no
     // authorizer), proving the hardened deny is the M1 confinement rule and not a
@@ -466,7 +472,10 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
     // DEFENSIVE surfaces as an Exec error (not a silent apply); the table's real
     // schema is untouched.
     assert!(
-        matches!(err, SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)),
+        matches!(
+            err,
+            SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)
+        ),
         "direct sqlite_master write must be rejected by DEFENSIVE, got: {err}"
     );
     // Positive control: with DEFENSIVE off + writable_schema on, a raw connection
@@ -483,7 +492,10 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
         let res = conn.execute_batch(
             "UPDATE sqlite_master SET sql = 'CREATE TABLE t (id INTEGER, pwned TEXT)' WHERE name = 't';",
         );
-        assert!(res.is_ok(), "control: raw sqlite_master edit succeeds: {res:?}");
+        assert!(
+            res.is_ok(),
+            "control: raw sqlite_master edit succeeds: {res:?}"
+        );
     }
 }
 
@@ -541,8 +553,8 @@ async fn reindex_no_arg_rejected_in_creator_up() {
 }
 
 /// (2) A real CREATE TABLE that emits system-field indexes APPLIES under
-/// CreatorUp — the regression for the REINDEX-on-main relaxation's motivation.
-/// CREATE INDEX fires SQLITE_REINDEX intrinsically; the relaxation must let that
+/// `CreatorUp` — the regression for the REINDEX-on-main relaxation's motivation.
+/// CREATE INDEX fires `SQLITE_REINDEX` intrinsically; the relaxation must let that
 /// pass on `main`, or the create fails to apply.
 #[compio::test]
 async fn create_table_with_system_field_indexes_applies_under_creator_up() {

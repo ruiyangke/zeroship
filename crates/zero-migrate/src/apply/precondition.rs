@@ -249,12 +249,13 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
         // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
         // on_unmet. A precondition that cannot be checked must never wave the
         // migration through.
-        let met = evaluate(conn, cfg, &pc.check)
-            .await
-            .map_err(|e| ApplyError::PreconditionFailed {
-                version: m.version.as_str().to_string(),
-                which: format!("{:?} could not be evaluated: {e}", pc.check),
-            })?;
+        let met =
+            evaluate(conn, cfg, &pc.check)
+                .await
+                .map_err(|e| ApplyError::PreconditionFailed {
+                    version: m.version.as_str().to_string(),
+                    which: format!("{:?} could not be evaluated: {e}", pc.check),
+                })?;
         if met {
             continue;
         }
@@ -393,14 +394,18 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
     // (a) No data-modifying statement anywhere (catches data-modifying CTEs).
     if let Some(kind) = first_dml_node(&json) {
         return Err(PreconditionError::NotABooleanSelect {
-            reason: format!("contains a data-modifying statement ({kind}) — a precondition must be read-only"),
+            reason: format!(
+                "contains a data-modifying statement ({kind}) — a precondition must be read-only"
+            ),
         });
     }
 
     // (b) No locking clause (`FOR UPDATE`/`FOR SHARE`/…).
     if tree_has_key(&json, "LockingClause") {
         return Err(PreconditionError::NotABooleanSelect {
-            reason: "contains a locking clause (FOR UPDATE/SHARE) — a precondition must be lock-free".to_string(),
+            reason:
+                "contains a locking clause (FOR UPDATE/SHARE) — a precondition must be lock-free"
+                    .to_string(),
         });
     }
 
@@ -418,9 +423,7 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
 /// `LockingClause` node anywhere — top-level or in a sub-select).
 fn tree_has_key(v: &Value, key: &str) -> bool {
     match v {
-        Value::Object(map) => {
-            map.contains_key(key) || map.values().any(|c| tree_has_key(c, key))
-        }
+        Value::Object(map) => map.contains_key(key) || map.values().any(|c| tree_has_key(c, key)),
         Value::Array(items) => items.iter().any(|i| tree_has_key(i, key)),
         _ => false,
     }
@@ -533,8 +536,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &cfg.pg.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
-        conn.batch(&format!("SET LOCAL ROLE {role_q}"))
-            .await?;
+        conn.batch(&format!("SET LOCAL ROLE {role_q}")).await?;
     }
     let row = conn.query_one(sql, &[]).await?;
     // Shape gate (result side): exactly one column, of boolean type. `try_get`
@@ -610,10 +612,10 @@ mod tests {
     fn shape_gate_rejects_data_modifying_cte() {
         // The DeleteStmt hangs off the SelectStmt's with_clause — a top-node-only
         // gate would miss it; the tree walk catches it.
-        assert!(
-            validate_single_select("WITH x AS (DELETE FROM t RETURNING 1) SELECT count(*)=0 FROM x")
-                .is_err()
-        );
+        assert!(validate_single_select(
+            "WITH x AS (DELETE FROM t RETURNING 1) SELECT count(*)=0 FROM x"
+        )
+        .is_err());
         assert!(validate_single_select(
             "WITH x AS (INSERT INTO t VALUES (1) RETURNING 1) SELECT count(*)=0 FROM x"
         )
@@ -648,9 +650,7 @@ mod tests {
         // pg_catalog-qualified resolves to the same builtin.
         assert!(validate_single_select("SELECT pg_catalog.nextval('s')").is_err());
         // Nested inside an expression / sub-select.
-        assert!(
-            validate_single_select("SELECT (SELECT nextval('s')) > 0").is_err()
-        );
+        assert!(validate_single_select("SELECT (SELECT nextval('s')) > 0").is_err());
     }
 
     #[test]

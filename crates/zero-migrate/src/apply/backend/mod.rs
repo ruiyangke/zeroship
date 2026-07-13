@@ -64,10 +64,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::conn::ExecutorConfig;
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, AppliedEntry, JournalError};
+use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
@@ -323,8 +323,7 @@ pub trait MigrationBackend {
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError>;
 
     /// The versions covered by a net-applied squash (the supersession net-state).
-    async fn superseded_versions(&self, cfg: &ExecutorConfig)
-        -> Result<Vec<String>, JournalError>;
+    async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError>;
 
     /// The latest journaled `completed` checksum per identity — the repeatable
     /// re-run oracle.
@@ -354,8 +353,7 @@ pub trait MigrationBackend {
 
     /// Introspect the live schema for the structural drift surface (PG
     /// `information_schema`/`pg_catalog`; SQLite `sqlite_master` + PRAGMAs).
-    async fn snapshot_schema(&self, cfg: &ExecutorConfig)
-        -> Result<SchemaSnapshot, DriftError>;
+    async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError>;
 
     // -- preconditions (DB-coupled) -----------------------------------------
 

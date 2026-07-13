@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
 
-use zero_migrate::model::expr::{AggFunc, BinaryOp, Expr, UnaryOp};
 use zero_migrate::guard::GuardConfig;
+use zero_migrate::model::expr::{AggFunc, BinaryOp, Expr, UnaryOp};
 use zero_migrate::model::ir::{
-    IrFlagsOverride, IrScalar, MigrationIr, Op, OrderDir, OrderItem, SafeU64, SelectAst, SelectItem,
-    TableRef, ViewQuery, CURRENT_IR_VERSION,
+    IrFlagsOverride, IrScalar, MigrationIr, Op, OrderDir, OrderItem, SafeU64, SelectAst,
+    SelectItem, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
-use zero_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
 use zero_migrate::model::validate::{
     validate_ir_scoped, Dialect, UnsupportedKind, CODE_AGGREGATE_IN_SCALAR_CONTEXT,
     CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
-use zero_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
+use zero_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
 use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
 
 const SCHEMA: &str = "app";
 
@@ -67,14 +67,14 @@ fn create_structured_view(replace: Option<bool>, materialized: Option<bool>) -> 
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: active_users_select(),
+            select: Box::new(active_users_select()),
         },
         replace,
         materialized,
     }
 }
 
-fn count_star() -> Expr {
+const fn count_star() -> Expr {
     Expr::Agg {
         func: AggFunc::Count,
         arg: None,
@@ -134,7 +134,7 @@ fn grouped_order_totals_view() -> Op {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "orders".to_string(),
                     schema: None,
@@ -173,7 +173,7 @@ fn grouped_order_totals_view() -> Op {
                     dir: Some(OrderDir::Asc),
                 }]),
                 limit: Some(SafeU64::new(10).unwrap()),
-            },
+            }),
         },
         replace: None,
         materialized: None,
@@ -186,7 +186,7 @@ fn pg_first_aggregate_rollup_view() -> Op {
         schema: None,
         columns: None,
         query: ViewQuery::Structured {
-            select: SelectAst {
+            select: Box::new(SelectAst {
                 from: TableRef {
                     name: "orders".to_string(),
                     schema: None,
@@ -224,7 +224,7 @@ fn pg_first_aggregate_rollup_view() -> Op {
                 }),
                 order_by: None,
                 limit: None,
-            },
+            }),
         },
         replace: None,
         materialized: None,
@@ -245,9 +245,8 @@ fn raw_view(sql: &str, materialized: Option<bool>) -> Op {
 }
 
 fn lower_up(dialect: SqlDialect, op: Op) -> Result<String, Box<IrLowerError>> {
-    let author = IrAuthor::new(SCHEMA, "app_a", dialect).with_schema_scope(
-        SchemaScope::Allowlist(vec![SCHEMA.to_string()]),
-    );
+    let author = IrAuthor::new(SCHEMA, "app_a", dialect)
+        .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -306,7 +305,10 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
             &PolicyProfile::platform(),
         )
         .unwrap_err();
-        assert_eq!(err.code, zero_migrate::model::validate::CODE_DIALECT_UNSUPPORTED);
+        assert_eq!(
+            err.code,
+            zero_migrate::model::validate::CODE_DIALECT_UNSUPPORTED
+        );
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
 }
@@ -350,7 +352,11 @@ fn pg_structured_view_renders_exact_select_where() {
 
 #[test]
 fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
-    let pg = lower_up(SqlDialect::Postgres, create_structured_view(Some(true), None)).unwrap();
+    let pg = lower_up(
+        SqlDialect::Postgres,
+        create_structured_view(Some(true), None),
+    )
+    .unwrap();
     assert_eq!(
         pg,
         "CREATE OR REPLACE VIEW \"app\".\"active_users\" AS SELECT \"id\", \"email\" FROM \"app\".\"users\" WHERE (\"deleted_at\" IS NULL)"
@@ -374,7 +380,11 @@ fn sqlite_structured_view_renders_dialect_quoted_select() {
 
 #[test]
 fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
-    let pg = lower_up(SqlDialect::Postgres, create_structured_view(None, Some(true))).unwrap();
+    let pg = lower_up(
+        SqlDialect::Postgres,
+        create_structured_view(None, Some(true)),
+    )
+    .unwrap();
     assert_eq!(
         pg,
         "CREATE MATERIALIZED VIEW \"app\".\"active_users\" AS SELECT \"id\", \"email\" FROM \"app\".\"users\" WHERE (\"deleted_at\" IS NULL)"
@@ -412,8 +422,16 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     assert_eq!(err.kind, Some(UnsupportedKind::Op));
     assert!(err.reason.contains("replace+materialized"));
     // The non-contradictory shapes still lower fine.
-    assert!(lower_up(SqlDialect::Postgres, create_structured_view(Some(true), None)).is_ok());
-    assert!(lower_up(SqlDialect::Postgres, create_structured_view(None, Some(true))).is_ok());
+    assert!(lower_up(
+        SqlDialect::Postgres,
+        create_structured_view(Some(true), None)
+    )
+    .is_ok());
+    assert!(lower_up(
+        SqlDialect::Postgres,
+        create_structured_view(None, Some(true))
+    )
+    .is_ok());
 }
 
 #[test]
@@ -482,7 +500,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
             Some(&operator),
             &PolicyProfile::platform(),
         )
-            .unwrap_err();
+        .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(
             err.reason.contains("single top-level SELECT")
@@ -538,7 +556,9 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
         name: "user_names".to_string(),
         schema: None,
         columns: Some(vec!["display_name".to_string()]),
-        query: ViewQuery::Structured { select },
+        query: ViewQuery::Structured {
+            select: Box::new(select),
+        },
         replace: None,
         materialized: None,
     };
@@ -554,12 +574,15 @@ fn fold_records_views_and_drop_removes_them() {
     let create = create_structured_view(None, None);
     let folded = fold_ops(std::slice::from_ref(&create), SqlDialect::Postgres, SCHEMA).unwrap();
     let mut expected_views = BTreeMap::new();
-    expected_views.insert("active_users".to_string(), ViewSnapshot {
-        materialized: false,
-        columns: None,
-        definition: None,
-        comment: None,
-    });
+    expected_views.insert(
+        "active_users".to_string(),
+        ViewSnapshot {
+            materialized: false,
+            columns: None,
+            definition: None,
+            comment: None,
+        },
+    );
     assert_eq!(
         folded,
         SchemaSnapshot {

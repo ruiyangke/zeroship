@@ -26,7 +26,9 @@ use std::cell::RefCell;
 use zero_migrate::apply::executor::apply;
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 
 use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
 use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
@@ -40,7 +42,7 @@ struct MockDispatch {
 }
 
 impl MockDispatch {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             log: RefCell::new(Vec::new()),
         }
@@ -51,7 +53,7 @@ impl MockDispatch {
     /// leg) gets rows — and we return NONE (nothing applied yet), so the supplied
     /// migration is pending and gets applied. Every other read (introspection,
     /// squash, drift) gets an empty rowset — a valid empty decode.
-    fn rows_for(&self, _sql: &str) -> Vec<JsRow> {
+    const fn rows_for(&self, _sql: &str) -> Vec<JsRow> {
         Vec::new()
     }
 }
@@ -139,8 +141,8 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     let outcome = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg = ExecutorConfig::new("prj_mock", "proj_mock")
-            .with_migrator_role("migrator_prj_mock");
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
         let version_str = migration.version.as_str().to_string();
 
@@ -166,7 +168,7 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     // in the applied list), and nothing was skipped/recovered.
     assert_eq!(
         apply_outcome.applied,
-        vec![version_str.clone()],
+        vec![version_str],
         "the pending migration's version is journaled as applied"
     );
     assert!(
@@ -182,8 +184,8 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
     let log = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg = ExecutorConfig::new("prj_mock", "proj_mock")
-            .with_migrator_role("migrator_prj_mock");
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
 
         apply(

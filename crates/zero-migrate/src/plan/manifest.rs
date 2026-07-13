@@ -173,9 +173,7 @@ pub enum ManifestError {
     /// trusted manifest. NOTHING should be applied. `kind` is a best-effort
     /// classification of the difference (it does NOT widen the trust decision —
     /// any mismatch refuses).
-    #[error(
-        "migration-set manifest mismatch (expected {expected}, got {actual}): {kind}"
-    )]
+    #[error("migration-set manifest mismatch (expected {expected}, got {actual}): {kind}")]
     Mismatch {
         /// The trusted hash the caller expected (from the control plane).
         expected: String,
@@ -299,7 +297,12 @@ mod tests {
 
     /// Build a versioned migration with a `depends_on` edge, with a checksum that
     /// folds it.
-    fn mig_dep(name: &str, up: &str, down: Option<&str>, depends_on: Vec<MigrationId>) -> Migration {
+    fn mig_dep(
+        name: &str,
+        up: &str,
+        down: Option<&str>,
+        depends_on: Vec<MigrationId>,
+    ) -> Migration {
         let flags = MigrationFlags::default();
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
             up,
@@ -375,7 +378,10 @@ mod tests {
         let a_dep = mig_dep("a", "CREATE TABLE a()", None, vec![b.version.clone()]);
         // Keep a's identity stable so this is a depends_on EDIT of the same set,
         // not an insertion/removal.
-        let a_dep = Migration { version: a.version, ..a_dep };
+        let a_dep = Migration {
+            version: a.version,
+            ..a_dep
+        };
         let reordered = vec![a_dep, b];
         assert_ne!(
             compute_manifest(&baseline),
@@ -469,11 +475,18 @@ mod tests {
         let expected = compute_manifest(&trusted);
         // Same versions, but a now depends_on b ⇒ executed order flips to [b, a].
         let a_dep = mig_dep("a", "CREATE TABLE a()", None, vec![b.version.clone()]);
-        let a_dep = Migration { version: a.version, ..a_dep };
+        let a_dep = Migration {
+            version: a.version,
+            ..a_dep
+        };
         let tampered = vec![a_dep, b];
         let err = verify_manifest(&tampered, &expected).unwrap_err();
         match err {
-            ManifestError::Mismatch { expected: e, actual, kind } => {
+            ManifestError::Mismatch {
+                expected: e,
+                actual,
+                kind,
+            } => {
                 assert_eq!(e, expected.as_str());
                 assert_ne!(actual, expected.as_str());
                 assert_eq!(kind, MismatchKind::Differs);
