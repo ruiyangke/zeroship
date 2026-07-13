@@ -301,7 +301,7 @@ async fn read_status_snapshot<D: SqlSession>(
 ///
 /// **Why `plan_version`, not `pending_version`.** The obligation key
 /// `pending_version` is the E2 trigger SUB-step id — a deep id that no plan-level
-/// migration set ever exposes (`load_dir_flat` produces ONE `Migration` per file,
+/// migration set ever exposes (a plan is ONE `Migration` per file,
 /// keyed on the file/plan version, never on a rename's interior sub-step). Keying
 /// orphan on `pending_version` made EVERY outstanding obligation falsely
 /// `orphaned`, and keying `blocked` on it made the blocked state NEVER fire (an

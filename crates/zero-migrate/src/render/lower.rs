@@ -5015,8 +5015,8 @@ fn enforce_vendor_capability_at_lower(
 /// template + binds) PLUS its `op_index` (the op's position in the migration's op
 /// list) makes a re-deploy of the SAME migration file map each op to the SAME id
 /// (skipped when net-applied) and a re-authored op (a changed template/binds) get
-/// a FRESH id (no false resume) — the same property `repeatable_id_for_name` /
-/// `BackfillSpec::backfill_id` give their respective steps. The `op_index` fold is
+/// a FRESH id (no false resume) — the same property `BackfillSpec::backfill_id`
+/// gives its respective steps. The `op_index` fold is
 /// what keeps two BYTE-IDENTICAL DML ops in the SAME migration (e.g. two intentional
 /// identical increment updates) DISTINCT: without it they would collide to one
 /// version and the second would be silently net-applied-skipped (data-intent
@@ -5125,7 +5125,7 @@ fn render_partition_bound_literal(value: &PartitionBoundValue) -> Result<String,
 }
 
 /// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using
-/// the SAME high-48-bit `0xFF…` marker layout `repeatable_id_for_name` uses — so a
+/// the SAME high-48-bit `0xFF…` marker layout (distinct from versioned-migration ids) — so a
 /// derived DML/backfill id can NEVER collide with a versioned migration id (whose
 /// high 48 bits hold a small numeric version) and is stable per seed. The `tag`
 /// folds into the low bits so a `"dml"` and a `"backfill"` seed never collide.

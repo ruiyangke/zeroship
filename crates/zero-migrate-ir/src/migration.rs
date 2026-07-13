@@ -47,8 +47,8 @@ impl MigrationId {
 
     /// Mint a DETERMINISTIC, STABLE migration id from a domain `tag` + a content
     /// `seed` (sub-step versioning). The id is `SHA-256(tag || seed)` laid
-    /// out with the SAME high-48-bit `0xFF…FF` MARKER the loader's
-    /// `repeatable_id_for_name` / the IR author's `dml_id_from_seed` use — so a
+    /// out with the SAME high-48-bit `0xFF…FF` MARKER the IR author's
+    /// derived DML/backfill ids use — so a
     /// derived sub-step id can **never** collide with a versioned migration id
     /// (whose high 48 bits hold a small numeric file version) and two distinct
     /// seeds collide only on an 80-bit SHA-256 prefix collision (negligible).
