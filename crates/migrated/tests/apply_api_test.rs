@@ -195,7 +195,7 @@ async fn ensure_migrated_service_tables(conn: &Client) {
 
 async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     let schema = app_id.to_string();
-    let role = zeroship_migrate::migrator_role_name(&schema).unwrap();
+    let role = zero_migrate::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let _ = conn
         .batch_execute(&format!(

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
-use zeroship_migrate::{
+use zero_migrate::{
     seal_effective_profile, DestructiveOps, PolicyProfile, SealError, SealVerifier, SealedProfile,
 };
 
@@ -267,7 +267,7 @@ fn is_creator_seal_error(err: &SealError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use zeroship_migrate::{DestructiveOps, SealedPosture};
+    use zero_migrate::{DestructiveOps, SealedPosture};
 
     use super::*;
 

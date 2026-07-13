@@ -4,7 +4,7 @@ use compio_postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_migrate::PolicyProfile;
+use zero_migrate::PolicyProfile;
 
 use crate::policy::EffectivePolicy;
 
