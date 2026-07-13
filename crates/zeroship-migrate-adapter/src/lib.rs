@@ -32,6 +32,13 @@ use compio_postgres::types::{Kind, ToSql, Type};
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
 use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
+/// Phase F Stage 4a — the platform-schema migrate path on the published engine
+/// (author `db/migrations-ts/*.ts` via zeroship-runtime V8 → apply via
+/// zero-migrate over [`CompioPgSession`]). Feature-gated so the base library
+/// surface (Stage 1's adapter) stays V8-free.
+#[cfg(feature = "platform-cli")]
+pub mod platform;
+
 /// A monorepo-native [`SqlSession`] over a pinned [`compio_postgres::Client`].
 ///
 /// The engine drives ONE verb at a time over a single pinned session (temp tables /

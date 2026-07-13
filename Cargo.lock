@@ -7045,6 +7045,7 @@ dependencies = [
  "tracing",
  "v8",
  "zero-migrate",
+ "zero-migrate-ir",
  "zeroship-runtime",
 ]
 
