@@ -1,11 +1,18 @@
+//! Standalone scheduler process placeholder.
+//!
+//! The library currently owns only the timers -> inflight transition. Dispatch,
+//! ack processing, and registration still run in the control cron, so this
+//! binary fails before touching the scheduler store until that loop is
+//! extracted.
+
 use clap::Parser;
 use zeroship_workflow_scheduler::{
-    run, SchedulerConfig, WorkflowSchedulerStore, DEFAULT_TICK_SECS,
+    DEFAULT_TICK_SECS, STANDALONE_SCHEDULER_UNAVAILABLE,
 };
 
 #[derive(Debug, Parser)]
 struct Cli {
-    #[arg(long, env = "WORKFLOW_SCHEDULER_DB")]
+    #[arg(long, env = "WORKFLOW_SCHEDULER_DB", default_value = "")]
     db: String,
     #[arg(
         long = "scheduler-schema",
@@ -13,11 +20,16 @@ struct Cli {
         default_value = "workflow_scheduler"
     )]
     scheduler_schema: String,
-    #[arg(long = "gateway-url", env = "WORKFLOW_SCHEDULER_GATEWAY_URL")]
+    #[arg(
+        long = "gateway-url",
+        env = "WORKFLOW_SCHEDULER_GATEWAY_URL",
+        default_value = ""
+    )]
     gateway_url: String,
     #[arg(
         long = "control-apply-url",
-        env = "WORKFLOW_SCHEDULER_CONTROL_APPLY_URL"
+        env = "WORKFLOW_SCHEDULER_CONTROL_APPLY_URL",
+        default_value = ""
     )]
     control_apply_url: String,
     #[arg(long = "tick-secs", default_value_t = DEFAULT_TICK_SECS)]
@@ -37,24 +49,19 @@ struct Cli {
 #[compio::main]
 async fn main() {
     let cli = Cli::parse();
-    tracing::info!(
+    tracing::error!(
+        db_configured = !cli.db.is_empty(),
         scheduler_schema = %cli.scheduler_schema,
         gateway_url = %cli.gateway_url,
         control_apply_url = %cli.control_apply_url,
         tick_secs = cli.tick_secs,
         reaper_interval_secs = cli.reaper_interval_secs,
-        "workflow scheduler starting"
+        near_horizon_ms = cli.near_horizon_ms,
+        max_loaded_timers = cli.max_loaded_timers,
+        max_due_per_tick = cli.max_due_per_tick,
+        inflight_ttl_ms = cli.inflight_ttl_ms,
+        STANDALONE_SCHEDULER_UNAVAILABLE
     );
-    let config = SchedulerConfig {
-        near_horizon_ms: cli.near_horizon_ms,
-        max_loaded_timers: cli.max_loaded_timers,
-        max_due_per_tick: cli.max_due_per_tick,
-        inflight_ttl_ms: cli.inflight_ttl_ms,
-        empty_sleep_ms: cli.tick_secs.saturating_mul(1_000),
-    };
-    let store = WorkflowSchedulerStore::new_with_schema(cli.db, cli.scheduler_schema);
-    if let Err(err) = run(store, config).await {
-        tracing::error!(error = %err, "workflow scheduler exited");
-        std::process::exit(1);
-    }
+    eprintln!("{STANDALONE_SCHEDULER_UNAVAILABLE}");
+    std::process::exit(1);
 }

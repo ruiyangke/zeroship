@@ -708,6 +708,148 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
     }
 }
 
+fn schedule_policy_config(owner: &str) -> workflow_schedules::ScheduleSweepConfig {
+    workflow_schedules::ScheduleSweepConfig {
+        batch_size: 4,
+        claim_ttl_ms: 1_500,
+        backfill_hard_max: 8,
+        owner_id: owner.to_string(),
+    }
+}
+
+fn aligned_planned_instant(ticks_before_now: i64, interval_ms: i64) -> DateTime<Utc> {
+    let now_ms = Utc::now().timestamp_millis();
+    let aligned_now_ms = now_ms - now_ms.rem_euclid(interval_ms);
+    DateTime::<Utc>::from_timestamp_millis(
+        aligned_now_ms - ticks_before_now.saturating_mul(interval_ms),
+    )
+    .expect("valid planned instant")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_interval_schedule(
+    fx: &Fixture,
+    app_id: Uuid,
+    deploy_id: &str,
+    name: &str,
+    workflow_name: &str,
+    overlap: &str,
+    catch_up: &str,
+    catch_up_max: i32,
+    interval_ms: i64,
+    next_fire_at: DateTime<Utc>,
+) -> String {
+    let schedule_id = zeroship_core::typed_id::new_workflow_schedule_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_schedules \
+                (id, app_id, deploy_id, deploy_hash, name, workflow_name, kind, \
+                 interval_ms, anchor, input_json, overlap, catch_up, catch_up_max, \
+                 next_fire_at, enabled, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'interval', \
+                     $7, 'epoch', $8, $9, $10, $11, $12, true, now())",
+            &[
+                &schedule_id,
+                &app_id,
+                &deploy_id,
+                &format!("hash-{deploy_id}"),
+                &name,
+                &workflow_name,
+                &interval_ms,
+                &serde_json::json!({"schedule": name}),
+                &overlap,
+                &catch_up,
+                &catch_up_max,
+                &next_fire_at,
+            ],
+        )
+        .await
+        .expect("insert interval workflow schedule");
+    schedule_id
+}
+
+async fn force_schedule_due(fx: &Fixture, schedule_id: &str, next_fire_at: DateTime<Utc>) {
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_schedules \
+                SET next_fire_at = $2, claimed_by = NULL, claimed_at = NULL, lease_expires = NULL \
+              WHERE id = $1",
+            &[&schedule_id, &next_fire_at],
+        )
+        .await
+        .expect("force schedule due");
+}
+
+async fn schedule_run_count(fx: &Fixture, schedule_id: &str) -> i64 {
+    let prefix = format!("sched:{schedule_id}:%");
+    fx.pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_runs \
+              WHERE dedup_key LIKE $1",
+            &[&prefix],
+        )
+        .await
+        .expect("count schedule runs")
+        .get("n")
+}
+
+async fn schedule_run_started_instants(
+    fx: &Fixture,
+    schedule_id: &str,
+) -> Vec<DateTime<Utc>> {
+    let prefix = format!("sched:{schedule_id}:%");
+    fx.pg
+        .query(
+            "SELECT started_at \
+               FROM zeroship.workflow_runs \
+              WHERE dedup_key LIKE $1 \
+              ORDER BY started_at",
+            &[&prefix],
+        )
+        .await
+        .expect("load schedule run instants")
+        .into_iter()
+        .map(|row| row.get("started_at"))
+        .collect()
+}
+
+async fn schedule_run_scheduler_timer_count(fx: &Fixture, schedule_id: &str) -> i64 {
+    let prefix = format!("sched:{schedule_id}:%");
+    fx.pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM workflow_scheduler.timers t \
+               JOIN zeroship.workflow_runs r ON r.id = t.run_id \
+              WHERE r.dedup_key LIKE $1",
+            &[&prefix],
+        )
+        .await
+        .expect("count schedule run scheduler timers")
+        .get("n")
+}
+
+async fn schedule_fire_row(
+    fx: &Fixture,
+    schedule_id: &str,
+) -> (Option<DateTime<Utc>>, Option<i64>, DateTime<Utc>) {
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT last_fire_at, last_fired_epoch, next_fire_at \
+               FROM zeroship.workflow_schedules \
+              WHERE id = $1",
+            &[&schedule_id],
+        )
+        .await
+        .expect("load workflow schedule fire row");
+    (
+        row.get("last_fire_at"),
+        row.get("last_fired_epoch"),
+        row.get("next_fire_at"),
+    )
+}
+
 fn config(owner: &str) -> WorkflowEngineConfig {
     WorkflowEngineConfig {
         batch_apps: 16,
@@ -3914,6 +4056,209 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
     })
     .await
     .expect("test timeout");
+}
+
+#[compio::test]
+async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent_run() {
+    let Some(fx) = isolated_fixture("schedule-overlap-policy").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-overlap-policy").await;
+        let interval_ms = 1_000;
+
+        let skip_first = aligned_planned_instant(5, interval_ms);
+        let skip_id = insert_interval_schedule(
+            &fx,
+            app_id,
+            &deploy_id,
+            "skip-live",
+            "TestWorkflow",
+            "skipIfRunning",
+            "skip",
+            0,
+            interval_ms,
+            skip_first,
+        )
+        .await;
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-overlap-skip-first"),
+        )
+        .await
+        .expect("first skip schedule sweep");
+        assert_eq!(fired, 1, "first skip schedule tick should create one run");
+        assert_eq!(schedule_run_count(&fx, &skip_id).await, 1);
+        assert_eq!(schedule_run_scheduler_timer_count(&fx, &skip_id).await, 1);
+
+        let skip_second = skip_first + ChronoDuration::milliseconds(interval_ms);
+        force_schedule_due(&fx, &skip_id, skip_second).await;
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-overlap-skip-second"),
+        )
+        .await
+        .expect("second skip schedule sweep");
+        assert_eq!(
+            fired, 0,
+            "skipIfRunning must not create a second run while the first is live"
+        );
+        assert_eq!(schedule_run_count(&fx, &skip_id).await, 1);
+        assert_eq!(schedule_run_started_instants(&fx, &skip_id).await, vec![skip_first]);
+
+        let allow_first = aligned_planned_instant(7, interval_ms);
+        let allow_id = insert_interval_schedule(
+            &fx,
+            app_id,
+            &deploy_id,
+            "allow-live",
+            "TestWorkflow",
+            "allow",
+            "skip",
+            0,
+            interval_ms,
+            allow_first,
+        )
+        .await;
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-overlap-allow-first"),
+        )
+        .await
+        .expect("first allow schedule sweep");
+        assert_eq!(fired, 1, "first allow schedule tick should create one run");
+
+        let allow_second = allow_first + ChronoDuration::milliseconds(interval_ms);
+        force_schedule_due(&fx, &allow_id, allow_second).await;
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-overlap-allow-second"),
+        )
+        .await
+        .expect("second allow schedule sweep");
+        assert_eq!(
+            fired, 1,
+            "allow overlap should create a second live scheduled run"
+        );
+        assert_eq!(schedule_run_count(&fx, &allow_id).await, 2);
+        assert_eq!(
+            schedule_run_started_instants(&fx, &allow_id).await,
+            vec![allow_first, allow_second]
+        );
+        assert_eq!(schedule_run_scheduler_timer_count(&fx, &allow_id).await, 2);
+    })
+    .await
+    .expect("schedule overlap policy test timeout");
+}
+
+#[compio::test]
+async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
+    let Some(fx) = isolated_fixture("schedule-catch-up-policy").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-catch-up-policy").await;
+        let interval_ms = 1_000;
+        let planned = aligned_planned_instant(9, interval_ms);
+        let schedule_id = insert_interval_schedule(
+            &fx,
+            app_id,
+            &deploy_id,
+            "catch-up-bounded",
+            "TestWorkflow",
+            "allow",
+            "backfill",
+            3,
+            interval_ms,
+            planned,
+        )
+        .await;
+        let tick_started = Utc::now();
+
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-catch-up-bounded"),
+        )
+        .await
+        .expect("catch-up schedule sweep");
+        assert_eq!(
+            fired, 3,
+            "catch-up backfill must create exactly catch_up_max runs"
+        );
+        assert_eq!(schedule_run_count(&fx, &schedule_id).await, 3);
+        assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 3);
+
+        let expected = vec![
+            planned,
+            planned + ChronoDuration::milliseconds(interval_ms),
+            planned + ChronoDuration::milliseconds(interval_ms * 2),
+        ];
+        assert_eq!(
+            schedule_run_started_instants(&fx, &schedule_id).await,
+            expected
+        );
+        let (last_fire_at, last_fired_epoch, next_fire_at) =
+            schedule_fire_row(&fx, &schedule_id).await;
+        assert_eq!(last_fire_at, expected.last().copied());
+        assert_eq!(
+            last_fired_epoch,
+            expected.last().map(DateTime::<Utc>::timestamp_millis)
+        );
+        assert!(
+            next_fire_at > tick_started,
+            "excess missed ticks should be dropped by rearming after the sweep clock"
+        );
+    })
+    .await
+    .expect("schedule catch-up policy test timeout");
+}
+
+#[compio::test]
+async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
+    let Some(fx) = isolated_fixture("schedule-normal-cadence").await else {
+        return;
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-normal-cadence").await;
+        let interval_ms = 1_000;
+        let planned = aligned_planned_instant(2, interval_ms);
+        let schedule_id = insert_interval_schedule(
+            &fx,
+            app_id,
+            &deploy_id,
+            "normal-cadence",
+            "TestWorkflow",
+            "allow",
+            "skip",
+            0,
+            interval_ms,
+            planned,
+        )
+        .await;
+        let tick_started = Utc::now();
+
+        let fired = workflow_schedules::tick_with_config(
+            &fx.state,
+            schedule_policy_config("schedule-normal-cadence"),
+        )
+        .await
+        .expect("normal cadence schedule sweep");
+        assert_eq!(fired, 1, "one due tick should create one scheduled run");
+        assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
+        assert_eq!(schedule_run_started_instants(&fx, &schedule_id).await, vec![planned]);
+        assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 1);
+
+        let (last_fire_at, last_fired_epoch, next_fire_at) =
+            schedule_fire_row(&fx, &schedule_id).await;
+        assert_eq!(last_fire_at, Some(planned));
+        assert_eq!(last_fired_epoch, Some(planned.timestamp_millis()));
+        assert!(
+            next_fire_at > tick_started,
+            "normal cadence schedule should rearm to the next future tick"
+        );
+    })
+    .await
+    .expect("schedule normal cadence test timeout");
 }
 
 #[compio::test]

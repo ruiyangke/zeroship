@@ -3,6 +3,11 @@
 //! The scheduler owns only its private `workflow_scheduler` schema and the
 //! timer authority built on top of it. The workflow journal and apply path stay
 //! outside this crate.
+//!
+//! This crate currently exposes only the timers -> inflight store primitive.
+//! The dispatch, ack, and registration loop still lives in the control cron;
+//! the standalone process is a deferred extraction target and must not run as
+//! a production scheduler until that loop moves here.
 
 use std::time::Duration;
 
@@ -19,6 +24,8 @@ pub use wheel::{TimerEntry, TimerWheel, WakeHandle};
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
 pub const WORKFLOW_ADVANCE_PATH: &str = "/__zeroship/internal/workflow-advance";
+pub const STANDALONE_SCHEDULER_UNAVAILABLE: &str =
+    "standalone workflow scheduler is not yet wired: dispatch/ack handling lives in the control workflow cron; this process is the deferred scheduler-tier extraction target";
 
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -49,8 +56,9 @@ pub enum SchedulerError {
 
 /// Move due timer rows into `workflow_scheduler.inflight`.
 ///
-/// This is intentionally small in C1: later workflow dispatch/apply layers build
-/// on the returned inflight rows without changing the store contract.
+/// This is intentionally only the store transition. The control cron consumes
+/// the returned inflight rows and owns dispatch, ack processing, and timer
+/// registration until the standalone scheduler tier is extracted.
 #[allow(clippy::future_not_send)]
 pub async fn fire_once(
     store: &WorkflowSchedulerStore,
