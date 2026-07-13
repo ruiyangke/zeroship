@@ -107,7 +107,9 @@ pub enum DmlError {
         reason: String,
     },
     /// An `update` / `backfill` whose `set` map is empty — nothing to assign.
-    #[error("malformed {op} into {table:?}: empty `set` (a transform must assign at least one column)")]
+    #[error(
+        "malformed {op} into {table:?}: empty `set` (a transform must assign at least one column)"
+    )]
     EmptySet {
         /// The op kind (`"update"` / `"backfill"`).
         op: &'static str,
@@ -174,7 +176,10 @@ pub(crate) fn quote_ident_for_dialect(
         && ident.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok {
-        return Err(DmlError::InvalidIdentifier { what, value: ident.to_string() });
+        return Err(DmlError::InvalidIdentifier {
+            what,
+            value: ident.to_string(),
+        });
     }
     Ok(escape_quote_ident_for_dialect(ident, dialect))
 }
@@ -237,10 +242,16 @@ pub(crate) fn quote_ident_checked_for_dialect(
     dialect: SqlDialect,
 ) -> Result<String, IdentQuoteError> {
     if ident.is_empty() {
-        return Err(IdentQuoteError { reason: "empty", value: ident.to_string() });
+        return Err(IdentQuoteError {
+            reason: "empty",
+            value: ident.to_string(),
+        });
     }
     if ident.contains('\0') {
-        return Err(IdentQuoteError { reason: "contains NUL", value: ident.to_string() });
+        return Err(IdentQuoteError {
+            reason: "contains NUL",
+            value: ident.to_string(),
+        });
     }
     Ok(escape_quote_ident_for_dialect(ident, dialect))
 }
@@ -355,7 +366,13 @@ pub(crate) fn sql_string_literal(s: &str) -> String {
 pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
     Ok(match s {
         IrScalar::Null => "NULL".to_string(),
-        IrScalar::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        IrScalar::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
         IrScalar::Int(i) => i.to_string(),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Str(s) => sql_string_literal(s),
@@ -371,20 +388,28 @@ pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
 
 fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     if s.is_empty() {
-        return Err(DmlError::UnrenderableExpr(format!("{what} must be non-empty")));
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} must be non-empty"
+        )));
     }
     if s.contains('\0') {
-        return Err(DmlError::UnrenderableExpr(format!("{what} contains a NUL byte")));
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} contains a NUL byte"
+        )));
     }
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
 fn in_list_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     if s.is_empty() {
-        return Err(DmlError::UnrenderableExpr(format!("{what} must be non-empty")));
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} must be non-empty"
+        )));
     }
     if s.contains('\0') {
-        return Err(DmlError::UnrenderableExpr(format!("{what} contains a NUL byte")));
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} contains a NUL byte"
+        )));
     }
     Ok(sql_string_literal(s))
 }
@@ -435,7 +460,11 @@ fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
         IrScalar::Int(i) => i.to_string(),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Bool(b) => {
-            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
         }
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bytes(_) => {
@@ -453,7 +482,11 @@ fn render_in_list_elem_portable(elem: &IrScalar) -> Result<String, DmlError> {
         IrScalar::Int(i) => i.to_string(),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Bool(b) => {
-            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
         }
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bytes(_) => {
@@ -475,11 +508,14 @@ fn render_in_list(
         return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
     }
     let kind = homogeneous_in_list_kind(elems)?.expect("non-empty list has kind");
-    let joiner = if matches!(kind, InListScalarKind::Text) { ", " } else { "," };
+    let joiner = if matches!(kind, InListScalarKind::Text) {
+        ", "
+    } else {
+        ","
+    };
     match dialect {
         SqlDialect::Postgres => {
-            let rendered: Result<Vec<_>, _> =
-                elems.iter().map(render_in_list_elem_pg).collect();
+            let rendered: Result<Vec<_>, _> = elems.iter().map(render_in_list_elem_pg).collect();
             let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
             Ok(format!(
                 "({expr} {cmp} {quantifier} (ARRAY[{}]))",
@@ -529,7 +565,11 @@ fn render_extract_field(field: ExtractField) -> &'static str {
     }
 }
 
-fn render_extract(field: ExtractField, expr: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+fn render_extract(
+    field: ExtractField,
+    expr: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     Ok(match dialect {
         SqlDialect::Postgres => format!("EXTRACT({} FROM {expr})", render_extract_field(field)),
         SqlDialect::Sqlite => {
@@ -583,10 +623,16 @@ fn render_pg_extract(
             "PG EXTRACT is PostgreSQL-only".to_string(),
         ));
     }
-    Ok(format!("EXTRACT({} FROM {expr})", render_pg_extract_field(field)))
+    Ok(format!(
+        "EXTRACT({} FROM {expr})",
+        render_pg_extract_field(field)
+    ))
 }
 
-fn render_pg_interval_literal(duration: &Duration, dialect: SqlDialect) -> Result<String, DmlError> {
+fn render_pg_interval_literal(
+    duration: &Duration,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     if !matches!(dialect, SqlDialect::Postgres) {
         return Err(DmlError::UnrenderableExpr(
             "PG interval literal is PostgreSQL-only".to_string(),
@@ -603,7 +649,11 @@ fn render_pg_interval_literal(duration: &Duration, dialect: SqlDialect) -> Resul
         (duration.seconds, "second", "seconds"),
     ] {
         if let Some(value) = value {
-            let unit = if value == 1 || value == -1 { singular } else { plural };
+            let unit = if value == 1 || value == -1 {
+                singular
+            } else {
+                plural
+            };
             parts.push(format!("{value} {unit}"));
         }
     }
@@ -752,12 +802,9 @@ fn render_agg(
         ));
     }
     match arg_sql {
-        None if matches!(f, AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr) => {
-            Err(DmlError::UnrenderableExpr(format!(
-                "{} requires an argument",
-                agg_fn_sql(f)
-            )))
-        }
+        None if matches!(f, AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr) => Err(
+            DmlError::UnrenderableExpr(format!("{} requires an argument", agg_fn_sql(f))),
+        ),
         None => Ok(format!("{name}(*)")),
         Some(a) if distinct => Ok(format!("{name}(DISTINCT {a})")),
         Some(a) => Ok(format!("{name}({a})")),
@@ -824,8 +871,12 @@ fn render_split_part(
     // GRAMMAR (both dialects): a string-literal delimiter, a positive integer
     // literal n. These are unrenderable on EITHER backend.
     let delim = match delim_arg {
-        Expr::Literal { value: IrScalar::Str(s) } if !s.is_empty() => s.as_str(),
-        Expr::Literal { value: IrScalar::Str(_) } => {
+        Expr::Literal {
+            value: IrScalar::Str(s),
+        } if !s.is_empty() => s.as_str(),
+        Expr::Literal {
+            value: IrScalar::Str(_),
+        } => {
             return Err(DmlError::UnrenderableExpr(
                 "c.fn.splitPart delimiter must be a non-empty string literal".to_string(),
             ));
@@ -838,8 +889,12 @@ fn render_split_part(
         }
     };
     let n = match n_arg {
-        Expr::Literal { value: IrScalar::Int(n) } if *n >= 1 => *n,
-        Expr::Literal { value: IrScalar::Int(n) } => {
+        Expr::Literal {
+            value: IrScalar::Int(n),
+        } if *n >= 1 => *n,
+        Expr::Literal {
+            value: IrScalar::Int(n),
+        } => {
             return Err(DmlError::UnrenderableExpr(format!(
                 "c.fn.splitPart part index n must be a positive integer literal; got {n}"
             )));
@@ -894,7 +949,10 @@ struct BindCtx {
 
 impl BindCtx {
     fn new(dialect: SqlDialect) -> Self {
-        Self { dialect, binds: Vec::new() }
+        Self {
+            dialect,
+            binds: Vec::new(),
+        }
     }
 
     /// Append a bound scalar and return its dialect placeholder.
@@ -973,7 +1031,12 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let r = render_expr_bound(right, ctx)?;
             render_distinct_from(&l, &r, ctx.dialect)
         }
-        Expr::Agg { func, arg, delimiter, distinct } => {
+        Expr::Agg {
+            func,
+            arg,
+            delimiter,
+            distinct,
+        } => {
             let a = match arg {
                 Some(e) => Some(render_expr_bound(e, ctx)?),
                 None => None,
@@ -984,7 +1047,11 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             };
             render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
-        Expr::InList { expr, elems, negated } => {
+        Expr::InList {
+            expr,
+            elems,
+            negated,
+        } => {
             let e = render_expr_bound(expr, ctx)?;
             render_in_list(&e, elems, *negated, ctx.dialect)?
         }
@@ -1010,7 +1077,12 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             render_pg_extract(*field, &e, ctx.dialect)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.dialect)?,
-        Expr::Dialectal { default, pg, sqlite, mysql } => {
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
             let leg = select_dialect_leg(ctx.dialect, default, pg, sqlite, mysql)?;
             render_expr_bound(leg, ctx)?
         }
@@ -1082,7 +1154,10 @@ pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<Str
     })
 }
 
-pub(crate) fn render_value_inline(value: &IrValue, dialect: SqlDialect) -> Result<String, DmlError> {
+pub(crate) fn render_value_inline(
+    value: &IrValue,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     match value {
         IrValue::Scalar(s) => inline_literal(s),
         IrValue::Expr(e) => render_expr_inline(e, dialect),
@@ -1136,10 +1211,10 @@ where
             s
         }
         Expr::FnCall { r#fn, args } => {
-            let rs: Result<Vec<_>, _> =
-                args.iter()
-                    .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
-                    .collect();
+            let rs: Result<Vec<_>, _> = args
+                .iter()
+                .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                .collect();
             render_scalar_fn_call(*r#fn, &rs?, dialect)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
@@ -1158,10 +1233,10 @@ where
                 render_split_part(&col_sql, &args[1], &args[2], dialect)?
             }
             SynthFn::ConcatWs => {
-                let rs: Result<Vec<_>, _> =
-                    args.iter()
-                        .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
-                        .collect();
+                let rs: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                    .collect();
                 render_concat_ws(&rs?, dialect)
             }
             SynthFn::Now => crate::render::renderer::renderer(dialect).synth_now(),
@@ -1190,7 +1265,12 @@ where
             let r = render_expr_inline_with_col(right, dialect, col_ref)?;
             render_distinct_from(&l, &r, dialect)
         }
-        Expr::Agg { func, arg, delimiter, distinct } => {
+        Expr::Agg {
+            func,
+            arg,
+            delimiter,
+            distinct,
+        } => {
             let a = match arg {
                 Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
                 None => None,
@@ -1201,7 +1281,11 @@ where
             };
             render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
         }
-        Expr::InList { expr, elems, negated } => {
+        Expr::InList {
+            expr,
+            elems,
+            negated,
+        } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
             render_in_list(&e, elems, *negated, dialect)?
         }
@@ -1215,7 +1299,10 @@ where
                     "pg_column_size is PostgreSQL-only".to_string(),
                 ));
             }
-            format!("pg_column_size({})", render_expr_inline_with_col(expr, dialect, col_ref)?)
+            format!(
+                "pg_column_size({})",
+                render_expr_inline_with_col(expr, dialect, col_ref)?
+            )
         }
         Expr::Extract { field, from } => {
             let e = render_expr_inline_with_col(from, dialect, col_ref)?;
@@ -1226,7 +1313,12 @@ where
             render_pg_extract(*field, &e, dialect)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, dialect)?,
-        Expr::Dialectal { default, pg, sqlite, mysql } => {
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
             let leg = select_dialect_leg(dialect, default, pg, sqlite, mysql)?;
             render_expr_inline_with_col(leg, dialect, col_ref)?
         }
@@ -1303,8 +1395,10 @@ pub fn assemble_insert(
         });
     }
     let qtable = qualify_table(project_schema, dialect, table)?;
-    let qcols: Result<Vec<_>, _> =
-        columns.iter().map(|c| quote_ident_for_dialect("column", c, dialect)).collect();
+    let qcols: Result<Vec<_>, _> = columns
+        .iter()
+        .map(|c| quote_ident_for_dialect("column", c, dialect))
+        .collect();
     let qcols = qcols?;
 
     let mut ctx = BindCtx::new(dialect);
@@ -1320,8 +1414,10 @@ pub fn assemble_insert(
                 ),
             });
         }
-        let placeholders: Result<Vec<String>, DmlError> =
-            row.iter().map(|v| render_value_bound(v, &mut ctx)).collect();
+        let placeholders: Result<Vec<String>, DmlError> = row
+            .iter()
+            .map(|v| render_value_bound(v, &mut ctx))
+            .collect();
         let placeholders = placeholders?;
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
@@ -1334,7 +1430,9 @@ pub fn assemble_insert(
 
     if let Some(oc) = on_conflict {
         if !dialect.supports(Capability::InsertOnConflictClause) {
-            return Err(DmlError::OnConflictNotPortable { table: table.to_string() });
+            return Err(DmlError::OnConflictNotPortable {
+                table: table.to_string(),
+            });
         }
         template.push_str(&render_on_conflict(oc, &mut ctx)?);
     }
@@ -1347,7 +1445,10 @@ pub fn assemble_insert(
         });
     }
 
-    Ok(AssembledDml { template, binds: ctx.binds })
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
 }
 
 /// Render the PG `ON CONFLICT (cols) DO {NOTHING|UPDATE SET …}` tail. The
@@ -1359,8 +1460,11 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
             reason: "onConflict carries no target columns".to_string(),
         });
     }
-    let qcols: Result<Vec<_>, _> =
-        oc.columns.iter().map(|c| quote_ident_for_dialect("column", c, ctx.dialect)).collect();
+    let qcols: Result<Vec<_>, _> = oc
+        .columns
+        .iter()
+        .map(|c| quote_ident_for_dialect("column", c, ctx.dialect))
+        .collect();
     let target = format!("ON CONFLICT ({})", qcols?.join(", "));
     match &oc.do_update {
         None => Ok(format!(" {target} DO NOTHING")),
@@ -1395,7 +1499,10 @@ pub fn assemble_update(
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
     if set.is_empty() {
-        return Err(DmlError::EmptySet { op: "update", table: table.to_string() });
+        return Err(DmlError::EmptySet {
+            op: "update",
+            table: table.to_string(),
+        });
     }
     let qtable = qualify_table(project_schema, dialect, table)?;
     let mut ctx = BindCtx::new(dialect);
@@ -1411,7 +1518,10 @@ pub fn assemble_update(
         let w = render_expr_bound(pred, &mut ctx)?;
         template.push_str(&format!(" WHERE {w}"));
     }
-    Ok(AssembledDml { template, binds: ctx.binds })
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
 }
 
 /// Assemble a `del` op into a parameterized `DELETE`. The mandatory `where`
@@ -1461,7 +1571,10 @@ pub fn assemble_delete(
             format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
         }
     };
-    Ok(AssembledDml { template, binds: ctx.binds })
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
 }
 
 /// The rendered backfill clauses (the SQL strings the
@@ -1489,7 +1602,10 @@ pub fn assemble_backfill_clauses(
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
     if set.is_empty() {
-        return Err(DmlError::EmptySet { op: "backfill", table: table.to_string() });
+        return Err(DmlError::EmptySet {
+            op: "backfill",
+            table: table.to_string(),
+        });
     }
     // BTreeMap ⇒ canonical order.
     let mut assigns = Vec::with_capacity(set.len());
@@ -1524,7 +1640,10 @@ mod tests {
         assert!(quote_ident_checked("").is_err(), "empty must fail closed");
         assert!(quote_ident_checked("a\0b").is_err(), "NUL must fail closed");
         assert_eq!(quote_ident_checked("").unwrap_err().reason, "empty");
-        assert_eq!(quote_ident_checked("a\0b").unwrap_err().reason, "contains NUL");
+        assert_eq!(
+            quote_ident_checked("a\0b").unwrap_err().reason,
+            "contains NUL"
+        );
     }
 
     /// For any non-empty / non-NUL identifier the output is
@@ -1532,7 +1651,12 @@ mod tests {
     /// peers used, including a quote-bearing schema (the dml goldens stay green).
     #[test]
     fn quote_ident_checked_is_byte_identical_to_bare_format() {
-        for s in ["app_proj", "019efd94-1a2b-7000-8000-000000000000", "a\"b", "\"\""] {
+        for s in [
+            "app_proj",
+            "019efd94-1a2b-7000-8000-000000000000",
+            "a\"b",
+            "\"\"",
+        ] {
             assert_eq!(
                 quote_ident_checked(s).unwrap(),
                 format!("\"{}\"", s.replace('"', "\"\"")),
@@ -1553,9 +1677,18 @@ mod tests {
         let schema = "ap\"p"; // a quote-bearing engine schema
         let canonical = quote_ident_checked(schema).unwrap();
         // author (infallible-on-valid wrapper) — maps to its own error on failure.
-        assert_eq!(crate::plan::author::quote_ident_for_test(schema).unwrap(), canonical);
-        assert_eq!(crate::apply::role::quote_ident_for_test(schema).unwrap(), canonical);
-        assert_eq!(crate::apply::journal::quote_ident_for_test(schema).unwrap(), canonical);
+        assert_eq!(
+            crate::plan::author::quote_ident_for_test(schema).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            crate::apply::role::quote_ident_for_test(schema).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            crate::apply::journal::quote_ident_for_test(schema).unwrap(),
+            canonical
+        );
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
@@ -1657,9 +1790,12 @@ mod tests {
         use std::path::Path;
         // The engine-supplied identifier argument patterns. `quote_ident_checked`
         // takes the SAME args; the infallible `escape_quote_ident` must not.
-        let esc = ['e', 's', 'c', 'a', 'p', 'e', '_', 'q', 'u', 'o', 't', 'e', '_', 'i', 'd', 'e', 'n', 't']
-            .iter()
-            .collect::<String>();
+        let esc = [
+            'e', 's', 'c', 'a', 'p', 'e', '_', 'q', 'u', 'o', 't', 'e', '_', 'i', 'd', 'e', 'n',
+            't',
+        ]
+        .iter()
+        .collect::<String>();
         let needles = [
             format!("{esc}(&cfg.pg.meta_schema)"),
             format!("{esc}(&cfg.project_schema)"),
@@ -1729,10 +1865,16 @@ mod tests {
         };
 
         let pg = render_expr_inline(&expr, SqlDialect::Postgres).unwrap();
-        assert_eq!(pg, "(\"first\" || \"last\")", "PG uses the || concat operator");
+        assert_eq!(
+            pg, "(\"first\" || \"last\")",
+            "PG uses the || concat operator"
+        );
 
         let sqlite = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap();
-        assert_eq!(sqlite, "(\"first\" || \"last\")", "SQLite uses the || concat operator");
+        assert_eq!(
+            sqlite, "(\"first\" || \"last\")",
+            "SQLite uses the || concat operator"
+        );
 
         let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
         assert!(
@@ -1767,9 +1909,15 @@ mod tests {
         ];
 
         for (target, pg, sqlite, mysql) in cases {
-            let expr = Expr::Cast { operand: Box::new(Expr::col("x")), target };
+            let expr = Expr::Cast {
+                operand: Box::new(Expr::col("x")),
+                target,
+            };
             assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(
+                render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+                sqlite
+            );
             assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
         }
     }
@@ -1800,9 +1948,18 @@ mod tests {
 
         // Unqualified stays exactly as today — no table segment, no dot.
         let plain = Expr::col("id");
-        assert_eq!(render_expr_inline(&plain, SqlDialect::Postgres).unwrap(), "\"id\"");
-        assert_eq!(render_expr_inline(&plain, SqlDialect::Sqlite).unwrap(), "\"id\"");
-        assert_eq!(render_expr_inline(&plain, SqlDialect::Mysql).unwrap(), "`id`");
+        assert_eq!(
+            render_expr_inline(&plain, SqlDialect::Postgres).unwrap(),
+            "\"id\""
+        );
+        assert_eq!(
+            render_expr_inline(&plain, SqlDialect::Sqlite).unwrap(),
+            "\"id\""
+        );
+        assert_eq!(
+            render_expr_inline(&plain, SqlDialect::Mysql).unwrap(),
+            "`id`"
+        );
 
         // The parameterized (bind) path mirrors the inline path for the ColRef arm.
         assert_eq!(
@@ -1823,7 +1980,10 @@ mod tests {
     fn length_is_char_length_on_mysql() {
         // Regression: MySQL LENGTH() is BYTE length; the portable length() intent
         // is CHARACTER length (PG/SQLite length()). MySQL MUST use CHAR_LENGTH().
-        let expr = Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] };
+        let expr = Expr::FnCall {
+            r#fn: ScalarFn::Length,
+            args: vec![Expr::col("name")],
+        };
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
             "length(\"name\")"
@@ -1846,7 +2006,10 @@ mod tests {
     fn portable_scalar_fns_render_identically_on_all_three() {
         let cases: &[(Expr, &str)] = &[
             (
-                Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("x")] },
+                Expr::FnCall {
+                    r#fn: ScalarFn::Round,
+                    args: vec![Expr::col("x")],
+                },
                 "round(\"x\")",
             ),
             (
@@ -1857,17 +2020,27 @@ mod tests {
                 "round(\"x\", 2)",
             ),
             (
-                Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("x")] },
+                Expr::FnCall {
+                    r#fn: ScalarFn::Floor,
+                    args: vec![Expr::col("x")],
+                },
                 "floor(\"x\")",
             ),
             (
-                Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("x")] },
+                Expr::FnCall {
+                    r#fn: ScalarFn::Ceil,
+                    args: vec![Expr::col("x")],
+                },
                 "ceil(\"x\")",
             ),
             (
                 Expr::FnCall {
                     r#fn: ScalarFn::Substr,
-                    args: vec![Expr::col("s"), Expr::lit(IrScalar::Int(1)), Expr::lit(IrScalar::Int(3))],
+                    args: vec![
+                        Expr::col("s"),
+                        Expr::lit(IrScalar::Int(1)),
+                        Expr::lit(IrScalar::Int(3)),
+                    ],
                 },
                 "substr(\"s\", 1, 3)",
             ),
@@ -1953,7 +2126,10 @@ mod tests {
                 from: Box::new(Expr::col("ts")),
             };
             assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(
+                render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+                sqlite
+            );
             assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
         }
     }
@@ -2045,14 +2221,22 @@ mod tests {
             (UnaryOp::IsTrue, "= 1", "IS TRUE"),
             (UnaryOp::IsFalse, "= 0", "IS FALSE"),
         ] {
-            let e = Expr::UnaryOp { op, operand: Box::new(Expr::col("active")) };
+            let e = Expr::UnaryOp {
+                op,
+                operand: Box::new(Expr::col("active")),
+            };
             let pg = render_expr_inline(&e, SqlDialect::Postgres).unwrap();
             assert!(pg.contains(std_frag), "PG keeps `{std_frag}`: {pg}");
             let mysql = render_expr_inline(&e, SqlDialect::Mysql).unwrap();
-            assert!(mysql.contains(std_frag), "MySQL keeps `{std_frag}`: {mysql}");
+            assert!(
+                mysql.contains(std_frag),
+                "MySQL keeps `{std_frag}`: {mysql}"
+            );
             let sqlite = render_expr_inline(&e, SqlDialect::Sqlite).unwrap();
             assert!(
-                sqlite.contains(sqlite_expect) && !sqlite.contains("IS TRUE") && !sqlite.contains("IS FALSE"),
+                sqlite.contains(sqlite_expect)
+                    && !sqlite.contains("IS TRUE")
+                    && !sqlite.contains("IS FALSE"),
                 "SQLite must rewrite `{std_frag}` to `{sqlite_expect}`: {sqlite}"
             );
         }
@@ -2071,9 +2255,18 @@ mod tests {
         };
         let expect_pg_sqlite = "(\"age\" BETWEEN 18 AND 65)";
         let expect_mysql = "(`age` BETWEEN 18 AND 65)";
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), expect_pg_sqlite);
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), expect_pg_sqlite);
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), expect_mysql);
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            expect_pg_sqlite
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            expect_pg_sqlite
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            expect_mysql
+        );
 
         // Bound path: operand is an identifier; low/high become placeholders.
         for (dialect, ident) in [
@@ -2202,8 +2395,14 @@ mod tests {
             negated: true,
         };
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-            assert_eq!(render_expr_inline(&includes_empty, dialect).unwrap(), "FALSE");
-            assert_eq!(render_expr_inline(&excludes_empty, dialect).unwrap(), "TRUE");
+            assert_eq!(
+                render_expr_inline(&includes_empty, dialect).unwrap(),
+                "FALSE"
+            );
+            assert_eq!(
+                render_expr_inline(&excludes_empty, dialect).unwrap(),
+                "TRUE"
+            );
             assert_eq!(
                 render_expr_bound(&includes_empty, &mut BindCtx::new(dialect)).unwrap(),
                 "FALSE"
@@ -2310,8 +2509,14 @@ mod tests {
             mysql: Some(Box::new(lit_str("C"))),
         };
         // Inline path: each leg is an inline string literal.
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'");
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'B'");
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "'A'"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "'B'"
+        );
         assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'C'");
 
         // Bound path: each leg's literal becomes exactly ONE placeholder — the
@@ -2324,7 +2529,11 @@ mod tests {
             let mut ctx = BindCtx::new(dialect);
             let sql = render_expr_bound(&expr, &mut ctx).unwrap();
             assert_eq!(sql, ph, "dialect() binds its chosen leg on {dialect:?}");
-            assert_eq!(ctx.binds.len(), 1, "exactly one leg's literal binds on {dialect:?}");
+            assert_eq!(
+                ctx.binds.len(),
+                1,
+                "exactly one leg's literal binds on {dialect:?}"
+            );
         }
     }
 
@@ -2338,9 +2547,21 @@ mod tests {
             sqlite: None,
             mysql: None,
         };
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'", "PG uses its own leg");
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'D'", "SQLite falls back to default");
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'D'", "MySQL falls back to default");
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "'A'",
+            "PG uses its own leg"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "'D'",
+            "SQLite falls back to default"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "'D'",
+            "MySQL falls back to default"
+        );
     }
 
     #[test]
@@ -2361,7 +2582,10 @@ mod tests {
             render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
             "(\"age\" BETWEEN 1 AND 9)",
         );
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "\"age\"");
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "\"age\""
+        );
     }
 
     #[test]
@@ -2377,7 +2601,10 @@ mod tests {
         };
         assert!(render_expr_inline(&expr, SqlDialect::Postgres).is_ok());
         let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
-        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "no SQLite leg → fail-closed: {err:?}");
+        assert!(
+            matches!(err, DmlError::UnrenderableExpr(_)),
+            "no SQLite leg → fail-closed: {err:?}"
+        );
     }
 
     // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT ──────
@@ -2408,9 +2635,18 @@ mod tests {
             delimiter: None,
             distinct: true,
         };
-        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(), "count(DISTINCT \"x\")");
-        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Sqlite).unwrap(), "count(DISTINCT \"x\")");
-        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Mysql).unwrap(), "count(DISTINCT `x`)");
+        assert_eq!(
+            render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(),
+            "count(DISTINCT \"x\")"
+        );
+        assert_eq!(
+            render_expr_inline(&count_distinct, SqlDialect::Sqlite).unwrap(),
+            "count(DISTINCT \"x\")"
+        );
+        assert_eq!(
+            render_expr_inline(&count_distinct, SqlDialect::Mysql).unwrap(),
+            "count(DISTINCT `x`)"
+        );
 
         // sum/avg/min/max(<col>) — identical spelling, only quoting differs.
         for (func, name) in [
@@ -2425,15 +2661,27 @@ mod tests {
                 delimiter: None,
                 distinct: false,
             };
-            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), format!("{name}(\"x\")"));
-            assert_eq!(render_expr_inline(&e, SqlDialect::Sqlite).unwrap(), format!("{name}(\"x\")"));
-            assert_eq!(render_expr_inline(&e, SqlDialect::Mysql).unwrap(), format!("{name}(`x`)"));
+            assert_eq!(
+                render_expr_inline(&e, SqlDialect::Postgres).unwrap(),
+                format!("{name}(\"x\")")
+            );
+            assert_eq!(
+                render_expr_inline(&e, SqlDialect::Sqlite).unwrap(),
+                format!("{name}(\"x\")")
+            );
+            assert_eq!(
+                render_expr_inline(&e, SqlDialect::Mysql).unwrap(),
+                format!("{name}(`x`)")
+            );
         }
 
         // The bound path renders the aggregate identically and binds no placeholders
         // (a ColRef arg is an identifier, not a bind).
         let mut ctx = BindCtx::new(SqlDialect::Postgres);
-        assert_eq!(render_expr_bound(&count_distinct, &mut ctx).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(
+            render_expr_bound(&count_distinct, &mut ctx).unwrap(),
+            "count(DISTINCT \"x\")"
+        );
         assert_eq!(ctx.binds.len(), 0, "a ColRef aggregate arg is not a bind");
         assert_eq!(
             render_expr_bound(&count_star, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
@@ -2495,7 +2743,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::InvalidIdentifier { what: "table", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::InvalidIdentifier { what: "table", .. }),
+            "{err:?}"
+        );
     }
 
     /// L1 self-defense: the PG `qualify_table` arm must not blindly trust
@@ -2515,7 +2766,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }),
+            "{err:?}"
+        );
     }
 
     /// An empty schema is likewise refused fail-closed — `""` cannot name a real
@@ -2531,7 +2785,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::InvalidIdentifier { what: "schema", .. }),
+            "{err:?}"
+        );
     }
 
     /// The real Confined project schema is the app id — a UUIDv7 carrying `-`,
@@ -2571,7 +2828,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(a.template, "INSERT INTO \"a\"\"; DROP--\".\"t\" (\"a\") VALUES ($1)");
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"a\"\"; DROP--\".\"t\" (\"a\") VALUES ($1)"
+        );
     }
 
     #[test]
@@ -2585,7 +2845,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::InvalidIdentifier { what: "column", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::InvalidIdentifier { what: "column", .. }),
+            "{err:?}"
+        );
     }
 
     // ── insert: native binds, never interpolated ────────────────────────────
@@ -2597,7 +2860,10 @@ mod tests {
             SqlDialect::Postgres,
             "status_codes",
             &["code".into(), "label".into()],
-            &[vec![val(IrScalar::Int(200)), val(IrScalar::Str("ok".into()))]],
+            &[vec![
+                val(IrScalar::Int(200)),
+                val(IrScalar::Str("ok".into())),
+            ]],
             None,
         )
         .unwrap();
@@ -2605,7 +2871,10 @@ mod tests {
             a.template,
             "INSERT INTO \"app_proj\".\"status_codes\" (\"code\", \"label\") VALUES ($1, $2)"
         );
-        assert_eq!(a.binds, vec![BindValue::Int(200), BindValue::Text("ok".into())]);
+        assert_eq!(
+            a.binds,
+            vec![BindValue::Int(200), BindValue::Text("ok".into())]
+        );
     }
 
     #[test]
@@ -2615,13 +2884,16 @@ mod tests {
             SqlDialect::Postgres,
             "events",
             &["created_at".into(), "id".into()],
-            &[vec![IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::Now,
-                args: vec![],
-            }), IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::GenRandomUuid,
-                args: vec![],
-            })]],
+            &[vec![
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args: vec![],
+                }),
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::GenRandomUuid,
+                    args: vec![],
+                }),
+            ]],
             None,
         )
         .unwrap();
@@ -2629,7 +2901,10 @@ mod tests {
             a.template,
             "INSERT INTO \"app_proj\".\"events\" (\"created_at\", \"id\") VALUES (now(), gen_random_uuid())"
         );
-        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+        assert!(
+            a.binds.is_empty(),
+            "fnSynth insert value is DB-evaluated, not a bind"
+        );
     }
 
     #[test]
@@ -2639,13 +2914,16 @@ mod tests {
             SqlDialect::Mysql,
             "events",
             &["created_at".into(), "id".into()],
-            &[vec![IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::Now,
-                args: vec![],
-            }), IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::GenRandomUuid,
-                args: vec![],
-            })]],
+            &[vec![
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args: vec![],
+                }),
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::GenRandomUuid,
+                    args: vec![],
+                }),
+            ]],
             None,
         )
         .unwrap();
@@ -2653,7 +2931,10 @@ mod tests {
             a.template,
             "INSERT INTO `app_proj`.`events` (`created_at`, `id`) VALUES (CURRENT_TIMESTAMP(6), UUID())"
         );
-        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+        assert!(
+            a.binds.is_empty(),
+            "fnSynth insert value is DB-evaluated, not a bind"
+        );
     }
 
     #[test]
@@ -2663,13 +2944,16 @@ mod tests {
             SqlDialect::Sqlite,
             "events",
             &["created_at".into(), "id".into()],
-            &[vec![IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::Now,
-                args: vec![],
-            }), IrValue::Expr(Expr::FnSynth {
-                r#fn: SynthFn::GenRandomUuid,
-                args: vec![],
-            })]],
+            &[vec![
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args: vec![],
+                }),
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::GenRandomUuid,
+                    args: vec![],
+                }),
+            ]],
             None,
         )
         .unwrap();
@@ -2677,7 +2961,10 @@ mod tests {
             a.template,
             "INSERT INTO \"events\" (\"created_at\", \"id\") VALUES (CURRENT_TIMESTAMP, lower(hex(randomblob(16))))"
         );
-        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+        assert!(
+            a.binds.is_empty(),
+            "fnSynth insert value is DB-evaluated, not a bind"
+        );
     }
 
     #[test]
@@ -2691,7 +2978,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(a.template, "INSERT INTO \"t\" (\"a\", \"b\") VALUES (?1, ?2)");
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"t\" (\"a\", \"b\") VALUES (?1, ?2)"
+        );
         assert_eq!(a.binds, vec![BindValue::Int(1), BindValue::Null]);
     }
 
@@ -2706,7 +2996,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(a.template, "INSERT INTO \"app_proj\".\"t\" (\"a\") VALUES ($1), ($2)");
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"app_proj\".\"t\" (\"a\") VALUES ($1), ($2)"
+        );
         assert_eq!(a.binds, vec![BindValue::Int(1), BindValue::Int(2)]);
     }
 
@@ -2725,8 +3018,14 @@ mod tests {
         )
         .unwrap();
         // The template carries ONLY the placeholder; the hostile bytes are a bind.
-        assert_eq!(a.template, "INSERT INTO \"app_proj\".\"t\" (\"a\") VALUES ($1)");
-        assert!(!a.template.contains("DROP"), "metacharacters must not reach the template");
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"app_proj\".\"t\" (\"a\") VALUES ($1)"
+        );
+        assert!(
+            !a.template.contains("DROP"),
+            "metacharacters must not reach the template"
+        );
         assert_eq!(a.binds, vec![BindValue::Text(hostile.into())]);
     }
 
@@ -2734,18 +3033,35 @@ mod tests {
     fn insert_over_the_bind_param_ceiling_is_rejected() {
         // One column × (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
         // overflowing the protocol parameter ceiling. Reject with a bounded error.
-        let rows: Vec<Vec<IrValue>> =
-            (0..=MAX_BIND_PARAMS as i64).map(|i| vec![val(IrScalar::Int(i))]).collect();
-        let err = assemble_insert(SCHEMA, SqlDialect::Postgres, "t", &["a".into()], &rows, None)
-            .unwrap_err();
+        let rows: Vec<Vec<IrValue>> = (0..=MAX_BIND_PARAMS as i64)
+            .map(|i| vec![val(IrScalar::Int(i))])
+            .collect();
+        let err = assemble_insert(
+            SCHEMA,
+            SqlDialect::Postgres,
+            "t",
+            &["a".into()],
+            &rows,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, DmlError::TooManyBinds { count, max, .. } if count == MAX_BIND_PARAMS + 1 && max == MAX_BIND_PARAMS),
             "{err:?}"
         );
         // Exactly at the ceiling still assembles.
-        let rows_ok: Vec<Vec<IrValue>> =
-            (0..MAX_BIND_PARAMS as i64).map(|i| vec![val(IrScalar::Int(i))]).collect();
-        assert!(assemble_insert(SCHEMA, SqlDialect::Postgres, "t", &["a".into()], &rows_ok, None).is_ok());
+        let rows_ok: Vec<Vec<IrValue>> = (0..MAX_BIND_PARAMS as i64)
+            .map(|i| vec![val(IrScalar::Int(i))])
+            .collect();
+        assert!(assemble_insert(
+            SCHEMA,
+            SqlDialect::Postgres,
+            "t",
+            &["a".into()],
+            &rows_ok,
+            None
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2768,7 +3084,10 @@ mod tests {
     fn insert_on_conflict_renders_on_pg() {
         let oc = OnConflict {
             columns: vec!["code".into()],
-            do_update: Some(BTreeMap::from([("label".to_string(), val(IrScalar::Str("dup".into())))])),
+            do_update: Some(BTreeMap::from([(
+                "label".to_string(),
+                val(IrScalar::Str("dup".into())),
+            )])),
         };
         let a = assemble_insert(
             SCHEMA,
@@ -2786,7 +3105,11 @@ mod tests {
         );
         assert_eq!(
             a.binds,
-            vec![BindValue::Int(1), BindValue::Text("ok".into()), BindValue::Text("dup".into())]
+            vec![
+                BindValue::Int(1),
+                BindValue::Text("ok".into()),
+                BindValue::Text("dup".into())
+            ]
         );
     }
 
@@ -2825,7 +3148,10 @@ mod tests {
 
     #[test]
     fn insert_on_conflict_do_nothing_pg() {
-        let oc = OnConflict { columns: vec!["code".into()], do_update: None };
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: None,
+        };
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Postgres,
@@ -2835,12 +3161,19 @@ mod tests {
             Some(&oc),
         )
         .unwrap();
-        assert!(a.template.ends_with("ON CONFLICT (\"code\") DO NOTHING"), "{}", a.template);
+        assert!(
+            a.template.ends_with("ON CONFLICT (\"code\") DO NOTHING"),
+            "{}",
+            a.template
+        );
     }
 
     #[test]
     fn insert_on_conflict_rejected_on_sqlite() {
-        let oc = OnConflict { columns: vec!["code".into()], do_update: None };
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: None,
+        };
         let err = assemble_insert(
             SCHEMA,
             SqlDialect::Sqlite,
@@ -2850,7 +3183,10 @@ mod tests {
             Some(&oc),
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::OnConflictNotPortable { .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::OnConflictNotPortable { .. }),
+            "{err:?}"
+        );
     }
 
     // ── update: bound set + where, both dialects ─────────────────────────────
@@ -2869,14 +3205,23 @@ mod tests {
             lhs: Box::new(Expr::col("code")),
             rhs: Box::new(lit_int(0)),
         };
-        let a = assemble_update(SCHEMA, SqlDialect::Postgres, "status_codes", &set, Some(&pred))
-            .unwrap();
+        let a = assemble_update(
+            SCHEMA,
+            SqlDialect::Postgres,
+            "status_codes",
+            &set,
+            Some(&pred),
+        )
+        .unwrap();
         assert_eq!(
             a.template,
             "UPDATE \"app_proj\".\"status_codes\" SET \"label\" = coalesce(\"label\", $1) \
              WHERE (\"code\" > $2)"
         );
-        assert_eq!(a.binds, vec![BindValue::Text("unknown".into()), BindValue::Int(0)]);
+        assert_eq!(
+            a.binds,
+            vec![BindValue::Text("unknown".into()), BindValue::Int(0)]
+        );
     }
 
     #[test]
@@ -2891,16 +3236,25 @@ mod tests {
     fn update_empty_set_rejected() {
         let err =
             assemble_update(SCHEMA, SqlDialect::Postgres, "t", &BTreeMap::new(), None).unwrap_err();
-        assert!(matches!(err, DmlError::EmptySet { op: "update", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::EmptySet { op: "update", .. }),
+            "{err:?}"
+        );
     }
 
     // ── delete: mandatory where, both dialects ───────────────────────────────
 
     #[test]
     fn delete_binds_where_pg() {
-        let pred = Expr::UnaryOp { op: UnaryOp::IsNull, operand: Box::new(Expr::col("code")) };
+        let pred = Expr::UnaryOp {
+            op: UnaryOp::IsNull,
+            operand: Box::new(Expr::col("code")),
+        };
         let a = assemble_delete(SCHEMA, SqlDialect::Postgres, "t", &pred, None).unwrap();
-        assert_eq!(a.template, "DELETE FROM \"app_proj\".\"t\" WHERE (\"code\" IS NULL)");
+        assert_eq!(
+            a.template,
+            "DELETE FROM \"app_proj\".\"t\" WHERE (\"code\" IS NULL)"
+        );
         assert!(a.binds.is_empty());
     }
 
@@ -2976,7 +3330,10 @@ mod tests {
     fn backfill_empty_set_rejected() {
         let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &BTreeMap::new(), None)
             .unwrap_err();
-        assert!(matches!(err, DmlError::EmptySet { op: "backfill", .. }), "{err:?}");
+        assert!(
+            matches!(err, DmlError::EmptySet { op: "backfill", .. }),
+            "{err:?}"
+        );
     }
 
     // ── splitPart lowering (pinned helper) ───────────────────────────────────
@@ -3032,8 +3389,14 @@ mod tests {
     fn split_part_one_shot_bound_pg() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", ",", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
-        assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"first\" = split_part(\"name\", ',', 1)");
-        assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
+        assert_eq!(
+            a.template,
+            "UPDATE \"app_proj\".\"t\" SET \"first\" = split_part(\"name\", ',', 1)"
+        );
+        assert!(
+            a.binds.is_empty(),
+            "delim/n are pinned constants, not binds"
+        );
     }
 
     /// A single-quote delimiter is `''''`-escaped in the inline literal on both legs.
@@ -3081,8 +3444,14 @@ mod tests {
         // and the one-shot (bound) PG path too — delim/n stay pinned constants.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
-        assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)");
-        assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
+        assert_eq!(
+            a.template,
+            "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)"
+        );
+        assert!(
+            a.binds.is_empty(),
+            "delim/n are pinned constants, not binds"
+        );
     }
 
     /// A non-ASCII (multibyte) delimiter is still PG-renderable (PG splits on the
@@ -3110,8 +3479,14 @@ mod tests {
         let bad = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![
-                Expr::ColRef { name: "name".into(), table: None },
-                Expr::ColRef { name: "name".into(), table: None },
+                Expr::ColRef {
+                    name: "name".into(),
+                    table: None,
+                },
+                Expr::ColRef {
+                    name: "name".into(),
+                    table: None,
+                },
                 lit_int(1),
             ],
         };

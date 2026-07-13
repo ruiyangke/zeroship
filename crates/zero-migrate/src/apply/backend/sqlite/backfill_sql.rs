@@ -74,7 +74,10 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
         && value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !ok {
-        return Err(BackfillError::InvalidIdentifier { what, value: value.to_string() });
+        return Err(BackfillError::InvalidIdentifier {
+            what,
+            value: value.to_string(),
+        });
     }
     Ok(())
 }
@@ -142,7 +145,11 @@ async fn resolve_cursor_info(
     let mut pk_cols = 0usize;
     let mut this_pk = false;
     for r in &rows {
-        let pk: i64 = r.get(5).and_then(|c| c.clone()).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let pk: i64 = r
+            .get(5)
+            .and_then(|c| c.clone())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         if pk > 0 {
             pk_cols += 1;
         }
@@ -151,8 +158,11 @@ async fn resolve_cursor_info(
             info.exists = true;
             let decl = r.get(2).and_then(|c| c.clone()).unwrap_or_default();
             info.numeric_affinity = is_numeric_affinity(&decl);
-            let nn: i64 =
-                r.get(3).and_then(|c| c.clone()).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let nn: i64 = r
+                .get(3)
+                .and_then(|c| c.clone())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             info.not_null = nn != 0 || pk > 0;
             this_pk = pk > 0;
         }
@@ -173,16 +183,24 @@ async fn cursor_has_single_unique_index(
         .query(&format!("PRAGMA index_list({})", quote_ident(&spec.table)))
         .await?;
     for r in &idx {
-        let unique: i64 =
-            r.get(2).and_then(|c| c.clone()).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let partial: i64 =
-            r.get(4).and_then(|c| c.clone()).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let unique: i64 = r
+            .get(2)
+            .and_then(|c| c.clone())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let partial: i64 = r
+            .get(4)
+            .and_then(|c| c.clone())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         if unique == 0 || partial != 0 {
             continue;
         }
         let name = r.get(1).and_then(|c| c.clone()).unwrap_or_default();
         // index_info columns: seqno, cid, name.
-        let cols = actor.query(&format!("PRAGMA index_info({})", sql_lit(&name))).await?;
+        let cols = actor
+            .query(&format!("PRAGMA index_info({})", sql_lit(&name)))
+            .await?;
         if cols.len() == 1 {
             let col = cols[0].get(2).and_then(|c| c.clone()).unwrap_or_default();
             if col == spec.cursor_column {
@@ -241,10 +259,18 @@ async fn read_progress(
         ))
         .await?;
     match rows.into_iter().next() {
-        None => Ok(Progress { last_cursor: None, complete: false, exists: false }),
+        None => Ok(Progress {
+            last_cursor: None,
+            complete: false,
+            exists: false,
+        }),
         Some(r) => Ok(Progress {
             last_cursor: r.first().and_then(|c| c.clone()),
-            complete: r.get(1).and_then(|c| c.clone()).map(|s| s != "0").unwrap_or(false),
+            complete: r
+                .get(1)
+                .and_then(|c| c.clone())
+                .map(|s| s != "0")
+                .unwrap_or(false),
             exists: true,
         }),
     }
@@ -282,7 +308,11 @@ fn build_batch_sql(
     have_cursor: bool,
 ) -> String {
     let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    let limit_ph = if have_cursor { sqlite_placeholder(2) } else { sqlite_placeholder(1) };
+    let limit_ph = if have_cursor {
+        sqlite_placeholder(2)
+    } else {
+        sqlite_placeholder(1)
+    };
     let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
     format!(
         "UPDATE {table_q} SET {set_clause} \
@@ -315,7 +345,11 @@ fn build_window_max_sql(
     have_cursor: bool,
 ) -> String {
     let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
-    let limit_ph = if have_cursor { sqlite_placeholder(2) } else { sqlite_placeholder(1) };
+    let limit_ph = if have_cursor {
+        sqlite_placeholder(2)
+    } else {
+        sqlite_placeholder(1)
+    };
     let pred = window_predicate(cursor_q, &filter_sql, have_cursor);
     format!(
         "SELECT max({cursor_q}) FROM ( \
@@ -352,13 +386,17 @@ pub(crate) async fn run_backfill_bounded(
     }
 
     let backfill_id = spec.backfill_id();
-    ensure_backfill_progress(actor).await.map_err(sqlite_journal_err)?;
+    ensure_backfill_progress(actor)
+        .await
+        .map_err(sqlite_journal_err)?;
 
     // Gate 2 — resolve the cursor column: it MUST exist, be a single-column
     // PRIMARY KEY or UNIQUE index, and be NOT NULL (the exactly-once + bounded +
     // filter-honoring correctness rests on a UNIQUE NOT NULL cursor; a non-unique
     // cursor over-matches every row sharing a key, a NULL cursor is never paged).
-    let info = resolve_cursor_info(actor, spec).await.map_err(sqlite_journal_err)?;
+    let info = resolve_cursor_info(actor, spec)
+        .await
+        .map_err(sqlite_journal_err)?;
     if !info.exists {
         return Err(BackfillError::TargetNotFound(format!(
             "{} column {} not found",
@@ -366,7 +404,9 @@ pub(crate) async fn run_backfill_bounded(
         )));
     }
     let is_unique = info.is_single_pk
-        || cursor_has_single_unique_index(actor, spec).await.map_err(sqlite_journal_err)?;
+        || cursor_has_single_unique_index(actor, spec)
+            .await
+            .map_err(sqlite_journal_err)?;
     if !is_unique {
         return Err(BackfillError::CursorNotUniqueNotNull {
             table: spec.table.clone(),
@@ -393,7 +433,9 @@ pub(crate) async fn run_backfill_bounded(
     assert_cursor_not_mutated(set_clause, &spec.cursor_column)?;
 
     // Resume from the last committed cursor (if any).
-    let existing = read_progress(actor, &backfill_id).await.map_err(sqlite_journal_err)?;
+    let existing = read_progress(actor, &backfill_id)
+        .await
+        .map_err(sqlite_journal_err)?;
     let resumed = existing.exists && existing.last_cursor.is_some();
     if existing.complete {
         // Already complete — idempotent no-op re-run.
@@ -409,7 +451,9 @@ pub(crate) async fn run_backfill_bounded(
 
     // Insert the progress row up-front (idempotent) so observability sees the
     // backfill exists even before the first batch commits.
-    upsert_progress_row(actor, &backfill_id, spec, applied_by).await.map_err(sqlite_journal_err)?;
+    upsert_progress_row(actor, &backfill_id, spec, applied_by)
+        .await
+        .map_err(sqlite_journal_err)?;
 
     let mut batches: u64 = 0;
     let mut rows_updated: u64 = 0;
@@ -451,7 +495,9 @@ pub(crate) async fn run_backfill_bounded(
         }
     }
     if tail_reached {
-        mark_complete(actor, &backfill_id).await.map_err(sqlite_journal_err)?;
+        mark_complete(actor, &backfill_id)
+            .await
+            .map_err(sqlite_journal_err)?;
     }
 
     Ok(BackfillOutcome {
@@ -628,8 +674,14 @@ async fn run_one_batch(
 
     // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows SQLITE_TRANSACTION
     // only in EngineJournal — the engine owns txn boundaries).
-    actor.set_mode(Mode::EngineJournal).await.map_err(batch_infra_err)?;
-    actor.exec("BEGIN IMMEDIATE").await.map_err(batch_infra_err)?;
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(batch_infra_err)?;
+    actor
+        .exec("BEGIN IMMEDIATE")
+        .await
+        .map_err(batch_infra_err)?;
 
     let result = async {
         // 2. Compute the high-water mark IN SQL, under the cursor column's collation,
@@ -645,8 +697,10 @@ async fn run_one_batch(
         // (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
         actor.set_mode(Mode::CreatorUp).await?;
         let max_rows = actor.query_params(&window_max_sql, &binds).await?;
-        let max_cursor =
-            max_rows.first().and_then(|r| r.first()).and_then(|c| c.clone());
+        let max_cursor = max_rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.clone());
 
         // 3. Run the batch UPDATE … RETURNING under the confined CreatorUp mode
         // (denied from `_mig`, PRAGMA, txn boundaries, vtables). The cursor +
@@ -688,12 +742,18 @@ async fn run_one_batch(
 
     match result {
         Ok((n, max_cursor)) => {
-            actor.set_mode(Mode::EngineJournal).await.map_err(batch_infra_err)?;
+            actor
+                .set_mode(Mode::EngineJournal)
+                .await
+                .map_err(batch_infra_err)?;
             actor.exec("COMMIT").await.map_err(batch_infra_err)?;
             Ok((n, max_cursor))
         }
         Err(e) => {
-            actor.set_mode(Mode::EngineJournal).await.map_err(batch_infra_err)?;
+            actor
+                .set_mode(Mode::EngineJournal)
+                .await
+                .map_err(batch_infra_err)?;
             let rb = actor.exec("ROLLBACK").await;
             // confirm the connection is back in autocommit; a wedged
             // connection is a hard infra error, not a silent reuse.
@@ -739,10 +799,16 @@ mod tests {
     #[test]
     fn batch_sql_first_vs_resume_shape() {
         let first = build_batch_sql("\"t\"", "\"id\"", "\"a\" = 1", None, false);
-        assert!(first.contains("WHERE 1=1 ORDER BY \"id\" ASC LIMIT ?1"), "{first}");
+        assert!(
+            first.contains("WHERE 1=1 ORDER BY \"id\" ASC LIMIT ?1"),
+            "{first}"
+        );
         assert!(first.ends_with("RETURNING \"id\""));
         let resume = build_batch_sql("\"t\"", "\"id\"", "\"a\" = 1", Some("\"a\" IS NULL"), true);
-        assert!(resume.contains("WHERE \"id\" > ?1 AND (\"a\" IS NULL)"), "{resume}");
+        assert!(
+            resume.contains("WHERE \"id\" > ?1 AND (\"a\" IS NULL)"),
+            "{resume}"
+        );
         assert!(resume.contains("LIMIT ?2"), "{resume}");
     }
 
@@ -822,18 +888,21 @@ mod tests {
     /// substring appears verbatim in both renderings.
     #[test]
     fn window_max_and_batch_share_the_window() {
-        for (filter, have_cursor) in
-            [(None, false), (Some("\"a\" IS NULL"), true), (None, true)]
-        {
+        for (filter, have_cursor) in [(None, false), (Some("\"a\" IS NULL"), true), (None, true)] {
             let batch = build_batch_sql("\"t\"", "\"id\"", "\"v\" = 1", filter, have_cursor);
             let wmax = build_window_max_sql("\"t\"", "\"id\"", filter, have_cursor);
             let filter_sql = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
             let limit_ph = if have_cursor { "?2" } else { "?1" };
             let pred = window_predicate("\"id\"", &filter_sql, have_cursor);
-            let shared =
-                format!("WHERE {pred} ORDER BY \"id\" ASC LIMIT {limit_ph}");
-            assert!(batch.contains(&shared), "batch missing shared window: {batch}");
-            assert!(wmax.contains(&shared), "window-max missing shared window: {wmax}");
+            let shared = format!("WHERE {pred} ORDER BY \"id\" ASC LIMIT {limit_ph}");
+            assert!(
+                batch.contains(&shared),
+                "batch missing shared window: {batch}"
+            );
+            assert!(
+                wmax.contains(&shared),
+                "window-max missing shared window: {wmax}"
+            );
         }
     }
 }

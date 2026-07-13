@@ -72,7 +72,6 @@ impl Default for OperatorCapability {
     }
 }
 
-
 /// The CLOSED set of vendor capabilities a privileged op can require.
 /// Each [`crate::ir::Op`] vendor variant maps to one or more of these via
 /// [`crate::ir::Op::vendor_capabilities`].
@@ -364,16 +363,34 @@ mod tests {
         assert!(l.grants(VendorCapability::Policy));
         assert!(l.grants(VendorCapability::Partition));
         assert!(l.grants(VendorCapability::MaterializedView));
-        assert!(!l.grants(VendorCapability::Role), "local must not mint roles");
-        assert!(!l.grants(VendorCapability::RawSql), "local must not allow the raw escape");
-        assert!(!l.grants(VendorCapability::RawViewBody), "local must not allow raw view bodies");
+        assert!(
+            !l.grants(VendorCapability::Role),
+            "local must not mint roles"
+        );
+        assert!(
+            !l.grants(VendorCapability::RawSql),
+            "local must not allow the raw escape"
+        );
+        assert!(
+            !l.grants(VendorCapability::RawViewBody),
+            "local must not allow raw view bodies"
+        );
     }
 
     #[test]
     fn for_trust_maps_profiles_onto_presets() {
-        assert_eq!(VendorCapabilities::for_trust(TrustProfile::Confined), VendorCapabilities::confined());
-        assert_eq!(VendorCapabilities::for_trust(TrustProfile::Platform), VendorCapabilities::operator());
-        assert_eq!(VendorCapabilities::for_trust(TrustProfile::Trusted), VendorCapabilities::operator());
+        assert_eq!(
+            VendorCapabilities::for_trust(TrustProfile::Confined),
+            VendorCapabilities::confined()
+        );
+        assert_eq!(
+            VendorCapabilities::for_trust(TrustProfile::Platform),
+            VendorCapabilities::operator()
+        );
+        assert_eq!(
+            VendorCapabilities::for_trust(TrustProfile::Trusted),
+            VendorCapabilities::operator()
+        );
     }
 
     #[test]
@@ -387,7 +404,10 @@ mod tests {
             "public".into(),
         ])));
         assert!(platform.grants(VendorCapability::Role));
-        assert_eq!(platform.schemas, vec!["zero_migrate".to_string(), "public".to_string()]);
+        assert_eq!(
+            platform.schemas,
+            vec!["zero_migrate".to_string(), "public".to_string()]
+        );
         // Omitted/default public capability (None) → confined, not operator.
         let defaulted = VendorCapabilities::from_scope(None);
         assert!(!defaulted.grants(VendorCapability::RawSql));

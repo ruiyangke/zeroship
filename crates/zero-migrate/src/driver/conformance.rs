@@ -50,7 +50,11 @@ pub struct ConformanceFailure {
 
 impl std::fmt::Display for ConformanceFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "seam conformance check `{}` failed: {}", self.check, self.reason)
+        write!(
+            f,
+            "seam conformance check `{}` failed: {}",
+            self.check, self.reason
+        )
     }
 }
 
@@ -184,8 +188,10 @@ async fn check_transaction_visibility<S: SqlSession>(
         let _ = session.batch("ROLLBACK").await;
         return Err(fail(
             CHECK,
-            format!("in-txn count = {n_in}, expected 1 — the INSERT is not visible \
-                     to a same-session read inside the open transaction"),
+            format!(
+                "in-txn count = {n_in}, expected 1 — the INSERT is not visible \
+                     to a same-session read inside the open transaction"
+            ),
         ));
     }
     session
@@ -206,8 +212,10 @@ async fn check_transaction_visibility<S: SqlSession>(
     if n_after != 0 {
         return Err(fail(
             CHECK,
-            format!("post-ROLLBACK count = {n_after}, expected 0 — ROLLBACK did not \
-                     discard the in-txn write"),
+            format!(
+                "post-ROLLBACK count = {n_after}, expected 0 — ROLLBACK did not \
+                     discard the in-txn write"
+            ),
         ));
     }
     session
@@ -221,16 +229,12 @@ async fn check_transaction_visibility<S: SqlSession>(
 /// the server to the target column type (the `text → timestamptz` path), and a
 /// `None` text param is a SQL NULL. This is the load-bearing distinction between
 /// `exec` (typed binds) and `exec_text` (all-text, server-inferred).
-async fn check_exec_text_semantics<S: SqlSession>(
-    session: &S,
-) -> Result<(), ConformanceFailure> {
+async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "exec-text-semantics";
     // A scratch temp table with a timestamptz column: the coercion the engine's
     // op.* DML path relies on (a text `'2026-01-02T03:04:05Z'` → timestamptz).
     session
-        .batch(
-            "CREATE TEMP TABLE zm_conf_text (id int8, ts timestamptz, tag text)",
-        )
+        .batch("CREATE TEMP TABLE zm_conf_text (id int8, ts timestamptz, tag text)")
         .await
         .map_err(|e| fail(CHECK, format!("create text-coercion scratch table: {e}")))?;
     // exec_text: every param crosses as server-inferred TEXT. `'7'` → int8,
@@ -304,15 +308,17 @@ async fn check_exec_text_semantics<S: SqlSession>(
             &[Bind::Int(8), Bind::Null],
         )
         .await
-        .map_err(|e| fail(CHECK, format!("exec with a Bind::Null (text) param failed: {e}")))?;
+        .map_err(|e| {
+            fail(
+                CHECK,
+                format!("exec with a Bind::Null (text) param failed: {e}"),
+            )
+        })?;
     if n != 1 {
         return Err(fail(CHECK, format!("exec reported {n} rows, expected 1")));
     }
     let null_row = session
-        .query_one(
-            "SELECT tag FROM zm_conf_text WHERE id = 8",
-            &[],
-        )
+        .query_one("SELECT tag FROM zm_conf_text WHERE id = 8", &[])
         .await
         .map_err(|e| fail(CHECK, format!("read-back Bind::Null row: {e}")))?;
     match null_row.try_get::<_, Option<String>>("tag") {

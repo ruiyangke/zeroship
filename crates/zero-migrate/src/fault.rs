@@ -132,6 +132,5 @@ pub mod points {
     /// later deploy silently reverted a committed contract; here a failure leaves it
     /// recoverable and the later deploy safely auto-aborts. Tripped by the
     /// no-false-abort / fail-safe-auto-recovery characterization test only.
-    pub const DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS: &str =
-        "deploy.success_committed_stamp_fails";
+    pub const DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS: &str = "deploy.success_committed_stamp_fails";
 }

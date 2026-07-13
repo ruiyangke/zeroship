@@ -142,7 +142,9 @@ pub fn normalize_frontable_suffixes(raw: &[String]) -> Result<Vec<String>, Strin
             return Err(format!("suffix {suffix:?} must not contain '*'"));
         }
         if !suffix.contains('.') {
-            return Err(format!("suffix {suffix:?} must contain at least two labels"));
+            return Err(format!(
+                "suffix {suffix:?} must contain at least two labels"
+            ));
         }
         if suffix.parse::<std::net::IpAddr>().is_ok() {
             return Err(format!("suffix {suffix:?} must be a DNS name, not an IP"));
@@ -234,10 +236,13 @@ mod tests {
     #[test]
     fn operator_review_uses_catalog_suffixes_and_fails_closed_when_missing() {
         let catalog = vec!["db.example.com".to_string()];
-        assert!(
-            HostPort::try_new_with_frontable_suffixes("*.db.example.com", 5432, &catalog, true)
-                .is_err()
-        );
+        assert!(HostPort::try_new_with_frontable_suffixes(
+            "*.db.example.com",
+            5432,
+            &catalog,
+            true
+        )
+        .is_err());
         assert!(
             HostPort::try_new_with_frontable_suffixes("*.tenant.example", 5432, &[], false)
                 .is_err(),

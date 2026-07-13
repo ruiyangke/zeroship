@@ -55,6 +55,12 @@ impl DispositionRow {
 }
 
 /// The generated dialect table, sorted by (kind, variant).
+///
+/// `#[rustfmt::skip]` keeps each row on one line: this file is generator-owned
+/// (the drift test byte-compares it against `gen:dialect-table`), and letting
+/// `cargo fmt` reflow the rows would put the committed form permanently at odds
+/// with the generator's output.
+#[rustfmt::skip]
 pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "addColumn", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "addColumn", variant: "identity", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },

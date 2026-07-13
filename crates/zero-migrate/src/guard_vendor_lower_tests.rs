@@ -31,7 +31,6 @@ use crate::model::ir::{MigrationIr, Op};
 use crate::model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 use crate::SqlDialect;
 
-
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
 /// the two ported extensions. Minted via the `for_test` seam,
 /// which is `#[cfg(test)]`-only.
@@ -92,9 +91,9 @@ fn create_table(name: &str) -> Op {
         constraints: Vec::new(),
         indexes: Vec::new(),
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
+        runtime_options: None,
         schema: None,
         existence_guard: None,
     }
@@ -103,8 +102,7 @@ fn create_table(name: &str) -> Op {
 #[test]
 fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
     let confined = SqlGuard::new(
-        GuardConfig::confined("public")
-            .with_data_security(false, DestructiveOps::Forbid),
+        GuardConfig::confined("public").with_data_security(false, DestructiveOps::Forbid),
     );
     for sql in [
         "DROP TABLE users",
@@ -136,9 +134,8 @@ fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
         "plain DROP INDEX must not be classified as destructive SQL"
     );
 
-    let platform = SqlGuard::new(
-        platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
-    );
+    let platform =
+        SqlGuard::new(platform_guard_config().with_data_security(false, DestructiveOps::Forbid));
     assert!(matches!(
         platform.check("DROP SCHEMA public"),
         Err(GuardError::DataSecurityPolicy {
@@ -251,11 +248,14 @@ fn destructive_ops_allow_is_silent_for_policy_warning() {
         GuardConfig::confined("public").with_data_security(false, DestructiveOps::Allow),
     );
 
-    let report = guard.check("DROP TABLE users").expect("allow permits the drop");
+    let report = guard
+        .check("DROP TABLE users")
+        .expect("allow permits the drop");
 
-    assert!(!report.advisories.iter().any(|a| {
-        a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
-    }));
+    assert!(!report
+        .advisories
+        .iter()
+        .any(|a| { a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN }));
 }
 
 #[test]
@@ -289,9 +289,8 @@ fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
         .check("COMMENT ON TABLE users IS 'creator table'")
         .expect("COMMENT is not destructive");
 
-    let platform = SqlGuard::new(
-        platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
-    );
+    let platform =
+        SqlGuard::new(platform_guard_config().with_data_security(false, DestructiveOps::Forbid));
     platform
         .check("CREATE SCHEMA IF NOT EXISTS public")
         .expect("CREATE SCHEMA is not destructive");
@@ -433,11 +432,9 @@ fn platform_author(guard_cfg: &GuardConfig) -> crate::render::lower::IrAuthor {
 fn is_denied(g: &SqlGuard, sql: &str) -> bool {
     matches!(
         g.check(sql),
-        Err(
-            GuardError::Denied { .. }
-                | GuardError::CrossSchema { .. }
-                | GuardError::DataSecurityPolicy { .. }
-        )
+        Err(GuardError::Denied { .. }
+            | GuardError::CrossSchema { .. }
+            | GuardError::DataSecurityPolicy { .. })
     )
 }
 
@@ -743,7 +740,6 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
     }
 }
 
-
 // ---- T11: capability minting uses named seams --------------------------
 
 /// The capability type is constructible from the in-crate test seam. The
@@ -883,7 +879,10 @@ fn t4b_do_block_privileged_ddl_applies_under_platform() {
 #[test]
 fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
     let g = confined_guard();
-    assert!(is_denied(&g, BOOTSTRAP_DO), "0025 bootstrap DO must DENY under Confined");
+    assert!(
+        is_denied(&g, BOOTSTRAP_DO),
+        "0025 bootstrap DO must DENY under Confined"
+    );
     assert!(
         is_denied(&g, PLATFORM_ROLE_DO),
         "platform role DO must DENY under Confined"
@@ -930,12 +929,15 @@ fn superuser_role_denied_even_under_platform() {
                 rule::SUPERUSER_ROLE,
                 "SUPERUSER must deny with the superuser_role rule, got rule={r} for {sql}"
             ),
-            other => panic!("SUPERUSER must be DENIED even under Platform; got {other:?} for {sql}"),
+            other => {
+                panic!("SUPERUSER must be DENIED even under Platform; got {other:?} for {sql}")
+            }
         }
     }
     // NOSUPERUSER (the negative attribute) is not an escalation — it passes.
     assert!(
-        g.check(r#"CREATE ROLE "zero_migrate_auth" NOSUPERUSER LOGIN"#).is_ok(),
+        g.check(r#"CREATE ROLE "zero_migrate_auth" NOSUPERUSER LOGIN"#)
+            .is_ok(),
         "NOSUPERUSER must not trip the superuser deny"
     );
 }
@@ -1137,11 +1139,8 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
 #[test]
 fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let guard_cfg = GuardConfig::confined("zero_migrate");
-    let author = crate::render::lower::IrAuthor::new(
-        "zero_migrate",
-        "app_corpus",
-        SqlDialect::Postgres,
-    );
+    let author =
+        crate::render::lower::IrAuthor::new("zero_migrate", "app_corpus", SqlDialect::Postgres);
     let op = zero_migrate_ir::ir::Op::CreateRole {
         name: "zero_migrate_auth".into(),
         login: Some(true),
@@ -1161,13 +1160,13 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
         &crate::render::lower::LiveSchema::default(),
     ) {
         Err(crate::render::lower::IrGuardedLowerError::Lower(
-            crate::render::lower::IrLowerError::VendorCapabilityDenied {
-                op,
-                capability,
-            },
+            crate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
         )) => {
             assert_eq!(op, "createRole");
-            assert_eq!(capability, zero_migrate_ir::capability::VendorCapability::Role);
+            assert_eq!(
+                capability,
+                zero_migrate_ir::capability::VendorCapability::Role
+            );
         }
         other => panic!(
             "vendor createRole must be refused at lower without Platform capability; got {other:?}"
@@ -1211,7 +1210,7 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
 #[test]
 fn t2_func_def_target_single_is_byte_identical() {
     let g = confined_guard(); // Single("zero_migrate")
-    // own-schema funcname → OK; foreign funcname → CrossSchema.
+                              // own-schema funcname → OK; foreign funcname → CrossSchema.
     assert!(g
         .check("CREATE FUNCTION zero_migrate.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
         .is_ok());
@@ -1243,7 +1242,7 @@ fn t2_literal_schema_refs_single_is_byte_identical() {
 #[test]
 fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
     let g = platform_guard(); // Allowlist(zero_migrate, public)
-    // allowlisted schema → OK
+                              // allowlisted schema → OK
     assert!(g
         .check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
         .is_ok());
@@ -1325,7 +1324,10 @@ fn trusted_still_derives_destructive_flag_at_guard_level() {
     let report = g
         .check("DROP TABLE users")
         .expect("Trusted must not deny a DROP TABLE");
-    assert!(report.destructive, "DROP TABLE is destructive under Trusted");
+    assert!(
+        report.destructive,
+        "DROP TABLE is destructive under Trusted"
+    );
     let flags = flags_for(&report);
     assert!(flags.destructive);
     assert!(
@@ -1450,7 +1452,9 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
     // cross-schema op still DENIES (Platform's deny-list is intact, NOT skipped).
     let platform = platform_guard();
     assert!(
-        platform.check("CREATE ROLE zero_migrate_auth NOLOGIN").is_ok(),
+        platform
+            .check("CREATE ROLE zero_migrate_auth NOLOGIN")
+            .is_ok(),
         "Platform widening intact"
     );
     assert!(

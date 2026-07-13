@@ -39,17 +39,17 @@ use crate::driver::SqlSession;
 use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
-use crate::model::migration::Migration;
-use crate::model::snapshot::{
-    canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
-    normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot,
-    ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
-    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
-    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
-};
 use crate::model::ir::{
     IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
     SafeI64, SafeU64, SequenceOwnedBy, SequenceRef,
+};
+use crate::model::migration::Migration;
+use crate::model::snapshot::{
+    canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
+    normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot, ConstraintSnapshot,
+    ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot,
+    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -207,8 +207,9 @@ pub fn compare_applied_to_set(
                 // re-classification (also a kind mismatch) ⇒ ChecksumDrift / abort;
                 // - journaled once-only AND supplied once-only ⇒ the ordinary
                 // once-only tamper guard (changed checksum still aborts).
-                let journaled_repeatable =
-                    entry.kind.is_some_and(crate::apply::journal::JournaledKind::is_repeatable);
+                let journaled_repeatable = entry
+                    .kind
+                    .is_some_and(crate::apply::journal::JournaledKind::is_repeatable);
                 let supplied_repeatable = m.flags.repeatable;
                 if journaled_repeatable && supplied_repeatable {
                     // Legit repeatable re-run signal — exempt from the tamper abort.
@@ -589,7 +590,9 @@ fn parse_index_storage_params_pg(
         };
         if key.eq_ignore_ascii_case("pages_per_range") {
             params.pages_per_range = Some(value.parse::<u32>().map_err(|_| {
-                DriftError::Snapshot(format!("invalid index pages_per_range reloption `{option}`"))
+                DriftError::Snapshot(format!(
+                    "invalid index pages_per_range reloption `{option}`"
+                ))
             })?);
         } else if key.eq_ignore_ascii_case("fillfactor") {
             params.fillfactor = Some(value.parse::<u32>().map_err(|_| {
@@ -651,17 +654,20 @@ pub async fn snapshot_schema<D: SqlSession>(
         .await?;
     for r in &table_rows {
         let name: String = r.try_get("table_name")?;
-        tables.insert(name, TableSnapshot {
-            columns: Vec::new(),
-            indexes: Vec::new(),
-            constraints: Vec::new(),
-            runtime_options: Default::default(),
-            partition_by: None,
-            comment: r.try_get("comment").ok().flatten(),
-            // PG recovers CHECK / generated / partial-index references from the
-            // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
-            stored_create_sql: None,
-        });
+        tables.insert(
+            name,
+            TableSnapshot {
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+                runtime_options: Default::default(),
+                partition_by: None,
+                comment: r.try_get("comment").ok().flatten(),
+                // PG recovers CHECK / generated / partial-index references from the
+                // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
+                stored_create_sql: None,
+            },
+        );
     }
 
     let partitioned_table_rows = conn
@@ -690,9 +696,18 @@ pub async fn snapshot_schema<D: SqlSession>(
         let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
         let partstrat: i8 = r.try_get("partstrat")?;
         t.partition_by = match u8::try_from(partstrat).ok().map(char::from) {
-            Some('r') => Some(PartitionSpec::Range { columns, collapse: false }),
-            Some('l') => Some(PartitionSpec::List { columns, collapse: false }),
-            Some('h') => Some(PartitionSpec::Hash { columns, collapse: false }),
+            Some('r') => Some(PartitionSpec::Range {
+                columns,
+                collapse: false,
+            }),
+            Some('l') => Some(PartitionSpec::List {
+                columns,
+                collapse: false,
+            }),
+            Some('h') => Some(PartitionSpec::Hash {
+                columns,
+                collapse: false,
+            }),
             _ => None,
         };
     }
@@ -717,12 +732,15 @@ pub async fn snapshot_schema<D: SqlSession>(
         let relkind: i8 = r.try_get("relkind")?;
         let materialized = matches!(u8::try_from(relkind).ok().map(char::from), Some('m'));
         let definition: Option<String> = r.try_get("definition").ok().flatten();
-        views.insert(name, ViewSnapshot {
-            materialized,
-            columns: None,
-            definition,
-            comment: r.try_get("comment").ok().flatten(),
-        });
+        views.insert(
+            name,
+            ViewSnapshot {
+                materialized,
+                columns: None,
+                definition,
+                comment: r.try_get("comment").ok().flatten(),
+            },
+        );
     }
 
     let type_rows = conn
@@ -786,7 +804,8 @@ pub async fn snapshot_schema<D: SqlSession>(
             let udt_name: String = r.try_get("udt_name")?;
             let format_type: String = r.try_get("format_type")?;
             let is_citext = data_type.eq_ignore_ascii_case("USER-DEFINED")
-                && (is_citext_extension_type(&format_type) || udt_name.eq_ignore_ascii_case("citext"));
+                && (is_citext_extension_type(&format_type)
+                    || udt_name.eq_ignore_ascii_case("citext"));
             // For a `USER-DEFINED` (extension) type, recover the precise spelling
             // from `format_type` and canonicalise it to the engine's DDL form so
             // it round-trips against the desired snapshot.
@@ -797,7 +816,11 @@ pub async fn snapshot_schema<D: SqlSession>(
             {
                 "text[]".to_string()
             } else if data_type.eq_ignore_ascii_case("character") {
-                match r.try_get::<_, Option<i32>>("character_maximum_length").ok().flatten() {
+                match r
+                    .try_get::<_, Option<i32>>("character_maximum_length")
+                    .ok()
+                    .flatten()
+                {
                     Some(len) if len > 0 => format!("character({len})"),
                     _ => data_type,
                 }
@@ -900,7 +923,11 @@ pub async fn snapshot_schema<D: SqlSession>(
             let reloptions: Option<Vec<String>> = r.try_get("reloptions").ok().flatten();
             let element_tokens: Vec<String> = r.try_get("elements").unwrap_or_default();
             let elements = if element_tokens.is_empty() {
-                columns.iter().cloned().map(IndexElementSnapshot::column).collect()
+                columns
+                    .iter()
+                    .cloned()
+                    .map(IndexElementSnapshot::column)
+                    .collect()
             } else {
                 element_tokens
                     .into_iter()
@@ -910,7 +937,9 @@ pub async fn snapshot_schema<D: SqlSession>(
                             .map(|name| {
                                 IndexElementSnapshot::column_ordered(name, IndexSortOrder::Desc)
                             })
-                            .or_else(|| token.strip_prefix("col:").map(IndexElementSnapshot::column))
+                            .or_else(|| {
+                                token.strip_prefix("col:").map(IndexElementSnapshot::column)
+                            })
                             .or_else(|| token.strip_prefix("expr:").map(IndexElementSnapshot::expr))
                     })
                     .collect()
@@ -1019,7 +1048,9 @@ pub async fn snapshot_schema<D: SqlSession>(
             .map_err(DriftError::Snapshot)?;
         let cache_raw: i64 = r.try_get("cache_size")?;
         let cache = u64::try_from(cache_raw)
-            .map_err(|_| DriftError::Snapshot(format!("sequence cache size {cache_raw} is negative")))
+            .map_err(|_| {
+                DriftError::Snapshot(format!("sequence cache size {cache_raw} is negative"))
+            })
             .and_then(|n| SafeU64::new(n).map_err(DriftError::Snapshot))?;
         let owned_table: Option<String> = r.try_get("owned_table").ok().flatten();
         let owned_column: Option<String> = r.try_get("owned_column").ok().flatten();
@@ -1330,24 +1361,48 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
         diff_named(
             name,
             "",
-            &exp_t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
-            &act_t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &exp_t
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
+            &act_t
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
             &mut missing,
             &mut unexpected,
         );
         diff_named(
             name,
             "index ",
-            &exp_t.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
-            &act_t.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+            &exp_t
+                .indexes
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>(),
+            &act_t
+                .indexes
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>(),
             &mut missing,
             &mut unexpected,
         );
         diff_named(
             name,
             "constraint ",
-            &exp_t.constraints.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
-            &act_t.constraints.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            &exp_t
+                .constraints
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
+            &act_t
+                .constraints
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
             &mut missing,
             &mut unexpected,
         );
@@ -1373,7 +1428,9 @@ fn format_sequence_bound(value: Option<SafeI64>) -> String {
 }
 
 fn format_sequence_owned_by(value: Option<&SequenceOwnedBy>) -> String {
-    value.map_or_else(String::new, |owned| format!("{}.{}", owned.table, owned.column))
+    value.map_or_else(String::new, |owned| {
+        format!("{}.{}", owned.table, owned.column)
+    })
 }
 
 fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
@@ -1397,7 +1454,11 @@ fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
 }
 
 fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
-    let inner = expr.trim().strip_prefix("nextval(")?.strip_suffix(')')?.trim();
+    let inner = expr
+        .trim()
+        .strip_prefix("nextval(")?
+        .strip_suffix(')')?
+        .trim();
     let literal = inner.strip_suffix("::regclass")?.trim();
     let regclass = parse_single_quoted_sql_string(literal)?;
     let (schema, name) = match regclass.split_once('.') {
@@ -1438,8 +1499,16 @@ fn diff_sequence_attrs(
         }
     };
 
-    push("as", expected.as_type.to_string(), actual.as_type.to_string());
-    push("increment", expected.increment.to_string(), actual.increment.to_string());
+    push(
+        "as",
+        expected.as_type.to_string(),
+        actual.as_type.to_string(),
+    );
+    push(
+        "increment",
+        expected.increment.to_string(),
+        actual.increment.to_string(),
+    );
     push(
         "min_value",
         format_sequence_bound(expected.min_value),
@@ -1450,9 +1519,21 @@ fn diff_sequence_attrs(
         format_sequence_bound(expected.max_value),
         format_sequence_bound(actual.max_value),
     );
-    push("start", expected.start.to_string(), actual.start.to_string());
-    push("cache", expected.cache.to_string(), actual.cache.to_string());
-    push("cycle", expected.cycle.to_string(), actual.cycle.to_string());
+    push(
+        "start",
+        expected.start.to_string(),
+        actual.start.to_string(),
+    );
+    push(
+        "cache",
+        expected.cache.to_string(),
+        actual.cache.to_string(),
+    );
+    push(
+        "cycle",
+        expected.cycle.to_string(),
+        actual.cycle.to_string(),
+    );
     push(
         "owned_by",
         format_sequence_owned_by(expected.owned_by.as_ref()),
@@ -1704,8 +1785,18 @@ fn diff_attrs(
     for ei in &exp_t.indexes {
         if let Some(ai) = act_idx.get(ei.name.as_str()) {
             let obj = format!("index {}", ei.name);
-            push(&obj, "unique", &ei.unique.to_string(), &ai.unique.to_string());
-            push(&obj, "columns", &ei.columns.join(","), &ai.columns.join(","));
+            push(
+                &obj,
+                "unique",
+                &ei.unique.to_string(),
+                &ai.unique.to_string(),
+            );
+            push(
+                &obj,
+                "columns",
+                &ei.columns.join(","),
+                &ai.columns.join(","),
+            );
             if !index_elements_canonically_eq(&ei.elements, &ai.elements) {
                 push(
                     &obj,
@@ -1724,10 +1815,7 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
-            if !index_predicates_canonically_eq(
-                ei.predicate.as_deref(),
-                ai.predicate.as_deref(),
-            ) {
+            if !index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref()) {
                 push(
                     &obj,
                     "predicate",
@@ -1735,7 +1823,12 @@ fn diff_attrs(
                     ai.predicate.as_deref().unwrap_or(""),
                 );
             }
-            push(&obj, "include", &ei.include.join(","), &ai.include.join(","));
+            push(
+                &obj,
+                "include",
+                &ei.include.join(","),
+                &ai.include.join(","),
+            );
             push(
                 &obj,
                 "with",
@@ -1758,8 +1851,11 @@ fn diff_attrs(
     // comparable form. The existence guard still fails closed for same-name
     // unprovable constraints; structural drift must not false-positive after a
     // clean apply + re-introspection.
-    let act_con: BTreeMap<&str, &ConstraintSnapshot> =
-        act_t.constraints.iter().map(|c| (c.name.as_str(), c)).collect();
+    let act_con: BTreeMap<&str, &ConstraintSnapshot> = act_t
+        .constraints
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
     for ec in &exp_t.constraints {
         if let Some(ac) = act_con.get(ec.name.as_str()) {
             let obj = format!("constraint {}", ec.name);

@@ -716,7 +716,9 @@ impl Serialize for IrDefault {
         use serde::ser::SerializeMap as _;
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
-            Self::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
+            Self::Literal { value } => {
+                map.serialize_entry("literal", &serde_json::json!({ "value": value }))?;
+            }
             Self::Expr { expr } => map.serialize_entry("expr", expr)?,
             Self::Container { kind } => map.serialize_entry("container", kind)?,
             Self::Json { value } => map.serialize_entry("json", value)?,
@@ -758,8 +760,7 @@ impl<'de> Deserialize<'de> for IrDefault {
             return Ok(Self::Container { kind });
         }
         if let Some(v) = obj.get("json") {
-            let value: IrJsonValue =
-                serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            let value: IrJsonValue = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(Self::Json { value });
         }
         if let Some(v) = obj.get("nextval") {
@@ -781,8 +782,8 @@ impl JsonSchema for IrDefault {
     fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let ir_scalar = serde_json::to_value(g.subschema_for::<IrScalar>())
             .expect("IrScalar schema ref serializes");
-        let expr = serde_json::to_value(g.subschema_for::<Expr>())
-            .expect("Expr schema ref serializes");
+        let expr =
+            serde_json::to_value(g.subschema_for::<Expr>()).expect("Expr schema ref serializes");
         let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
             .expect("EmptyContainerKind schema ref serializes");
         let ir_json_value = serde_json::to_value(g.subschema_for::<IrJsonValue>())
@@ -1189,7 +1190,12 @@ impl RefAction {
 /// The CLOSED target shape for an exclusion-constraint element. A target is
 /// either a quoted column name or a closed expression AST; never raw SQL.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ColumnOrExpr {
     /// A table column target.
     Column {
@@ -1209,7 +1215,12 @@ pub enum ColumnOrExpr {
 /// but uses the index-specific name because future index-only facets can be
 /// added here without widening exclusion elements.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum IndexElement {
     /// A table column key.
     Column {
@@ -1324,7 +1335,12 @@ pub struct ExclusionElement {
 
 /// The kind of a table constraint. CLOSED enum, internally tagged on `"kind"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum IrConstraintKind {
     /// FOREIGN KEY referencing `(referencesTable.referencesColumns)`.
     Fk {
@@ -1502,7 +1518,12 @@ pub struct IrIndex {
 
 /// Partitioning strategy for a partitioned table parent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum PartitionSpec {
     /// `PARTITION BY RANGE (...)`.
     Range {
@@ -1538,9 +1559,9 @@ impl PartitionSpec {
     #[must_use]
     pub fn columns(&self) -> &[String] {
         match self {
-            Self::Range { columns, .. } | Self::List { columns, .. } | Self::Hash { columns, .. } => {
-                columns
-            }
+            Self::Range { columns, .. }
+            | Self::List { columns, .. }
+            | Self::Hash { columns, .. } => columns,
         }
     }
 
@@ -1557,7 +1578,12 @@ impl PartitionSpec {
 
 /// Closed partition-bound literal. Never raw SQL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum PartitionBoundValue {
     /// String/timestamptz literal. Rendered as a quoted SQL string.
     String {
@@ -1577,7 +1603,12 @@ pub enum PartitionBoundValue {
 
 /// Partition bounds for `CREATE TABLE child PARTITION OF parent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum PartitionBounds {
     /// `FOR VALUES FROM (...) TO (...)`.
     Range {
@@ -1609,7 +1640,12 @@ pub enum PartitionBounds {
 /// for unambiguous `FUNCTION name` references and are not folded into the
 /// snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum CommentTarget {
     /// `COMMENT ON TABLE`.
     Table {
@@ -1704,9 +1740,7 @@ impl CommentTarget {
     #[must_use]
     pub const fn touched_table(&self) -> Option<&str> {
         match self {
-            Self::Table { name, .. } | Self::Column { table: name, .. } => {
-                Some(name.as_str())
-            }
+            Self::Table { name, .. } | Self::Column { table: name, .. } => Some(name.as_str()),
             Self::Constraint { table, .. } => Some(table.as_str()),
             Self::Index { .. }
             | Self::View { .. }
@@ -1824,7 +1858,12 @@ impl Privilege {
 /// **VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target. Tagged on `"kind"`; each shape is closed + `deny_unknown_fields` so a
 /// hand-crafted artifact cannot smuggle an arbitrary object class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum GrantTarget {
     /// `… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all
     /// named tables.
@@ -1930,7 +1969,12 @@ impl ForEach {
 /// The per-dialect trigger action model. Postgres triggers execute a named
 /// function; `SQLite` triggers carry an inline, closed statement body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum TriggerAction {
     /// `EXECUTE FUNCTION <name>()` (Postgres render; `SQLite` refuses).
     ExecuteFunction {
@@ -1948,7 +1992,12 @@ pub enum TriggerAction {
 /// DML payload fields where they make sense inside a trigger body; `Raise` is the
 /// closed replacement for raw trigger-body error text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "stmt", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "stmt",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum TriggerStmt {
     /// `INSERT INTO … VALUES …` with typed scalar/closed-expression rows.
     Insert {
@@ -2418,7 +2467,12 @@ pub enum OrderItem {
 )]
 /// checksum-neutral when unset — preserving the cross-impl single-checksum invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "op",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum Op {
     /// `CREATE TABLE` with columns + table constraints + indexes.
     CreateTable {
@@ -2437,11 +2491,19 @@ pub enum Op {
         #[serde(default)]
         indexes: Vec<IrIndex>,
         /// Partitioning strategy for a partitioned table parent.
-        #[serde(rename = "partitionBy", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "partitionBy",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         partition_by: Option<PartitionSpec>,
         /// Collection-level runtime options (`softDelete`, `versioning`,
         /// `strictness`) that are not recoverable from physical columns.
-        #[serde(rename = "runtimeOptions", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "runtimeOptions",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         runtime_options: Option<TableRuntimeOptions>,
         /// the schema qualifier. Honored under Trusted/Platform,
         /// pinned/refused under Confined. Omitted-when-absent.
@@ -2585,7 +2647,11 @@ pub enum Op {
         /// byte-identical when absent. (No `id_prefix` slot: an added column is NEVER the
         /// system PK, so a typed-id prefix is meaningless — the recorder keeps that
         /// fail-closed.)
-        #[serde(rename = "vectorMetric", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "vectorMetric",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         vector_metric: Option<VectorMetric>,
         /// Case-sensitivity facet for a text added column. Only `Some(false)` is
         /// meaningful; absent/true omits the key and preserves the old wire image.
@@ -3484,10 +3550,21 @@ impl Op {
     /// table and delegate to [`Self::touched_table`]; `Dialectal` recursively
     /// flattens all present legs because its op sequence can touch several tables.
     pub fn collect_touched_tables<'a>(&'a self, set: &mut std::collections::BTreeSet<&'a str>) {
-        if let Self::Dialectal { default, pg, sqlite, mysql } = self {
-            for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
-                .into_iter()
-                .flatten()
+        if let Self::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = self
+        {
+            for leg in [
+                default.as_deref(),
+                pg.as_deref(),
+                sqlite.as_deref(),
+                mysql.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 for op in leg {
                     op.collect_touched_tables(set);
@@ -3577,28 +3654,72 @@ impl Op {
     #[must_use]
     pub const fn existence_guard(&self) -> Option<ExistenceGuard> {
         match self {
-            Self::CreateTable { existence_guard, .. }
-            | Self::CreatePartition { existence_guard, .. }
-            | Self::DropPartition { existence_guard, .. }
-            | Self::DropTable { existence_guard, .. }
-            | Self::RenameTable { existence_guard, .. }
-            | Self::AddColumn { existence_guard, .. }
-            | Self::DropColumn { existence_guard, .. }
-            | Self::CreateIndex { existence_guard, .. }
-            | Self::DropIndex { existence_guard, .. }
-            | Self::SetColumnType { existence_guard, .. }
-            | Self::SetColumnNotNull { existence_guard, .. }
-            | Self::DropColumnNotNull { existence_guard, .. }
-            | Self::SetColumnDefault { existence_guard, .. }
-            | Self::DropColumnDefault { existence_guard, .. }
-            | Self::RenameColumn { existence_guard, .. }
-            | Self::AddConstraint { existence_guard, .. }
-            | Self::DropConstraint { existence_guard, .. }
-            | Self::ValidateConstraint { existence_guard, .. }
-            | Self::DropView { existence_guard, .. }
-            | Self::DropEnum { existence_guard, .. }
-            | Self::DropDomain { existence_guard, .. }
-            | Self::DropSequence { existence_guard, .. } => *existence_guard,
+            Self::CreateTable {
+                existence_guard, ..
+            }
+            | Self::CreatePartition {
+                existence_guard, ..
+            }
+            | Self::DropPartition {
+                existence_guard, ..
+            }
+            | Self::DropTable {
+                existence_guard, ..
+            }
+            | Self::RenameTable {
+                existence_guard, ..
+            }
+            | Self::AddColumn {
+                existence_guard, ..
+            }
+            | Self::DropColumn {
+                existence_guard, ..
+            }
+            | Self::CreateIndex {
+                existence_guard, ..
+            }
+            | Self::DropIndex {
+                existence_guard, ..
+            }
+            | Self::SetColumnType {
+                existence_guard, ..
+            }
+            | Self::SetColumnNotNull {
+                existence_guard, ..
+            }
+            | Self::DropColumnNotNull {
+                existence_guard, ..
+            }
+            | Self::SetColumnDefault {
+                existence_guard, ..
+            }
+            | Self::DropColumnDefault {
+                existence_guard, ..
+            }
+            | Self::RenameColumn {
+                existence_guard, ..
+            }
+            | Self::AddConstraint {
+                existence_guard, ..
+            }
+            | Self::DropConstraint {
+                existence_guard, ..
+            }
+            | Self::ValidateConstraint {
+                existence_guard, ..
+            }
+            | Self::DropView {
+                existence_guard, ..
+            }
+            | Self::DropEnum {
+                existence_guard, ..
+            }
+            | Self::DropDomain {
+                existence_guard, ..
+            }
+            | Self::DropSequence {
+                existence_guard, ..
+            } => *existence_guard,
             Self::AttachPartition { .. }
             | Self::DetachPartition { .. }
             | Self::SetTableOptions { .. }
@@ -3780,7 +3901,10 @@ impl Serialize for IrScalar {
 /// do not parse it into a float — we only shape-check it.)
 #[must_use]
 pub fn is_decimal_string(s: &str) -> bool {
-    let body = s.strip_prefix('-').or_else(|| s.strip_prefix('+')).unwrap_or(s);
+    let body = s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+'))
+        .unwrap_or(s);
     if body.is_empty() {
         return false;
     }
@@ -3841,9 +3965,9 @@ impl<'de> Deserialize<'de> for IrScalar {
                     ));
                 }
                 if let Some(d) = map.get("decimal") {
-                    let s = d.as_str().ok_or_else(|| {
-                        D::Error::custom("IrScalar decimal must be a string")
-                    })?;
+                    let s = d
+                        .as_str()
+                        .ok_or_else(|| D::Error::custom("IrScalar decimal must be a string"))?;
                     if !is_decimal_string(s) {
                         return Err(D::Error::custom(format!(
                             "{EXPR_INVALID_NUMERIC}: decimal string {s:?} is not a plain \
@@ -4179,13 +4303,16 @@ mod tests {
             ("b", IrJsonValue::Int(2)),
             ("a", IrJsonValue::Int(1)),
         ]);
-        let default_ab = IrDefault::Json { value: value_ab.clone() };
-        let default_ba = IrDefault::Json { value: value_ba.clone() };
+        let default_ab = IrDefault::Json {
+            value: value_ab.clone(),
+        };
+        let default_ba = IrDefault::Json {
+            value: value_ba.clone(),
+        };
 
         let wire = serde_json::to_string(&default_ab).unwrap();
         assert_eq!(
-            wire,
-            r#"{"json":{"a":1,"b":2,"nested":{"a":2,"z":1}}}"#,
+            wire, r#"{"json":{"a":1,"b":2,"nested":{"a":2,"z":1}}}"#,
             "IrJsonValue object keys must serialize deterministically"
         );
         assert_eq!(serde_json::to_string(&default_ba).unwrap(), wire);
@@ -4218,7 +4345,9 @@ mod tests {
 
         let float_err = serde_json::from_str::<IrDefault>(r#"{"json":{"x":1.5}}"#).unwrap_err();
         assert!(
-            float_err.to_string().contains("json default values support integers only")
+            float_err
+                .to_string()
+                .contains("json default values support integers only")
                 || float_err.to_string().contains(EXPR_INVALID_NUMERIC),
             "float JSON defaults must be rejected at deserialize, got: {float_err}"
         );
@@ -4268,8 +4397,14 @@ mod tests {
             serde_json::from_str::<IrScalar>(r#""hi""#).unwrap(),
             IrScalar::Str("hi".to_string())
         );
-        assert_eq!(serde_json::from_str::<IrScalar>("true").unwrap(), IrScalar::Bool(true));
-        assert_eq!(serde_json::from_str::<IrScalar>("null").unwrap(), IrScalar::Null);
+        assert_eq!(
+            serde_json::from_str::<IrScalar>("true").unwrap(),
+            IrScalar::Bool(true)
+        );
+        assert_eq!(
+            serde_json::from_str::<IrScalar>("null").unwrap(),
+            IrScalar::Null
+        );
         assert_eq!(
             serde_json::from_str::<IrScalar>(r#"{"bytes":"AAEC"}"#).unwrap(),
             IrScalar::Bytes(vec![0x00, 0x01, 0x02])
@@ -4341,8 +4476,14 @@ mod tests {
             existence_guard: Some(ExistenceGuard::IfExists),
         };
         let v = serde_json::to_value(&op).unwrap();
-        assert_eq!(v["op"], "dropTable", "tag must be the camelCase variant on key \"op\"");
-        assert_eq!(v["existenceGuard"], "ifExists", "the guard serializes camelCased");
+        assert_eq!(
+            v["op"], "dropTable",
+            "tag must be the camelCase variant on key \"op\""
+        );
+        assert_eq!(
+            v["existenceGuard"], "ifExists",
+            "the guard serializes camelCased"
+        );
         // Round-trips.
         let back: Op = serde_json::from_value(v).unwrap();
         assert_eq!(op, back);
@@ -4363,8 +4504,12 @@ mod tests {
         // lead surrogate 0xD800 < 0xFFFF). RFC 8785 demands the UTF-16 order.
         let hi = "\u{10000}"; // supplementary
         let bmp = "\u{ffff}"; // BMP
-        // Sanity: the two orderings genuinely disagree here.
-        assert_eq!(hi.cmp(bmp), std::cmp::Ordering::Greater, "UTF-8 scalar: hi > bmp");
+                              // Sanity: the two orderings genuinely disagree here.
+        assert_eq!(
+            hi.cmp(bmp),
+            std::cmp::Ordering::Greater,
+            "UTF-8 scalar: hi > bmp"
+        );
         assert_eq!(
             utf16_code_unit_cmp(hi, bmp),
             std::cmp::Ordering::Less,
@@ -4375,7 +4520,10 @@ mod tests {
         let encoded = jcs_encode(&v);
         let hi_pos = encoded.find(hi).unwrap();
         let bmp_pos = encoded.find(bmp).unwrap();
-        assert!(hi_pos < bmp_pos, "JCS must sort keys by UTF-16 code unit: {encoded}");
+        assert!(
+            hi_pos < bmp_pos,
+            "JCS must sort keys by UTF-16 code unit: {encoded}"
+        );
     }
 
     #[test]
@@ -4466,7 +4614,10 @@ mod tests {
     #[test]
     fn coltype_nested_round_trips() {
         let t = ColType::Encrypted {
-            of: Box::new(ColType::Decimal { precision: 10, scale: 2 }),
+            of: Box::new(ColType::Decimal {
+                precision: 10,
+                scale: 2,
+            }),
         };
         let s = serde_json::to_string(&t).unwrap();
         let back: ColType = serde_json::from_str(&s).unwrap();
@@ -4516,7 +4667,10 @@ mod tests {
         assert_eq!(err.current, CURRENT_IR_VERSION);
 
         // A far-future version is likewise rejected.
-        let ir999 = MigrationIr { ir_version: 999, ..ir };
+        let ir999 = MigrationIr {
+            ir_version: 999,
+            ..ir
+        };
         assert!(ir999.check_ir_version().is_err());
     }
 
@@ -4538,10 +4692,19 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        assert!(ir.check_ir_version().is_ok(), "the current version validates");
+        assert!(
+            ir.check_ir_version().is_ok(),
+            "the current version validates"
+        );
         if CURRENT_IR_VERSION > 0 {
-            let past = MigrationIr { ir_version: CURRENT_IR_VERSION - 1, ..ir };
-            assert!(past.check_ir_version().is_ok(), "a past version this build understands validates");
+            let past = MigrationIr {
+                ir_version: CURRENT_IR_VERSION - 1,
+                ..ir
+            };
+            assert!(
+                past.check_ir_version().is_ok(),
+                "a past version this build understands validates"
+            );
         }
     }
 
@@ -4588,7 +4751,10 @@ mod tests {
             preconditions: vec![],
             checksum: Some("deadbeef".to_string()),
         };
-        let without_hint = MigrationIr { checksum: None, ..with_hint.clone() };
+        let without_hint = MigrationIr {
+            checksum: None,
+            ..with_hint.clone()
+        };
 
         // The hint-domain recompute (the half the loader compares to the hint):
         // ops + dialect-neutral flags + owner "" + deps/supersedes/preconditions.
@@ -4641,9 +4807,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -4705,9 +4871,16 @@ mod tests {
              column and the pre-facet wire image must be canonical-byte-identical"
         );
         let csum = |o: &[Op]| {
-            Checksum::of_ir(&CanonicalOpList(o), &MigrationFlags::default(), "", &[], &[], &[])
-                .as_str()
-                .to_string()
+            Checksum::of_ir(
+                &CanonicalOpList(o),
+                &MigrationFlags::default(),
+                "",
+                &[],
+                &[],
+                &[],
+            )
+            .as_str()
+            .to_string()
         };
         assert_eq!(
             csum(&ops),
@@ -4731,7 +4904,10 @@ mod tests {
         );
         // The camelCase native spelling is likewise gone.
         let json2 = r#"{"op":"dropTable","table":"t","ifExists":true}"#;
-        assert!(serde_json::from_str::<Op>(json2).is_err(), "native ifExists bool is gone too");
+        assert!(
+            serde_json::from_str::<Op>(json2).is_err(),
+            "native ifExists bool is gone too"
+        );
 
         let json3 = r#"{"op":"dropView","name":"v","if_exists":true}"#;
         let err = serde_json::from_str::<Op>(json3).unwrap_err();
@@ -4761,7 +4937,10 @@ mod tests {
         };
         let v = serde_json::to_value(&with).unwrap();
         assert_eq!(v["schema"], "app2");
-        assert!(v.get("existenceGuard").is_none(), "absent guard omitted: {v}");
+        assert!(
+            v.get("existenceGuard").is_none(),
+            "absent guard omitted: {v}"
+        );
         let back: Op = serde_json::from_value(v).unwrap();
         assert_eq!(with, back);
 
@@ -4780,7 +4959,10 @@ mod tests {
             existence_guard: None,
         };
         let v2 = serde_json::to_value(&without).unwrap();
-        assert!(v2.get("schema").is_none(), "absent schema is omitted on the wire: {v2}");
+        assert!(
+            v2.get("schema").is_none(),
+            "absent schema is omitted on the wire: {v2}"
+        );
     }
 
     /// `existence_guard` round-trips as the camelCase token; the legal-direction
@@ -4794,15 +4976,18 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: Some(ExistenceGuard::IfNotExists),
         };
         let v = serde_json::to_value(&create).unwrap();
         assert_eq!(v["existenceGuard"], "ifNotExists");
-        assert_eq!(create.legal_existence_guard(), Some(ExistenceGuard::IfNotExists));
+        assert_eq!(
+            create.legal_existence_guard(),
+            Some(ExistenceGuard::IfNotExists)
+        );
         assert_eq!(create.existence_guard(), Some(ExistenceGuard::IfNotExists));
 
         let drop = Op::DropColumn {
@@ -4849,15 +5034,26 @@ mod tests {
             existence_guard: Some(ExistenceGuard::IfExists),
         };
         let cb = |op: &Op| CanonicalOpList(std::slice::from_ref(op)).canonical_bytes();
-        assert_ne!(cb(&bare), cb(&schemaed), "present schema must shift the canonical bytes");
-        assert_ne!(cb(&bare), cb(&guarded), "present guard must shift the canonical bytes");
+        assert_ne!(
+            cb(&bare),
+            cb(&schemaed),
+            "present schema must shift the canonical bytes"
+        );
+        assert_ne!(
+            cb(&bare),
+            cb(&guarded),
+            "present guard must shift the canonical bytes"
+        );
     }
 
     #[test]
     fn ir_default_expr_accepts_now_and_gen_random_uuid() {
         for (wire, want) in [
             (r#"{"expr":{"node":"fnSynth","fn":"now","args":[]}}"#, "now"),
-            (r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#, "genRandomUuid"),
+            (
+                r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#,
+                "genRandomUuid",
+            ),
         ] {
             let d: IrDefault = serde_json::from_str(wire).unwrap();
             assert!(matches!(
@@ -4937,8 +5133,7 @@ mod tests {
         };
         let json = serde_json::to_string(&col).unwrap();
         assert_eq!(
-            json,
-            r#"{"name":"email","type":"text","caseSensitive":false}"#,
+            json, r#"{"name":"email","type":"text","caseSensitive":false}"#,
             "caseSensitive:false must serialize as the camelCase facet"
         );
         let back: IrColumn = serde_json::from_str(&json).unwrap();
@@ -4963,11 +5158,13 @@ mod tests {
         };
         let json = serde_json::to_string(&col).unwrap();
         assert_eq!(
-            json,
-            r#"{"name":"body","type":"text"}"#,
+            json, r#"{"name":"body","type":"text"}"#,
             "a column without the new default must remain byte-identical"
         );
-        assert!(!json.contains("container"), "absent container defaults add no key");
+        assert!(
+            !json.contains("container"),
+            "absent container defaults add no key"
+        );
     }
 
     #[test]
@@ -4987,10 +5184,12 @@ mod tests {
         };
         let json = serde_json::to_string(&col).unwrap();
         assert_eq!(
-            json,
-            r#"{"name":"id","type":"bigInt"}"#,
+            json, r#"{"name":"id","type":"bigInt"}"#,
             "a column without a nextval default must remain byte-identical"
         );
-        assert!(!json.contains("nextval"), "absent nextval defaults add no key");
+        assert!(
+            !json.contains("nextval"),
+            "absent nextval defaults add no key"
+        );
     }
 }

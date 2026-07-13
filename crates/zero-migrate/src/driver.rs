@@ -433,7 +433,10 @@ impl FromValue for Vec<String> {
                         "text[] contains a NULL element (cannot decode to Vec<String>)",
                     ));
                 }
-                Ok(elems.iter().map(|e| e.clone().unwrap_or_default()).collect())
+                Ok(elems
+                    .iter()
+                    .map(|e| e.clone().unwrap_or_default())
+                    .collect())
             }
             other => Err(type_err("Vec<String>", other)),
         }
@@ -478,7 +481,9 @@ mod element_null_parity {
     #[test]
     fn host_element_null_reloptions_coerces_to_empty_via_unwrap_or_default() {
         let row = host_row_with_element_null();
-        let cols: Vec<String> = row.try_get::<_, Vec<String>>("reloptions").unwrap_or_default();
+        let cols: Vec<String> = row
+            .try_get::<_, Vec<String>>("reloptions")
+            .unwrap_or_default();
         assert!(
             cols.is_empty(),
             "element-NULL text[] must coerce to [] on host adapter"

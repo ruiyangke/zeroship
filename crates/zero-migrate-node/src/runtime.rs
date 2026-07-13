@@ -79,6 +79,9 @@ mod tests {
         let got = result_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("worker delivered result");
-        assert_eq!(got, 42, "cross-thread oneshot woke the reactor-less block_on");
+        assert_eq!(
+            got, 42,
+            "cross-thread oneshot woke the reactor-less block_on"
+        );
     }
 }

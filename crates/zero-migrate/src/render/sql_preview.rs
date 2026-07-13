@@ -67,7 +67,10 @@ pub struct PreviewOpts {
 
 impl Default for PreviewOpts {
     fn default() -> Self {
-        Self { default_schema: "public".to_string(), owner_app: "app_preview".to_string() }
+        Self {
+            default_schema: "public".to_string(),
+            owner_app: "app_preview".to_string(),
+        }
     }
 }
 
@@ -124,13 +127,25 @@ struct Rendered {
 
 impl Rendered {
     fn statement(text: String) -> Self {
-        Self { text, runtime_resolved: false, statement: true }
+        Self {
+            text,
+            runtime_resolved: false,
+            statement: true,
+        }
     }
     fn label(text: String) -> Self {
-        Self { text, runtime_resolved: true, statement: false }
+        Self {
+            text,
+            runtime_resolved: true,
+            statement: false,
+        }
     }
     fn comment(text: String) -> Self {
-        Self { text, runtime_resolved: false, statement: false }
+        Self {
+            text,
+            runtime_resolved: false,
+            statement: false,
+        }
     }
 }
 
@@ -199,14 +214,20 @@ pub fn render_ir_envelope_sql(
     let mut out = String::new();
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
     // a single un-lowerable op would otherwise make `lower_plan` abort).
-    let _ = writeln!(out, "-- ============================================================");
+    let _ = writeln!(
+        out,
+        "-- ============================================================"
+    );
     let _ = writeln!(
         out,
         "-- plan {:?}  {}",
         name,
         DialectCaption::Lowered(dialect).header_suffix()
     );
-    let _ = writeln!(out, "-- ============================================================");
+    let _ = writeln!(
+        out,
+        "-- ============================================================"
+    );
     write_rendered(&mut out, &rendered);
     let statements = rendered.iter().filter(|r| r.statement).count();
     let runtime = rendered.iter().filter(|r| r.runtime_resolved).count();
@@ -252,8 +273,8 @@ fn render_ir_envelope_rendered(
     // structure. We deliberately do NOT call `load_ir_document` — that gate stamps
     // server ownership and consults a cross-app registry which has no meaning
     // offline. The structural validator is enough to refuse a malformed artifact.
-    let ir: MigrationIr = serde_json::from_str(bytes)
-        .map_err(|e| format!("parse IR envelope: {e}"))?;
+    let ir: MigrationIr =
+        serde_json::from_str(bytes).map_err(|e| format!("parse IR envelope: {e}"))?;
     let target = match dialect {
         SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
         SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
@@ -345,7 +366,9 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
             }
             push_statement(&m.up, out);
         }
-        PlanStep::Dml { template, binds, .. } => {
+        PlanStep::Dml {
+            template, binds, ..
+        } => {
             out.push(Rendered::comment(dml_comment(op, binds)));
             push_statement(template, out);
         }
@@ -373,7 +396,9 @@ fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
             }
             push_statement(&m.up, out);
         }
-        PlanStep::Dml { template, binds, .. } => {
+        PlanStep::Dml {
+            template, binds, ..
+        } => {
             out.push(Rendered::comment(format!(
                 "-- DML; binds: {} typed value(s) (bound natively, never interpolated)",
                 binds.len()
@@ -462,9 +487,7 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
              windowed by PK and the cutover is partitioned across deploys — exact statement \
              stream depends on live state"
         ),
-        other => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject}: not offline-renderable ({other})"
-        ),
+        other => format!("{RUNTIME_RESOLVED} {kind} {subject}: not offline-renderable ({other})"),
     }
 }
 
@@ -518,8 +541,14 @@ fn op_subject(op: &Op) -> String {
             Some(t) => quote_dotted(&[t, name]),
             None => quote_dotted(&[name]),
         },
-        Op::RenameColumn { table, from, to, .. } => {
-            format!("{} → {}", quote_dotted(&[table, from]), quote_dotted(&[table, to]))
+        Op::RenameColumn {
+            table, from, to, ..
+        } => {
+            format!(
+                "{} → {}",
+                quote_dotted(&[table, from]),
+                quote_dotted(&[table, to])
+            )
         }
         Op::RenameTable { table, to, .. } => {
             format!("{} → {}", quote_dotted(&[table]), quote_dotted(&[to]))
@@ -576,8 +605,14 @@ fn op_subject(op: &Op) -> String {
 /// The rename subject `"t"."from" → "t"."to"` for an online rename op.
 fn rename_subject(op: &Op) -> String {
     match op {
-        Op::RenameColumn { table, from, to, .. } => {
-            format!("{} → {}", quote_dotted(&[table, from]), quote_dotted(&[table, to]))
+        Op::RenameColumn {
+            table, from, to, ..
+        } => {
+            format!(
+                "{} → {}",
+                quote_dotted(&[table, from]),
+                quote_dotted(&[table, to])
+            )
         }
         // Defensive: a non-rename op reaching the online-rename render is a logic
         // error, but never fabricate — fall back to the kind subject.
@@ -662,7 +697,10 @@ fn indent_sql(sql: &str) -> String {
 /// Write the per-plan header block. `caption` decides whether the parenthetical is a
 /// dialect claim (lowered IR envelope) or a verbatim-raw-`.sql` disclaimer.
 fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCaption) {
-    let _ = writeln!(out, "-- ============================================================");
+    let _ = writeln!(
+        out,
+        "-- ============================================================"
+    );
     let _ = writeln!(
         out,
         "-- plan {} {:?}  {}",
@@ -670,7 +708,10 @@ fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCapti
         plan.name,
         caption.header_suffix()
     );
-    let _ = writeln!(out, "-- ============================================================");
+    let _ = writeln!(
+        out,
+        "-- ============================================================"
+    );
 }
 
 /// Write the document-level honest header. `caption` carries the dialect claim (for

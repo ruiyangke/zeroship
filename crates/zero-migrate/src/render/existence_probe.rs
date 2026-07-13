@@ -126,32 +126,53 @@ pub enum GuardVerdict {
 #[must_use]
 pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) -> GuardVerdict {
     match probe {
-        GuardProbe::Table { table, direction, expect_columns, .. } => {
-            decide_table(table, *direction, expect_columns, live, dialect)
-        }
-        GuardProbe::Column { table, column, direction, expect, .. } => {
-            decide_column(table, column, *direction, expect.as_ref(), live, dialect)
-        }
-        GuardProbe::Index { table, name, direction, expect, .. } => {
-            decide_index(table, name, *direction, expect.as_ref(), live)
-        }
-        GuardProbe::Constraint { table, name, direction, expect_kind, expect_definition, .. } => {
-            decide_constraint(
-                table,
-                name,
-                *direction,
-                expect_kind.as_deref(),
-                expect_definition.as_deref(),
-                live,
-            )
-        }
-        GuardProbe::View { name, direction, .. } => decide_view(name, *direction, live),
-        GuardProbe::Sequence { name, direction, .. } => {
-            decide_sequence(name, *direction, live)
-        }
-        GuardProbe::NamedType { name, kind, direction, .. } => {
-            decide_named_type(name, kind, *direction, live)
-        }
+        GuardProbe::Table {
+            table,
+            direction,
+            expect_columns,
+            ..
+        } => decide_table(table, *direction, expect_columns, live, dialect),
+        GuardProbe::Column {
+            table,
+            column,
+            direction,
+            expect,
+            ..
+        } => decide_column(table, column, *direction, expect.as_ref(), live, dialect),
+        GuardProbe::Index {
+            table,
+            name,
+            direction,
+            expect,
+            ..
+        } => decide_index(table, name, *direction, expect.as_ref(), live),
+        GuardProbe::Constraint {
+            table,
+            name,
+            direction,
+            expect_kind,
+            expect_definition,
+            ..
+        } => decide_constraint(
+            table,
+            name,
+            *direction,
+            expect_kind.as_deref(),
+            expect_definition.as_deref(),
+            live,
+        ),
+        GuardProbe::View {
+            name, direction, ..
+        } => decide_view(name, *direction, live),
+        GuardProbe::Sequence {
+            name, direction, ..
+        } => decide_sequence(name, *direction, live),
+        GuardProbe::NamedType {
+            name,
+            kind,
+            direction,
+            ..
+        } => decide_named_type(name, kind, *direction, live),
         GuardProbe::ColumnPresence { table, column, .. } => {
             // Always IfExists. Source column must EXIST → RunBare; absent → Noop.
             if column_present(live, table, column) {
@@ -192,10 +213,18 @@ fn decide_view(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardV
     match direction {
         GuardDir::IfExists => {
             // dropView: presence-only.
-            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
-            if present { GuardVerdict::SatisfiedNoop } else { GuardVerdict::RunBare }
+            if present {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                GuardVerdict::RunBare
+            }
         }
     }
 }
@@ -210,10 +239,18 @@ fn decide_sequence(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> Gu
     let present = live.sequences.contains_key(name);
     match direction {
         GuardDir::IfExists => {
-            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
-            if present { GuardVerdict::SatisfiedNoop } else { GuardVerdict::RunBare }
+            if present {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                GuardVerdict::RunBare
+            }
         }
     }
 }
@@ -229,7 +266,11 @@ fn decide_table(
     match direction {
         GuardDir::IfExists => {
             // dropTable: presence-only.
-            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
             let Some(t) = live.tables.get(table) else {
@@ -292,7 +333,11 @@ fn decide_column(
     match direction {
         GuardDir::IfExists => {
             // dropColumn: presence-only.
-            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
             if !present {
@@ -433,11 +478,20 @@ fn decide_index(
         .tables
         .get(table)
         .and_then(|t| t.indexes.iter().find(|i| i.name == name))
-        .or_else(|| live.tables.values().flat_map(|t| &t.indexes).find(|i| i.name == name));
+        .or_else(|| {
+            live.tables
+                .values()
+                .flat_map(|t| &t.indexes)
+                .find(|i| i.name == name)
+        });
     match direction {
         GuardDir::IfExists => {
             // dropIndex: presence-only on the index name.
-            if live_idx.is_some() { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if live_idx.is_some() {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
             let Some(live_idx) = live_idx else {
@@ -448,10 +502,12 @@ fn decide_index(
             // column-list expectation, so expression/predicate equivalence cannot
             // be proven here.
             if live_idx.predicate.is_some()
-                || live_idx
-                    .elements
-                    .iter()
-                    .any(|element| matches!(element, crate::model::snapshot::IndexElementSnapshot::Expr(_)))
+                || live_idx.elements.iter().any(|element| {
+                    matches!(
+                        element,
+                        crate::model::snapshot::IndexElementSnapshot::Expr(_)
+                    )
+                })
             {
                 return drift(
                     &format!("index {name}"),
@@ -504,7 +560,11 @@ fn decide_constraint(
     match direction {
         GuardDir::IfExists => {
             // dropConstraint: presence-only on the constraint name.
-            if live_con.is_some() { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+            if live_con.is_some() {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
         }
         GuardDir::IfNotExists => {
             let Some(live_con) = live_con else {
@@ -513,12 +573,7 @@ fn decide_constraint(
             // Present. A kind clash is the clearest divergence.
             if let Some(kind) = expect_kind {
                 if kind != live_con.kind {
-                    return drift(
-                        &format!("constraint {name}"),
-                        "kind",
-                        kind,
-                        &live_con.kind,
-                    );
+                    return drift(&format!("constraint {name}"), "kind", kind, &live_con.kind);
                 }
             }
             // **F2 — structural compare when a byte-comparable definition is
@@ -538,14 +593,20 @@ fn decide_constraint(
             // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
             // DEFERRABLE) survives the normalization and is still caught.
             if let Some(decl_def) = expect_definition {
-                if normalize_fk_definition(decl_def) == normalize_fk_definition(&live_con.definition) {
+                if normalize_fk_definition(decl_def)
+                    == normalize_fk_definition(&live_con.definition)
+                {
                     return GuardVerdict::SatisfiedNoop;
                 }
                 return drift(
                     &format!("constraint {name}"),
                     "definition",
                     decl_def,
-                    if live_con.definition.is_empty() { "<present>" } else { &live_con.definition },
+                    if live_con.definition.is_empty() {
+                        "<present>"
+                    } else {
+                        &live_con.definition
+                    },
                 );
             }
             // Fail-closed over a catalog-exposed divergence. With NO
@@ -560,7 +621,11 @@ fn decide_constraint(
                 &format!("constraint {name}"),
                 "definition",
                 "<declared constraint — cannot prove equal to live pg_get_constraintdef>",
-                if live_con.definition.is_empty() { "<present>" } else { &live_con.definition },
+                if live_con.definition.is_empty() {
+                    "<present>"
+                } else {
+                    &live_con.definition
+                },
             )
         }
     }
@@ -591,20 +656,20 @@ fn normalize_fk_definition(def: &str) -> String {
         return def.to_string();
     };
     let obj = &rest[..paren_rel]; // e.g. `"schema".people` / `schema.people` / `people`
-    // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
-    // Handles quoted identifiers by splitting on the last `.`.
-    //
-    // **SAFE post-validation** — `rsplit('.')` would mis-split a referenced table
-    // whose own (quoted) identifier contained a literal dot (e.g. `"a.b"`). That
-    // case is UNREACHABLE here: the declared side is built by
-    // [`crate::render::declarative::fk_definition_pg`] from a `target` that has already
-    // passed `validate_ident` (rejects `.` in identifiers) and `reject_cross_app_ref`
-    // (rejects dotted FK targets, `declarative.rs`), so the referenced table is
-    // ALWAYS a single dot-free segment. The live side comes from
-    // `pg_get_constraintdef`, which double-quotes such a name — but the catalog only
-    // ever holds names this same author path created, so it is dot-free too. The
-    // debug_assert pins that invariant; if identifier rules ever loosen this must
-    // become a quote-aware split.
+                                  // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
+                                  // Handles quoted identifiers by splitting on the last `.`.
+                                  //
+                                  // **SAFE post-validation** — `rsplit('.')` would mis-split a referenced table
+                                  // whose own (quoted) identifier contained a literal dot (e.g. `"a.b"`). That
+                                  // case is UNREACHABLE here: the declared side is built by
+                                  // [`crate::render::declarative::fk_definition_pg`] from a `target` that has already
+                                  // passed `validate_ident` (rejects `.` in identifiers) and `reject_cross_app_ref`
+                                  // (rejects dotted FK targets, `declarative.rs`), so the referenced table is
+                                  // ALWAYS a single dot-free segment. The live side comes from
+                                  // `pg_get_constraintdef`, which double-quotes such a name — but the catalog only
+                                  // ever holds names this same author path created, so it is dot-free too. The
+                                  // debug_assert pins that invariant; if identifier rules ever loosen this must
+                                  // become a quote-aware split.
     let table_seg = obj.rsplit('.').next().unwrap_or(obj).trim();
     debug_assert!(
         !table_seg.trim_matches('"').contains('.'),
@@ -671,13 +736,20 @@ mod tests {
     }
 
     fn ec(name: &str, dtype: &str, nullable: bool) -> ExpectColumn {
-        ExpectColumn { name: name.to_string(), data_type: dtype.to_string(), nullable }
+        ExpectColumn {
+            name: name.to_string(),
+            data_type: dtype.to_string(),
+            nullable,
+        }
     }
 
     fn snapshot_with(table: &str, t: TableSnapshot) -> SchemaSnapshot {
         let mut tables = BTreeMap::new();
         tables.insert(table.to_string(), t);
-        SchemaSnapshot { tables, ..Default::default() }
+        SchemaSnapshot {
+            tables,
+            ..Default::default()
+        }
     }
 
     fn empty_table() -> TableSnapshot {
@@ -799,7 +871,10 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("email", "text", true));
-        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("users", t)),
+            GuardVerdict::SatisfiedNoop
+        );
     }
 
     #[test]
@@ -843,8 +918,14 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("legacy", "text", true));
-        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
-        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("users", t)),
+            GuardVerdict::RunBare
+        );
+        assert_eq!(
+            decide_pg(&probe, &SchemaSnapshot::default()),
+            GuardVerdict::SatisfiedNoop
+        );
     }
 
     // -- Table ifNotExists -------------------------------------------------
@@ -876,7 +957,10 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("id", "integer", false));
-        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::SatisfiedNoop);
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("users", t)),
+            GuardVerdict::SatisfiedNoop
+        );
     }
 
     // -- Index ifNotExists -------------------------------------------------
@@ -891,8 +975,11 @@ mod tests {
             expect: Some((true, vec!["email".into()])),
         };
         let mut t = empty_table();
-        t.indexes
-            .push(IndexSnapshot::btree("users_email_idx".to_string(), false, vec!["email".to_string()]));
+        t.indexes.push(IndexSnapshot::btree(
+            "users_email_idx".to_string(),
+            false,
+            vec!["email".to_string()],
+        ));
         match decide_pg(&probe, &snapshot_with("users", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "unique"),
             v => panic!("expected FailDrift(unique), got {v:?}"),
@@ -939,7 +1026,10 @@ mod tests {
             expect_kind: Some("UNIQUE".into()),
             expect_definition: None,
         };
-        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::RunBare);
+        assert_eq!(
+            decide_pg(&probe, &SchemaSnapshot::default()),
+            GuardVerdict::RunBare
+        );
     }
 
     #[test]
@@ -1102,7 +1192,8 @@ mod tests {
         // people(id)`). After normalizing the qualifier out of both sides they MATCH →
         // SatisfiedNoop (the real-world re-deploy case — a hard FailDrift here was the
         // F2 bug).
-        let declared = "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED";
+        let declared =
+            "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED";
         let live = "FOREIGN KEY (owner) REFERENCES people(id) DEFERRABLE INITIALLY DEFERRED";
         let probe = GuardProbe::Constraint {
             schema: "app".into(),
@@ -1113,7 +1204,8 @@ mod tests {
             expect_definition: Some(declared.into()),
         };
         let mut t = empty_table();
-        t.constraints.push(constraint("pets_owner_fkey", "FOREIGN KEY", live));
+        t.constraints
+            .push(constraint("pets_owner_fkey", "FOREIGN KEY", live));
         assert_eq!(
             decide_pg(&probe, &snapshot_with("pets", t)),
             GuardVerdict::SatisfiedNoop,
@@ -1130,17 +1222,22 @@ mod tests {
         let b = normalize_fk_definition(
             "FOREIGN KEY (owner) REFERENCES app.people(id) ON DELETE RESTRICT",
         );
-        let c = normalize_fk_definition(
-            "FOREIGN KEY (owner) REFERENCES people(id) ON DELETE RESTRICT",
-        );
+        let c =
+            normalize_fk_definition("FOREIGN KEY (owner) REFERENCES people(id) ON DELETE RESTRICT");
         assert_eq!(a, c);
         assert_eq!(b, c);
-        assert!(c.contains("REFERENCES people(id)"), "table + columns preserved: {c}");
+        assert!(
+            c.contains("REFERENCES people(id)"),
+            "table + columns preserved: {c}"
+        );
         // A re-pointed target survives normalization → still DIFFERENT.
         let d = normalize_fk_definition(
             "FOREIGN KEY (owner) REFERENCES app.companies(id) ON DELETE RESTRICT",
         );
-        assert_ne!(c, d, "a different referenced TABLE must not be normalized away");
+        assert_ne!(
+            c, d,
+            "a different referenced TABLE must not be normalized away"
+        );
     }
 
     #[test]
@@ -1176,7 +1273,8 @@ mod tests {
             direction: GuardDir::IfNotExists,
             expect_kind: Some("FOREIGN KEY".into()),
             expect_definition: Some(
-                "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED".into(),
+                "FOREIGN KEY (owner) REFERENCES app.people(id) DEFERRABLE INITIALLY DEFERRED"
+                    .into(),
             ),
         };
         let mut t = empty_table();
@@ -1204,7 +1302,8 @@ mod tests {
             expect_definition: Some("FOREIGN KEY (owner) REFERENCES app.people(id)".into()),
         };
         let mut t = empty_table();
-        t.constraints.push(constraint("pets_owner_fkey", "UNIQUE", "UNIQUE (owner)"));
+        t.constraints
+            .push(constraint("pets_owner_fkey", "UNIQUE", "UNIQUE (owner)"));
         match decide_pg(&probe, &snapshot_with("pets", t)) {
             GuardVerdict::FailDrift(d) => assert_eq!(d.field, "kind"),
             v => panic!("expected FailDrift(kind) on a kind clash, got {v:?}"),
@@ -1223,7 +1322,13 @@ mod tests {
         };
         let mut t = empty_table();
         t.columns.push(col("name", "text", true));
-        assert_eq!(decide_pg(&probe, &snapshot_with("users", t)), GuardVerdict::RunBare);
-        assert_eq!(decide_pg(&probe, &SchemaSnapshot::default()), GuardVerdict::SatisfiedNoop);
+        assert_eq!(
+            decide_pg(&probe, &snapshot_with("users", t)),
+            GuardVerdict::RunBare
+        );
+        assert_eq!(
+            decide_pg(&probe, &SchemaSnapshot::default()),
+            GuardVerdict::SatisfiedNoop
+        );
     }
 }

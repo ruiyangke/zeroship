@@ -233,9 +233,7 @@ enum PartitionComparableBound<'a> {
     Max,
 }
 
-fn comparable_bound(
-    value: &crate::model::ir::PartitionBoundValue,
-) -> PartitionComparableBound<'_> {
+fn comparable_bound(value: &crate::model::ir::PartitionBoundValue) -> PartitionComparableBound<'_> {
     match value {
         crate::model::ir::PartitionBoundValue::String { value } => {
             PartitionComparableBound::String(value)
@@ -386,9 +384,13 @@ fn validate_partition_recording(
                     parents.insert(to.clone(), parent);
                 }
             }
-            Op::CreatePartition { name, of, bounds, .. } => {
+            Op::CreatePartition {
+                name, of, bounds, ..
+            } => {
                 if let Some(parent) = parents.get_mut(of) {
-                    parent.children.insert(name.clone(), (op_index, bounds.clone()));
+                    parent
+                        .children
+                        .insert(name.clone(), (op_index, bounds.clone()));
                 } else if !matches!(target_dialect, Dialect::Postgres) {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
@@ -402,9 +404,16 @@ fn validate_partition_recording(
                     ));
                 }
             }
-            Op::AttachPartition { parent, name, bound, .. } => {
+            Op::AttachPartition {
+                parent,
+                name,
+                bound,
+                ..
+            } => {
                 if let Some(parent) = parents.get_mut(parent) {
-                    parent.children.insert(name.clone(), (op_index, bound.clone()));
+                    parent
+                        .children
+                        .insert(name.clone(), (op_index, bound.clone()));
                 } else if !matches!(target_dialect, Dialect::Postgres) {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
@@ -421,10 +430,9 @@ fn validate_partition_recording(
             Op::DropPartition { parent, name, .. } => {
                 if let Some(parent_state) = parents.get(parent) {
                     if parent_state.spec.collapse()
-                        && parent_state
-                            .children
-                            .get(name)
-                            .is_some_and(|(_, bounds)| matches!(bounds, crate::model::ir::PartitionBounds::Hash { .. }))
+                        && parent_state.children.get(name).is_some_and(|(_, bounds)| {
+                            matches!(bounds, crate::model::ir::PartitionBounds::Hash { .. })
+                        })
                     {
                         return Err(partition_error(
                             CODE_PARTITION_HASH_DROP_UNDERIVABLE,
@@ -452,7 +460,9 @@ fn validate_partition_recording(
                     parent.not_null_columns.remove(column);
                 }
             }
-            Op::AddConstraint { table, constraint, .. } => {
+            Op::AddConstraint {
+                table, constraint, ..
+            } => {
                 if let Some(parent) = parents.get_mut(table) {
                     match &constraint.kind {
                         IrConstraintKind::Unique { columns } => {
@@ -605,7 +615,9 @@ fn validate_partition_bounds_well_formed(
                             *op_index,
                             ts_locations,
                             dialect,
-                            format!("range partitioned table {table:?} has a non-range child bound"),
+                            format!(
+                                "range partitioned table {table:?} has a non-range child bound"
+                            ),
                             "use range bounds or a default child under a range-partitioned parent",
                         ));
                     }
@@ -686,8 +698,8 @@ fn validate_partition_bounds_well_formed(
                         ));
                     }
                     PartitionBounds::Hash { modulus, remainder } => {
-                    if *modulus == 0 || *remainder >= *modulus {
-                        return Err(partition_error(
+                        if *modulus == 0 || *remainder >= *modulus {
+                            return Err(partition_error(
                             CODE_PARTITION_BOUNDS_ILL_FORMED,
                             *op_index,
                             ts_locations,
@@ -697,8 +709,8 @@ fn validate_partition_bounds_well_formed(
                             ),
                             "use hash bounds with modulus > 0 and remainder < modulus",
                         ));
-                    }
-                    classes.push((*op_index, u128::from(*modulus), u128::from(*remainder)));
+                        }
+                        classes.push((*op_index, u128::from(*modulus), u128::from(*remainder)));
                     }
                     _ => {
                         return Err(partition_error(
@@ -890,7 +902,10 @@ fn validate_dialectal_op(
         let Some(ops) = leg else {
             continue;
         };
-        if ops.iter().any(|op| matches!(op, crate::model::ir::Op::Dialectal { .. })) {
+        if ops
+            .iter()
+            .any(|op| matches!(op, crate::model::ir::Op::Dialectal { .. }))
+        {
             return Err(mk(
                 target_dialect,
                 op_index,
@@ -972,7 +987,13 @@ pub fn validate_op_scoped(
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
     };
 
-    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+    if let Op::Dialectal {
+        default,
+        pg,
+        sqlite,
+        mysql,
+    } = op
+    {
         return validate_dialectal_op(
             default.as_deref(),
             pg.as_deref(),
@@ -1023,7 +1044,11 @@ pub fn validate_op_scoped(
                         ts_location,
                     )?;
                 }
-                IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
+                IrConstraintKind::Exclusion {
+                    elements,
+                    where_predicate,
+                    ..
+                } => {
                     for element in elements {
                         match &element.target {
                             ColumnOrExpr::Column { name } => {
@@ -1051,7 +1076,10 @@ pub fn validate_op_scoped(
         |element: &IndexElement, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match element {
                 IndexElement::Column { name, .. } => {
-                    let col = crate::model::expr::Expr::ColRef { name: name.clone(), table: None };
+                    let col = crate::model::expr::Expr::ColRef {
+                        name: name.clone(),
+                        table: None,
+                    };
                     validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                 }
                 IndexElement::Expr { expr } => {
@@ -1691,10 +1719,9 @@ fn validate_op_support(
                 identity: Some(_), ..
             } => UnsupportedKind::Identity,
             Op::SetColumnType { using: Some(_), .. } => UnsupportedKind::Expr,
-            Op::AddConstraint {
-                constraint,
-                ..
-            } if matches!(constraint.kind, IrConstraintKind::Check { .. }) => {
+            Op::AddConstraint { constraint, .. }
+                if matches!(constraint.kind, IrConstraintKind::Check { .. }) =>
+            {
                 UnsupportedKind::Expr
             }
             _ => UnsupportedKind::Op,
@@ -1738,21 +1765,38 @@ fn validate_op_support(
 
     fn index_elements_have_opclass(columns: &[IndexElement]) -> bool {
         columns.iter().any(|element| {
-            matches!(element, IndexElement::Column { opclass: Some(_), .. })
+            matches!(
+                element,
+                IndexElement::Column {
+                    opclass: Some(_),
+                    ..
+                }
+            )
         })
     }
 
     fn index_elements_have_collation(columns: &[IndexElement]) -> bool {
         columns.iter().any(|element| {
-            matches!(element, IndexElement::Column { collation: Some(_), .. })
+            matches!(
+                element,
+                IndexElement::Column {
+                    collation: Some(_),
+                    ..
+                }
+            )
         })
     }
 
     fn constraint_kind_not_valid(kind: &IrConstraintKind) -> bool {
         matches!(
             kind,
-            IrConstraintKind::Fk { not_valid: Some(true), .. }
-                | IrConstraintKind::Check { not_valid: Some(true), .. }
+            IrConstraintKind::Fk {
+                not_valid: Some(true),
+                ..
+            } | IrConstraintKind::Check {
+                not_valid: Some(true),
+                ..
+            }
         )
     }
 
@@ -1827,9 +1871,8 @@ fn validate_op_support(
         return Err(err);
     }
 
-    let mut check = |feature| {
-        check_feature(&support, feature, target_dialect, op_index, ts_location)
-    };
+    let mut check =
+        |feature| check_feature(&support, feature, target_dialect, op_index, ts_location);
 
     match op {
         Op::CreateTable {
@@ -2120,8 +2163,10 @@ fn validate_vendor_op(
             .find(|cap| !matches!(cap, crate::model::capability::VendorCapability::RawViewBody))
             .copied()
             .expect("non-raw-view cap exists");
-        let (reason, fix) = if matches!(cap, crate::model::capability::VendorCapability::MaterializedView)
-        {
+        let (reason, fix) = if matches!(
+            cap,
+            crate::model::capability::VendorCapability::MaterializedView
+        ) {
             (
                 "materializedView: SQLite has no materialized views; materialized:true is PostgreSQL-only"
                     .to_string(),
@@ -2220,7 +2265,10 @@ fn validate_function_type_refs(
                 }
             }
         }
-        crate::model::ir::Op::DropFunction { arg_types: Some(arg_types), .. } => {
+        crate::model::ir::Op::DropFunction {
+            arg_types: Some(arg_types),
+            ..
+        } => {
             for ty in arg_types {
                 if !crate::model::ir::is_valid_pg_type_ref(ty) {
                     return Err(reject("dropFunction.argTypes[]", ty));
@@ -2374,7 +2422,13 @@ fn validate_select_ast(
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{OrderItem, SelectItem};
 
-    validate_table_ref(&select.from, target_dialect, op_index, ts_location, schema_scope)?;
+    validate_table_ref(
+        &select.from,
+        target_dialect,
+        op_index,
+        ts_location,
+        schema_scope,
+    )?;
     let scope = TargetScope::structural_only(&select.from.name);
 
     for item in &select.projection {
@@ -2383,7 +2437,13 @@ fn validate_select_ast(
         }
     }
     for join in &select.joins {
-        validate_table_ref(&join.table, target_dialect, op_index, ts_location, schema_scope)?;
+        validate_table_ref(
+            &join.table,
+            target_dialect,
+            op_index,
+            ts_location,
+            schema_scope,
+        )?;
         validate_expr(&join.on, target_dialect, &scope, op_index, ts_location)?;
     }
     if let Some(pred) = &select.r#where {
@@ -2422,9 +2482,9 @@ fn validate_select_ast(
 ///    validate-time reject is the defense the names-are-strings stance needs).
 /// 2. **Cross-schema confinement** — under a `Some(scope)` (Confined/Platform) an
 ///    explicit `schema` the scope does not `permit` is refused
-    ///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes.
-    ///    `SchemaScope::Unconfined` skips this for the explicit Trusted operator
-    ///    profile; `None` means default public validation without vendor capabilities.
+///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes.
+///    `SchemaScope::Unconfined` skips this for the explicit Trusted operator
+///    profile; `None` means default public validation without vendor capabilities.
 /// 3. **Existence-guard direction** — a guard whose direction is illegal for the op
 ///    variant is refused ([`CODE_GUARD_DIRECTION`]).
 fn validate_op_schema_and_guard(
@@ -2503,11 +2563,19 @@ fn validate_op_schema_and_guard(
     // an out-of-scope table grant is refused before lower/render.
     match op {
         crate::model::ir::Op::Grant {
-            on: crate::model::ir::GrantTarget::Table { schema: Some(schema), .. },
+            on:
+                crate::model::ir::GrantTarget::Table {
+                    schema: Some(schema),
+                    ..
+                },
             ..
         }
         | crate::model::ir::Op::Revoke {
-            on: crate::model::ir::GrantTarget::Table { schema: Some(schema), .. },
+            on:
+                crate::model::ir::GrantTarget::Table {
+                    schema: Some(schema),
+                    ..
+                },
             ..
         } => {
             check_schema(schema, "grant table target")?;
@@ -2687,7 +2755,10 @@ fn validate_trigger_dialect(
                 "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
             ));
         }
-        (Dialect::Sqlite | Dialect::Mysql, crate::model::ir::TriggerAction::ExecuteFunction { .. }) => {
+        (
+            Dialect::Sqlite | Dialect::Mysql,
+            crate::model::ir::TriggerAction::ExecuteFunction { .. },
+        ) => {
             let dialect_name = target_dialect.as_str();
             return Err(unsupported_trigger(
                 "executeFunction",
@@ -2702,7 +2773,9 @@ fn validate_trigger_dialect(
     }
 
     if matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql)
-        && events.iter().any(|e| matches!(e, crate::model::ir::TriggerEvent::Truncate))
+        && events
+            .iter()
+            .any(|e| matches!(e, crate::model::ir::TriggerEvent::Truncate))
     {
         let dialect_name = target_dialect.as_str();
         return Err(unsupported_trigger(
@@ -2711,7 +2784,9 @@ fn validate_trigger_dialect(
             op_index,
             ts_location,
             format!("{dialect_name} has no TRUNCATE trigger event"),
-            format!("remove the truncate event for {dialect_name}, or target Postgres for this trigger"),
+            format!(
+                "remove the truncate event for {dialect_name}, or target Postgres for this trigger"
+            ),
         ));
     }
 
@@ -2789,7 +2864,12 @@ fn validate_trigger_stmt(
     };
 
     match stmt {
-        crate::model::ir::TriggerStmt::Insert { table, rows, schema, .. } => {
+        crate::model::ir::TriggerStmt::Insert {
+            table,
+            rows,
+            schema,
+            ..
+        } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);
             for row in rows {
@@ -2801,7 +2881,12 @@ fn validate_trigger_stmt(
             }
             Ok(())
         }
-        crate::model::ir::TriggerStmt::Update { table, set, r#where, schema } => {
+        crate::model::ir::TriggerStmt::Update {
+            table,
+            set,
+            r#where,
+            schema,
+        } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);
             for value in set.values() {
@@ -2814,7 +2899,12 @@ fn validate_trigger_stmt(
             }
             Ok(())
         }
-        crate::model::ir::TriggerStmt::Delete { table, r#where, schema, .. } => {
+        crate::model::ir::TriggerStmt::Delete {
+            table,
+            r#where,
+            schema,
+            ..
+        } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);
             validate_expr(r#where, target_dialect, &scope, op_index, ts_location)
@@ -2938,7 +3028,10 @@ fn validate_default_for_type(
     let ok = matches!(
         (kind, ty),
         (EmptyContainerKind::Object, ColType::Json)
-            | (EmptyContainerKind::Array, ColType::Json | ColType::TextArray)
+            | (
+                EmptyContainerKind::Array,
+                ColType::Json | ColType::TextArray
+            )
     );
     if ok {
         return Ok(());
@@ -3304,7 +3397,9 @@ fn validate_col_type_position(
             op_index,
             ts_location: ts_location.map(str::to_string),
             dialect: target_dialect,
-            reason: format!("{position} uses `char(0)`; fixed-length char requires a positive length"),
+            reason: format!(
+                "{position} uses `char(0)`; fixed-length char requires a positive length"
+            ),
             suggested_fix: Some("use `t.char(1)` or larger".to_string()),
         });
     }
@@ -3444,7 +3539,12 @@ pub fn validate_op_resolved(
     // The op's target table (for the DML / setColumnType ops we resolve).
     let resolved_scope = |table: &str| -> Option<Vec<String>> { live_columns.get(table).cloned() };
     match op {
-        Op::Update { table, set, r#where, .. } => {
+        Op::Update {
+            table,
+            set,
+            r#where,
+            ..
+        } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
                 for value in set.values() {
@@ -3467,7 +3567,9 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
-        Op::Backfill { table, set, filter, .. } => {
+        Op::Backfill {
+            table, set, filter, ..
+        } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
                 for value in set.values() {
@@ -3482,7 +3584,12 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
-        Op::SetColumnType { table, to_type, using, .. } => {
+        Op::SetColumnType {
+            table,
+            to_type,
+            using,
+            ..
+        } => {
             validate_col_type_position(
                 to_type,
                 "setColumnType.toType",
@@ -3504,7 +3611,12 @@ pub fn validate_op_resolved(
         // resolving `TargetScope` so a ColRef to a non-existent column is rejected
         // here, not as an opaque mid-statement DB error — symmetric with the
         // Update/Delete/Backfill/SetColumnType arms above.
-        Op::Insert { table, rows, on_conflict, .. } => {
+        Op::Insert {
+            table,
+            rows,
+            on_conflict,
+            ..
+        } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
                 for row in rows {
@@ -3542,7 +3654,13 @@ mod tests {
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
 
     fn cols() -> Vec<String> {
-        vec!["name".into(), "first".into(), "last".into(), "total".into(), "active".into()]
+        vec![
+            "name".into(),
+            "first".into(),
+            "last".into(),
+            "total".into(),
+            "active".into(),
+        ]
     }
 
     fn scope<'a>(table: &'a str, cols: &'a [String]) -> TargetScope<'a> {
@@ -3561,7 +3679,10 @@ mod tests {
     fn nest_not(depth: u32, inner: Expr) -> Expr {
         let mut e = inner;
         for _ in 0..depth {
-            e = Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(e) };
+            e = Expr::UnaryOp {
+                op: UnaryOp::Not,
+                operand: Box::new(e),
+            };
         }
         e
     }
@@ -3605,7 +3726,10 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for f in [ScalarFn::CurrentUser, ScalarFn::CurrentSetting] {
-            let e = Expr::FnCall { r#fn: f, args: vec![] };
+            let e = Expr::FnCall {
+                r#fn: f,
+                args: vec![],
+            };
             assert!(
                 validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
                 "{f:?} must validate on Postgres"
@@ -3666,7 +3790,10 @@ mod tests {
     fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
+            elems: elems
+                .into_iter()
+                .map(|s| IrScalar::Str(s.to_string()))
+                .collect(),
             negated: false,
         }
     }
@@ -3674,7 +3801,10 @@ mod tests {
     fn not_in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
+            elems: elems
+                .into_iter()
+                .map(|s| IrScalar::Str(s.to_string()))
+                .collect(),
             negated: true,
         }
     }
@@ -3694,7 +3824,9 @@ mod tests {
         for e in [
             Expr::BinOp {
                 op: BinaryOp::Le,
-                lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+                lhs: Box::new(Expr::PgColumnSize {
+                    expr: Box::new(Expr::col("name")),
+                }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
             },
             Expr::PgExtract {
@@ -3742,12 +3874,30 @@ mod tests {
                 elems: vec![IrScalar::Bool(true), IrScalar::Bool(false)],
                 negated: false,
             },
-            Expr::Extract { field: ExtractField::Year, from: Box::new(Expr::col("total")) },
-            Expr::Extract { field: ExtractField::Month, from: Box::new(Expr::col("total")) },
-            Expr::Extract { field: ExtractField::Day, from: Box::new(Expr::col("total")) },
-            Expr::Extract { field: ExtractField::Hour, from: Box::new(Expr::col("total")) },
-            Expr::Extract { field: ExtractField::Minute, from: Box::new(Expr::col("total")) },
-            Expr::Extract { field: ExtractField::Dow, from: Box::new(Expr::col("total")) },
+            Expr::Extract {
+                field: ExtractField::Year,
+                from: Box::new(Expr::col("total")),
+            },
+            Expr::Extract {
+                field: ExtractField::Month,
+                from: Box::new(Expr::col("total")),
+            },
+            Expr::Extract {
+                field: ExtractField::Day,
+                from: Box::new(Expr::col("total")),
+            },
+            Expr::Extract {
+                field: ExtractField::Hour,
+                from: Box::new(Expr::col("total")),
+            },
+            Expr::Extract {
+                field: ExtractField::Minute,
+                from: Box::new(Expr::col("total")),
+            },
+            Expr::Extract {
+                field: ExtractField::Dow,
+                from: Box::new(Expr::col("total")),
+            },
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
@@ -3806,8 +3956,9 @@ mod tests {
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
-                validate_expr(e, d, &sc, 0, None)
-                    .unwrap_or_else(|err| panic!("portable aggregate must validate on {d:?}: {err}"));
+                validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
+                    panic!("portable aggregate must validate on {d:?}: {err}")
+                });
             }
         }
         // A bogus column inside the aggregate arg is still caught by the recursive
@@ -3857,8 +4008,9 @@ mod tests {
         ];
 
         for e in &nodes {
-            validate_expr(e, Dialect::Postgres, &sc, 0, None)
-                .unwrap_or_else(|err| panic!("PG-first aggregate must validate on Postgres: {err}"));
+            validate_expr(e, Dialect::Postgres, &sc, 0, None).unwrap_or_else(|err| {
+                panic!("PG-first aggregate must validate on Postgres: {err}")
+            });
             for d in [Dialect::Sqlite, Dialect::Mysql] {
                 let err = validate_expr(e, d, &sc, 0, None)
                     .expect_err("PG-first aggregate must fail closed off Postgres");
@@ -3881,13 +4033,22 @@ mod tests {
                 r#fn: ScalarFn::Mod,
                 args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(3))],
             },
-            Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Round,
+                args: vec![Expr::col("total")],
+            },
             Expr::FnCall {
                 r#fn: ScalarFn::Round,
                 args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(2))],
             },
-            Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("total")] },
-            Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Floor,
+                args: vec![Expr::col("total")],
+            },
+            Expr::FnCall {
+                r#fn: ScalarFn::Ceil,
+                args: vec![Expr::col("total")],
+            },
             Expr::FnCall {
                 r#fn: ScalarFn::Substr,
                 args: vec![
@@ -3919,7 +4080,9 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
+            Expr::PgColumnSize {
+                expr: Box::new(Expr::col("name")),
+            },
             Expr::PgExtract {
                 field: PgExtractField::Epoch,
                 from: Box::new(Expr::col("total")),
@@ -4027,8 +4190,8 @@ mod tests {
     fn split_part_multichar_delim_rejected() {
         let c = cols();
         let sc = scope("users", &c);
-        let err = validate_expr(&split(", ", 1), Dialect::Sqlite, &sc, 2, Some("m.ts:9"))
-            .unwrap_err();
+        let err =
+            validate_expr(&split(", ", 1), Dialect::Sqlite, &sc, 2, Some("m.ts:9")).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 2);
         assert_eq!(err.dialect, Dialect::Sqlite);
@@ -4072,7 +4235,9 @@ mod tests {
                 "out-of-envelope splitPart loads on PG"
             );
             assert_eq!(
-                validate_expr(&node, Dialect::Sqlite, &sc, 0, None).unwrap_err().code,
+                validate_expr(&node, Dialect::Sqlite, &sc, 0, None)
+                    .unwrap_err()
+                    .code,
                 CODE_EXPR_NOT_PORTABLE
             );
         }
@@ -4095,7 +4260,11 @@ mod tests {
         //     string literal. Grammar-broken on BOTH dialects.
         let runtime_delim = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
-            args: vec![Expr::col("name"), Expr::col("first"), Expr::lit(IrScalar::Int(1))],
+            args: vec![
+                Expr::col("name"),
+                Expr::col("first"),
+                Expr::lit(IrScalar::Int(1)),
+            ],
         };
         for d in [Dialect::Postgres, Dialect::Sqlite] {
             let err = validate_expr(&runtime_delim, d, &sc, 0, None).unwrap_err();
@@ -4125,7 +4294,11 @@ mod tests {
         // (3) n is a COLUMN REFERENCE (a runtime n) — not a literal. Both dialects.
         let runtime_n = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
-            args: vec![Expr::col("name"), Expr::lit(IrScalar::Str(",".into())), Expr::col("total")],
+            args: vec![
+                Expr::col("name"),
+                Expr::lit(IrScalar::Str(",".into())),
+                Expr::col("total"),
+            ],
         };
         for d in [Dialect::Postgres, Dialect::Sqlite] {
             assert_eq!(
@@ -4138,7 +4311,9 @@ mod tests {
         // (4) n is a non-POSITIVE integer literal (n<1) — grammar-broken on both.
         for d in [Dialect::Postgres, Dialect::Sqlite] {
             assert_eq!(
-                validate_expr(&split(",", 0), d, &sc, 0, None).unwrap_err().code,
+                validate_expr(&split(",", 0), d, &sc, 0, None)
+                    .unwrap_err()
+                    .code,
                 CODE_EXPR_NOT_PORTABLE,
                 "n<1 must reject on {d:?}"
             );
@@ -4170,7 +4345,10 @@ mod tests {
         };
         for d in [Dialect::Postgres, Dialect::Sqlite] {
             let err = validate_expr(&two_arg, d, &sc, 0, None).unwrap_err();
-            assert_eq!(err.code, CODE_UNSUPPORTED, "wrong arity is broken on both dialects ({d:?})");
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "wrong arity is broken on both dialects ({d:?})"
+            );
             assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
     }
@@ -4213,11 +4391,21 @@ mod tests {
         let e = synth(SynthFn::Now, vec![Expr::lit(IrScalar::Int(1))]);
         for d in [Dialect::Postgres, Dialect::Sqlite] {
             let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
-            assert_eq!(err.code, CODE_UNSUPPORTED, "now(arg) is broken on both dialects ({d:?})");
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "now(arg) is broken on both dialects ({d:?})"
+            );
             assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
         // zero-arg form passes on both.
-        assert!(validate_expr(&synth(SynthFn::Now, vec![]), Dialect::Postgres, &sc, 0, None).is_ok());
+        assert!(validate_expr(
+            &synth(SynthFn::Now, vec![]),
+            Dialect::Postgres,
+            &sc,
+            0,
+            None
+        )
+        .is_ok());
         assert!(validate_expr(&synth(SynthFn::Now, vec![]), Dialect::Sqlite, &sc, 0, None).is_ok());
     }
 
@@ -4231,10 +4419,14 @@ mod tests {
             let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
             assert_eq!(err.code, CODE_UNSUPPORTED);
         }
-        assert!(
-            validate_expr(&synth(SynthFn::GenRandomUuid, vec![]), Dialect::Postgres, &sc, 0, None)
-                .is_ok()
-        );
+        assert!(validate_expr(
+            &synth(SynthFn::GenRandomUuid, vec![]),
+            Dialect::Postgres,
+            &sc,
+            0,
+            None
+        )
+        .is_ok());
     }
 
     #[test]
@@ -4248,7 +4440,10 @@ mod tests {
             for d in [Dialect::Postgres, Dialect::Sqlite] {
                 let err = validate_expr(&synth(SynthFn::ConcatWs, bad.clone()), d, &sc, 0, None)
                     .unwrap_err();
-                assert_eq!(err.code, CODE_UNSUPPORTED, "concatWs needs delim + >=1 value ({d:?})");
+                assert_eq!(
+                    err.code, CODE_UNSUPPORTED,
+                    "concatWs needs delim + >=1 value ({d:?})"
+                );
             }
         }
         // delim + 1 value is the minimum valid shape; the value still recurses.
@@ -4367,7 +4562,9 @@ mod tests {
         let sc = scope("users", &c);
         let e = dialectal(
             None,
-            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::PgColumnSize {
+                expr: Box::new(Expr::col("name")),
+            }),
             Some(Expr::col("name")),
             Some(Expr::col("name")),
         );
@@ -4386,7 +4583,9 @@ mod tests {
         let sc = scope("users", &c);
         let e = dialectal(
             None,
-            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::PgColumnSize {
+                expr: Box::new(Expr::col("name")),
+            }),
             Some(Expr::col("name")),
             None,
         );
@@ -4406,7 +4605,9 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         let e = dialectal(
-            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::PgColumnSize {
+                expr: Box::new(Expr::col("name")),
+            }),
             None,
             Some(Expr::col("name")),
             Some(Expr::col("name")),
@@ -4430,7 +4631,10 @@ mod tests {
         let e = dialectal(None, None, None, None);
         for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
-            assert_eq!(err.code, CODE_UNSUPPORTED, "legless dialect() refused on {d:?}; got: {err}");
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "legless dialect() refused on {d:?}; got: {err}"
+            );
             assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
     }
@@ -4464,7 +4668,11 @@ mod tests {
         // Non-literal delimiter (a column ref) is not portable.
         let e = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
-            args: vec![Expr::col("name"), Expr::col("first"), Expr::lit(IrScalar::Int(1))],
+            args: vec![
+                Expr::col("name"),
+                Expr::col("first"),
+                Expr::lit(IrScalar::Int(1)),
+            ],
         };
         let err = validate_expr(&e, Dialect::Sqlite, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
@@ -4552,7 +4760,14 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -4568,15 +4783,15 @@ mod tests {
                             ],
                         }),
                     },
-                
+
                     not_valid: None,
                 },
             }],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -4598,8 +4813,14 @@ mod tests {
     fn colref_not_on_target_table_rejected() {
         let c = cols();
         let sc = scope("users", &c);
-        let err =
-            validate_expr(&Expr::col("nope"), Dialect::Postgres, &sc, 3, Some("m.ts:4")).unwrap_err();
+        let err = validate_expr(
+            &Expr::col("nope"),
+            Dialect::Postgres,
+            &sc,
+            3,
+            Some("m.ts:4"),
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 3);
@@ -4664,10 +4885,7 @@ mod tests {
         serde_json::from_str(json).expect("test op JSON")
     }
 
-    fn validate_ir_platform(
-        ir: &MigrationIr,
-        dialect: Dialect,
-    ) -> Result<(), AuthoringError> {
+    fn validate_ir_platform(ir: &MigrationIr, dialect: Dialect) -> Result<(), AuthoringError> {
         validate_ir_scoped(ir, dialect, &[], None, &PolicyProfile::platform())
     }
 
@@ -4731,7 +4949,9 @@ mod tests {
     }
 
     fn str_b(value: &str) -> PartitionBoundValue {
-        PartitionBoundValue::String { value: value.into() }
+        PartitionBoundValue::String {
+            value: value.into(),
+        }
     }
 
     fn create_parent(
@@ -4779,7 +4999,10 @@ mod tests {
     fn partitioned_table_without_collapse_is_dialect_unsupported_off_postgres() {
         let ir = ir_with(vec![create_parent(
             "events",
-            PartitionSpec::Range { columns: vec!["ts".into()], collapse: false },
+            PartitionSpec::Range {
+                columns: vec!["ts".into()],
+                collapse: false,
+            },
             vec![part_col("ts", ColType::Timestamp, true)],
             None,
             vec![],
@@ -4800,7 +5023,10 @@ mod tests {
                 part_col("ts", ColType::Timestamp, true),
             ]
         };
-        let spec = || PartitionSpec::Range { columns: vec!["ts".into()], collapse: false };
+        let spec = || PartitionSpec::Range {
+            columns: vec!["ts".into()],
+            collapse: false,
+        };
 
         let bad = ir_with(vec![create_parent(
             "events",
@@ -4830,7 +5056,10 @@ mod tests {
         let range_missing_default = ir_with(vec![
             create_parent(
                 "events",
-                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                PartitionSpec::Range {
+                    columns: vec!["ts".into()],
+                    collapse: true,
+                },
                 vec![part_col("ts", ColType::Timestamp, true)],
                 None,
                 vec![],
@@ -4852,7 +5081,10 @@ mod tests {
         let list_missing_default = ir_with(vec![
             create_parent(
                 "orders",
-                PartitionSpec::List { columns: vec!["region".into()], collapse: true },
+                PartitionSpec::List {
+                    columns: vec!["region".into()],
+                    collapse: true,
+                },
                 vec![part_col("region", ColType::Text, true)],
                 None,
                 vec![],
@@ -4861,7 +5093,9 @@ mod tests {
             create_part(
                 "orders_us",
                 "orders",
-                PartitionBounds::List { values: vec![str_b("US")] },
+                PartitionBounds::List {
+                    values: vec![str_b("US")],
+                },
             ),
         ]);
         let err = validate_ir_platform(&list_missing_default, Dialect::Postgres)
@@ -4871,7 +5105,10 @@ mod tests {
         let hash_partial = ir_with(vec![
             create_parent(
                 "sessions",
-                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                PartitionSpec::Hash {
+                    columns: vec!["tenant_id".into()],
+                    collapse: true,
+                },
                 vec![part_col("tenant_id", ColType::Uuid, true)],
                 None,
                 vec![],
@@ -4880,7 +5117,10 @@ mod tests {
             create_part(
                 "sessions_0",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 0,
+                },
             ),
         ]);
         let err = validate_ir_platform(&hash_partial, Dialect::Postgres)
@@ -4890,7 +5130,10 @@ mod tests {
         let hash_total = ir_with(vec![
             create_parent(
                 "sessions",
-                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                PartitionSpec::Hash {
+                    columns: vec!["tenant_id".into()],
+                    collapse: true,
+                },
                 vec![part_col("tenant_id", ColType::Uuid, true)],
                 None,
                 vec![],
@@ -4899,12 +5142,18 @@ mod tests {
             create_part(
                 "sessions_0",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 0,
+                },
             ),
             create_part(
                 "sessions_1",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 1,
+                },
             ),
         ]);
         assert!(validate_ir_platform(&hash_total, Dialect::Postgres).is_ok());
@@ -4915,7 +5164,10 @@ mod tests {
         let parent = |collapse| {
             create_parent(
                 "sessions",
-                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse },
+                PartitionSpec::Hash {
+                    columns: vec!["tenant_id".into()],
+                    collapse,
+                },
                 vec![part_col("tenant_id", ColType::Uuid, true)],
                 None,
                 vec![],
@@ -4926,14 +5178,20 @@ mod tests {
             create_part(
                 "sessions_0",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 0,
+                },
             )
         };
         let child_1 = || {
             create_part(
                 "sessions_1",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 1,
+                },
             )
         };
 
@@ -4949,8 +5207,12 @@ mod tests {
             assert_eq!(err.code, CODE_PARTITION_HASH_DROP_UNDERIVABLE, "got: {err}");
         }
 
-        let pg_only_drop =
-            ir_with(vec![parent(false), child_0(), child_1(), drop_part("sessions", "sessions_0")]);
+        let pg_only_drop = ir_with(vec![
+            parent(false),
+            child_0(),
+            child_1(),
+            drop_part("sessions", "sessions_0"),
+        ]);
         assert!(validate_ir_platform(&pg_only_drop, Dialect::Postgres).is_ok());
     }
 
@@ -4976,7 +5238,10 @@ mod tests {
 
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("range collapse v1 supports one key column");
-        assert_eq!(err.code, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, "got: {err}");
+        assert_eq!(
+            err.code, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4984,7 +5249,10 @@ mod tests {
         let nullable = ir_with(vec![
             create_parent(
                 "events",
-                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                PartitionSpec::Range {
+                    columns: vec!["ts".into()],
+                    collapse: true,
+                },
                 vec![part_col("ts", ColType::Timestamp, false)],
                 None,
                 vec![],
@@ -4994,12 +5262,18 @@ mod tests {
         ]);
         let err = validate_ir_platform(&nullable, Dialect::Postgres)
             .expect_err("collapse partition keys must be not null");
-        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+        assert_eq!(
+            err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+            "got: {err}"
+        );
 
         let dropped_later = ir_with(vec![
             create_parent(
                 "events",
-                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                PartitionSpec::Range {
+                    columns: vec!["ts".into()],
+                    collapse: true,
+                },
                 vec![part_col("ts", ColType::Timestamp, true)],
                 None,
                 vec![],
@@ -5015,7 +5289,10 @@ mod tests {
         ]);
         let err = validate_ir_platform(&dropped_later, Dialect::Postgres)
             .expect_err("later dropNotNull on a collapse key must refuse");
-        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+        assert_eq!(
+            err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -5023,7 +5300,10 @@ mod tests {
         let parent = || {
             create_parent(
                 "events",
-                PartitionSpec::Range { columns: vec!["bucket".into()], collapse: false },
+                PartitionSpec::Range {
+                    columns: vec!["bucket".into()],
+                    collapse: false,
+                },
                 vec![part_col("bucket", ColType::Int, true)],
                 None,
                 vec![],
@@ -5041,12 +5321,20 @@ mod tests {
             )
         };
 
-        let bad = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 5, 20)]);
+        let bad = ir_with(vec![
+            parent(),
+            range("events_a", 0, 10),
+            range("events_b", 5, 20),
+        ]);
         let err = validate_ir_platform(&bad, Dialect::Postgres)
             .expect_err("overlapping range siblings must refuse");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
 
-        let ok = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 10, 20)]);
+        let ok = ir_with(vec![
+            parent(),
+            range("events_a", 0, 10),
+            range("events_b", 10, 20),
+        ]);
         assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
     }
 
@@ -5055,7 +5343,10 @@ mod tests {
         let parent = || {
             create_parent(
                 "orders",
-                PartitionSpec::List { columns: vec!["region".into()], collapse: false },
+                PartitionSpec::List {
+                    columns: vec!["region".into()],
+                    collapse: false,
+                },
                 vec![part_col("region", ColType::Text, true)],
                 None,
                 vec![],
@@ -5068,7 +5359,9 @@ mod tests {
             create_part(
                 "orders_a",
                 "orders",
-                PartitionBounds::List { values: vec![str_b("US"), str_b("US")] },
+                PartitionBounds::List {
+                    values: vec![str_b("US"), str_b("US")],
+                },
             ),
         ]);
         let err = validate_ir_platform(&bad, Dialect::Postgres)
@@ -5080,12 +5373,16 @@ mod tests {
             create_part(
                 "orders_us",
                 "orders",
-                PartitionBounds::List { values: vec![str_b("US")] },
+                PartitionBounds::List {
+                    values: vec![str_b("US")],
+                },
             ),
             create_part(
                 "orders_eu",
                 "orders",
-                PartitionBounds::List { values: vec![str_b("EU")] },
+                PartitionBounds::List {
+                    values: vec![str_b("EU")],
+                },
             ),
         ]);
         assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
@@ -5096,7 +5393,10 @@ mod tests {
         let parent = || {
             create_parent(
                 "sessions",
-                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: false },
+                PartitionSpec::Hash {
+                    columns: vec!["tenant_id".into()],
+                    collapse: false,
+                },
                 vec![part_col("tenant_id", ColType::Uuid, true)],
                 None,
                 vec![],
@@ -5109,12 +5409,18 @@ mod tests {
             create_part(
                 "sessions_2_0",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 0,
+                },
             ),
             create_part(
                 "sessions_3_1",
                 "sessions",
-                PartitionBounds::Hash { modulus: 3, remainder: 1 },
+                PartitionBounds::Hash {
+                    modulus: 3,
+                    remainder: 1,
+                },
             ),
         ]);
         let err = validate_ir_platform(&bad, Dialect::Postgres)
@@ -5126,12 +5432,18 @@ mod tests {
             create_part(
                 "sessions_2_0",
                 "sessions",
-                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+                PartitionBounds::Hash {
+                    modulus: 2,
+                    remainder: 0,
+                },
             ),
             create_part(
                 "sessions_4_1",
                 "sessions",
-                PartitionBounds::Hash { modulus: 4, remainder: 1 },
+                PartitionBounds::Hash {
+                    modulus: 4,
+                    remainder: 1,
+                },
             ),
         ]);
         assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
@@ -5266,7 +5578,10 @@ mod tests {
                 &PolicyProfile::confined(),
             )
             .unwrap_err();
-            assert_eq!(err.code, CODE_INVALID_SCHEMA_IDENT, "schema {bad:?} got: {err}");
+            assert_eq!(
+                err.code, CODE_INVALID_SCHEMA_IDENT,
+                "schema {bad:?} got: {err}"
+            );
         }
     }
 
@@ -5283,9 +5598,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
@@ -5324,9 +5639,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
@@ -5440,14 +5755,8 @@ mod tests {
         let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
             .expect("confined table-shape resolution succeeds");
 
-        validate_ir_scoped(
-            &resolved,
-            Dialect::Postgres,
-            &[],
-            None,
-            &confined,
-        )
-        .expect("resolved confined system shape remains valid");
+        validate_ir_scoped(&resolved, Dialect::Postgres, &[], None, &confined)
+            .expect("resolved confined system shape remains valid");
     }
 
     // ColRef resolution at the apply/render seam. At LOAD the DML scope
@@ -5477,10 +5786,16 @@ mod tests {
 
         // At APPLY: resolve against the live columns of `users` (no `ghost`).
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        live.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        );
         let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
             .expect_err("an unresolved ColRef must be rejected at the resolved apply seam");
-        assert_eq!(err.code, CODE_UNSUPPORTED, "rule (c) failure is structured, not a raw DB error");
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "rule (c) failure is structured, not a raw DB error"
+        );
         assert_eq!(err.op_index, 0);
     }
 
@@ -5495,8 +5810,13 @@ mod tests {
         let ir = ir_with(vec![Op::Insert {
             table: "users".into(),
             columns: vec!["name".into()],
-            rows: vec![vec![IrValue::Scalar(crate::model::ir::IrScalar::Str("x".into()))]],
-            on_conflict: Some(IrOnConflict { columns: vec!["id".into()], do_update: Some(do_update) }),
+            rows: vec![vec![IrValue::Scalar(crate::model::ir::IrScalar::Str(
+                "x".into(),
+            ))]],
+            on_conflict: Some(IrOnConflict {
+                columns: vec!["id".into()],
+                do_update: Some(do_update),
+            }),
             schema: None,
         }]);
 
@@ -5506,7 +5826,10 @@ mod tests {
 
         // At APPLY: resolve against the live columns of `users` (no `ghost`).
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        live.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        );
         let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
             .expect_err("an unresolved ColRef in DO UPDATE must be rejected at the resolved seam");
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -5526,7 +5849,10 @@ mod tests {
             schema: None,
         }]);
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        live.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        );
         assert!(
             validate_ir_resolved(&ir, Dialect::Postgres, &live, &[]).is_ok(),
             "a ColRef that resolves to a live column passes the apply-seam (c) check"
@@ -5539,8 +5865,32 @@ mod tests {
             Op::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
-                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    IrColumn {
+                        name: "first".into(),
+                        ty: ColType::Text,
+                        nullable: None,
+                        default: None,
+                        unique: None,
+                        id_prefix: None,
+                        case_sensitive: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
+                    },
+                    IrColumn {
+                        name: "total".into(),
+                        ty: ColType::Int,
+                        nullable: None,
+                        default: None,
+                        unique: None,
+                        id_prefix: None,
+                        case_sensitive: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
+                    },
                 ],
                 primary_key: None,
                 constraints: vec![],
@@ -5558,15 +5908,15 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("first")),
                     }),
-                include: Vec::new(),
-                with: None,
-                only: None,
-                nulls_not_distinct: None,
+                    include: Vec::new(),
+                    with: None,
+                    only: None,
+                    nulls_not_distinct: None,
                 }],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: Default::default(),
+                runtime_options: Default::default(),
                 schema: None,
                 existence_guard: None,
             },
@@ -5637,7 +5987,9 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_sequence_increment_zero() {
-        let ir = ir_with(vec![op_json(r#"{"op":"createSequence","name":"s","increment":0}"#)]);
+        let ir = ir_with(vec![op_json(
+            r#"{"op":"createSequence","name":"s","increment":0}"#,
+        )]);
         let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("increment"));
@@ -5645,7 +5997,9 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_sequence_cache_zero() {
-        let ir = ir_with(vec![op_json(r#"{"op":"alterSequence","name":"s","cache":0}"#)]);
+        let ir = ir_with(vec![op_json(
+            r#"{"op":"alterSequence","name":"s","cache":0}"#,
+        )]);
         let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("cache"));
@@ -5674,7 +6028,14 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
             primary_key: None,
             constraints: vec![],
             indexes: vec![IrIndex {
@@ -5692,15 +6053,15 @@ mod tests {
                     op: UnaryOp::IsNull,
                     operand: Box::new(Expr::col("deleted_at")),
                 }),
-            include: Vec::new(),
-            with: None,
-            only: None,
-            nulls_not_distinct: None,
+                include: Vec::new(),
+                with: None,
+                only: None,
+                nulls_not_distinct: None,
             }],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: Default::default(),
+            runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }]);
@@ -5730,7 +6091,14 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -5739,15 +6107,15 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
-                
+
                     not_valid: None,
                 },
             }],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -5767,7 +6135,14 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -5776,15 +6151,15 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
-                
+
                     not_valid: None,
                 },
             }],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -5807,12 +6182,20 @@ mod tests {
                 schema: None,
                 existence_guard: None,
             },
-            Op::Update { table: "users".into(), set, r#where: None, schema: None },
+            Op::Update {
+                table: "users".into(),
+                set,
+                r#where: None,
+                schema: None,
+            },
         ]);
         let ts = vec![None, Some("m.ts:9".to_string())];
         let err = validate_ir(&ir, Dialect::Sqlite, &ts).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
-        assert_eq!(err.op_index, 1, "the walker must stamp the enclosing op's index");
+        assert_eq!(
+            err.op_index, 1,
+            "the walker must stamp the enclosing op's index"
+        );
         assert_eq!(err.ts_location.as_deref(), Some("m.ts:9"));
     }
 
@@ -5833,11 +6216,11 @@ mod tests {
             using: None,
             r#where: Some(split(", ", 1)),
 
-        include: Vec::new(),
-        with: None,
-        only: None,
-        nulls_not_distinct: None,
-        concurrently: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+            concurrently: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -5913,11 +6296,11 @@ mod tests {
                 args: vec![],
             }),
 
-        include: Vec::new(),
-        with: None,
-        only: None,
-        nulls_not_distinct: None,
-        concurrently: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+            concurrently: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -5925,7 +6308,10 @@ mod tests {
         assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 0);
-        assert!(err.reason.contains("now()"), "reason names offending function: {err}");
+        assert!(
+            err.reason.contains("now()"),
+            "reason names offending function: {err}"
+        );
         assert!(
             err.reason.contains("index predicate"),
             "reason names immutable context: {err}"
@@ -5993,8 +6379,8 @@ mod tests {
                 "name".to_string(),
                 IrValue::Expr(Expr::col("column_that_was_dropped")),
             )]
-                .into_iter()
-                .collect(),
+            .into_iter()
+            .collect(),
             r#where: Some(Expr::BinOp {
                 op: BinaryOp::Eq,
                 lhs: Box::new(Expr::col("column_that_was_dropped")),
@@ -6014,7 +6400,10 @@ mod tests {
         // the SOLE place it is caught — with the STRUCTURED `UNSUPPORTED { expr }`
         // error, not a raw DB \"column does not exist\" surprise.
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        live.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string()],
+        );
         let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
             .expect_err("a non-existent column name must FAIL at the resolved apply seam");
         assert_eq!(
@@ -6026,7 +6415,10 @@ mod tests {
             Some(UnsupportedKind::Expr),
             "an unknown column is a rule-(c) expr-kind capability-boundary reject"
         );
-        assert_eq!(err.op_index, 0, "the structured error attributes the failing op");
+        assert_eq!(
+            err.op_index, 0,
+            "the structured error attributes the failing op"
+        );
     }
 
     // ── column-facet validate-time bounds ───────────────────────────────────
@@ -6048,7 +6440,8 @@ mod tests {
                 unique: None,
                 id_prefix: Some(prefix.to_string()),
                 case_sensitive: None,
-                vector_metric: None, mask: None,
+                vector_metric: None,
+                mask: None,
                 generated: None,
                 identity: None,
             }],
@@ -6056,9 +6449,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -6137,7 +6530,10 @@ mod tests {
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("an over-long id prefix must be refused at validate");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
-        assert!(err.reason.contains("maximum"), "the error names the length bound: {err}");
+        assert!(
+            err.reason.contains("maximum"),
+            "the error names the length bound: {err}"
+        );
     }
 
     #[test]
@@ -6164,9 +6560,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -6205,7 +6601,8 @@ mod tests {
                 .expect_err("caseSensitive:false on a non-text column must be refused");
             assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
             assert!(
-                err.reason.contains("caseSensitive:false is only valid on a text column"),
+                err.reason
+                    .contains("caseSensitive:false is only valid on a text column"),
                 "error should explain the text-only bound: {err}"
             );
         }
@@ -6215,7 +6612,9 @@ mod tests {
     fn container_default_object_on_text_array_is_rejected() {
         let ir = ir_with(vec![create_with_default(
             ColType::TextArray,
-            crate::model::ir::IrDefault::Container { kind: EmptyContainerKind::Object },
+            crate::model::ir::IrDefault::Container {
+                kind: EmptyContainerKind::Object,
+            },
         )]);
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("empty object defaults are valid only on json columns");
@@ -6230,25 +6629,32 @@ mod tests {
     fn container_default_array_on_int_is_rejected() {
         let ir = ir_with(vec![create_with_default(
             ColType::Int,
-            crate::model::ir::IrDefault::Container { kind: EmptyContainerKind::Array },
+            crate::model::ir::IrDefault::Container {
+                kind: EmptyContainerKind::Array,
+            },
         )]);
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("empty array defaults are valid only on json/textArray columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
-            err.reason.contains("empty array defaults require json or textArray"),
+            err.reason
+                .contains("empty array defaults require json or textArray"),
             "error should explain the allowed types: {err}"
         );
     }
 
     #[test]
     fn json_value_default_on_int_is_rejected() {
-        let ir = ir_with(vec![create_with_default(ColType::Int, json_value_default())]);
+        let ir = ir_with(vec![create_with_default(
+            ColType::Int,
+            json_value_default(),
+        )]);
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("JSON value defaults are valid only on json columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
-            err.reason.contains("JSON value defaults are valid only on json columns"),
+            err.reason
+                .contains("JSON value defaults are valid only on json columns"),
             "error should explain the json-only bound: {err}"
         );
     }
@@ -6263,7 +6669,8 @@ mod tests {
             .expect_err("JSON value defaults are valid only on json columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
-            err.reason.contains("JSON value defaults are valid only on json columns"),
+            err.reason
+                .contains("JSON value defaults are valid only on json columns"),
             "error should explain the json-only bound: {err}"
         );
     }
@@ -6289,9 +6696,9 @@ mod tests {
             constraints: vec![],
             indexes: vec![],
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);

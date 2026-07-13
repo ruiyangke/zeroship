@@ -12,10 +12,8 @@ use crate::driver::SqlSession;
 /// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
 
-use super::{
-    CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
-};
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
+use super::{CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
@@ -103,10 +101,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             )
             .await
         } else {
-            session::apply_transactional(
-                self.conn, cfg, m, applied_by, supersedes, kind,
-            )
-            .await?;
+            session::apply_transactional(self.conn, cfg, m, applied_by, supersedes, kind).await?;
             Ok(false)
         }
     }
@@ -132,10 +127,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         journal::applied(self.conn, cfg).await
     }
 
-    async fn superseded_versions(
-        &self,
-        cfg: &ExecutorConfig,
-    ) -> Result<Vec<String>, JournalError> {
+    async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
         journal::superseded_versions(self.conn, cfg).await
     }
 
@@ -203,7 +195,6 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         )))
     }
 
-
     // Host-pg build: the host addon's v1 facade does not surface expand/online, so
     // there is no online/backfill harness. A backfill step routed to the host PG
     // backend is a routing bug (the differ never emits one on the plain apply path),
@@ -270,12 +261,10 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         Ok(true)
     }
 
-
     // Host-pg build: no online harness → always `None`.
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         None
     }
-
 
     // Host-pg build: no shadow harness → always `None`, so
     // `dry_run`/`dry_run_declarative` return `DryRunError::ShadowUnsupported`
@@ -356,14 +345,8 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::mark_deploy_recovery_reconciled(
-                self.conn,
-                cfg,
-                deploy_id,
-                pending_version,
-                by,
-            )
-            .await
+            journal::mark_deploy_recovery_reconciled(self.conn, cfg, deploy_id, pending_version, by)
+                .await
         })
     }
 
@@ -384,8 +367,8 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 /// closing the old `unreachable!("read verbs…")` gap.
 #[cfg(test)]
 mod recording_session_genericity {
-    use crate::driver::{Bind, DbError, Row, Value};
     use super::*;
+    use crate::driver::{Bind, DbError, Row, Value};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -488,22 +471,12 @@ mod recording_session_genericity {
             self.binds.borrow_mut().push(params.to_vec());
             Ok(1)
         }
-        async fn exec_text(
-            &self,
-            sql: &str,
-            _params: &[Option<String>],
-        ) -> Result<u64, DbError> {
+        async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
-            self.log
-                .borrow_mut()
-                .push(format!("exec_text: {sql}"));
+            self.log.borrow_mut().push(format!("exec_text: {sql}"));
             Ok(1)
         }
-        async fn query(
-            &self,
-            sql: &str,
-            params: &[Bind],
-        ) -> Result<Vec<Row>, DbError> {
+        async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
             let _g = InFlightGuard::enter(&self.in_flight);
             self.log.borrow_mut().push(format!("query: {sql}"));
             self.binds.borrow_mut().push(params.to_vec());
@@ -549,16 +522,28 @@ mod recording_session_genericity {
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
 
         // A non-native `D` reports no PG-concrete online/shadow harness.
-        assert!(backend.online().is_none(), "generic D has no PgOnline harness");
-        assert!(backend.shadow().is_none(), "generic D has no PgShadow harness");
+        assert!(
+            backend.online().is_none(),
+            "generic D has no PgOnline harness"
+        );
+        assert!(
+            backend.shadow().is_none(),
+            "generic D has no PgShadow harness"
+        );
 
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
         // Lock acquire/release + RESET ROLE — all write/DDL verbs, run through the
         // generic MigrationBackend surface, recorded by the non-compio driver.
-        backend.acquire_project_lock(&cfg).await.expect("acquire lock");
+        backend
+            .acquire_project_lock(&cfg)
+            .await
+            .expect("acquire lock");
         backend.reset_role_best_effort().await;
-        backend.release_project_lock(&cfg).await.expect("release lock");
+        backend
+            .release_project_lock(&cfg)
+            .await
+            .expect("release lock");
 
         let log = rec.log.borrow();
         assert!(
@@ -591,9 +576,8 @@ mod recording_session_genericity {
     /// closure of the old `unreachable!("read verbs…")` gap.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
-        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
-            "mig_0001", "deadbeef",
-        )]);
+        let rec =
+            RecordingSession::with_canned_journal(vec![canned_journal_row("mig_0001", "deadbeef")]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
@@ -625,20 +609,27 @@ mod recording_session_genericity {
     /// driver — their decoded shapes matching what a live host driver produces.
     #[compio::test]
     async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
-        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
-            "mig_0001", "cafef00d",
-        )]);
+        let rec =
+            RecordingSession::with_canned_journal(vec![canned_journal_row("mig_0001", "cafef00d")]);
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
         let cfg = ExecutorConfig::new("prj_x", "proj_x");
 
         // 1. WRITE / DDL — journal bootstrap: CREATE SCHEMA + the append-only events
         //    table + the immutability trigger, all through `batch`.
-        backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .expect("ensure_journal DDL");
 
         // 2. WRITE — a journal INSERT (`record_started`) through `exec` with
         //    neutral Bind params. Drives the param-side seam on a write.
         crate::apply::journal::record_started(
-            &rec, &cfg, "mig_0001", "create_users", "cafef00d", "tester",
+            &rec,
+            &cfg,
+            "mig_0001",
+            "create_users",
+            "cafef00d",
+            "tester",
         )
         .await
         .expect("record_started journal write");
@@ -653,7 +644,10 @@ mod recording_session_genericity {
         // 4. READ (drift/catalog) — `snapshot_schema` issues its catalog introspection
         //    queries; the empty canned rows yield an empty-but-valid snapshot, proving
         //    the whole introspection decode chain runs over Row.
-        let snap = backend.snapshot_schema(&cfg).await.expect("snapshot_schema");
+        let snap = backend
+            .snapshot_schema(&cfg)
+            .await
+            .expect("snapshot_schema");
         assert!(
             snap.tables.is_empty(),
             "empty canned catalog → empty snapshot (decode chain ran clean)"
@@ -700,10 +694,9 @@ mod recording_session_genericity {
         );
         // The journal INSERT bound its fields as neutral Binds (param widening).
         assert!(
-            rec.binds
-                .borrow()
+            rec.binds.borrow().iter().any(|b| b
                 .iter()
-                .any(|b| b.iter().any(|v| matches!(v, Bind::Text(t) if t == "mig_0001"))),
+                .any(|v| matches!(v, Bind::Text(t) if t == "mig_0001"))),
             "journal INSERT bound the version as a neutral Bind::Text"
         );
     }

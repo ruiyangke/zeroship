@@ -282,8 +282,7 @@ mod tests {
 
     #[test]
     fn create_fts_table_unqualified_for_engine_main() {
-        let ddl =
-            build_create_fts_table_sql(None, "docs", &["body".to_string()]);
+        let ddl = build_create_fts_table_sql(None, "docs", &["body".to_string()]);
         assert_eq!(
             ddl,
             "CREATE VIRTUAL TABLE IF NOT EXISTS \"docs__fts\" \
@@ -357,11 +356,8 @@ mod tests {
 
     #[test]
     fn parse_columns_round_trips_create_text() {
-        let ddl = build_create_fts_table_sql(
-            None,
-            "posts",
-            &["body".to_string(), "title".to_string()],
-        );
+        let ddl =
+            build_create_fts_table_sql(None, "posts", &["body".to_string(), "title".to_string()]);
         assert_eq!(
             parse_fts5_columns(&ddl),
             Some(vec!["body".to_string(), "title".to_string()])

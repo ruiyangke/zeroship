@@ -114,7 +114,10 @@ pub enum AuthorRequest {
 /// (which `"`-doubling cannot neutralise) rather than silently emitting it.
 fn quote_ident(ident: &str) -> Result<String, AuthorError> {
     crate::render::dml::quote_ident_checked(ident).map_err(|e| {
-        AuthorError::Invalid(format!("unquotable identifier ({}): {:?}", e.reason, e.value))
+        AuthorError::Invalid(format!(
+            "unquotable identifier ({}): {:?}",
+            e.reason, e.value
+        ))
     })
 }
 
@@ -164,9 +167,9 @@ pub fn cap_ident_name(natural: &str) -> String {
     // truncated readable prefix. `<prefix>_<10 hex>` stays ≤ 63 bytes.
     let digest = Sha256::digest(natural.as_bytes());
     let suffix = hex::encode(&digest[..5]); // 10 hex chars
-    // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
-    // part on a char boundary so we never split a multi-byte UTF-8 sequence
-    // (identifiers are ASCII in practice, but be safe).
+                                            // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
+                                            // part on a char boundary so we never split a multi-byte UTF-8 sequence
+                                            // (identifiers are ASCII in practice, but be safe).
     let budget = PG_MAX_IDENT_BYTES - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
@@ -211,7 +214,13 @@ impl DeterministicAuthor {
     }
 
     /// Build a [`Migration`] from already-rendered `up`/`down` SQL + flags.
-    fn make(&self, name: &str, up: String, down: Option<String>, flags: MigrationFlags) -> Migration {
+    fn make(
+        &self,
+        name: &str,
+        up: String,
+        down: Option<String>,
+        flags: MigrationFlags,
+    ) -> Migration {
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
             up: &up,
             down: down.as_deref(),
@@ -471,7 +480,10 @@ mod tests {
         );
         assert!(m.up.contains("\"id\" bigint NOT NULL"), "up = {}", m.up);
         assert!(m.up.contains("\"note\" text"), "up = {}", m.up);
-        assert!(!m.up.contains("\"note\" text NOT NULL"), "nullable col must not be NOT NULL");
+        assert!(
+            !m.up.contains("\"note\" text NOT NULL"),
+            "nullable col must not be NOT NULL"
+        );
         // Additive ⇒ transactional, non-destructive, no approval.
         assert!(m.flags.transactional);
         assert!(!m.flags.destructive);
@@ -482,7 +494,10 @@ mod tests {
             Some("DROP TABLE \"proj_acme\".\"orders\"")
         );
         // Checksum matches the emitted migration's whole apply-relevant unit.
-        assert_eq!(m.checksum, Checksum::of(&crate::model::migration::ChecksumInput::from_migration(m)));
+        assert_eq!(
+            m.checksum,
+            Checksum::of(&crate::model::migration::ChecksumInput::from_migration(m))
+        );
     }
 
     #[test]
@@ -512,9 +527,20 @@ mod tests {
             concurrently: false,
         };
         let m = &det().author(&req).expect("author")[0];
-        assert!(m.up.starts_with("CREATE INDEX IF NOT EXISTS"), "up = {}", m.up);
-        assert!(!m.up.contains("CONCURRENTLY"), "plain index must not be concurrent");
-        assert!(m.up.contains("ON \"proj_acme\".\"users\" (\"email\")"), "up = {}", m.up);
+        assert!(
+            m.up.starts_with("CREATE INDEX IF NOT EXISTS"),
+            "up = {}",
+            m.up
+        );
+        assert!(
+            !m.up.contains("CONCURRENTLY"),
+            "plain index must not be concurrent"
+        );
+        assert!(
+            m.up.contains("ON \"proj_acme\".\"users\" (\"email\")"),
+            "up = {}",
+            m.up
+        );
         assert!(m.flags.transactional);
         assert!(!m.flags.destructive);
     }
@@ -534,13 +560,19 @@ mod tests {
             "up = {}",
             m.up
         );
-        assert!(!m.flags.transactional, "CONCURRENTLY must be non-transactional");
+        assert!(
+            !m.flags.transactional,
+            "CONCURRENTLY must be non-transactional"
+        );
         assert!(!m.flags.destructive);
         // Multi-column.
         assert!(m.up.contains("(\"email\", \"tenant\")"), "up = {}", m.up);
         // The down also drops concurrently + IF EXISTS.
         assert!(
-            m.down.as_deref().unwrap().contains("DROP INDEX CONCURRENTLY IF EXISTS"),
+            m.down
+                .as_deref()
+                .unwrap()
+                .contains("DROP INDEX CONCURRENTLY IF EXISTS"),
             "down = {:?}",
             m.down
         );
@@ -569,10 +601,16 @@ mod tests {
         let mut other_cols = long_cols;
         other_cols.push("d".repeat(20));
         let n2 = index_name(&long_table, &other_cols);
-        assert_ne!(n1, n2, "distinct column sets must yield distinct index names");
+        assert_ne!(
+            n1, n2,
+            "distinct column sets must yield distinct index names"
+        );
         assert!(n2.len() <= PG_MAX_IDENT_BYTES);
         // A valid Postgres identifier (starts with a letter, then [a-z0-9_]).
-        assert!(n1.starts_with("idx_"), "name should keep a readable prefix: {n1}");
+        assert!(
+            n1.starts_with("idx_"),
+            "name should keep a readable prefix: {n1}"
+        );
         assert!(
             n1.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
             "index name must be a bare identifier: {n1}"
@@ -603,7 +641,10 @@ mod tests {
         assert!(expected.len() <= PG_MAX_IDENT_BYTES);
         assert!(m.up.contains(&format!("\"{expected}\"")), "up = {}", m.up);
         assert!(
-            m.down.as_deref().unwrap().contains(&format!("\"{expected}\"")),
+            m.down
+                .as_deref()
+                .unwrap()
+                .contains(&format!("\"{expected}\"")),
             "down = {:?}",
             m.down
         );
@@ -632,21 +673,23 @@ mod tests {
         assert!(!m.flags.destructive);
         assert!(!m.flags.requires_approval);
         assert!(m.flags.transactional);
-        assert_eq!(m.checksum, Checksum::of(&crate::model::migration::ChecksumInput::from_migration(&m)));
+        assert_eq!(
+            m.checksum,
+            Checksum::of(&crate::model::migration::ChecksumInput::from_migration(&m))
+        );
     }
 
     #[test]
     fn raw_sql_author_flags_destructive_drop_requiring_approval() {
         let author = RawSqlAuthor::new("proj_acme", "app_acme");
         let m = author
-            .wrap(
-                "drop_legacy",
-                "DROP TABLE \"proj_acme\".\"legacy\"",
-                None,
-            )
+            .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
             .expect("wrap");
         // A DROP is destructive ⇒ requires approval (flags_for).
-        assert!(m.flags.destructive, "DROP TABLE must be flagged destructive");
+        assert!(
+            m.flags.destructive,
+            "DROP TABLE must be flagged destructive"
+        );
         assert!(m.flags.requires_approval);
     }
 
@@ -656,7 +699,10 @@ mod tests {
         let err = author
             .wrap("broken", "THIS IS NOT SQL ;;", None)
             .unwrap_err();
-        assert!(matches!(err, AuthorError::Guard(GuardError::Parse(_))), "got {err:?}");
+        assert!(
+            matches!(err, AuthorError::Guard(GuardError::Parse(_))),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -668,6 +714,9 @@ mod tests {
         let m = author
             .wrap("evil", "SELECT * FROM control.users", None)
             .expect("parseable, so wrap succeeds");
-        assert!(m.flags.requires_approval, "dangerous SQL is conservatively gated");
+        assert!(
+            m.flags.requires_approval,
+            "dangerous SQL is conservatively gated"
+        );
     }
 }

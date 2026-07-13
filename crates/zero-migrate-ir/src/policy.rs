@@ -129,7 +129,11 @@ impl DestructiveOps {
     /// The tighter (more restrictive) of two postures (operator-ceiling meet).
     #[must_use]
     pub const fn tightest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 
     /// True if `self` is looser (less restrictive) than the `ceiling`.

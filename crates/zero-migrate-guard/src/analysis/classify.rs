@@ -150,8 +150,7 @@ pub fn drop_index_targets(sql: &str) -> Result<Vec<DropIndexTarget>, ParseError>
     let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
     let mut out = Vec::new();
     for raw_stmt in &parsed.protobuf.stmts {
-        let Some(NodeEnum::DropStmt(drop)) =
-            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        let Some(NodeEnum::DropStmt(drop)) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
         else {
             continue;
         };
@@ -229,9 +228,15 @@ const fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
 /// reported `stmt_location`/`stmt_len` (byte offsets into the input). A zero
 /// `stmt_len` (single trailing statement) means "to end of input".
 fn raw_statement_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
-    let start = usize::try_from(raw_stmt.stmt_location).unwrap_or(0).min(sql.len());
+    let start = usize::try_from(raw_stmt.stmt_location)
+        .unwrap_or(0)
+        .min(sql.len());
     let len = usize::try_from(raw_stmt.stmt_len).unwrap_or(0);
-    let end = if len == 0 { sql.len() } else { (start + len).min(sql.len()) };
+    let end = if len == 0 {
+        sql.len()
+    } else {
+        (start + len).min(sql.len())
+    };
     sql.get(start..end).unwrap_or("").trim().to_string()
 }
 

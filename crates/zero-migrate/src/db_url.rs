@@ -29,9 +29,7 @@ pub fn is_sqlite_url(url: &str) -> bool {
     if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
         return false;
     }
-    if lower.starts_with("sqlite://")
-        || lower.starts_with("sqlite:")
-        || lower.starts_with("file:")
+    if lower.starts_with("sqlite://") || lower.starts_with("sqlite:") || lower.starts_with("file:")
     {
         return true;
     }

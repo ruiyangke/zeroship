@@ -392,9 +392,15 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 /// # Errors
 /// [`JournalError::Db`] on any DDL failure.
 #[cfg(pg_seam)]
-pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), JournalError> {
+pub async fn ensure_journal<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
-    let trg_fn = quote_ident(&format!("{}_schema_migrations_immutable", cfg.pg.meta_schema))?;
+    let trg_fn = quote_ident(&format!(
+        "{}_schema_migrations_immutable",
+        cfg.pg.meta_schema
+    ))?;
     let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
@@ -1016,7 +1022,12 @@ pub async fn record_started<D: SqlSession>(
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (version) DO NOTHING"
         ),
-        &[version.into(), name.into(), checksum.into(), applied_by.into()],
+        &[
+            version.into(),
+            name.into(),
+            checksum.into(),
+            applied_by.into(),
+        ],
     )
     .await?;
     Ok(())
@@ -1235,10 +1246,17 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
                          (deploy_id, pending_version, state, \"by\")
                      VALUES ($1, $2, 'in_progress', $3)"
                 ),
-                &[scope.deploy_id.into(), rec.pending_version.into(), rec.by.into()],
+                &[
+                    scope.deploy_id.into(),
+                    rec.pending_version.into(),
+                    rec.by.into(),
+                ],
             )
             .await?;
-        debug_assert_eq!(m, 1, "the in_progress recovery marker must insert exactly one row");
+        debug_assert_eq!(
+            m, 1,
+            "the in_progress recovery marker must insert exactly one row"
+        );
         Ok::<(), JournalError>(())
     }
     .await;
@@ -1536,7 +1554,10 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
 /// # Errors
 /// [`JournalError::Db`] on query failure.
 #[cfg(pg_seam)]
-pub async fn applied_count<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Result<i64, JournalError> {
+pub async fn applied_count<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+) -> Result<i64, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let row = conn
         .query_one(

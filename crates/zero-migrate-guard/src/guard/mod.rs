@@ -29,17 +29,15 @@ use pg_query::protobuf::{self, ObjectType};
 use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
-use crate::analysis::classify::{
-    classify, DataSecurityClass, DdlKind, ParseError, StatementClass,
-};
-use zero_migrate_ir::capability::{OperatorCapability, VendorCapabilities};
-use zero_migrate_ir::ir::{MigrationIr, Op};
-use zero_migrate_ir::migration::MigrationFlags;
-use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
-use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::dialect::SqlDialect;
+use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
 use denylist::rule;
 use serde_json::Value;
+use zero_migrate_ir::capability::{OperatorCapability, VendorCapabilities};
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::ir::{MigrationIr, Op};
+use zero_migrate_ir::migration::MigrationFlags;
+use zero_migrate_ir::policy::DestructiveOps;
+use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
 
 /// Stable data-security policy rule ids. These are policy decisions layered on
 /// the guard, not deny-list parser rules.
@@ -657,11 +655,7 @@ impl SqlGuard {
     /// best-effort parseable as SQL, so this intentionally reuses the existing body
     /// scanner: parse what can be parsed, inspect dynamic SQL literals, then token
     /// scan for deny-listed names.
-    pub fn check_raw_island_body_backstop(
-        &self,
-        body: &str,
-        raw: &str,
-    ) -> Result<(), GuardError> {
+    pub fn check_raw_island_body_backstop(&self, body: &str, raw: &str) -> Result<(), GuardError> {
         self.check_body_text(body, raw)
     }
 
@@ -1097,11 +1091,7 @@ impl SqlGuard {
     /// non-project schema is denied. `name` is the funcname/objname list of
     /// protobuf String nodes; an unqualified name (single part) is fine — it
     /// resolves under the pinned `search_path`.
-    fn check_func_def_target(
-        &self,
-        name: &[protobuf::Node],
-        raw: &str,
-    ) -> Result<(), GuardError> {
+    fn check_func_def_target(&self, name: &[protobuf::Node], raw: &str) -> Result<(), GuardError> {
         let parts: Vec<&str> = name
             .iter()
             .filter_map(|n| match n.node.as_ref() {
@@ -1416,9 +1406,7 @@ impl SqlGuard {
         //     uses an `%I` identifier template — any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
-        if let Some(schema) =
-            foreign_schema_literal_in_body(body, &self.cfg.schemas)
-        {
+        if let Some(schema) = foreign_schema_literal_in_body(body, &self.cfg.schemas) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -1799,7 +1787,13 @@ pub fn check_ir_data_security_policy(
         op: &'a Op,
         out: &mut Vec<(usize, &'a Op)>,
     ) {
-        if let Op::Dialectal { default, pg, sqlite, mysql } = op {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
             let own = match cfg.dialect() {
                 SqlDialect::Postgres => pg.as_deref(),
                 SqlDialect::Sqlite => sqlite.as_deref(),
@@ -1882,7 +1876,12 @@ pub fn check_ir_data_security_policy(
                 }
             }
             Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
-            Op::DropTable { table, schema, .. } | Op::DropPartition { name: table, schema, .. } => {
+            Op::DropTable { table, schema, .. }
+            | Op::DropPartition {
+                name: table,
+                schema,
+                ..
+            } => {
                 let key = table_key_for_policy(cfg, schema, table);
                 tables
                     .entry(key)
@@ -1899,7 +1898,9 @@ pub fn check_ir_data_security_policy(
                         table: table.clone(),
                     });
             }
-            Op::RenameTable { table, to, schema, .. } => {
+            Op::RenameTable {
+                table, to, schema, ..
+            } => {
                 let from = table_key_for_policy(cfg, schema, table);
                 let to_key = table_key_for_policy(cfg, schema, to);
                 if let Some(mut state) = tables.remove(&from) {
@@ -2913,7 +2914,10 @@ fn owned_by_schema(v: Option<&Value>) -> Option<String> {
 fn qualified_list_parts(v: Option<&Value>) -> Option<Vec<String>> {
     let arr = match v {
         Some(Value::Array(a)) => a.as_slice(),
-        Some(obj) => match obj.get("node").and_then(|n| n.get("List")).and_then(|l| l.get("items"))
+        Some(obj) => match obj
+            .get("node")
+            .and_then(|n| n.get("List"))
+            .and_then(|l| l.get("items"))
         {
             Some(Value::Array(a)) => a.as_slice(),
             _ => return None,
@@ -3075,9 +3079,15 @@ fn body_contains_superuser_role_escalation(lower: &str) -> bool {
 
 /// Slice the original source for a statement using its byte offsets.
 fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
-    let start = usize::try_from(raw_stmt.stmt_location).unwrap_or(0).min(sql.len());
+    let start = usize::try_from(raw_stmt.stmt_location)
+        .unwrap_or(0)
+        .min(sql.len());
     let len = usize::try_from(raw_stmt.stmt_len).unwrap_or(0);
-    let end = if len == 0 { sql.len() } else { (start + len).min(sql.len()) };
+    let end = if len == 0 {
+        sql.len()
+    } else {
+        (start + len).min(sql.len())
+    };
     sql.get(start..end).unwrap_or("").trim().to_string()
 }
 

@@ -131,10 +131,21 @@ pub fn op_created_table(op: &Op) -> Option<&str> {
 }
 
 fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
-    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
-        for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
-            .into_iter()
-            .flatten()
+    if let Op::Dialectal {
+        default,
+        pg,
+        sqlite,
+        mysql,
+    } = op
+    {
+        for leg in [
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for inner in leg {
                 collect_created_tables(inner, out);
@@ -161,12 +172,12 @@ fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
 /// checkable target rather than silently passing as an owned op.
 #[must_use]
 fn op_target_table(op: &Op) -> Option<&str> {
-        match op {
-            Op::CreateTable { name, .. } => Some(name),
-            Op::CreatePartition { of, .. }
-            | Op::AttachPartition { parent: of, .. }
-            | Op::DetachPartition { parent: of, .. }
-            | Op::DropPartition { parent: of, .. } => Some(of),
+    match op {
+        Op::CreateTable { name, .. } => Some(name),
+        Op::CreatePartition { of, .. }
+        | Op::AttachPartition { parent: of, .. }
+        | Op::DetachPartition { parent: of, .. }
+        | Op::DropPartition { parent: of, .. } => Some(of),
         Op::SetTableOptions { table, .. } => Some(table),
         // The ownership gate checks the EXISTING (old) table — a rename of a table
         // the deploying app does not own is refused on the source name.
@@ -226,10 +237,21 @@ fn op_target_table(op: &Op) -> Option<&str> {
 }
 
 fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
-    if let Op::Dialectal { default, pg, sqlite, mysql } = op {
-        for leg in [default.as_deref(), pg.as_deref(), sqlite.as_deref(), mysql.as_deref()]
-            .into_iter()
-            .flatten()
+    if let Op::Dialectal {
+        default,
+        pg,
+        sqlite,
+        mysql,
+    } = op
+    {
+        for leg in [
+            default.as_deref(),
+            pg.as_deref(),
+            sqlite.as_deref(),
+            mysql.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for inner in leg {
                 collect_target_tables(inner, out);
@@ -278,8 +300,10 @@ pub fn enforce_ir_ownership(
     // ALREADY has a different owner is still caught by the per-op check below
     // (we only insert when absent, so an existing owner is not silently
     // overwritten — a createTable colliding with another app's table is refused).
-    let mut owners: BTreeMap<&str, &str> =
-        registry.iter().map(|(t, o)| (t.as_str(), o.as_str())).collect();
+    let mut owners: BTreeMap<&str, &str> = registry
+        .iter()
+        .map(|(t, o)| (t.as_str(), o.as_str()))
+        .collect();
     for op in &ir.ops {
         let mut created = Vec::new();
         collect_created_tables(op, &mut created);

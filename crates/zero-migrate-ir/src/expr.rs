@@ -288,7 +288,12 @@ const fn is_false(b: &bool) -> bool {
 #[schemars(
     description = "The CLOSED expression AST node. Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize."
 )]
-#[serde(tag = "node", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "node",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum Expr {
     /// A column reference (`c("name")`). The name is a plain string, resolved
     /// against the enclosing op's single target table at apply/render time

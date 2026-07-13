@@ -22,12 +22,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zero_migrate::driver::{Bind, DbError, Row};
 use zero_migrate::driver::SqlSession;
+use zero_migrate::driver::{Bind, DbError, Row};
 
-use crate::marshal::{
-    bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest,
-};
+use crate::marshal::{bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsReply, JsRequest};
 
 /// The verb kinds crossing to the host (kept in sync with [`JsRequest::kind`]).
 pub const KIND_BATCH: &str = "batch";
@@ -100,7 +98,10 @@ impl<D: VerbDispatch> NapiHostSession<D> {
             binds: binds.iter().map(bind_to_cell).collect(),
             text_params: Vec::new(),
         };
-        self.dispatch.dispatch(req).await.map_err(|e| js_error_to_seam(&e))
+        self.dispatch
+            .dispatch(req)
+            .await
+            .map_err(|e| js_error_to_seam(&e))
     }
 
     /// Decode a reply's rows into neutral [`Row`]s.
@@ -134,11 +135,7 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
         Ok(affected(&reply))
     }
 
-    async fn exec_text(
-        &self,
-        sql: &str,
-        params: &[Option<String>],
-    ) -> Result<u64, DbError> {
+    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
         let _g = self.enter();
         // Text-format params: cross verbatim as `(string | null)[]` — NO
         // type coercion, NO explicit OID. `None → null → PG NULL`.
@@ -148,7 +145,11 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
             binds: Vec::new(),
             text_params: params.to_vec(),
         };
-        let reply = self.dispatch.dispatch(req).await.map_err(|e| js_error_to_seam(&e))?;
+        let reply = self
+            .dispatch
+            .dispatch(req)
+            .await
+            .map_err(|e| js_error_to_seam(&e))?;
         Ok(affected(&reply))
     }
 

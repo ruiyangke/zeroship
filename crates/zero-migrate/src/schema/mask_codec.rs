@@ -267,9 +267,7 @@ pub fn parse_mask_sentinel_with(
         }
     }
     let kind_str = kind_str.ok_or_else(|| {
-        MaskSentinelError::new(format!(
-            "mask_sentinel_malformed: missing kind= in {s:?}"
-        ))
+        MaskSentinelError::new(format!("mask_sentinel_malformed: missing kind= in {s:?}"))
     })?;
     let class_str = class_str.ok_or_else(|| {
         MaskSentinelError::new(format!(
@@ -314,7 +312,10 @@ mod tests {
         };
         let s = build_encryption_sentinel_with(legacy_enc, &meta);
         assert_eq!(s, "zsenc:randomised:default:string");
-        assert_eq!(parse_encryption_sentinel_with(legacy_enc, &s).unwrap(), meta);
+        assert_eq!(
+            parse_encryption_sentinel_with(legacy_enc, &s).unwrap(),
+            meta
+        );
         // The DEFAULT parser rejects the foreign prefix (fail-closed).
         assert!(parse_encryption_sentinel(&s).is_err());
 
@@ -374,13 +375,15 @@ mod tests {
 
     #[test]
     fn parse_mask_sentinel_rejects_unknown_kind() {
-        let err = parse_mask_sentinel("zero-migrate:mask:kind=blink_182,classification=pii").unwrap_err();
+        let err =
+            parse_mask_sentinel("zero-migrate:mask:kind=blink_182,classification=pii").unwrap_err();
         assert!(err.message().contains("mask_sentinel_malformed"));
     }
 
     #[test]
     fn parse_mask_sentinel_rejects_unknown_classification() {
-        let err = parse_mask_sentinel("zero-migrate:mask:kind=last4,classification=cosmic").unwrap_err();
+        let err =
+            parse_mask_sentinel("zero-migrate:mask:kind=last4,classification=cosmic").unwrap_err();
         assert!(err.message().contains("mask_sentinel_malformed"));
     }
 
@@ -393,7 +396,8 @@ mod tests {
     #[test]
     fn parse_mask_sentinel_rejects_trailing_junk() {
         let err =
-            parse_mask_sentinel("zero-migrate:mask:kind=last4,classification=pii,extra=bogus").unwrap_err();
+            parse_mask_sentinel("zero-migrate:mask:kind=last4,classification=pii,extra=bogus")
+                .unwrap_err();
         assert!(err.message().contains("mask_sentinel_malformed"));
     }
 
@@ -409,9 +413,17 @@ mod tests {
 
     #[test]
     fn build_encryption_sentinel_canonical_shape() {
-        let s = build_encryption_sentinel(&enc(EncryptionMode::Randomised, "default", WrappedType::String));
+        let s = build_encryption_sentinel(&enc(
+            EncryptionMode::Randomised,
+            "default",
+            WrappedType::String,
+        ));
         assert_eq!(s, "zero-migrate:enc:randomised:default:string");
-        let d = build_encryption_sentinel(&enc(EncryptionMode::Deterministic, "k7", WrappedType::Number));
+        let d = build_encryption_sentinel(&enc(
+            EncryptionMode::Deterministic,
+            "k7",
+            WrappedType::Number,
+        ));
         assert_eq!(d, "zero-migrate:enc:deterministic:k7:number");
     }
 
@@ -433,9 +445,13 @@ mod tests {
         // The SQLite-surviving inline form parses to the same meta as the bare
         // PG comment body — both introspectors feed one parser.
         let bare = parse_encryption_sentinel("zero-migrate:enc:randomised:default:string").unwrap();
-        let inline = parse_encryption_sentinel("/* zero-migrate:enc:randomised:default:string */").unwrap();
+        let inline =
+            parse_encryption_sentinel("/* zero-migrate:enc:randomised:default:string */").unwrap();
         assert_eq!(bare, inline);
-        assert_eq!(bare, enc(EncryptionMode::Randomised, "default", WrappedType::String));
+        assert_eq!(
+            bare,
+            enc(EncryptionMode::Randomised, "default", WrappedType::String)
+        );
     }
 
     #[test]
@@ -454,33 +470,43 @@ mod tests {
 
     #[test]
     fn parse_encryption_sentinel_rejects_wrong_arity() {
-        assert!(parse_encryption_sentinel("zero-migrate:enc:randomised:default")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
-        assert!(parse_encryption_sentinel("zero-migrate:enc:randomised:default:string:extra")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:randomised:default")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:randomised:default:string:extra")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_mode_and_wraps() {
-        assert!(parse_encryption_sentinel("zero-migrate:enc:rot13:default:string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
-        assert!(parse_encryption_sentinel("zero-migrate:enc:randomised:default:blob")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:rot13:default:string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:randomised:default:blob")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_empty_key_id() {
-        assert!(parse_encryption_sentinel("zero-migrate:enc:randomised::string")
-            .unwrap_err()
-            .message()
-            .contains("enc_sentinel_malformed"));
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:randomised::string")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
     }
 }

@@ -5,8 +5,8 @@
 //! id (`mig_…`) so concurrent multi-app authoring produces collision-free,
 //! time-ordered versions (sequential ints collide; raw timestamps skew).
 
-use sha2::{Digest, Sha256};
 use crate::id as typed_id;
+use sha2::{Digest, Sha256};
 
 use crate::precondition::PreconditionCheck;
 
@@ -35,7 +35,9 @@ pub enum IdError {
 /// Time-ordered (the `UUIDv7` timestamp is in the high bits, and base62 here
 /// preserves that order lexicographically), so string-sorting a set of
 /// versions yields apply order — see [`MigrationId::timestamp_ms`].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MigrationId(String);
 
 impl MigrationId {
@@ -99,9 +101,7 @@ impl MigrationId {
     pub fn parse(s: &str) -> Result<Self, IdError> {
         match typed_id::parse_with_prefix(s, MIGRATION_PREFIX) {
             Ok(_) => Ok(Self(s.to_string())),
-            Err(typed_id::ParseError::WrongPrefix { got, .. }) => {
-                Err(IdError::WrongPrefix { got })
-            }
+            Err(typed_id::ParseError::WrongPrefix { got, .. }) => Err(IdError::WrongPrefix { got }),
             Err(typed_id::ParseError::Malformed(msg)) => Err(IdError::Malformed(msg)),
         }
     }
@@ -534,8 +534,7 @@ fn fold_common(
         // infallibly serializable; if it ever did fail, an empty string would
         // silently collide two DISTINCT preconditions into the SAME checksum
         // (a tamper-evidence hole). Fail loud instead.
-        let json =
-            serde_json::to_string(pc).expect("PreconditionCheck is infallibly serializable");
+        let json = serde_json::to_string(pc).expect("PreconditionCheck is infallibly serializable");
         hasher.update((json.len() as u64).to_be_bytes());
         hasher.update(json.as_bytes());
     }
@@ -675,7 +674,10 @@ mod tests {
         // And the 2ms gap makes it strictly greater.
         assert!(b.timestamp_ms() > a.timestamp_ms());
         // String sort matches time order (the UUIDv7 + base62 invariant).
-        assert!(b.as_str() > a.as_str(), "string order must match time order");
+        assert!(
+            b.as_str() > a.as_str(),
+            "string order must match time order"
+        );
         assert!(b > a, "Ord must match time order");
     }
 
@@ -706,17 +708,74 @@ mod tests {
     fn checksum_is_deterministic_and_sensitive() {
         use crate::precondition::{Precondition, PreconditionCheck};
         let f = MigrationFlags::default();
-        let base = Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[]));
+        let base = Checksum::of(&input(
+            "CREATE TABLE t()",
+            Some("DROP TABLE t"),
+            &f,
+            "app_test",
+            &[],
+            &[],
+            &[],
+        ));
         // Deterministic.
-        assert_eq!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[])));
+        assert_eq!(
+            base,
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &[]
+            ))
+        );
         // Sensitive to `up`.
-        assert_ne!(base, Checksum::of(&input("CREATE TABLE u()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &[])));
+        assert_ne!(
+            base,
+            Checksum::of(&input(
+                "CREATE TABLE u()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &[]
+            ))
+        );
         // Sensitive to `down`.
-        assert_ne!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE u"), &f, "app_test", &[], &[], &[])));
+        assert_ne!(
+            base,
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE u"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &[]
+            ))
+        );
         // `Some("")` differs from `None` (empty down != irreversible).
         assert_ne!(
-            Checksum::of(&input("CREATE TABLE t()", Some(""), &f, "app_test", &[], &[], &[])),
-            Checksum::of(&input("CREATE TABLE t()", None, &f, "app_test", &[], &[], &[]))
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some(""),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &[]
+            )),
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                None,
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &[]
+            ))
         );
         // And no concatenation collision: up="ab",down="c" != up="a",down="bc".
         assert_ne!(
@@ -728,27 +787,86 @@ mod tests {
         let pre = [PreconditionCheck::halt(Precondition::TableExists {
             table: "users".to_string(),
         })];
-        assert_ne!(base, Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)));
+        assert_ne!(
+            base,
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre
+            ))
+        );
         // Deterministic with preconditions.
         assert_eq!(
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre))
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre
+            )),
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre
+            ))
         );
         // A DIFFERENT precondition => a different checksum.
         let pre2 = [PreconditionCheck::halt(Precondition::TableNotExists {
             table: "users".to_string(),
         })];
         assert_ne!(
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre2))
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre
+            )),
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre2
+            ))
         );
         // A different unmet policy on the SAME check => a different checksum.
         let pre_skip = [PreconditionCheck::skip(Precondition::TableExists {
             table: "users".to_string(),
         })];
         assert_ne!(
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre)),
-            Checksum::of(&input("CREATE TABLE t()", Some("DROP TABLE t"), &f, "app_test", &[], &[], &pre_skip))
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre
+            )),
+            Checksum::of(&input(
+                "CREATE TABLE t()",
+                Some("DROP TABLE t"),
+                &f,
+                "app_test",
+                &[],
+                &[],
+                &pre_skip
+            ))
         );
         // Hex sha256 = 64 chars.
         assert_eq!(base.as_str().len(), 64);
@@ -767,39 +885,94 @@ mod tests {
 
         // --- flags: each apply-relevant field flips the checksum ---
         // repeatable flip (re-phase: repeatables run after versioned migrations).
-        let f_rep = MigrationFlags { repeatable: true, ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_rep, owner, &[], &[], &[])), "repeatable flip must change the checksum");
+        let f_rep = MigrationFlags {
+            repeatable: true,
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_rep, owner, &[], &[], &[])),
+            "repeatable flip must change the checksum"
+        );
         // requires_approval clear (un-gate). Default is false; set true here so
         // "clearing" it (back to default) differs from the gated form.
-        let f_appr = MigrationFlags { requires_approval: true, ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_appr, owner, &[], &[], &[])), "requires_approval change must change the checksum");
+        let f_appr = MigrationFlags {
+            requires_approval: true,
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_appr, owner, &[], &[], &[])),
+            "requires_approval change must change the checksum"
+        );
         // timeout_ms change.
-        let f_to = MigrationFlags { timeout_ms: Some(60_000), ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_to, owner, &[], &[], &[])), "timeout_ms change must change the checksum");
+        let f_to = MigrationFlags {
+            timeout_ms: Some(60_000),
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_to, owner, &[], &[], &[])),
+            "timeout_ms change must change the checksum"
+        );
         // lock_timeout_ms change — the per-deploy maintenance-window override
         // folds into the tamper-evident checksum exactly like timeout_ms, so an
         // attacker cannot silently inflate the lock-acquisition budget past the
         // SHORT fail-fast default without tripping the drift check.
-        let f_lto = MigrationFlags { lock_timeout_ms: Some(30_000), ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_lto, owner, &[], &[], &[])), "lock_timeout_ms change must change the checksum");
+        let f_lto = MigrationFlags {
+            lock_timeout_ms: Some(30_000),
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_lto, owner, &[], &[], &[])),
+            "lock_timeout_ms change must change the checksum"
+        );
         // destructive flip.
-        let f_destr = MigrationFlags { destructive: true, ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_destr, owner, &[], &[], &[])), "destructive flip must change the checksum");
+        let f_destr = MigrationFlags {
+            destructive: true,
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_destr, owner, &[], &[], &[])),
+            "destructive flip must change the checksum"
+        );
         // online + phase.
-        let f_phase = MigrationFlags { online: true, phase: Some(OnlinePhase::Contract), ..MigrationFlags::default() };
-        assert_ne!(base, Checksum::of(&input(up, None, &f_phase, owner, &[], &[], &[])), "phase change must change the checksum");
+        let f_phase = MigrationFlags {
+            online: true,
+            phase: Some(OnlinePhase::Contract),
+            ..MigrationFlags::default()
+        };
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &f_phase, owner, &[], &[], &[])),
+            "phase change must change the checksum"
+        );
 
         // --- depends_on: an inserted dependency edge flips the checksum ---
         let deps = [MigrationId::generate()];
-        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, owner, &deps, &[], &[])), "depends_on edit must change the checksum");
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &base_flags, owner, &deps, &[], &[])),
+            "depends_on edit must change the checksum"
+        );
 
         // --- supersedes: an injected supersession flips the checksum ---
         let sup = MigrationId::generate();
         let sups = [sup];
-        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, owner, &[], &sups, &[])), "supersedes injection must change the checksum");
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &base_flags, owner, &[], &sups, &[])),
+            "supersedes injection must change the checksum"
+        );
 
         // --- owner_app: a re-owned migration flips the checksum ---
-        assert_ne!(base, Checksum::of(&input(up, None, &base_flags, "app_beta", &[], &[], &[])), "owner_app change must change the checksum");
+        assert_ne!(
+            base,
+            Checksum::of(&input(up, None, &base_flags, "app_beta", &[], &[], &[])),
+            "owner_app change must change the checksum"
+        );
 
         // depends_on and supersedes are domain-separated: dep=[x],sup=[] !=
         // dep=[],sup=[x] (no cross-list concatenation collision).
@@ -815,7 +988,10 @@ mod tests {
     /// `ChecksumInput::from_migration` re-derives exactly the stored checksum.
     #[test]
     fn from_migration_redrives_checksum() {
-        let f = MigrationFlags { destructive: true, ..MigrationFlags::default() };
+        let f = MigrationFlags {
+            destructive: true,
+            ..MigrationFlags::default()
+        };
         let up = "CREATE TABLE t()";
         let expected = Checksum::of(&input(up, Some("DROP TABLE t"), &f, "app_z", &[], &[], &[]));
         let m = Migration {

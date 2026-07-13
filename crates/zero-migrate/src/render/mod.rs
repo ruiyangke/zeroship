@@ -1,7 +1,7 @@
 pub mod declarative;
 pub mod dml;
-pub mod expand_contract;
 pub mod existence_probe;
+pub mod expand_contract;
 pub mod fold;
 pub mod lower;
 pub mod plan;

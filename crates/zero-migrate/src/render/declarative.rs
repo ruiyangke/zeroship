@@ -38,15 +38,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Deserialize;
 
+use crate::model::ir::{
+    ColType, EmptyContainerKind, IndexStorageParams, IrJsonValue, PartitionBoundValue,
+    PartitionBounds, PartitionSpec, TableRuntimeOptions,
+};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     IndexElementSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
-};
-use crate::IndexSortOrder;
-use crate::model::ir::{
-    ColType, EmptyContainerKind, IndexStorageParams, IrJsonValue, PartitionBoundValue,
-    PartitionBounds, PartitionSpec, TableRuntimeOptions,
 };
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -54,13 +53,18 @@ use crate::render::expand_contract::{
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::{SqlDialect, SqliteEmitScope};
+use crate::IndexSortOrder;
 
 fn mysql_quote_ident(ident: &str) -> String {
     crate::schema::query::mysql_quote_ident(ident)
 }
 
 fn mysql_qualified(schema: &str, object: &str) -> String {
-    format!("{}.{}", mysql_quote_ident(schema), mysql_quote_ident(object))
+    format!(
+        "{}.{}",
+        mysql_quote_ident(schema),
+        mysql_quote_ident(object)
+    )
 }
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
@@ -81,27 +85,162 @@ fn quote_ident(ident: &str) -> String {
 /// but is reserved) renders QUOTED in the catalog — and now here too — so the
 /// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
 const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
-    "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric",
-    "authorization", "between", "bigint", "binary", "bit", "boolean", "both", "case",
-    "cast", "char", "character", "check", "coalesce", "collate", "collation", "column",
-    "concurrently", "constraint", "create", "cross", "current_catalog", "current_date",
-    "current_role", "current_schema", "current_time", "current_timestamp",
-    "current_user", "dec", "decimal", "default", "deferrable", "desc", "distinct", "do",
-    "else", "end", "except", "exists", "extract", "false", "fetch", "float", "for",
-    "foreign", "freeze", "from", "full", "grant", "greatest", "group", "grouping",
-    "having", "ilike", "in", "initially", "inner", "inout", "int", "integer",
-    "intersect", "interval", "into", "is", "isnull", "join", "json_array",
-    "json_arrayagg", "json_object", "json_objectagg", "lateral", "leading", "least",
-    "left", "like", "limit", "localtime", "localtimestamp", "national", "natural",
-    "nchar", "none", "normalize", "not", "notnull", "null", "nullif", "numeric",
-    "offset", "on", "only", "or", "order", "out", "outer", "overlaps", "overlay",
-    "placing", "position", "precision", "primary", "real", "references", "returning",
-    "right", "row", "select", "session_user", "setof", "similar", "smallint", "some",
-    "substring", "symmetric", "system_user", "table", "tablesample", "then", "time",
-    "timestamp", "to", "trailing", "treat", "trim", "true", "union", "unique", "user",
-    "using", "values", "varchar", "variadic", "verbose", "when", "where", "window",
-    "with", "xmlattributes", "xmlconcat", "xmlelement", "xmlexists", "xmlforest",
-    "xmlnamespaces", "xmlparse", "xmlpi", "xmlroot", "xmlserialize", "xmltable",
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "between",
+    "bigint",
+    "binary",
+    "bit",
+    "boolean",
+    "both",
+    "case",
+    "cast",
+    "char",
+    "character",
+    "check",
+    "coalesce",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "dec",
+    "decimal",
+    "default",
+    "deferrable",
+    "desc",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "exists",
+    "extract",
+    "false",
+    "fetch",
+    "float",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "greatest",
+    "group",
+    "grouping",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "inout",
+    "int",
+    "integer",
+    "intersect",
+    "interval",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "json_array",
+    "json_arrayagg",
+    "json_object",
+    "json_objectagg",
+    "lateral",
+    "leading",
+    "least",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "national",
+    "natural",
+    "nchar",
+    "none",
+    "normalize",
+    "not",
+    "notnull",
+    "null",
+    "nullif",
+    "numeric",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "out",
+    "outer",
+    "overlaps",
+    "overlay",
+    "placing",
+    "position",
+    "precision",
+    "primary",
+    "real",
+    "references",
+    "returning",
+    "right",
+    "row",
+    "select",
+    "session_user",
+    "setof",
+    "similar",
+    "smallint",
+    "some",
+    "substring",
+    "symmetric",
+    "system_user",
+    "table",
+    "tablesample",
+    "then",
+    "time",
+    "timestamp",
+    "to",
+    "trailing",
+    "treat",
+    "trim",
+    "true",
+    "union",
+    "unique",
+    "user",
+    "using",
+    "values",
+    "varchar",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+    "xmlattributes",
+    "xmlconcat",
+    "xmlelement",
+    "xmlexists",
+    "xmlforest",
+    "xmlnamespaces",
+    "xmlparse",
+    "xmlpi",
+    "xmlroot",
+    "xmlserialize",
+    "xmltable",
 ];
 
 /// Quote an identifier ONLY when Postgres' own `quote_identifier` would — i.e.
@@ -120,7 +259,9 @@ const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
 pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
     let safe_bare = !ident.is_empty()
         && ident.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
-        && ident.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && ident
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !PG_NON_UNRESERVED_KEYWORDS.contains(&ident);
     if safe_bare {
         ident.to_string()
@@ -138,7 +279,10 @@ pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
 /// lower-emitted UNIQUE/PK `definition` cannot drift (an unconditional quote would
 /// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
 pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
-    cols.iter().map(|c| quote_ident_if_needed(c)).collect::<Vec<_>>().join(", ")
+    cols.iter()
+        .map(|c| quote_ident_if_needed(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// True iff `b` is a SQL identifier byte (so a whole-word scan does not match a
@@ -189,9 +333,7 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
@@ -330,9 +472,7 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
 }
 
 fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
-    if matches!(dialect, SqlDialect::Sqlite)
-        && sqlite_auto_increment_identity_pk(c, inline_pk)
-    {
+    if matches!(dialect, SqlDialect::Sqlite) && sqlite_auto_increment_identity_pk(c, inline_pk) {
         " PRIMARY KEY AUTOINCREMENT"
     } else if inline_pk {
         " PRIMARY KEY"
@@ -412,7 +552,10 @@ fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String
 }
 
 fn render_ident_list_pg(cols: &[String]) -> String {
-    cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+    cols.iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_partition_spec_pg(spec: &PartitionSpec) -> String {
@@ -429,7 +572,10 @@ fn normalize_timestamptz_bound_literal(value: &str) -> String {
     if out.len() >= 20
         && out.as_bytes().get(4) == Some(&b'-')
         && out.as_bytes().get(7) == Some(&b'-')
-        && out.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b' ')
+        && out
+            .as_bytes()
+            .get(10)
+            .is_some_and(|b| *b == b'T' || *b == b' ')
     {
         out = out.replace('T', " ");
         if let Some(stripped) = out.strip_suffix('Z') {
@@ -473,7 +619,10 @@ fn render_partition_bounds_pg(bounds: &PartitionBounds) -> String {
             render_partition_bound_values_pg(to),
         ),
         PartitionBounds::List { values } => {
-            format!("FOR VALUES IN ({})", render_partition_bound_values_pg(values))
+            format!(
+                "FOR VALUES IN ({})",
+                render_partition_bound_values_pg(values)
+            )
         }
         PartitionBounds::Hash { modulus, remainder } => {
             format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
@@ -543,7 +692,11 @@ fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
             // opclass/collation are PG-only (refused at validate before lower), so
             // the MySQL element render intentionally ignores them.
             IndexElementSnapshot::Column { name, order, .. } => {
-                format!("{}{}", mysql_quote_ident(name), render_index_order_suffix(*order))
+                format!(
+                    "{}{}",
+                    mysql_quote_ident(name),
+                    render_index_order_suffix(*order)
+                )
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
@@ -1051,10 +1204,7 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
             def.insert("enum".into(), serde_json::Value::Array(en.clone()));
         }
         if let Some(prefix) = &f.id_prefix {
-            def.insert(
-                "idPrefix".into(),
-                serde_json::Value::String(prefix.clone()),
-            );
+            def.insert("idPrefix".into(), serde_json::Value::String(prefix.clone()));
         }
         if f.fts {
             def.insert("fts".into(), serde_json::Value::Bool(true));
@@ -1077,11 +1227,16 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 /// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
 /// the inline sentinel emitter (`mode = randomised`, `keyId = default`,
 /// `wraps = string`).
-fn encryption_meta_for_field(def: &serde_json::Value) -> Option<crate::schema::diff::EncryptionMeta> {
+fn encryption_meta_for_field(
+    def: &serde_json::Value,
+) -> Option<crate::schema::diff::EncryptionMeta> {
     use crate::schema::descriptors::EncryptionMode;
     use crate::schema::diff::{EncryptionMeta, WrappedType};
     let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let mode_str = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
+    let mode_str = enc
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("randomised");
     let mode = match mode_str {
         "deterministic" => EncryptionMode::Deterministic,
         // `randomised` / `randomized` (US) / anything else → fail-safe default.
@@ -1097,7 +1252,11 @@ fn encryption_meta_for_field(def: &serde_json::Value) -> Option<crate::schema::d
         Some("bytes") => WrappedType::Bytes,
         _ => WrappedType::String,
     };
-    Some(EncryptionMeta { mode, key_id, wraps })
+    Some(EncryptionMeta {
+        mode,
+        key_id,
+        wraps,
+    })
 }
 
 /// The hidden `<col>_masked` sibling column a field's `.mask({...})` declaration
@@ -1124,7 +1283,9 @@ fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
     // A bare `literal` with no value is malformed — the SDK never emits it, and
     // the shared map would degrade it to TEXT. Keep the engine's explicit error.
     if f.ty == "literal" && f.literal_value.is_none() {
-        return Err(DeclarativeError::UnsupportedType { ty: "literal".into() });
+        return Err(DeclarativeError::UnsupportedType {
+            ty: "literal".into(),
+        });
     }
 
     // GAP (flagged): the shared kernel's `def_to_pg_type` has NO `bytes` arm — a
@@ -1368,7 +1529,9 @@ fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     } else if let Some(f) = v.as_f64() {
         Some(f.to_string())
     } else {
-        v.as_str().filter(|s| crate::model::ir::is_decimal_string(s)).map(str::to_string)
+        v.as_str()
+            .filter(|s| crate::model::ir::is_decimal_string(s))
+            .map(str::to_string)
     }
 }
 
@@ -1508,7 +1671,9 @@ fn generated_column_snapshot(
         ));
     }
     let expr = crate::render::dml::render_expr_inline(&generated.expr, dialect).map_err(|e| {
-        DeclarativeError::Invalid(format!("generated column expression is not renderable: {e}"))
+        DeclarativeError::Invalid(format!(
+            "generated column expression is not renderable: {e}"
+        ))
     })?;
     Ok(GeneratedColumnSnapshot {
         expr,
@@ -1524,18 +1689,20 @@ fn column_snapshot_for_field(
     let data_type = field_data_type(f)?;
     let sdk_def = field_to_sdk_def(f);
     let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
-    let comment_sentinel =
-        encryption_meta_for_field(&sdk_def).map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
-    let case_sensitive = if matches!(f.case_sensitive, Some(false)) && !matches!(dialect, SqlDialect::Mysql) {
-        Some(false)
-    } else {
-        None
-    };
-    let ddl_type_override = if matches!(f.case_sensitive, Some(false)) && matches!(dialect, SqlDialect::Mysql) {
-        Some("text".to_string())
-    } else {
-        None
-    };
+    let comment_sentinel = encryption_meta_for_field(&sdk_def)
+        .map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
+    let case_sensitive =
+        if matches!(f.case_sensitive, Some(false)) && !matches!(dialect, SqlDialect::Mysql) {
+            Some(false)
+        } else {
+            None
+        };
+    let ddl_type_override =
+        if matches!(f.case_sensitive, Some(false)) && matches!(dialect, SqlDialect::Mysql) {
+            Some("text".to_string())
+        } else {
+            None
+        };
     Ok(ColumnSnapshot {
         name: f.name.clone(),
         data_type,
@@ -1568,11 +1735,7 @@ fn column_snapshot_for_field(
 #[cfg(test)]
 fn system_field_columns() -> Vec<ColumnSnapshot> {
     let shape = crate::model::profile::PolicyProfile::confined().system_shape;
-    shape
-        .columns
-        .iter()
-        .map(system_column_snapshot)
-        .collect()
+    shape.columns.iter().map(system_column_snapshot).collect()
 }
 
 /// The columns the platform auto-indexes on every table. Mirrors
@@ -1610,11 +1773,7 @@ fn system_index_snapshots(
 }
 
 /// Stamp a resolved primary-key constraint and its implicit index onto a snapshot.
-pub(crate) fn push_primary_key_snapshot(
-    table: &str,
-    snap: &mut TableSnapshot,
-    columns: &[String],
-) {
+pub(crate) fn push_primary_key_snapshot(table: &str, snap: &mut TableSnapshot, columns: &[String]) {
     let name = format!("{table}_pkey");
     snap.constraints.push(ConstraintSnapshot {
         name: name.clone(),
@@ -1929,9 +2088,7 @@ impl SnapshotResolvedShape {
     fn confined(table: &str) -> Self {
         let shape = crate::model::profile::PolicyProfile::confined().system_shape;
         let primary_key = match shape.primary_key {
-            crate::model::profile::TablePrimaryKeyPolicy::ExplicitColumns(columns) => {
-                Some(columns)
-            }
+            crate::model::profile::TablePrimaryKeyPolicy::ExplicitColumns(columns) => Some(columns),
             crate::model::profile::TablePrimaryKeyPolicy::Author(_) => None,
         };
         Self {
@@ -2270,7 +2427,11 @@ fn desired_snapshot_second_pass(
         // byte-identical, the migrations either owner would author are identical
         // too, so the tiebreak is behaviourally inert beyond which app the
         // enforcement check names.
-        let owner = decls.iter().map(|(app, _)| app.clone()).min().unwrap_or_default();
+        let owner = decls
+            .iter()
+            .map(|(app, _)| app.clone())
+            .min()
+            .unwrap_or_default();
         // Take the first declaration's shape (all are identical); `swap_remove(0)`
         // avoids a panicking index and any extra clone.
         let (_, shape) = decls.swap_remove(0);
@@ -2283,7 +2444,10 @@ fn desired_snapshot_second_pass(
     // the snapshot.
     sqlite_schemas.retain(|table, _| tables.contains_key(table));
 
-    let snapshot = SchemaSnapshot { tables, ..Default::default() };
+    let snapshot = SchemaSnapshot {
+        tables,
+        ..Default::default()
+    };
     Ok(DesiredSchema {
         snapshot,
         ownership,
@@ -2394,7 +2558,12 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         initially_deferred,
         dialect,
     );
-    ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition, comment: None }
+    ConstraintSnapshot {
+        name,
+        kind: "FOREIGN KEY".to_string(),
+        definition,
+        comment: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2528,8 +2697,7 @@ fn fts_objects_pg(
         .map(|f| format!("coalesce({}, ''::text)", quote_ident(&f.name)))
         .collect::<Vec<_>>()
         .join(" || ' '::text || ");
-    let generation_expr =
-        format!("to_tsvector('{language}'::regconfig, {concat})");
+    let generation_expr = format!("to_tsvector('{language}'::regconfig, {concat})");
     let col = ColumnSnapshot {
         name: fts_column_name().to_string(),
         data_type: "tsvector".to_string(),
@@ -2593,10 +2761,7 @@ fn sqlite_fts_vtable_name(table: &str) -> String {
 /// the SOURCE columns (in declared order — NOT a `__fts` generated column, which
 /// has no SQLite spelling). The SQLite drift introspector parses the live vtable's
 /// `fts5(...)` column list back to this exact list, so a re-diff is zero-drift.
-fn fts_index_snapshot_sqlite(
-    table: &str,
-    fields: &[FieldDescriptor],
-) -> Option<IndexSnapshot> {
+fn fts_index_snapshot_sqlite(table: &str, fields: &[FieldDescriptor]) -> Option<IndexSnapshot> {
     let cols: Vec<String> = fields
         .iter()
         .filter(|f| f.fts)
@@ -2608,7 +2773,11 @@ fn fts_index_snapshot_sqlite(
     Some(IndexSnapshot {
         name: sqlite_fts_vtable_name(table),
         unique: false,
-        elements: cols.iter().cloned().map(IndexElementSnapshot::column).collect(),
+        elements: cols
+            .iter()
+            .cloned()
+            .map(IndexElementSnapshot::column)
+            .collect(),
         columns: cols,
         access_method: SQLITE_FTS5_ACCESS_METHOD.to_string(),
         predicate: None,
@@ -3224,9 +3393,9 @@ impl DeclarativePlan {
                 // referencing column it covers is indexed somewhere in the plan.
                 let fk_cols = crate::analysis::analyze::fk_columns_needing_index(&m.up);
                 if !fk_cols.is_empty() {
-                    let all_covered = fk_cols.iter().all(|col| {
-                        plan_indexed.iter().any(|i| i.eq_ignore_ascii_case(col))
-                    });
+                    let all_covered = fk_cols
+                        .iter()
+                        .all(|col| plan_indexed.iter().any(|i| i.eq_ignore_ascii_case(col)));
                     if all_covered {
                         advs.retain(|a| a.rule != crate::analysis::analyze::rule::FK_WITHOUT_INDEX);
                     }
@@ -3351,7 +3520,11 @@ impl DeclarativeAuthor {
 
     /// Render `<schema>.<object>`, both parts quoted.
     fn qualified(&self, object: &str) -> String {
-        format!("{}.{}", quote_ident(&self.project_schema), quote_ident(object))
+        format!(
+            "{}.{}",
+            quote_ident(&self.project_schema),
+            quote_ident(object)
+        )
     }
 
     /// Build a [`Migration`] from rendered `up`/`down` SQL + flags + deps.
@@ -3554,8 +3727,7 @@ impl DeclarativeAuthor {
                 let target = fk_target_table(&c.definition);
                 match target {
                     Some(tt)
-                        if live.tables.contains_key(&tt)
-                            || created_version.contains_key(&tt) =>
+                        if live.tables.contains_key(&tt) || created_version.contains_key(&tt) =>
                     {
                         if let Some(v) = created_version.get(&tt) {
                             depends_on.push(v.clone());
@@ -3588,7 +3760,10 @@ impl DeclarativeAuthor {
                 SqlDialect::Mysql => (
                     self.render_create_table_mysql_snapshot_statements(table, t, &inline_fks)
                         .join(";\n"),
-                    format!("DROP TABLE {}", mysql_qualified(&self.project_schema, table)),
+                    format!(
+                        "DROP TABLE {}",
+                        mysql_qualified(&self.project_schema, table)
+                    ),
                 ),
                 SqlDialect::Postgres => (
                     self.render_create_table(table, t, &inline_fks),
@@ -3623,11 +3798,7 @@ impl DeclarativeAuthor {
                 if is_sqlite && is_system_field_index(table, &idx.name) {
                     continue;
                 }
-                out.push(self.render_create_index(
-                    table,
-                    idx,
-                    vec![table_version.clone()],
-                ));
+                out.push(self.render_create_index(table, idx, vec![table_version.clone()]));
             }
         }
 
@@ -3769,11 +3940,9 @@ impl DeclarativeAuthor {
                             out.push(self.render_alter_column_type(table, c));
                         }
                         if lc.nullable != c.nullable {
-                            out.push(self.render_alter_column_nullability(
-                                table,
-                                &c.name,
-                                c.nullable,
-                            ));
+                            out.push(
+                                self.render_alter_column_nullability(table, &c.name, c.nullable),
+                            );
                         }
                     }
                 }
@@ -3995,9 +4164,7 @@ impl DeclarativeAuthor {
                     continue;
                 }
                 if let Some(target) = fk_target_table(&c.definition) {
-                    if !desired.tables.contains_key(&target)
-                        && !live.tables.contains_key(&target)
-                    {
+                    if !desired.tables.contains_key(&target) && !live.tables.contains_key(&target) {
                         return Err(DeclarativeError::CrossAppFkTargetMissing {
                             table: table.clone(),
                             target,
@@ -4064,7 +4231,11 @@ impl DeclarativeAuthor {
             let mut tos: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
             for h in hints {
                 // the multiset of `from`s per table must be duplicate-free.
-                if !froms.entry(h.table.as_str()).or_default().insert(h.from.as_str()) {
+                if !froms
+                    .entry(h.table.as_str())
+                    .or_default()
+                    .insert(h.from.as_str())
+                {
                     return Err(DeclarativeError::DuplicateRenameHint {
                         table: h.table.clone(),
                         column: h.from.clone(),
@@ -4072,7 +4243,11 @@ impl DeclarativeAuthor {
                     });
                 }
                 // …and so must the multiset of `to`s.
-                if !tos.entry(h.table.as_str()).or_default().insert(h.to.as_str()) {
+                if !tos
+                    .entry(h.table.as_str())
+                    .or_default()
+                    .insert(h.to.as_str())
+                {
                     return Err(DeclarativeError::DuplicateRenameHint {
                         table: h.table.clone(),
                         column: h.to.clone(),
@@ -4115,8 +4290,7 @@ impl DeclarativeAuthor {
             // The named table must exist on BOTH sides (a rename is in-place on an
             // existing table). If it is missing on either side the hint cannot be
             // a drop+add pair → unmatched.
-            let (Some(lt), Some(dt)) =
-                (live.tables.get(&h.table), desired.tables.get(&h.table))
+            let (Some(lt), Some(dt)) = (live.tables.get(&h.table), desired.tables.get(&h.table))
             else {
                 return Err(DeclarativeError::RenameHintUnmatched {
                     table: h.table.clone(),
@@ -4227,7 +4401,9 @@ impl DeclarativeAuthor {
         table: &str,
         schema: &serde_json::Value,
     ) -> Result<String, DeclarativeError> {
-        Ok(self.render_create_table_sqlite_value_statements(table, schema)?.join(";\n"))
+        Ok(self
+            .render_create_table_sqlite_value_statements(table, schema)?
+            .join(";\n"))
     }
 
     /// **Structural** form of [`render_create_table_sqlite_value`]: the SQLite
@@ -4384,10 +4560,8 @@ impl DeclarativeAuthor {
         //
         //     "Dropped" = a column present in LIVE, absent from DESIRED, and NOT a
         //     rename `from` (a rename is its own rebuild trigger, handled in step 1).
-        let desired_names: BTreeSet<&str> =
-            dt.columns.iter().map(|c| c.name.as_str()).collect();
-        let renamed_from: BTreeSet<&str> =
-            table_renames.iter().map(|r| r.from.as_str()).collect();
+        let desired_names: BTreeSet<&str> = dt.columns.iter().map(|c| c.name.as_str()).collect();
+        let renamed_from: BTreeSet<&str> = table_renames.iter().map(|r| r.from.as_str()).collect();
         for lc in &lt.columns {
             let col = lc.name.as_str();
             if desired_names.contains(col) || renamed_from.contains(col) {
@@ -4562,10 +4736,8 @@ impl DeclarativeAuthor {
         // under a new name, it is not a drop). The executor uses this to SKIP
         // replaying any captured dependent (index / trigger) that references a
         // dropped column — such a dependent is dropped WITH the column.
-        let desired_names: BTreeSet<&str> =
-            dt.columns.iter().map(|c| c.name.as_str()).collect();
-        let rename_from: BTreeSet<&str> =
-            table_renames.iter().map(|r| r.from.as_str()).collect();
+        let desired_names: BTreeSet<&str> = dt.columns.iter().map(|c| c.name.as_str()).collect();
+        let rename_from: BTreeSet<&str> = table_renames.iter().map(|r| r.from.as_str()).collect();
         let dropped_columns: Vec<String> = lt
             .columns
             .iter()
@@ -4762,77 +4934,75 @@ impl DeclarativeAuthor {
         // We require the live `from` column to be present in `live_snapshot` (checked
         // above) so the value-copy mapping is authoritative; the SDK `Value` may then be
         // sourced from EITHER shape. If it carries NEITHER `from` nor `to`, fail closed.
-        let desired_schema_value = if let Some(v) =
-            rename_sdk_schema_field(live_sqlite_schema, from, to)
-        {
-            // (1) pre-rename Value → rename the field key to the post-rename shape.
-            v
-        } else if let Some(to_def) = live_sqlite_schema
-            .as_object()
-            .and_then(|o| o.get(to))
-        {
-            // (2) post-rename desired Value (already keyed `to`) → use as-is, BUT
-            // ONLY after asserting its column AFFINITY equals the live `from` column's
-            // The new-table CREATE renders from THIS descriptor-sourced
-            // `to` def, while the value-copy carries the old `from` bytes across
-            // un-transformed; a `rename` preserves facets by contract, so a descriptor
-            // whose `to` field diverges in affinity from the live `from` (e.g. a rename
-            // bundled with an encryption/affinity change in the SAME descriptor) would
-            // silently rebuild the column under a different affinity. Enforce the SAME
-            // equality the snapshot-path `RenameHintTypeMismatch` guard enforces
-            // (SQLite collapses `data_type` to affinity), failing closed on divergence
-            // instead of emitting a silent shape skew.
-            use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
-            let Some(live_from) = live_snapshot.columns.iter().find(|c| c.name == from) else {
-                // `found` above already proved `from` is present; defensive.
-                return Err(DeclarativeError::Invalid(format!(
-                    "renameColumn: live table '{table}' lost column '{from}' between the \
+        let desired_schema_value =
+            if let Some(v) = rename_sdk_schema_field(live_sqlite_schema, from, to) {
+                // (1) pre-rename Value → rename the field key to the post-rename shape.
+                v
+            } else if let Some(to_def) = live_sqlite_schema.as_object().and_then(|o| o.get(to)) {
+                // (2) post-rename desired Value (already keyed `to`) → use as-is, BUT
+                // ONLY after asserting its column AFFINITY equals the live `from` column's
+                // The new-table CREATE renders from THIS descriptor-sourced
+                // `to` def, while the value-copy carries the old `from` bytes across
+                // un-transformed; a `rename` preserves facets by contract, so a descriptor
+                // whose `to` field diverges in affinity from the live `from` (e.g. a rename
+                // bundled with an encryption/affinity change in the SAME descriptor) would
+                // silently rebuild the column under a different affinity. Enforce the SAME
+                // equality the snapshot-path `RenameHintTypeMismatch` guard enforces
+                // (SQLite collapses `data_type` to affinity), failing closed on divergence
+                // instead of emitting a silent shape skew.
+                use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
+                let Some(live_from) = live_snapshot.columns.iter().find(|c| c.name == from) else {
+                    // `found` above already proved `from` is present; defensive.
+                    return Err(DeclarativeError::Invalid(format!(
+                        "renameColumn: live table '{table}' lost column '{from}' between the \
                      rename-field check and the affinity guard (internal invariant)"
-                )));
-            };
-            let to_affinity =
-                sqlite_canonical_type(&def_to_column_type_for_dialect(to_def, SqlDialect::Postgres));
-            let from_affinity = sqlite_canonical_type(&live_from.data_type);
-            if to_affinity != from_affinity {
-                return Err(DeclarativeError::RenameHintTypeMismatch {
-                    table: table.to_string(),
-                    from: from.to_string(),
-                    to: to.to_string(),
-                    from_type: live_from.data_type.clone(),
-                    to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
-                });
-            }
-            // TIGHTEN past affinity to the FULL data-transforming facet
-            // set. Affinity equality alone is too weak: a same-affinity facet change on
-            // the renamed column (e.g. add `encrypted`/`mask`/`default`/`enum`/`check`,
-            // all of which a `string`/`number` column keeps its TEXT/NUMERIC affinity
-            // under) is still rendered into the rebuilt CREATE while the value-copy
-            // carries the live `from` bytes VERBATIM. The live catalog read does NOT
-            // recover the `from` column's SDK facets (`ColumnSnapshot`'s
-            // encryption/mask/default are emission-only and always `None` from
-            // introspection — see drift.rs), so on THIS post-rename-descriptor path we
-            // cannot prove the live `from` already carried the facet. Fail CLOSED if the
-            // descriptor `to` def declares ANY such facet, rather than silently rebuild a
-            // changed-facet column over un-transformed bytes (e.g. an `encrypted` CREATE
-            // over plaintext, or an `enum`/`check` the old values may violate). The
-            // pre-rename-descriptor path (branch 1) keeps the `from` facets and is
-            // unaffected. A plain rename (no facet on `to_def`) passes unchanged.
-            if let Some(facet) = data_transforming_facet(to_def) {
-                return Err(DeclarativeError::RenameHintFacetMismatch {
-                    table: table.to_string(),
-                    from: from.to_string(),
-                    to: to.to_string(),
-                    facet,
-                });
-            }
-            live_sqlite_schema.clone()
-        } else {
-            return Err(DeclarativeError::Invalid(format!(
-                "renameColumn: SDK schema for '{table}' has neither the pre-rename field \
+                    )));
+                };
+                let to_affinity = sqlite_canonical_type(&def_to_column_type_for_dialect(
+                    to_def,
+                    SqlDialect::Postgres,
+                ));
+                let from_affinity = sqlite_canonical_type(&live_from.data_type);
+                if to_affinity != from_affinity {
+                    return Err(DeclarativeError::RenameHintTypeMismatch {
+                        table: table.to_string(),
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        from_type: live_from.data_type.clone(),
+                        to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
+                    });
+                }
+                // TIGHTEN past affinity to the FULL data-transforming facet
+                // set. Affinity equality alone is too weak: a same-affinity facet change on
+                // the renamed column (e.g. add `encrypted`/`mask`/`default`/`enum`/`check`,
+                // all of which a `string`/`number` column keeps its TEXT/NUMERIC affinity
+                // under) is still rendered into the rebuilt CREATE while the value-copy
+                // carries the live `from` bytes VERBATIM. The live catalog read does NOT
+                // recover the `from` column's SDK facets (`ColumnSnapshot`'s
+                // encryption/mask/default are emission-only and always `None` from
+                // introspection — see drift.rs), so on THIS post-rename-descriptor path we
+                // cannot prove the live `from` already carried the facet. Fail CLOSED if the
+                // descriptor `to` def declares ANY such facet, rather than silently rebuild a
+                // changed-facet column over un-transformed bytes (e.g. an `encrypted` CREATE
+                // over plaintext, or an `enum`/`check` the old values may violate). The
+                // pre-rename-descriptor path (branch 1) keeps the `from` facets and is
+                // unaffected. A plain rename (no facet on `to_def`) passes unchanged.
+                if let Some(facet) = data_transforming_facet(to_def) {
+                    return Err(DeclarativeError::RenameHintFacetMismatch {
+                        table: table.to_string(),
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        facet,
+                    });
+                }
+                live_sqlite_schema.clone()
+            } else {
+                return Err(DeclarativeError::Invalid(format!(
+                    "renameColumn: SDK schema for '{table}' has neither the pre-rename field \
                  '{from}' nor the post-rename field '{to}' (cannot author the post-rename \
                  CREATE) — refusing to emit a rebuild from a partial view"
-            )));
-        };
+                )));
+            };
 
         // ---- assemble the one-table DesiredSchema + live snapshot ----
         // **Cross-app guard correctness.** The diff's `enforce_ownership`
@@ -4851,14 +5021,20 @@ impl DeclarativeAuthor {
         let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         sqlite_schemas.insert(table.to_string(), desired_schema_value);
         let desired = DesiredSchema {
-            snapshot: SchemaSnapshot { tables: desired_tables, ..Default::default() },
+            snapshot: SchemaSnapshot {
+                tables: desired_tables,
+                ..Default::default()
+            },
             ownership,
             sqlite_schemas,
         };
 
         let mut live_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
         live_tables.insert(table.to_string(), live_snapshot.clone());
-        let live = SchemaSnapshot { tables: live_tables, ..Default::default() };
+        let live = SchemaSnapshot {
+            tables: live_tables,
+            ..Default::default()
+        };
         let mut live_ownership: HashMap<String, String> = HashMap::new();
         live_ownership.insert(table.to_string(), live_owner.to_string());
 
@@ -4868,7 +5044,12 @@ impl DeclarativeAuthor {
             to: to.to_string(),
         };
 
-        let plan = self.diff(&desired, &live, &live_ownership, std::slice::from_ref(&hint))?;
+        let plan = self.diff(
+            &desired,
+            &live,
+            &live_ownership,
+            std::slice::from_ref(&hint),
+        )?;
         // A rename on SQLite is ALWAYS a rebuild (no native online rename); the diff
         // emits exactly one, and NO PG expand-contract.
         let mut rebuilds = plan.rebuilds;
@@ -4893,7 +5074,8 @@ impl DeclarativeAuthor {
         // multi-statement `up` byte-for-byte. The `diff` path takes this joined
         // form; the IR lower path takes the structural list directly (so a
         // string-literal DEFAULT carrying an interior `;\n` is never re-split).
-        self.render_create_table_statements(table, t, inline_fks).join(";\n")
+        self.render_create_table_statements(table, t, inline_fks)
+            .join(";\n")
     }
 
     /// **Structural** form of [`render_create_table`]: the CREATE statement plus
@@ -4959,7 +5141,11 @@ impl DeclarativeAuthor {
                 || c.kind == "UNIQUE"
                 || c.kind == "EXCLUDE"
             {
-                parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
+                parts.push(format!(
+                    "CONSTRAINT {} {}",
+                    quote_ident(&c.name),
+                    c.definition
+                ));
             }
         }
         let partition = t
@@ -5036,7 +5222,11 @@ impl DeclarativeAuthor {
                 || c.kind == "UNIQUE"
                 || c.kind == "FOREIGN KEY"
             {
-                parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
+                parts.push(format!(
+                    "CONSTRAINT {} {}",
+                    quote_ident(&c.name),
+                    c.definition
+                ));
             }
         }
         let mut statements = vec![format!(
@@ -5075,9 +5265,8 @@ impl DeclarativeAuthor {
             if enum_type.is_some() {
                 consumed_enum_checks.insert(enum_check_name);
             }
-            let ty = enum_type.unwrap_or_else(|| {
-                column_type_for_render(c, SqlDialect::Mysql, inline_pk)
-            });
+            let ty = enum_type
+                .unwrap_or_else(|| column_type_for_render(c, SqlDialect::Mysql, inline_pk));
             let pk = primary_key_clause(c, SqlDialect::Mysql, inline_pk);
             let null = null_clause(c, SqlDialect::Mysql, inline_pk);
             let identity = mysql_identity_clause(c);
@@ -5189,11 +5378,7 @@ impl DeclarativeAuthor {
             SqlDialect::Sqlite => quote_ident(table),
             SqlDialect::Mysql => mysql_qualified(&self.project_schema, table),
         };
-        let up = format!(
-            "ALTER TABLE {} ADD {}",
-            table_ref,
-            self.fk_clause(fk)
-        );
+        let up = format!("ALTER TABLE {} ADD {}", table_ref, self.fk_clause(fk));
         let down = match self.dialect {
             SqlDialect::Mysql => format!(
                 "ALTER TABLE {} DROP FOREIGN KEY {}",
@@ -5298,12 +5483,7 @@ impl DeclarativeAuthor {
     ///   row is NULL, so it is GATED (`destructive` is false — no data is lost —
     ///   but `requires_approval` is true; a later analyzer-lint plan will suggest
     ///   the `CHECK … NOT VALID` → `VALIDATE` online path). `down` relaxes it.
-    fn render_alter_column_nullability(
-        &self,
-        table: &str,
-        col: &str,
-        nullable: bool,
-    ) -> Migration {
+    fn render_alter_column_nullability(&self, table: &str, col: &str, nullable: bool) -> Migration {
         let (verb, reverse, flags) = if nullable {
             // DROP NOT NULL — safe, ungated; down re-adds NOT NULL.
             ("DROP NOT NULL", "SET NOT NULL", MigrationFlags::default())
@@ -5436,12 +5616,7 @@ impl DeclarativeAuthor {
         )
     }
 
-    fn render_create_partition(
-        &self,
-        name: &str,
-        of: &str,
-        bounds: &PartitionBounds,
-    ) -> Migration {
+    fn render_create_partition(&self, name: &str, of: &str, bounds: &PartitionBounds) -> Migration {
         let up = format!(
             "CREATE TABLE {} PARTITION OF {} {}",
             self.qualified(name),
@@ -5484,12 +5659,7 @@ impl DeclarativeAuthor {
         )
     }
 
-    fn render_detach_partition(
-        &self,
-        parent: &str,
-        name: &str,
-        concurrently: bool,
-    ) -> Migration {
+    fn render_detach_partition(&self, parent: &str, name: &str, concurrently: bool) -> Migration {
         let concurrently = if concurrently { " CONCURRENTLY" } else { "" };
         let up = format!(
             "ALTER TABLE {} DETACH PARTITION {}{}",
@@ -5532,7 +5702,10 @@ impl DeclarativeAuthor {
             &format!("rename_table_{table}_to_{to}"),
             up,
             Some(down),
-            MigrationFlags { requires_approval: true, ..MigrationFlags::default() },
+            MigrationFlags {
+                requires_approval: true,
+                ..MigrationFlags::default()
+            },
             Vec::new(),
         )
     }
@@ -5648,12 +5821,16 @@ impl DeclarativeAuthor {
                 // value emitter, whose author-facing contract rightly rejects
                 // reserved system-field names.
                 let _ = sqlite_schema;
-                let statements = self.render_create_table_sqlite_snapshot_statements(table, snapshot);
+                let statements =
+                    self.render_create_table_sqlite_snapshot_statements(table, snapshot);
                 (statements, format!("DROP TABLE {}", quote_ident(table)))
             }
             SqlDialect::Mysql => (
                 self.render_create_table_mysql_snapshot_statements(table, snapshot, &inline_fks),
-                format!("DROP TABLE {}", mysql_qualified(&self.project_schema, table)),
+                format!(
+                    "DROP TABLE {}",
+                    mysql_qualified(&self.project_schema, table)
+                ),
             ),
             SqlDialect::Postgres => (
                 self.render_create_table_statements(table, snapshot, &inline_fks),
@@ -5861,7 +6038,10 @@ impl DeclarativeAuthor {
             quote_ident(name),
         );
         let flags = if gated {
-            MigrationFlags { requires_approval: true, ..MigrationFlags::default() }
+            MigrationFlags {
+                requires_approval: true,
+                ..MigrationFlags::default()
+            }
         } else {
             MigrationFlags::default()
         };
@@ -5911,7 +6091,10 @@ impl DeclarativeAuthor {
             self.qualified(table),
             quote_ident(name),
         );
-        let flags = MigrationFlags { requires_approval: true, ..MigrationFlags::default() };
+        let flags = MigrationFlags {
+            requires_approval: true,
+            ..MigrationFlags::default()
+        };
         single_stmt(self.make(
             &format!("validate_constraint_{table}_{name}"),
             up,
@@ -5949,7 +6132,10 @@ impl DeclarativeAuthor {
         down: Option<String>,
     ) -> LoweredUnit {
         let up = statements.join(";\n");
-        (self.make(name, up, down, MigrationFlags::default(), Vec::new()), statements)
+        (
+            self.make(name, up, down, MigrationFlags::default(), Vec::new()),
+            statements,
+        )
     }
 
     /// render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
@@ -6408,8 +6594,16 @@ impl DdlEmitter for SqliteEmitter {
         // metadata rewrite). Both names are UNqualified `main` names — a
         // schema-qualified ref would resolve to no table. `down` is the inverse.
         (
-            format!("ALTER TABLE {} RENAME TO {}", quote_ident(table), quote_ident(to)),
-            format!("ALTER TABLE {} RENAME TO {}", quote_ident(to), quote_ident(table)),
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                quote_ident(table),
+                quote_ident(to)
+            ),
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                quote_ident(to),
+                quote_ident(table)
+            ),
         )
     }
 
@@ -6744,12 +6938,21 @@ fn fk_definition_column_group(definition: &str, offset: usize) -> Option<(Vec<St
 }
 
 fn fk_ddl_local_cols(cols: &[String]) -> String {
-    cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+    cols.iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn fk_ddl_referenced_cols(cols: &[String]) -> String {
     cols.iter()
-        .map(|c| if c == "id" { "id".to_string() } else { quote_ident(c) })
+        .map(|c| {
+            if c == "id" {
+                "id".to_string()
+            } else {
+                quote_ident(c)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -6811,10 +7014,15 @@ fn fk_referenced_columns(definition: &str) -> Vec<String> {
     };
     let offset = definition.len() - after_ref.1.len();
     fk_definition_column_group(definition, offset)
-        .map(|(cols, _)| if cols.is_empty() { vec!["id".to_string()] } else { cols })
+        .map(|(cols, _)| {
+            if cols.is_empty() {
+                vec!["id".to_string()]
+            } else {
+                cols
+            }
+        })
         .unwrap_or_else(|| vec!["id".to_string()])
 }
-
 
 #[cfg(test)]
 mod snapshot_builder_refactor_safety_tests {
@@ -6911,12 +7119,18 @@ mod snapshot_builder_refactor_safety_tests {
         let pg = build_table_snapshot("app", &d, SqlDialect::Postgres).unwrap();
         let sq = build_table_snapshot("app", &d, SqlDialect::Sqlite).unwrap();
         std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens/refactor_safety_pg.txt"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/goldens/refactor_safety_pg.txt"
+            ),
             format!("{pg:#?}\n"),
         )
         .unwrap();
         std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens/refactor_safety_sqlite.txt"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/goldens/refactor_safety_sqlite.txt"
+            ),
             format!("{sq:#?}\n"),
         )
         .unwrap();
@@ -6944,7 +7158,11 @@ mod snapshot_builder_refactor_safety_tests {
     /// `ir_column_to_field` produces for an `id`-named uuid column under the id
     /// remap (`ty = "id"`). The op.* `t.id()` synth default maps to `default: None`,
     /// so a `Some(default)` here models the dangerous `id: t.uuid().default(<lit>)`.
-    fn id_descriptor(required: bool, unique: bool, default: Option<serde_json::Value>) -> CollectionDescriptor {
+    fn id_descriptor(
+        required: bool,
+        unique: bool,
+        default: Option<serde_json::Value>,
+    ) -> CollectionDescriptor {
         CollectionDescriptor {
             name: "posts".into(),
             owner_app: "app_test".into(),
@@ -7008,7 +7226,10 @@ mod snapshot_builder_refactor_safety_tests {
         let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
             .expect("a t.id() with the descriptor's default required:false still folds");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
-        assert_eq!(id_cols, 1, "exactly one (system) id column — nullability is not a drop");
+        assert_eq!(
+            id_cols, 1,
+            "exactly one (system) id column — nullability is not a drop"
+        );
     }
 
     /// **the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
@@ -7022,7 +7243,10 @@ mod snapshot_builder_refactor_safety_tests {
         let snap = build_table_snapshot("app", &d, SqlDialect::Postgres)
             .expect("a clean t.id() folds cleanly");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
-        assert_eq!(id_cols, 1, "exactly one (system) id column — the field folds, not duplicates");
+        assert_eq!(
+            id_cols, 1,
+            "exactly one (system) id column — the field folds, not duplicates"
+        );
     }
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
@@ -7132,8 +7356,11 @@ mod snapshot_builder_refactor_safety_tests {
             None
         );
 
-        let sql =
-            DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(
+            &d.name,
+            &snap,
+            &[],
+        );
         assert!(
             !sql.contains("\"payload\" jsonb NOT NULL DEFAULT"),
             "platform-exact json column without explicit default must not render DEFAULT:\n{sql}"
@@ -7193,8 +7420,11 @@ mod snapshot_builder_refactor_safety_tests {
             "explicit-default arm must remain unchanged"
         );
 
-        let sql =
-            DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(
+            &d.name,
+            &snap,
+            &[],
+        );
         assert!(
             sql.contains("\"settings\" jsonb NOT NULL DEFAULT '{}'::jsonb"),
             "platform-exact explicit json default must still render:\n{sql}"
@@ -7216,7 +7446,10 @@ mod system_field_names_tie_tests {
     fn system_field_names_match_system_field_columns() {
         let from_columns: Vec<String> =
             system_field_columns().into_iter().map(|c| c.name).collect();
-        let expected: Vec<String> = SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
+        let expected: Vec<String> = SYSTEM_FIELD_NAMES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         assert_eq!(
             from_columns, expected,
             "SYSTEM_FIELD_NAMES must mirror system_field_columns() exactly (single source)"
@@ -7305,7 +7538,10 @@ mod advisory_seam_tests {
         assert!(mig.up.contains("DROP TABLE"));
         assert!(advs.iter().any(|a| a.rule == rule::DESTRUCTIVE_DROP));
         // The suggestion points at the safer path.
-        let a = advs.iter().find(|a| a.rule == rule::DESTRUCTIVE_DROP).unwrap();
+        let a = advs
+            .iter()
+            .find(|a| a.rule == rule::DESTRUCTIVE_DROP)
+            .unwrap();
         assert!(a
             .suggestion
             .as_deref()
@@ -7344,11 +7580,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
         };
-        let all: Vec<_> = plan
-            .advisories()
-            .into_iter()
-            .flat_map(|(_, a)| a)
-            .collect();
+        let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
             !all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
             "a covering index in a separate migration of the same plan must suppress \
@@ -7367,11 +7599,7 @@ mod advisory_seam_tests {
             renames: Vec::new(),
             rebuilds: Vec::new(),
         };
-        let all: Vec<_> = plan
-            .advisories()
-            .into_iter()
-            .flat_map(|(_, a)| a)
-            .collect();
+        let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
             all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
             "an FK with no covering index anywhere in the plan must still emit a Notice"
@@ -7397,7 +7625,10 @@ mod fk_referenced_table_quoting_tests {
             def.contains("REFERENCES app.authors(id)"),
             "safe lowercase names must render bare (catalog parity); def = {def:?}"
         );
-        assert!(!def.contains('"'), "no identifier should be quoted here; def = {def:?}");
+        assert!(
+            !def.contains('"'),
+            "no identifier should be quoted here; def = {def:?}"
+        );
     }
 
     /// **RED before the conditional-quote fix.** A RESERVED-WORD target table
@@ -7502,14 +7733,23 @@ mod numeric_default_literal_tests {
 
     #[test]
     fn decimal_string_default_is_rendered_verbatim() {
-        assert_eq!(numeric_default_literal(&json!("1.5")), Some("1.5".to_string()));
-        assert_eq!(numeric_default_literal(&json!("-0.001")), Some("-0.001".to_string()));
+        assert_eq!(
+            numeric_default_literal(&json!("1.5")),
+            Some("1.5".to_string())
+        );
+        assert_eq!(
+            numeric_default_literal(&json!("-0.001")),
+            Some("-0.001".to_string())
+        );
     }
 
     #[test]
     fn non_numeric_string_is_rejected_no_raw_text_injection() {
         // A non-decimal string must NOT reach the DDL (is_decimal_string gate).
-        assert_eq!(numeric_default_literal(&json!("0); DROP TABLE users; --")), None);
+        assert_eq!(
+            numeric_default_literal(&json!("0); DROP TABLE users; --")),
+            None
+        );
         assert_eq!(numeric_default_literal(&json!("now()")), None);
     }
 }

@@ -88,9 +88,8 @@
 //! (re-granting an existing grant is a no-op, re-altering `search_path` is a no-op).
 //! Schema ownership is only (re)assigned when it differs.
 
-use sha2::{Digest, Sha256};
 use crate::id::base62_encode_bytes;
-
+use sha2::{Digest, Sha256};
 
 /// Error provisioning or deprovisioning a migrator role.
 #[derive(Debug, thiserror::Error)]
@@ -121,8 +120,6 @@ fn quote_ident(ident: &str) -> Result<String, RoleError> {
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, RoleError> {
     quote_ident(ident)
 }
-
-
 
 /// Derive the deterministic migrator role name for a project.
 ///
@@ -162,8 +159,6 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     Ok(format!("{PREFIX}{readable}_{suffix}"))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::migrator_role_name;
@@ -177,7 +172,13 @@ mod tests {
             a, b,
             "case-distinct project ids must not collapse to one migrator role"
         );
-        assert!(a.len() <= 63, "postgres role name must fit in an identifier: {a}");
-        assert!(b.len() <= 63, "postgres role name must fit in an identifier: {b}");
+        assert!(
+            a.len() <= 63,
+            "postgres role name must fit in an identifier: {a}"
+        );
+        assert!(
+            b.len() <= 63,
+            "postgres role name must fit in an identifier: {b}"
+        );
     }
 }

@@ -252,10 +252,7 @@ async fn run_rebuild_txn(
                 .set_mode(Mode::EngineJournal)
                 .await
                 .map_err(|e| step_err(table, e))?;
-            actor
-                .exec("COMMIT")
-                .await
-                .map_err(|e| step_err(table, e))?;
+            actor.exec("COMMIT").await.map_err(|e| step_err(table, e))?;
             Ok(())
         }
         Err(e) => {
@@ -413,12 +410,15 @@ async fn run_rebuild_steps(
         {
             continue;
         }
-        actor.exec(&obj.sql).await.map_err(|e| RebuildError::DependentReplayFailed {
-            table: spec.table.clone(),
-            kind: obj.kind.clone(),
-            object: obj.name.clone(),
-            source: e,
-        })?;
+        actor
+            .exec(&obj.sql)
+            .await
+            .map_err(|e| RebuildError::DependentReplayFailed {
+                table: spec.table.clone(),
+                kind: obj.kind.clone(),
+                object: obj.name.clone(),
+                source: e,
+            })?;
     }
     for obj in &spec.recreate_objects {
         actor.exec(obj).await.map_err(|e| step_err(table, e))?;
@@ -573,7 +573,10 @@ mod tests {
 
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {
-        assert_eq!(SqliteRebuildSpec::tmp_name("users"), "users__zero_migrate_rebuild");
+        assert_eq!(
+            SqliteRebuildSpec::tmp_name("users"),
+            "users__zero_migrate_rebuild"
+        );
     }
 
     #[test]
@@ -591,8 +594,14 @@ mod tests {
             "CREATE INDEX i ON t (\"drop_me\")",
             "drop_me"
         ));
-        assert!(ddl_references_column("CREATE INDEX i ON t (drop_me)", "drop_me"));
-        assert!(ddl_references_column("CREATE INDEX i ON t (DROP_ME)", "drop_me"));
+        assert!(ddl_references_column(
+            "CREATE INDEX i ON t (drop_me)",
+            "drop_me"
+        ));
+        assert!(ddl_references_column(
+            "CREATE INDEX i ON t (DROP_ME)",
+            "drop_me"
+        ));
         // Substring must NOT match: `id` is not `user_id` / `idx`.
         assert!(!ddl_references_column(
             "CREATE INDEX idx ON t (user_id)",

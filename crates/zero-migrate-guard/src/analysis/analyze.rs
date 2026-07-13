@@ -127,8 +127,7 @@ pub mod rule {
     /// `data_security.destructive_ops = "warn"` surfaced a destructive operation.
     pub const DATA_SECURITY_DESTRUCTIVE_OPS_WARN: &str = "DATA_SECURITY_DESTRUCTIVE_OPS_WARN";
     /// `data_security.destructive_ops = "warn"` surfaced an unclassified operation.
-    pub const DATA_SECURITY_UNCLASSIFIED_OPS_WARN: &str =
-        "DATA_SECURITY_UNCLASSIFIED_OPS_WARN";
+    pub const DATA_SECURITY_UNCLASSIFIED_OPS_WARN: &str = "DATA_SECURITY_UNCLASSIFIED_OPS_WARN";
     /// `DROP TABLE`/`DROP COLUMN`/`DROP CONSTRAINT` — irreversible data loss.
     pub const DESTRUCTIVE_DROP: &str = "DESTRUCTIVE_DROP";
     /// `RENAME COLUMN`/`RENAME TABLE` — breaks code reading the old name.
@@ -657,11 +656,7 @@ fn analyze_add_constraint(
         let fk_cols = fk_referencing_columns(con);
         let unindexed: Vec<String> = fk_cols
             .into_iter()
-            .filter(|col| {
-                !indexed_in_stmt
-                    .iter()
-                    .any(|i| i.eq_ignore_ascii_case(col))
-            })
+            .filter(|col| !indexed_in_stmt.iter().any(|i| i.eq_ignore_ascii_case(col)))
             .collect();
         if !unindexed.is_empty() {
             out.push(Advisory::notice(
@@ -749,15 +744,17 @@ fn constraint_label(con: &protobuf::Constraint) -> String {
 /// of that constraint (each builds an index under ACCESS EXCLUSIVE on a populated
 /// table). Returns `None` for a column with no inline index-building constraint.
 fn inline_index_constraint_kind(col: &protobuf::ColumnDef) -> Option<&'static str> {
-    col.constraints.iter().find_map(|con| match con.node.as_ref() {
-        Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrPrimary as i32 => {
-            Some("PRIMARY KEY")
-        }
-        Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrUnique as i32 => {
-            Some("UNIQUE")
-        }
-        _ => None,
-    })
+    col.constraints
+        .iter()
+        .find_map(|con| match con.node.as_ref() {
+            Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrPrimary as i32 => {
+                Some("PRIMARY KEY")
+            }
+            Some(NodeEnum::Constraint(c)) if c.contype == ConstrType::ConstrUnique as i32 => {
+                Some("UNIQUE")
+            }
+            _ => None,
+        })
 }
 
 /// Whether a `ColumnDef` carries a NOT NULL: the `is_not_null` flag, an explicit

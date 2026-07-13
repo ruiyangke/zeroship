@@ -267,10 +267,7 @@ impl Support {
     }
 
     #[must_use]
-    pub const fn core(
-        dialects: DialectSupport,
-        features: &'static [FeatureSupport],
-    ) -> Self {
+    pub const fn core(dialects: DialectSupport, features: &'static [FeatureSupport]) -> Self {
         Self::new(SupportTier::Core, dialects, features)
     }
 
@@ -313,8 +310,7 @@ pub(crate) const CAP_PARTITION: &[VendorCapability] = &[VendorCapability::Partit
 pub(crate) const CAP_POLICY: &[VendorCapability] = &[VendorCapability::Policy];
 pub(crate) const CAP_FUNCTION: &[VendorCapability] = &[VendorCapability::Function];
 pub(crate) const CAP_RAW_SQL: &[VendorCapability] = &[VendorCapability::RawSql];
-pub(crate) const CAP_MATERIALIZED_VIEW: &[VendorCapability] =
-    &[VendorCapability::MaterializedView];
+pub(crate) const CAP_MATERIALIZED_VIEW: &[VendorCapability] = &[VendorCapability::MaterializedView];
 pub(crate) const CAP_RAW_MATERIALIZED_VIEW: &[VendorCapability] = &[
     VendorCapability::RawViewBody,
     VendorCapability::MaterializedView,
@@ -466,8 +462,10 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] =
-    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
+pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
+    Feature::SequenceDefault,
+    PG_ONLY_SEQUENCE_DEFAULT,
+)];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
@@ -486,16 +484,16 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
         DialectSupport::new(
             supported(RenderMode::Offline),
             supported(RenderMode::Offline),
-            unsupported(
-                UNSUPPORTED,
-                "MySQL does not support partial indexes",
-            ),
+            unsupported(UNSUPPORTED, "MySQL does not support partial indexes"),
         ),
     ),
     FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
     FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
     FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
-    FeatureSupport::new(Feature::IndexNullsNotDistinct, PG_ONLY_INDEX_NULLS_NOT_DISTINCT),
+    FeatureSupport::new(
+        Feature::IndexNullsNotDistinct,
+        PG_ONLY_INDEX_NULLS_NOT_DISTINCT,
+    ),
     FeatureSupport::new(Feature::IndexOpclass, PG_ONLY_INDEX_OPCLASS),
     FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
@@ -529,7 +527,10 @@ pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::n
 )];
 
 pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
+    FeatureSupport::new(
+        Feature::ForeignKeyNoLocalColumn,
+        UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN,
+    ),
     FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
     FeatureSupport::new(Feature::ConstraintNotValid, PG_ONLY_CONSTRAINT_NOT_VALID),
@@ -543,8 +544,10 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] =
-    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
+pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
+    Feature::SequenceDefault,
+    PG_ONLY_SEQUENCE_DEFAULT,
+)];
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,
@@ -645,12 +648,7 @@ pub(crate) const COMMENT_FEATURES: &[FeatureSupport] =
 pub(crate) const SEQUENCE_FEATURES: &[FeatureSupport] =
     &[FeatureSupport::new(Feature::Sequence, PG_ONLY_SEQUENCE)];
 
-pub(crate) const PG_RAW_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(
-        Feature::RawSql,
-        DialectSupport::postgres_only(
-            RenderMode::Offline,
-            "pgRaw statements are PostgreSQL-only",
-        ),
-    ),
-];
+pub(crate) const PG_RAW_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
+    Feature::RawSql,
+    DialectSupport::postgres_only(RenderMode::Offline, "pgRaw statements are PostgreSQL-only"),
+)];

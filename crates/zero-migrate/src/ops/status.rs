@@ -19,9 +19,11 @@ use std::collections::HashMap;
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
-use crate::conn::ExecutorConfig;
 use crate::apply::executor::{order_pending, ApplyError};
-use crate::apply::journal::{self, AppliedEntry, HistoryEvent, JournalError, Phase, RolledBackEntry};
+use crate::apply::journal::{
+    self, AppliedEntry, HistoryEvent, JournalError, Phase, RolledBackEntry,
+};
+use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
 
 /// Where a project's schema stands relative to a supplied migration set.
@@ -195,7 +197,8 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
     let completed: HashMap<&str, &AppliedEntry> =
         applied.iter().map(|e| (e.version.as_str(), e)).collect();
     let journal_superseded = backend.superseded_versions(cfg).await?;
-    let superseded_owned = crate::apply::executor::compute_superseded(migrations, &journal_superseded);
+    let superseded_owned =
+        crate::apply::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
     let ordered =

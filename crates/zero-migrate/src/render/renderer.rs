@@ -1,10 +1,10 @@
 use crate::schema::query::SqlDialect;
 
-use crate::render::dml::{self, DmlError};
 use crate::model::expr::CastTarget;
 use crate::model::ir::{
     ForEach, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
 };
+use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 
 /// Closed set of dialect feature predicates used by the migration lowerer.
@@ -148,8 +148,7 @@ pub(crate) trait DmlRenderer {
         -> Result<String, IrLowerError>;
     fn view_replace_prelude(&self, qname: &str, replace: bool) -> Vec<String>;
     fn view_object_name(&self, name: &str, eff_schema: &str) -> Result<String, IrLowerError>;
-    fn render_table_ref(&self, table: &TableRef, eff_schema: &str)
-        -> Result<String, IrLowerError>;
+    fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError>;
     fn render_trigger_op(
         &self,
         op: &Op,
@@ -175,7 +174,10 @@ pub(crate) fn renderer(dialect: SqlDialect) -> &'static dyn DmlRenderer {
 
 fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
     dml::quote_ident_checked(ident)
-        .map_err(|e| DmlError::InvalidIdentifier { what, value: e.value })
+        .map_err(|e| DmlError::InvalidIdentifier {
+            what,
+            value: e.value,
+        })
         .map_err(IrLowerError::DmlAssemble)
 }
 
@@ -271,11 +273,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         ))
     }
 
-    fn render_table_ref(
-        &self,
-        table: &TableRef,
-        eff_schema: &str,
-    ) -> Result<String, IrLowerError> {
+    fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError> {
         let mut sql = {
             let schema = table.schema.as_deref().unwrap_or(eff_schema);
             format!(
@@ -296,7 +294,11 @@ impl DmlRenderer for PostgresDmlRenderer {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
-        if let Op::CreateTrigger { action: TriggerAction::Body { .. }, .. } = op {
+        if let Op::CreateTrigger {
+            action: TriggerAction::Body { .. },
+            ..
+        } = op
+        {
             if !SqlDialect::Postgres.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
@@ -382,7 +384,11 @@ impl DmlRenderer for SqliteDmlRenderer {
         }
         let dc = char::from(bytes[0]);
         // Single-ASCII delimiter as an inline SQL string literal (`'` -> `''`).
-        let d = if dc == '\'' { "''''".to_string() } else { format!("'{dc}'") };
+        let d = if dc == '\'' {
+            "''''".to_string()
+        } else {
+            format!("'{dc}'")
+        };
         // cur0 = (col || 'd') - the sentinel-terminated string.
         let mut cur = format!("({col_sql} || {d})");
         // cur_i = substr(cur_i-1, instr(cur_i-1, 'd') + 1), i = 1..n-1.
@@ -433,11 +439,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         Ok(dml::quote_bare_ident("view", name)?)
     }
 
-    fn render_table_ref(
-        &self,
-        table: &TableRef,
-        eff_schema: &str,
-    ) -> Result<String, IrLowerError> {
+    fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError> {
         let mut sql = {
             if let Some(schema) = table.schema.as_deref() {
                 if !schema.eq_ignore_ascii_case(eff_schema) {
@@ -458,7 +460,9 @@ impl DmlRenderer for SqliteDmlRenderer {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
-        Ok(vec![crate::render::lower::render_sqlite_trigger_op(op, eff_schema)?])
+        Ok(vec![crate::render::lower::render_sqlite_trigger_op(
+            op, eff_schema,
+        )?])
     }
 }
 
@@ -498,7 +502,9 @@ impl DmlRenderer for MysqlDmlRenderer {
 
     fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError> {
         let d = format!("'{}'", delim.replace('\'', "''"));
-        Ok(format!("substring_index(substring_index({col_sql}, {d}, {n}), {d}, -1)"))
+        Ok(format!(
+            "substring_index(substring_index({col_sql}, {d}, {n}), {d}, -1)"
+        ))
     }
 
     fn synth_now(&self) -> String {
@@ -541,30 +547,27 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn view_object_name(&self, name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
         Ok(format!(
             "{}.{}",
-            dml::quote_ident_checked_for_dialect(eff_schema, SqlDialect::Mysql)
-                .map_err(|e| DmlError::InvalidIdentifier {
+            dml::quote_ident_checked_for_dialect(eff_schema, SqlDialect::Mysql).map_err(|e| {
+                DmlError::InvalidIdentifier {
                     what: "schema",
                     value: e.value,
-                })?,
+                }
+            })?,
             dml::quote_bare_ident_for_dialect("view", name, SqlDialect::Mysql)?
         ))
     }
 
-    fn render_table_ref(
-        &self,
-        table: &TableRef,
-        eff_schema: &str,
-    ) -> Result<String, IrLowerError> {
+    fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError> {
         let mut sql = {
             let schema = table.schema.as_deref().unwrap_or(eff_schema);
             format!(
                 "{}.{}",
-                dml::quote_ident_checked_for_dialect(schema, SqlDialect::Mysql).map_err(
-                    |e| DmlError::InvalidIdentifier {
+                dml::quote_ident_checked_for_dialect(schema, SqlDialect::Mysql).map_err(|e| {
+                    DmlError::InvalidIdentifier {
                         what: "schema",
                         value: e.value,
-                    },
-                )?,
+                    }
+                },)?,
                 dml::quote_bare_ident_for_dialect("table", &table.name, SqlDialect::Mysql)?
             )
         };
@@ -595,9 +598,21 @@ impl DmlRenderer for MysqlDmlRenderer {
                 action,
                 ..
             } => Ok(vec![render_mysql_trigger_create(
-                name, table, *timing, events, *for_each, when.as_ref(), action, eff_schema,
+                name,
+                table,
+                *timing,
+                events,
+                *for_each,
+                when.as_ref(),
+                action,
+                eff_schema,
             )?]),
-            Op::DropTrigger { name, table, if_exists, .. } => {
+            Op::DropTrigger {
+                name,
+                table,
+                if_exists,
+                ..
+            } => {
                 let qname = mysql_trigger_name(name, eff_schema)?;
                 let mut up = String::from("DROP TRIGGER ");
                 if if_exists.unwrap_or(false) {
@@ -610,7 +625,9 @@ impl DmlRenderer for MysqlDmlRenderer {
                     down: None,
                 }])
             }
-            _ => Err(IrLowerError::UnsupportedOp("non-trigger op routed to trigger renderer")),
+            _ => Err(IrLowerError::UnsupportedOp(
+                "non-trigger op routed to trigger renderer",
+            )),
         }
     }
 }
@@ -618,12 +635,12 @@ impl DmlRenderer for MysqlDmlRenderer {
 fn mysql_trigger_name(name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
     Ok(format!(
         "{}.{}",
-        dml::quote_ident_checked_for_dialect(eff_schema, SqlDialect::Mysql).map_err(
-            |e| DmlError::InvalidIdentifier {
+        dml::quote_ident_checked_for_dialect(eff_schema, SqlDialect::Mysql).map_err(|e| {
+            DmlError::InvalidIdentifier {
                 what: "schema",
                 value: e.value,
-            },
-        )?,
+            }
+        },)?,
         dml::quote_bare_ident_for_dialect("trigger", name, SqlDialect::Mysql)?
     ))
 }
@@ -636,12 +653,12 @@ fn mysql_trigger_table_ref(
     let schema = schema.unwrap_or(eff_schema);
     Ok(format!(
         "{}.{}",
-        dml::quote_ident_checked_for_dialect(schema, SqlDialect::Mysql).map_err(
-            |e| DmlError::InvalidIdentifier {
+        dml::quote_ident_checked_for_dialect(schema, SqlDialect::Mysql).map_err(|e| {
+            DmlError::InvalidIdentifier {
                 what: "schema",
                 value: e.value,
-            },
-        )?,
+            }
+        },)?,
         dml::quote_bare_ident_for_dialect("table", table, SqlDialect::Mysql)?
     ))
 }
@@ -658,9 +675,11 @@ fn render_mysql_trigger_create(
     eff_schema: &str,
 ) -> Result<crate::render::vendor::VendorStatement, IrLowerError> {
     if events.is_empty() {
-        return Err(IrLowerError::Vendor(crate::render::vendor::VendorError::EmptyList {
-            what: "trigger events",
-        }));
+        return Err(IrLowerError::Vendor(
+            crate::render::vendor::VendorError::EmptyList {
+                what: "trigger events",
+            },
+        ));
     }
     if events.len() != 1 {
         return Err(IrLowerError::TriggerUnsupported {
@@ -699,21 +718,31 @@ fn render_mysql_trigger_create(
         });
     };
     if statements.is_empty() {
-        return Err(IrLowerError::Vendor(crate::render::vendor::VendorError::EmptyList {
-            what: "trigger body statements",
-        }));
+        return Err(IrLowerError::Vendor(
+            crate::render::vendor::VendorError::EmptyList {
+                what: "trigger body statements",
+            },
+        ));
     }
 
     let qname = mysql_trigger_name(name, eff_schema)?;
     let qtable = mysql_trigger_table_ref(table, None, eff_schema)?;
-    let body: Result<Vec<_>, _> =
-        statements.iter().map(|stmt| render_mysql_trigger_stmt(stmt, eff_schema)).collect();
+    let body: Result<Vec<_>, _> = statements
+        .iter()
+        .map(|stmt| render_mysql_trigger_stmt(stmt, eff_schema))
+        .collect();
     let mut up = format!(
         "CREATE TRIGGER {qname} {} {} ON {qtable} FOR EACH ROW BEGIN ",
         timing.as_sql(),
         events[0].as_sql()
     );
-    up.push_str(&body?.into_iter().map(|s| format!("{s};")).collect::<Vec<_>>().join(" "));
+    up.push_str(
+        &body?
+            .into_iter()
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
     up.push_str(" END");
     Ok(crate::render::vendor::VendorStatement {
         name: format!("create_trigger_{name}_{table}"),
@@ -722,23 +751,29 @@ fn render_mysql_trigger_create(
     })
 }
 
-fn render_mysql_trigger_stmt(
-    stmt: &TriggerStmt,
-    eff_schema: &str,
-) -> Result<String, IrLowerError> {
+fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<String, IrLowerError> {
     match stmt {
-        TriggerStmt::Insert { table, columns, rows, schema } => {
+        TriggerStmt::Insert {
+            table,
+            columns,
+            rows,
+            schema,
+        } => {
             if columns.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::MalformedInsert {
-                    table: table.clone(),
-                    reason: "no columns".to_string(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no columns".to_string(),
+                    },
+                ));
             }
             if rows.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::MalformedInsert {
-                    table: table.clone(),
-                    reason: "no rows".to_string(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no rows".to_string(),
+                    },
+                ));
             }
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let qcols: Result<Vec<_>, _> = columns
@@ -771,12 +806,19 @@ fn render_mysql_trigger_stmt(
                 groups.join(", ")
             ))
         }
-        TriggerStmt::Update { table, set, r#where, schema } => {
+        TriggerStmt::Update {
+            table,
+            set,
+            r#where,
+            schema,
+        } => {
             if set.is_empty() {
-                return Err(IrLowerError::DmlAssemble(crate::render::dml::DmlError::EmptySet {
-                    op: "update",
-                    table: table.clone(),
-                }));
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::EmptySet {
+                        op: "update",
+                        table: table.clone(),
+                    },
+                ));
             }
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let mut assigns = Vec::with_capacity(set.len());
@@ -796,7 +838,12 @@ fn render_mysql_trigger_stmt(
             }
             Ok(sql)
         }
-        TriggerStmt::Delete { table, r#where, limit, schema } => {
+        TriggerStmt::Delete {
+            table,
+            r#where,
+            limit,
+            schema,
+        } => {
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let pred = crate::render::dml::render_expr_inline(r#where, SqlDialect::Mysql)?;
             Ok(match limit {
@@ -808,13 +855,18 @@ fn render_mysql_trigger_stmt(
             "SELECT {}",
             crate::render::dml::render_expr_inline(expr, SqlDialect::Mysql)?
         )),
-        TriggerStmt::Raise { level: RaiseLevel::Ignore, .. } => {
-            Err(IrLowerError::TriggerUnsupported {
-                kind: "raiseIgnore",
-                dialect: SqlDialect::Mysql,
-            })
-        }
-        TriggerStmt::Raise { level: _, message, errcode } => {
+        TriggerStmt::Raise {
+            level: RaiseLevel::Ignore,
+            ..
+        } => Err(IrLowerError::TriggerUnsupported {
+            kind: "raiseIgnore",
+            dialect: SqlDialect::Mysql,
+        }),
+        TriggerStmt::Raise {
+            level: _,
+            message,
+            errcode,
+        } => {
             let errcode = errcode.as_deref().unwrap_or("45000");
             Ok(format!(
                 "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
@@ -857,7 +909,10 @@ mod tests {
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
         assert_eq!(renderer(SqlDialect::Postgres).synth_now(), "now()");
-        assert_eq!(renderer(SqlDialect::Sqlite).synth_now(), "CURRENT_TIMESTAMP");
+        assert_eq!(
+            renderer(SqlDialect::Sqlite).synth_now(),
+            "CURRENT_TIMESTAMP"
+        );
         assert_eq!(
             renderer(SqlDialect::Mysql).synth_now(),
             "CURRENT_TIMESTAMP(6)"

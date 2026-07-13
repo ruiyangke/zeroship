@@ -130,8 +130,8 @@ type HostDriverFn = Function<'static, (JsRequest, DoneFn), ()>;
 /// The TSFN's `CallJsBackArgs`: the JS host driver is invoked as
 /// `hostDriver(request, done)`.
 type HostTsfn = ThreadsafeFunction<
-    VerbCall, // T — payload crossing to the JS thread
-    (),       // Return — the host callback returns void; it calls `done` instead
+    VerbCall,            // T — payload crossing to the JS thread
+    (),                  // Return — the host callback returns void; it calls `done` instead
     (JsRequest, DoneFn), // CallJsBackArgs
     Status,
     false, // CalleeHandled = false: we surface driver errors via `done(err, …)`
@@ -243,8 +243,9 @@ where
     Ret: FromNapiValue + 'static,
 {
     let raw = unsafe { <Function<Args, Ret> as ToNapiValue>::to_napi_value(env.raw(), f)? };
-    let detached =
-        unsafe { <Function<'static, Args, Ret> as FromNapiValue>::from_napi_value(env.raw(), raw)? };
+    let detached = unsafe {
+        <Function<'static, Args, Ret> as FromNapiValue>::from_napi_value(env.raw(), raw)?
+    };
     Ok(detached)
 }
 
@@ -369,7 +370,9 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 #[napi(ts_return_type = "Promise<ApplyReply>")]
 pub fn apply_ir(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: ApplyRequest,
 ) -> Result<Object<'static>> {
@@ -408,7 +411,11 @@ pub fn apply_ir(
         applied_by,
         ..
     } = req;
-    let approval = if approved { Approval::Approved } else { Approval::None };
+    let approval = if approved {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
 
     run_verb(env, host_driver, move |session| async move {
         let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
@@ -418,7 +425,11 @@ pub fn apply_ir(
         let out = match target {
             ApplyDialect::Postgres => {
                 zero_migrate::apply::executor::apply(
-                    &session, &cfg, &migrations, approval, &applied_by,
+                    &session,
+                    &cfg,
+                    &migrations,
+                    approval,
+                    &applied_by,
                 )
                 .await
             }
@@ -452,7 +463,9 @@ fn owner_app_project(project_schema: &str) -> String {
 #[napi(ts_return_type = "Promise<StatusReply>")]
 pub fn status(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: StatusRequest,
 ) -> Result<Object<'static>> {
@@ -482,7 +495,9 @@ pub fn status(
 #[napi(ts_return_type = "Promise<HistoryReply>")]
 pub fn history(
     env: Env,
-    #[napi(ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void")]
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
     host_driver: HostDriverFn,
     req: HistoryRequest,
 ) -> Result<Object<'static>> {

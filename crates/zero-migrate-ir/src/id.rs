@@ -90,7 +90,8 @@ pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
         if digit == 255 {
             return Err(format!("invalid base62 character: {}", b as char));
         }
-        n = n.checked_mul(62)
+        n = n
+            .checked_mul(62)
             .and_then(|n| n.checked_add(u128::from(digit)))
             .ok_or_else(|| "base62 overflow".to_string())?;
     }
@@ -159,10 +160,7 @@ impl std::error::Error for ParseError {}
 /// hardening posture in `crates/sandbox/src/persist.rs:36-40`.
 ///
 /// Returns the embedded UUID on success.
-pub fn parse_with_prefix(
-    typed_id: &str,
-    expected_prefix: &str,
-) -> Result<uuid::Uuid, ParseError> {
+pub fn parse_with_prefix(typed_id: &str, expected_prefix: &str) -> Result<uuid::Uuid, ParseError> {
     let (got, uuid) = parse(typed_id).map_err(ParseError::Malformed)?;
     if got != expected_prefix {
         return Err(ParseError::WrongPrefix {

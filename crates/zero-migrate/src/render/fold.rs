@@ -48,30 +48,29 @@
 
 use std::collections::BTreeMap;
 
+use crate::model::ir::{
+    ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
+    RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+};
+use crate::model::snapshot::{
+    normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexSnapshot, NamedTypeSnapshot,
+    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+};
 use crate::render::declarative::{
     build_resolved_table_snapshot, build_table_snapshot, constraintdef_cols,
     ir_fk_constraint_snapshot_for_columns, push_primary_key_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
-use crate::model::snapshot::{
-    normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexSnapshot, NamedTypeSnapshot,
-    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
-    SequenceSnapshot, TableSnapshot, ViewSnapshot,
-};
-use crate::render::renderer::{Capability, DialectSupports};
-use crate::model::ir::{
-    ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
-    RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
-};
 use crate::render::lower::{
     create_index_snapshot, derived_check_constraint_name, derived_constraint_name,
     derived_exclusion_constraint_name, enum_inline_check, index_method_access, ir_column_to_field,
-    ir_column_to_field_resolved_create, mysql_enum_type, render_domain_check,
-    render_exclusion_constraint_body, render_container_default_for_data_type,
-    render_json_default_for_data_type,
-    render_ir_default, render_ir_default_for_type, IrLowerError, NamedTypeRegistry,
+    ir_column_to_field_resolved_create, mysql_enum_type, render_container_default_for_data_type,
+    render_domain_check, render_exclusion_constraint_body, render_ir_default,
+    render_ir_default_for_type, render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
 };
+use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::SqlDialect;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
@@ -400,7 +399,12 @@ fn push_fold_op<'a>(
     inside_dialectal: bool,
 ) -> Result<(), FoldError> {
     match op {
-        Op::Dialectal { default, pg, sqlite, mysql } => {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
             if inside_dialectal {
                 return Err(FoldError::Unsupported("nested dialectal op reached fold"));
             }
@@ -548,13 +552,7 @@ pub fn fold_ops(
                     .get_mut(name)
                     .ok_or_else(|| FoldError::MissingSequence(name.clone()))?;
                 apply_alter_sequence_snapshot(
-                    seq,
-                    *increment,
-                    min_value,
-                    max_value,
-                    *cache,
-                    *cycle,
-                    owned_by,
+                    seq, *increment, min_value, max_value, *cache, *cycle, owned_by,
                 )?;
             }
             Op::DropSequence { name, .. } => {
@@ -608,10 +606,7 @@ pub fn fold_ops(
                 tables.insert(name.clone(), snap);
             }
             Op::CreatePartition {
-                name,
-                of,
-                bounds,
-                ..
+                name, of, bounds, ..
             } => {
                 let parent = tables
                     .get(of)
@@ -836,7 +831,8 @@ pub fn fold_ops(
                 // (1) Drop every index covering the column. `IndexSnapshot::columns`
                 //     is the raw key-column list, so an exact name compare suffices;
                 //     a multi-column index partially covering it is dropped too.
-                snap.indexes.retain(|i| !i.columns.iter().any(|c| c == column));
+                snap.indexes
+                    .retain(|i| !i.columns.iter().any(|c| c == column));
                 // (2) Drop every constraint whose LOCAL column list contains the
                 //     column. UNIQUE (`UNIQUE (cols)`) and FOREIGN KEY
                 //     (`FOREIGN KEY (cols) REFERENCES …`) both carry their local
@@ -873,7 +869,9 @@ pub fn fold_ops(
                 snap.indexes
                     .retain(|i| !implicit_index_names.contains(&&i.name));
             }
-            Op::RenameColumn { table, from, to, .. } => {
+            Op::RenameColumn {
+                table, from, to, ..
+            } => {
                 let snap = table_mut(&mut tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
@@ -996,8 +994,8 @@ pub fn fold_ops(
                         }
                     }
                 }
-                let target_has_sentinel = new_col.encryption_sentinel.is_some()
-                    || new_col.comment_sentinel.is_some();
+                let target_has_sentinel =
+                    new_col.encryption_sentinel.is_some() || new_col.comment_sentinel.is_some();
                 let snap = table_mut(&mut tables, table)?;
                 let col = snap
                     .columns
@@ -1042,7 +1040,12 @@ pub fn fold_ops(
                     })?;
                 col.nullable = true;
             }
-            Op::SetColumnDefault { table, column, value, .. } => {
+            Op::SetColumnDefault {
+                table,
+                column,
+                value,
+                ..
+            } => {
                 let snap = table_mut(&mut tables, table)?;
                 let col = snap
                     .columns
@@ -1085,7 +1088,9 @@ pub fn fold_ops(
                     })?;
                 col.default = None;
             }
-            Op::AddConstraint { table, constraint, .. } => {
+            Op::AddConstraint {
+                table, constraint, ..
+            } => {
                 // Build the constraint (+ its implicit index for UNIQUE/PK, which PG
                 // MATERIALIZES and live introspection reports) the SAME way the lower's
                 // snapshot half does: FK via the shared `ir_fk_*`, UNIQUE/PK with a
@@ -1198,19 +1203,27 @@ pub fn fold_ops(
                     return Err(FoldError::MissingIndex(name.clone()));
                 }
             }
-            Op::CreateView { name, columns, materialized, .. } => {
+            Op::CreateView {
+                name,
+                columns,
+                materialized,
+                ..
+            } => {
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
                 if views.contains_key(name) {
                     return Err(FoldError::DuplicateView(name.clone()));
                 }
-                views.insert(name.clone(), ViewSnapshot {
-                    materialized: materialized.unwrap_or(false),
-                    columns: columns.clone(),
-                    definition: None,
-                    comment: None,
-                });
+                views.insert(
+                    name.clone(),
+                    ViewSnapshot {
+                        materialized: materialized.unwrap_or(false),
+                        columns: columns.clone(),
+                        definition: None,
+                        comment: None,
+                    },
+                );
             }
             Op::DropView { name, .. } => {
                 if views.remove(name).is_none() {
@@ -1234,18 +1247,28 @@ pub fn fold_ops(
             // IF-NOT-EXISTS decision remains presence-based; this snapshot compare
             // is the safety net that catches a same-name object with divergent
             // attributes after a skip.
-            Op::CreateSchema { name, authorization, .. } => {
-                schemas.insert(name.clone(), SchemaObjectSnapshot {
-                    owner: authorization.clone(),
-                });
+            Op::CreateSchema {
+                name,
+                authorization,
+                ..
+            } => {
+                schemas.insert(
+                    name.clone(),
+                    SchemaObjectSnapshot {
+                        owner: authorization.clone(),
+                    },
+                );
             }
             Op::DropSchema { name, .. } => {
                 schemas.remove(name);
             }
             Op::CreateExtension { name, schema, .. } => {
-                extensions.insert(name.clone(), ExtensionSnapshot {
-                    schema: schema.clone(),
-                });
+                extensions.insert(
+                    name.clone(),
+                    ExtensionSnapshot {
+                        schema: schema.clone(),
+                    },
+                );
             }
             Op::DropExtension { name, .. } => {
                 extensions.remove(name);
@@ -1263,15 +1286,18 @@ pub fn fold_ops(
                 let mut member_of = in_role.clone().unwrap_or_default();
                 member_of.sort();
                 member_of.dedup();
-                roles.insert(name.clone(), RoleSnapshot {
-                    login: login.unwrap_or(false),
-                    superuser: superuser.unwrap_or(false),
-                    create_db: create_db.unwrap_or(false),
-                    create_role: create_role.unwrap_or(false),
-                    bypass_rls: bypass_rls.unwrap_or(false),
-                    member_of,
-                    ..RoleSnapshot::default()
-                });
+                roles.insert(
+                    name.clone(),
+                    RoleSnapshot {
+                        login: login.unwrap_or(false),
+                        superuser: superuser.unwrap_or(false),
+                        create_db: create_db.unwrap_or(false),
+                        create_role: create_role.unwrap_or(false),
+                        bypass_rls: bypass_rls.unwrap_or(false),
+                        member_of,
+                        ..RoleSnapshot::default()
+                    },
+                );
             }
             Op::DropRole { name, .. } => {
                 roles.remove(name);
@@ -1296,9 +1322,9 @@ pub fn fold_ops(
     }
 
     Ok(SchemaSnapshot {
-                tables,
-                partitions,
-                views,
+        tables,
+        partitions,
+        views,
         named_types: named_type_snapshots,
         sequences,
         roles,
@@ -1331,14 +1357,14 @@ fn apply_comment(
         }
         CommentTarget::Column { table, name, .. } => {
             let snap = table_mut(tables, table)?;
-            let col =
-                snap.columns
-                    .iter_mut()
-                    .find(|c| c.name == *name)
-                    .ok_or_else(|| FoldError::MissingColumn {
-                        table: table.clone(),
-                        column: name.clone(),
-                    })?;
+            let col = snap
+                .columns
+                .iter_mut()
+                .find(|c| c.name == *name)
+                .ok_or_else(|| FoldError::MissingColumn {
+                    table: table.clone(),
+                    column: name.clone(),
+                })?;
             col.comment = comment;
         }
         CommentTarget::Index { name, .. } => {
@@ -1407,7 +1433,10 @@ fn create_table_descriptor(
     CollectionDescriptor {
         name: name.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
-        fields: columns.iter().map(ir_column_to_field_resolved_create).collect(),
+        fields: columns
+            .iter()
+            .map(ir_column_to_field_resolved_create)
+            .collect(),
         indexes: Vec::new(),
         runtime_options: runtime_options.cloned().unwrap_or_default(),
     }
@@ -1536,7 +1565,13 @@ fn apply_fold_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        let Some(IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
+        let Some(
+            IrDefault::Expr { .. }
+            | IrDefault::Container { .. }
+            | IrDefault::Json { .. }
+            | IrDefault::Nextval { .. },
+        ) = source.default.as_ref()
+        else {
             continue;
         };
         let col = snap
@@ -1567,7 +1602,13 @@ fn apply_fold_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(
+        default @ (IrDefault::Expr { .. }
+        | IrDefault::Container { .. }
+        | IrDefault::Json { .. }
+        | IrDefault::Nextval { .. }),
+    ) = default
+    else {
         return Ok(());
     };
     if col.name != column {
@@ -1623,35 +1664,35 @@ fn apply_fold_named_type_column_metadata(
     project_schema: &str,
 ) -> Result<(), FoldError> {
     match &source.ty {
-        ColType::Enum { name, .. } => {
-            match dialect {
-                SqlDialect::Postgres => {
-                    let schema = named_types.enum_schema_or(name, project_schema);
-                    col.data_type = pg_type_data_type(schema, name);
-                }
-                SqlDialect::Sqlite => {
-                    let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
-                    col.data_type = "text".to_string();
-                    col.inline_checks.push(
-                        enum_inline_check(&source.name, &def.values, dialect)
-                            .map_err(fold_named_type_error)?,
-                    );
-                }
-                SqlDialect::Mysql => {
-                    let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
-                    let ty = mysql_enum_type(&def.values);
-                    col.data_type = ty.clone();
-                    col.ddl_type_override = Some(ty);
-                }
+        ColType::Enum { name, .. } => match dialect {
+            SqlDialect::Postgres => {
+                let schema = named_types.enum_schema_or(name, project_schema);
+                col.data_type = pg_type_data_type(schema, name);
             }
-        }
+            SqlDialect::Sqlite => {
+                let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
+                col.data_type = "text".to_string();
+                col.inline_checks.push(
+                    enum_inline_check(&source.name, &def.values, dialect)
+                        .map_err(fold_named_type_error)?,
+                );
+            }
+            SqlDialect::Mysql => {
+                let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
+                let ty = mysql_enum_type(&def.values);
+                col.data_type = ty.clone();
+                col.ddl_type_override = Some(ty);
+            }
+        },
         ColType::Domain { name, .. } => {
             if matches!(dialect, SqlDialect::Postgres) {
                 let schema = named_types.domain_schema_or(name, project_schema);
                 col.data_type = pg_type_data_type(schema, name);
                 return Ok(());
             }
-            let def = named_types.domain_def(name).map_err(fold_named_type_error)?;
+            let def = named_types
+                .domain_def(name)
+                .map_err(fold_named_type_error)?;
             if matches!(def.as_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                 return Err(FoldError::NamedTypeUnsupported {
                     kind: "domain",
@@ -1683,15 +1724,19 @@ fn apply_fold_named_type_column_metadata(
                 }
                 if col.default.is_none() {
                     if let Some(default) = &def.default {
-                        col.default =
-                            Some(render_ir_default_for_type(default, &def.as_type, dialect)
-                                .map_err(fold_named_type_error)?);
+                        col.default = Some(
+                            render_ir_default_for_type(default, &def.as_type, dialect)
+                                .map_err(fold_named_type_error)?,
+                        );
                     }
                 }
                 if let Some(check) = &def.check {
-                    let value_sql =
-                        crate::render::dml::quote_ident_for_dialect("column", &source.name, dialect)
-                            .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
+                    let value_sql = crate::render::dml::quote_ident_for_dialect(
+                        "column",
+                        &source.name,
+                        dialect,
+                    )
+                    .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
                     let expr = render_domain_check(check, dialect, &value_sql)
                         .map_err(fold_named_type_error)?;
                     col.inline_checks.push(format!("CHECK ({expr})"));
@@ -1759,10 +1804,10 @@ fn fold_create_table_specs(
                         "createTable table-level CHECK is PostgreSQL-only",
                     ));
                 }
-                let name = c
-                    .name
-                    .as_deref()
-                    .map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                let name = c.name.as_deref().map_or_else(
+                    || derived_check_constraint_name(table, expr),
+                    str::to_string,
+                );
                 let rendered = crate::render::dml::render_expr_inline(expr, dialect)
                     .map_err(|e| FoldError::Render(e.to_string()))?;
                 push_folded_constraint(
@@ -1797,7 +1842,9 @@ fn fold_create_table_specs(
                     ));
                 }
                 if columns.is_empty() {
-                    return Err(FoldError::Unsupported("createTable FOREIGN KEY with no local column"));
+                    return Err(FoldError::Unsupported(
+                        "createTable FOREIGN KEY with no local column",
+                    ));
                 }
                 let fk = ir_fk_constraint_snapshot_for_columns(
                     project_schema,
@@ -1812,7 +1859,14 @@ fn fold_create_table_specs(
                     dialect,
                 );
                 // A FOREIGN KEY materializes no index.
-                push_folded_constraint(table, snap, FoldedConstraint { constraint: fk, index: None })?;
+                push_folded_constraint(
+                    table,
+                    snap,
+                    FoldedConstraint {
+                        constraint: fk,
+                        index: None,
+                    },
+                )?;
             }
             IrConstraintKind::Unique { columns } => {
                 if !dialect.supports(Capability::TableLevelUnique) {
@@ -1910,7 +1964,11 @@ fn push_folded_constraint(
     snap: &mut TableSnapshot,
     folded: FoldedConstraint,
 ) -> Result<(), FoldError> {
-    if snap.constraints.iter().any(|c| c.name == folded.constraint.name) {
+    if snap
+        .constraints
+        .iter()
+        .any(|c| c.name == folded.constraint.name)
+    {
         return Err(FoldError::DuplicateConstraint {
             table: table.to_string(),
             name: folded.constraint.name,
@@ -1966,7 +2024,11 @@ fn unique_constraint(name: &str, columns: &[String]) -> FoldedConstraint {
             definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
             comment: None,
         },
-        index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
+        index: Some(IndexSnapshot::btree(
+            name.to_string(),
+            true,
+            columns.to_vec(),
+        )),
     }
 }
 
@@ -1996,7 +2058,9 @@ fn add_constraint_snapshot(
             not_valid: _,
         } => {
             if columns.is_empty() {
-                return Err(FoldError::Unsupported("addConstraint(fk) with no local column"));
+                return Err(FoldError::Unsupported(
+                    "addConstraint(fk) with no local column",
+                ));
             }
             Ok(FoldedConstraint {
                 constraint: ir_fk_constraint_snapshot_for_columns(
@@ -2053,7 +2117,8 @@ fn add_constraint_snapshot(
                 || derived_exclusion_constraint_name(table, elements),
                 str::to_string,
             );
-            render_exclusion_constraint_body(&constraint.kind, dialect).map_err(fold_lower_error)?;
+            render_exclusion_constraint_body(&constraint.kind, dialect)
+                .map_err(fold_lower_error)?;
             Ok(FoldedConstraint {
                 constraint: ConstraintSnapshot {
                     name: cname,
@@ -2196,7 +2261,12 @@ pub fn recover_check_facet(expr: &crate::model::expr::Expr) -> Option<RecoveredC
     use crate::model::expr::{BinaryOp, Expr};
 
     // Range: `col >= a AND col <= b` over the SAME column.
-    if let Expr::BinOp { op: BinaryOp::And, lhs, rhs } = expr {
+    if let Expr::BinOp {
+        op: BinaryOp::And,
+        lhs,
+        rhs,
+    } = expr
+    {
         let lo = match_col_op_lit(lhs, BinaryOp::Ge);
         let hi = match_col_op_lit(rhs, BinaryOp::Le);
         if let (Some((c1, lo_v)), Some((c2, hi_v))) = (lo, hi) {
@@ -2214,13 +2284,21 @@ pub fn recover_check_facet(expr: &crate::model::expr::Expr) -> Option<RecoveredC
     // Range: a lone `col >= n`.
     if let Some((c, v)) = match_col_op_lit(expr, BinaryOp::Ge) {
         if let Some(min) = ir_scalar_as_f64(v) {
-            return Some(RecoveredCheck::Range { column: c.to_string(), min: Some(min), max: None });
+            return Some(RecoveredCheck::Range {
+                column: c.to_string(),
+                min: Some(min),
+                max: None,
+            });
         }
     }
     // Range: a lone `col <= n`.
     if let Some((c, v)) = match_col_op_lit(expr, BinaryOp::Le) {
         if let Some(max) = ir_scalar_as_f64(v) {
-            return Some(RecoveredCheck::Range { column: c.to_string(), min: None, max: Some(max) });
+            return Some(RecoveredCheck::Range {
+                column: c.to_string(),
+                min: None,
+                max: Some(max),
+            });
         }
     }
     // Enum: a single `col = v` OR a left-folded OR-chain of `col = v` over one column.
@@ -2240,7 +2318,12 @@ fn recover_enum_chain(expr: &crate::model::expr::Expr) -> Option<(String, Vec<se
 
     // Collect leaves of the left-folded OR tree in source order.
     fn collect<'a>(e: &'a Expr, leaves: &mut Vec<&'a Expr>) -> bool {
-        if let Expr::BinOp { op: BinaryOp::Or, lhs, rhs } = e {
+        if let Expr::BinOp {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+        } = e
+        {
             collect(lhs, leaves) && collect(rhs, leaves)
         } else {
             leaves.push(e);
@@ -2341,8 +2424,10 @@ pub fn fold_to_field_defs(
     //    matches the createTable column order (the SAME order `descriptor_to_sdk_schema`
     //    emits from `descriptor.fields`) — the round-trip parity compares the
     //    serialized maps, so a sorted-vs-declared order would false-mismatch.
-    let mut tables: BTreeMap<String, indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor>> =
-        BTreeMap::new();
+    let mut tables: BTreeMap<
+        String,
+        indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor>,
+    > = BTreeMap::new();
     // Per-table CHECK facets to lift onto the matching column at the end. A CHECK
     // over an unrecognized shape is left unprojected (the column types as its base
     // scalar) — NOT an error.
@@ -2358,10 +2443,17 @@ pub fn fold_to_field_defs(
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
     for op in replay_ops {
         match op {
-            Op::CreateTable { name, columns, constraints, .. } => {
+            Op::CreateTable {
+                name,
+                columns,
+                constraints,
+                ..
+            } => {
                 let system_prefix_len = confined_resolved_system_prefix_len(columns);
-                let mut cols: indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor> =
-                    indexmap::IndexMap::new();
+                let mut cols: indexmap::IndexMap<
+                    String,
+                    crate::render::declarative::FieldDescriptor,
+                > = indexmap::IndexMap::new();
                 for (idx, c) in columns.iter().enumerate() {
                     cols.insert(
                         c.name.clone(),
@@ -2376,8 +2468,14 @@ pub fn fold_to_field_defs(
                                 checks.entry(name.clone()).or_default().push(facet);
                             }
                         }
-                        IrConstraintKind::Fk { columns, on_delete, on_update, .. } => {
-                            if let Some(recovered) = recover_fk_policy(columns, *on_delete, *on_update)
+                        IrConstraintKind::Fk {
+                            columns,
+                            on_delete,
+                            on_update,
+                            ..
+                        } => {
+                            if let Some(recovered) =
+                                recover_fk_policy(columns, *on_delete, *on_update)
                             {
                                 fks.entry(name.clone()).or_default().push(recovered);
                             }
@@ -2462,7 +2560,9 @@ pub fn fold_to_field_defs(
                     cols.shift_remove(column);
                 }
             }
-            Op::RenameColumn { table, from, to, .. } => {
+            Op::RenameColumn {
+                table, from, to, ..
+            } => {
                 if let Some(cols) = tables.get_mut(table) {
                     // Preserve the renamed column's POSITION: find its index, remove,
                     // re-insert at the same slot under the new key.
@@ -2474,8 +2574,16 @@ pub fn fold_to_field_defs(
                     }
                 }
             }
-            Op::AddConstraint { table, constraint, .. } => {
-                if let IrConstraintKind::Fk { columns, on_delete, on_update, .. } = &constraint.kind {
+            Op::AddConstraint {
+                table, constraint, ..
+            } => {
+                if let IrConstraintKind::Fk {
+                    columns,
+                    on_delete,
+                    on_update,
+                    ..
+                } = &constraint.kind
+                {
                     if let Some(recovered) = recover_fk_policy(columns, *on_delete, *on_update) {
                         fks.entry(table.clone()).or_default().push(recovered);
                     }
@@ -2536,7 +2644,10 @@ pub fn fold_to_field_defs(
             indexes: Vec::new(),
             runtime_options: Default::default(),
         };
-        out.insert(table, crate::render::declarative::descriptor_to_sdk_schema(&desc));
+        out.insert(
+            table,
+            crate::render::declarative::descriptor_to_sdk_schema(&desc),
+        );
     }
     Ok(out)
 }
@@ -2662,16 +2773,27 @@ pub enum ProduceError {
 impl std::fmt::Display for ProduceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProduceError::UnknownType { table, column, token } => write!(
+            ProduceError::UnknownType {
+                table,
+                column,
+                token,
+            } => write!(
                 f,
                 "produce: `{table}.{column}` has unmappable type token `{token}`"
             ),
-            ProduceError::UnrepresentableFacet { table, column, facet } => write!(
+            ProduceError::UnrepresentableFacet {
+                table,
+                column,
+                facet,
+            } => write!(
                 f,
                 "produce: `{table}.{column}` has an unrepresentable `{facet}` facet value"
             ),
             ProduceError::TableShape { table, message } => {
-                write!(f, "produce: `{table}` could not resolve table shape: {message}")
+                write!(
+                    f,
+                    "produce: `{table}` could not resolve table shape: {message}"
+                )
             }
         }
     }
@@ -2717,7 +2839,10 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
         // prefix; the inverse of `ir_column_to_field`'s `name=="id" && Uuid → "id"`.
         "id" => Some(ColType::Uuid),
         // A `ref` column carries the FK target on `references`.
-        "ref" => f.references.clone().map(|references| ColType::Ref { references }),
+        "ref" => f
+            .references
+            .clone()
+            .map(|references| ColType::Ref { references }),
         // A `vector(N)` column carries dims on `vector_dims`.
         "vector" => f.vector_dims.map(|d| ColType::Vector { vector: d as u32 }),
         other => {
@@ -2817,7 +2942,10 @@ fn facet_check_constraints(
     if let Some(expr) = range_expr {
         out.push(IrConstraint {
             name: Some(format!("{table}_{}_range_check", f.name)),
-            kind: IrConstraintKind::Check { expr, not_valid: None },
+            kind: IrConstraintKind::Check {
+                expr,
+                not_valid: None,
+            },
         });
     }
 
@@ -2826,11 +2954,12 @@ fn facet_check_constraints(
         if !values.is_empty() {
             let mut leaves = Vec::with_capacity(values.len());
             for v in values {
-                let scalar = json_to_ir_scalar(v).ok_or_else(|| ProduceError::UnrepresentableFacet {
-                    table: table.to_string(),
-                    column: f.name.clone(),
-                    facet: "enum",
-                })?;
+                let scalar =
+                    json_to_ir_scalar(v).ok_or_else(|| ProduceError::UnrepresentableFacet {
+                        table: table.to_string(),
+                        column: f.name.clone(),
+                        facet: "enum",
+                    })?;
                 leaves.push(Expr::BinOp {
                     op: BinaryOp::Eq,
                     lhs: Box::new(col()),
@@ -2849,7 +2978,10 @@ fn facet_check_constraints(
             }
             out.push(IrConstraint {
                 name: Some(format!("{table}_{}_enum_check", f.name)),
-                kind: IrConstraintKind::Check { expr, not_valid: None },
+                kind: IrConstraintKind::Check {
+                    expr,
+                    not_valid: None,
+                },
             });
         }
     }
@@ -2896,9 +3028,12 @@ pub fn descriptors_to_create_ops(
             // `required = !nullable.unwrap_or(true)`. A non-required field stays
             // `None` (the `t.*` default-nullable image), so the wire bytes match.
             let nullable = if f.required { Some(false) } else { None };
-            let default = f.default.as_ref().map(|v| crate::model::ir::IrDefault::Literal {
-                value: json_value_to_ir_scalar_default(v),
-            });
+            let default = f
+                .default
+                .as_ref()
+                .map(|v| crate::model::ir::IrDefault::Literal {
+                    value: json_value_to_ir_scalar_default(v),
+                });
             let vector_metric = f
                 .vector_metric
                 .as_deref()
@@ -3027,10 +3162,14 @@ fn parse_vector_metric_token(token: &str) -> Option<crate::model::ir::VectorMetr
 /// plaintext column, or a NON-default mask on an encrypted column (an explicit override),
 /// IS carried. An unparseable kind/classification token yields `None` (fail-soft — the
 /// closed-enum producer never panics; the round-trip's own gate catches a genuine drop).
-fn standalone_mask_facet(f: &crate::render::declarative::FieldDescriptor) -> Option<crate::model::ir::IrMask> {
+fn standalone_mask_facet(
+    f: &crate::render::declarative::FieldDescriptor,
+) -> Option<crate::model::ir::IrMask> {
     let mask = f.mask.as_ref()?;
     let kind = mask.get("kind").and_then(serde_json::Value::as_str)?;
-    let classification = mask.get("classification").and_then(serde_json::Value::as_str)?;
+    let classification = mask
+        .get("classification")
+        .and_then(serde_json::Value::as_str)?;
     // Suppress the encrypted auto-mask: only when the column is ACTUALLY encrypted and
     // the mask is the exact kernel default. (A plaintext column authored with
     // `.mask({ full, pii })` is a real standalone mask and IS carried.)
@@ -3092,12 +3231,10 @@ mod tests {
         IndexElement, IrScalar, MigrationIr, TableRuntimeOptions, TableRuntimeOptionsPatch,
         TableStrictness, CURRENT_IR_VERSION,
     };
+    use crate::model::policy::SchemaScope;
     use crate::model::profile::PolicyProfile;
     use crate::model::table_shape::resolve_create_table_policy;
-    use crate::model::policy::SchemaScope;
-    use crate::model::validate::{
-        validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
-    };
+    use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
 
@@ -3204,11 +3341,16 @@ mod tests {
         let snap = fold(&[create("users", vec![col("email", ColType::Text, false)])]).unwrap();
         let t = snap.tables.get("users").expect("users table folded");
         let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"id"), "system `id` column injected by the shared builder");
+        assert!(
+            names.contains(&"id"),
+            "system `id` column injected by the shared builder"
+        );
         assert!(names.contains(&"email"), "user column present");
         // The `<table>_pkey` PK constraint the shared builder injects.
         assert!(
-            t.constraints.iter().any(|c| c.name == "users_pkey" && c.kind == "PRIMARY KEY"),
+            t.constraints
+                .iter()
+                .any(|c| c.name == "users_pkey" && c.kind == "PRIMARY KEY"),
             "system PK constraint injected"
         );
     }
@@ -3235,7 +3377,10 @@ mod tests {
             },
         ])
         .unwrap();
-        assert!(snap.tables.is_empty(), "dropped table removed from the fold");
+        assert!(
+            snap.tables.is_empty(),
+            "dropped table removed from the fold"
+        );
     }
 
     #[test]
@@ -3275,7 +3420,10 @@ mod tests {
         ])
         .unwrap();
         let t = &snap.tables["users"];
-        assert!(t.columns.iter().any(|c| c.name == "score"), "added column present");
+        assert!(
+            t.columns.iter().any(|c| c.name == "score"),
+            "added column present"
+        );
         // Columns are name-sorted (matches snapshot_schema + build_table_snapshot).
         let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
         let mut sorted = names.clone();
@@ -3298,7 +3446,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            FoldError::DuplicateColumn { table: "users".to_string(), column: "name".to_string() }
+            FoldError::DuplicateColumn {
+                table: "users".to_string(),
+                column: "name".to_string()
+            }
         );
     }
 
@@ -3339,7 +3490,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            FoldError::MissingColumn { table: "users".to_string(), column: "ghost".to_string() }
+            FoldError::MissingColumn {
+                table: "users".to_string(),
+                column: "ghost".to_string()
+            }
         );
     }
 
@@ -3357,16 +3511,31 @@ mod tests {
         // PG auto-drops an index over a dropped column; the pure fold must too.
         // Pre-fix this RETAINED the stale `t_b_idx`, leaving fold != introspect.
         let with_idx = fold(&[
-            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create(
+                "t",
+                vec![
+                    col("a", ColType::Text, false),
+                    col("b", ColType::Text, true),
+                ],
+            ),
             create_index("t", Some("t_b_idx"), &["b"], false),
         ])
         .unwrap();
         assert!(
-            with_idx.tables["t"].indexes.iter().any(|i| i.name == "t_b_idx"),
+            with_idx.tables["t"]
+                .indexes
+                .iter()
+                .any(|i| i.name == "t_b_idx"),
             "precondition: index present before the drop"
         );
         let dropped = fold(&[
-            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create(
+                "t",
+                vec![
+                    col("a", ColType::Text, false),
+                    col("b", ColType::Text, true),
+                ],
+            ),
             create_index("t", Some("t_b_idx"), &["b"], false),
             drop_column("t", "b"),
         ])
@@ -3379,7 +3548,10 @@ mod tests {
         );
         // Equals the schema that never had the index/column at all.
         let base = fold(&[create("t", vec![col("a", ColType::Text, false)])]).unwrap();
-        assert_eq!(dropped, base, "drop-column-with-index folds back to the bare table");
+        assert_eq!(
+            dropped, base,
+            "drop-column-with-index folds back to the bare table"
+        );
     }
 
     #[test]
@@ -3387,7 +3559,13 @@ mod tests {
         // PG auto-drops a UNIQUE constraint (AND its implicit index) over a dropped
         // column. Pre-fix the fold retained BOTH, leaving fold != introspect.
         let dropped = fold(&[
-            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, false)]),
+            create(
+                "t",
+                vec![
+                    col("a", ColType::Text, false),
+                    col("b", ColType::Text, false),
+                ],
+            ),
             Op::AddConstraint {
                 table: "t".to_string(),
                 constraint: unique_constraint(Some("t_b_uq"), &["b"]),
@@ -3407,7 +3585,10 @@ mod tests {
             "the constraint's implicit unique index cascades away too"
         );
         let base = fold(&[create("t", vec![col("a", ColType::Text, false)])]).unwrap();
-        assert_eq!(dropped, base, "drop-column-with-unique folds back to the bare table");
+        assert_eq!(
+            dropped, base,
+            "drop-column-with-unique folds back to the bare table"
+        );
     }
 
     #[test]
@@ -3423,7 +3604,7 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
-            
+
                 not_valid: None,
             },
         };
@@ -3440,7 +3621,10 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            !dropped.tables["members"].constraints.iter().any(|c| c.name == "m_team_fk"),
+            !dropped.tables["members"]
+                .constraints
+                .iter()
+                .any(|c| c.name == "m_team_fk"),
             "the FK over the dropped local column cascades away"
         );
     }
@@ -3463,7 +3647,10 @@ mod tests {
         ])
         .unwrap();
         let t = &snap.tables["t"];
-        assert!(t.indexes.iter().any(|i| i.name == "t_c_idx"), "unrelated index kept");
+        assert!(
+            t.indexes.iter().any(|i| i.name == "t_c_idx"),
+            "unrelated index kept"
+        );
         assert!(
             t.constraints.iter().any(|c| c.name == "t_pkey"),
             "system PK (PRIMARY KEY (id)) not dropped by a non-id column drop"
@@ -3475,13 +3662,22 @@ mod tests {
         // A multi-column index that merely PARTIALLY covers the dropped column is
         // dropped whole by PG — the fold mirrors that.
         let snap = fold(&[
-            create("t", vec![col("a", ColType::Text, false), col("b", ColType::Text, true)]),
+            create(
+                "t",
+                vec![
+                    col("a", ColType::Text, false),
+                    col("b", ColType::Text, true),
+                ],
+            ),
             create_index("t", Some("t_ab_idx"), &["a", "b"], false),
             drop_column("t", "b"),
         ])
         .unwrap();
         assert!(
-            !snap.tables["t"].indexes.iter().any(|i| i.name == "t_ab_idx"),
+            !snap.tables["t"]
+                .indexes
+                .iter()
+                .any(|i| i.name == "t_ab_idx"),
             "a multi-column index partially covering the dropped column cascades away"
         );
     }
@@ -3505,8 +3701,14 @@ mod tests {
         ])
         .unwrap();
         let t = &snap.tables["users"];
-        assert!(t.columns.iter().any(|c| c.name == "handle"), "renamed-to column present");
-        assert!(!t.columns.iter().any(|c| c.name == "nickname"), "old name gone");
+        assert!(
+            t.columns.iter().any(|c| c.name == "handle"),
+            "renamed-to column present"
+        );
+        assert!(
+            !t.columns.iter().any(|c| c.name == "nickname"),
+            "old name gone"
+        );
     }
 
     #[test]
@@ -3527,8 +3729,15 @@ mod tests {
             rename("users", "n", "m"),
         ])
         .unwrap();
-        let m = renamed.tables["users"].columns.iter().find(|c| c.name == "m").unwrap();
-        assert_eq!(m.data_type, int_type, "rename keeps the existing column type");
+        let m = renamed.tables["users"]
+            .columns
+            .iter()
+            .find(|c| c.name == "m")
+            .unwrap();
+        assert_eq!(
+            m.data_type, int_type,
+            "rename keeps the existing column type"
+        );
         assert!(!m.nullable, "rename keeps nullability");
     }
 
@@ -3541,18 +3750,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            FoldError::MissingColumn { table: "users".to_string(), column: "ghost".to_string() }
+            FoldError::MissingColumn {
+                table: "users".to_string(),
+                column: "ghost".to_string()
+            }
         );
     }
 
     #[test]
     fn rename_to_existing_errors() {
         let err = fold(&[
-            create("users", vec![col("a", ColType::Text, true), col("b", ColType::Text, true)]),
+            create(
+                "users",
+                vec![col("a", ColType::Text, true), col("b", ColType::Text, true)],
+            ),
             rename("users", "a", "b"),
         ])
         .unwrap_err();
-        assert_eq!(err, FoldError::RenameCollision { table: "users".to_string(), to: "b".to_string() });
+        assert_eq!(
+            err,
+            FoldError::RenameCollision {
+                table: "users".to_string(),
+                to: "b".to_string()
+            }
+        );
     }
 
     fn rename_table(table: &str, to: &str) -> Op {
@@ -3570,15 +3791,33 @@ mod tests {
         // PRESERVING every column + index. A later op referencing the NEW name
         // resolves; the old key is gone.
         let snap = fold(&[
-            create("accounts", vec![col("email", ColType::Text, false), col("balance", ColType::Int, true)]),
+            create(
+                "accounts",
+                vec![
+                    col("email", ColType::Text, false),
+                    col("balance", ColType::Int, true),
+                ],
+            ),
             create_index("accounts", Some("accounts_email_idx"), &["email"], true),
             rename_table("accounts", "members"),
         ])
         .unwrap();
-        assert!(!snap.tables.contains_key("accounts"), "old table name is gone after rename");
-        let t = snap.tables.get("members").expect("renamed table present under new name");
-        assert!(t.columns.iter().any(|c| c.name == "email"), "columns preserved across table rename");
-        assert!(t.columns.iter().any(|c| c.name == "balance"), "all columns preserved");
+        assert!(
+            !snap.tables.contains_key("accounts"),
+            "old table name is gone after rename"
+        );
+        let t = snap
+            .tables
+            .get("members")
+            .expect("renamed table present under new name");
+        assert!(
+            t.columns.iter().any(|c| c.name == "email"),
+            "columns preserved across table rename"
+        );
+        assert!(
+            t.columns.iter().any(|c| c.name == "balance"),
+            "all columns preserved"
+        );
         assert!(
             t.indexes.iter().any(|i| i.name == "accounts_email_idx"),
             "indexes preserved across table rename"
@@ -3609,7 +3848,10 @@ mod tests {
         ])
         .unwrap();
         let t = &snap.tables["members"];
-        assert!(t.columns.iter().any(|c| c.name == "nickname"), "op on the renamed-to name resolves");
+        assert!(
+            t.columns.iter().any(|c| c.name == "nickname"),
+            "op on the renamed-to name resolves"
+        );
     }
 
     #[test]
@@ -3664,7 +3906,7 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
-            
+
                 not_valid: None,
             },
         };
@@ -3718,7 +3960,7 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
-                    
+
                         not_valid: None,
                     },
                 },
@@ -3754,7 +3996,7 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
-            
+
                 not_valid: None,
             },
         };
@@ -3790,7 +4032,9 @@ mod tests {
         // pointing at the dead `accounts`.
         let account_ref = IrColumn {
             name: "account_id".into(),
-            ty: ColType::Ref { references: "accounts".into() },
+            ty: ColType::Ref {
+                references: "accounts".into(),
+            },
             nullable: Some(true),
             default: None,
             unique: None,
@@ -3829,10 +4073,21 @@ mod tests {
             },
         ])
         .unwrap();
-        let n = snap.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
+        let n = snap.tables["users"]
+            .columns
+            .iter()
+            .find(|c| c.name == "n")
+            .unwrap();
         let text_n = fold(&[create("users", vec![col("n", ColType::Text, false)])]).unwrap();
-        let want = text_n.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
-        assert_eq!(n.data_type, want.data_type, "setColumnType re-derives the new data_type");
+        let want = text_n.tables["users"]
+            .columns
+            .iter()
+            .find(|c| c.name == "n")
+            .unwrap();
+        assert_eq!(
+            n.data_type, want.data_type,
+            "setColumnType re-derives the new data_type"
+        );
         assert!(!n.nullable, "setColumnType keeps existing nullability");
     }
 
@@ -3852,7 +4107,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            FoldError::MissingColumn { table: "users".to_string(), column: "ghost".to_string() }
+            FoldError::MissingColumn {
+                table: "users".to_string(),
+                column: "ghost".to_string()
+            }
         );
     }
 
@@ -3868,7 +4126,11 @@ mod tests {
             },
         ])
         .unwrap();
-        let n = snap.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
+        let n = snap.tables["users"]
+            .columns
+            .iter()
+            .find(|c| c.name == "n")
+            .unwrap();
         assert!(n.nullable, "dropColumnNotNull set NULL");
     }
 
@@ -3902,7 +4164,10 @@ mod tests {
         // A UNIQUE constraint also materializes the implicit unique index PG names
         // after the constraint — live introspection reports it, so the fold must too.
         let idx = t.indexes.iter().find(|i| i.name == "u_handle").unwrap();
-        assert!(idx.unique, "implicit unique index for the UNIQUE constraint");
+        assert!(
+            idx.unique,
+            "implicit unique index for the UNIQUE constraint"
+        );
         assert_eq!(idx.columns, vec!["handle".to_string()]);
 
         // An unnamed UNIQUE derives `<table>_<cols>_key`.
@@ -3917,7 +4182,10 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            derived.tables["users"].constraints.iter().any(|c| c.name == "users_handle_key"),
+            derived.tables["users"]
+                .constraints
+                .iter()
+                .any(|c| c.name == "users_handle_key"),
             "unnamed UNIQUE derives <table>_<cols>_key"
         );
     }
@@ -3997,7 +4265,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            FoldError::MissingConstraint { table: "users".to_string(), name: "ghost".to_string() }
+            FoldError::MissingConstraint {
+                table: "users".to_string(),
+                name: "ghost".to_string()
+            }
         );
     }
 
@@ -4006,16 +4277,20 @@ mod tests {
         let create_chk = IrConstraint {
             name: Some("users_true".to_string()),
             kind: IrConstraintKind::Check {
-                expr: Expr::Literal { value: IrScalar::Bool(true) },
-            
+                expr: Expr::Literal {
+                    value: IrScalar::Bool(true),
+                },
+
                 not_valid: None,
             },
         };
         let add_chk = IrConstraint {
             name: Some("age_pos".to_string()),
             kind: IrConstraintKind::Check {
-                expr: Expr::Literal { value: IrScalar::Bool(true) },
-            
+                expr: Expr::Literal {
+                    value: IrScalar::Bool(true),
+                },
+
                 not_valid: None,
             },
         };
@@ -4078,7 +4353,7 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
-            
+
                 not_valid: None,
             },
         };
@@ -4093,10 +4368,22 @@ mod tests {
             },
         ])
         .unwrap();
-        let c = snap.tables["members"].constraints.iter().find(|c| c.name == "m_team_fk").unwrap();
+        let c = snap.tables["members"]
+            .constraints
+            .iter()
+            .find(|c| c.name == "m_team_fk")
+            .unwrap();
         assert_eq!(c.kind, "FOREIGN KEY");
-        assert!(c.definition.contains("ON DELETE CASCADE"), "FK definition carries ON DELETE: {}", c.definition);
-        assert!(c.definition.contains("teams"), "FK references the target table: {}", c.definition);
+        assert!(
+            c.definition.contains("ON DELETE CASCADE"),
+            "FK definition carries ON DELETE: {}",
+            c.definition
+        );
+        assert!(
+            c.definition.contains("teams"),
+            "FK references the target table: {}",
+            c.definition
+        );
     }
 
     fn create_index(table: &str, name: Option<&str>, cols: &[&str], unique: bool) -> Op {
@@ -4132,7 +4419,11 @@ mod tests {
             create_index("users", Some("u_email_idx"), &["email"], true),
         ])
         .unwrap();
-        let idx = snap.tables["users"].indexes.iter().find(|i| i.name == "u_email_idx").unwrap();
+        let idx = snap.tables["users"]
+            .indexes
+            .iter()
+            .find(|i| i.name == "u_email_idx")
+            .unwrap();
         assert!(idx.unique, "unique index folded");
         assert_eq!(idx.columns, vec!["email".to_string()]);
     }
@@ -4172,7 +4463,10 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            !snap.tables["users"].indexes.iter().any(|i| i.name == "u_email_idx"),
+            !snap.tables["users"]
+                .indexes
+                .iter()
+                .any(|i| i.name == "u_email_idx"),
             "bare-name drop scans all tables and removes the index"
         );
     }
@@ -4210,13 +4504,18 @@ mod tests {
             },
             Op::Delete {
                 table: "users".to_string(),
-                r#where: Expr::Literal { value: IrScalar::Bool(true) },
+                r#where: Expr::Literal {
+                    value: IrScalar::Bool(true),
+                },
                 limit: None,
                 schema: None,
             },
         ])
         .unwrap();
-        assert_eq!(with_dml, schema_only, "DML ops leave the folded schema unchanged");
+        assert_eq!(
+            with_dml, schema_only,
+            "DML ops leave the folded schema unchanged"
+        );
     }
 
     #[test]
@@ -4226,7 +4525,10 @@ mod tests {
         let teams = create("teams", vec![col("label", ColType::Text, false)]);
         let memberships = Op::CreateTable {
             name: "memberships".to_string(),
-            columns: vec![col("team_id", ColType::Text, false), col("slot", ColType::Text, false)],
+            columns: vec![
+                col("team_id", ColType::Text, false),
+                col("slot", ColType::Text, false),
+            ],
             primary_key: None,
             constraints: vec![
                 unique_constraint(Some("m_slot_uq"), &["slot"]),
@@ -4240,7 +4542,7 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
-                    
+
                         not_valid: None,
                     },
                 },
@@ -4268,8 +4570,14 @@ mod tests {
         };
         let snap = fold(&[teams, memberships]).unwrap();
         let t = &snap.tables["memberships"];
-        assert!(t.constraints.iter().any(|c| c.name == "m_slot_uq" && c.kind == "UNIQUE"));
-        assert!(t.constraints.iter().any(|c| c.name == "m_team_fk" && c.kind == "FOREIGN KEY"));
+        assert!(t
+            .constraints
+            .iter()
+            .any(|c| c.name == "m_slot_uq" && c.kind == "UNIQUE"));
+        assert!(t
+            .constraints
+            .iter()
+            .any(|c| c.name == "m_team_fk" && c.kind == "FOREIGN KEY"));
         assert!(t.indexes.iter().any(|i| i.name == "m_team_idx"));
     }
 
@@ -4369,7 +4677,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn encrypted_text() -> ColType {
-        ColType::Encrypted { of: Box::new(ColType::Text) }
+        ColType::Encrypted {
+            of: Box::new(ColType::Text),
+        }
     }
 
     fn alter_type(table: &str, column: &str, ty: ColType) -> Op {
@@ -4390,7 +4700,11 @@ mod tests {
     #[test]
     fn fresh_encrypted_column_carries_sentinel() {
         let snap = fold(&[create("v", vec![col("secret", encrypted_text(), true)])]).unwrap();
-        let c = snap.tables["v"].columns.iter().find(|c| c.name == "secret").unwrap();
+        let c = snap.tables["v"]
+            .columns
+            .iter()
+            .find(|c| c.name == "secret")
+            .unwrap();
         assert!(
             c.encryption_sentinel.is_some() || c.comment_sentinel.is_some(),
             "a fresh encrypted column carries the zero-migrate:enc sentinel (the gen-types contract)"
@@ -4441,10 +4755,21 @@ mod tests {
             alter_type("v", "n", ColType::BigInt),
         ])
         .unwrap();
-        let n = snap.tables["v"].columns.iter().find(|c| c.name == "n").unwrap();
+        let n = snap.tables["v"]
+            .columns
+            .iter()
+            .find(|c| c.name == "n")
+            .unwrap();
         let want = fold(&[create("v", vec![col("n", ColType::BigInt, false)])]).unwrap();
-        let want_n = want.tables["v"].columns.iter().find(|c| c.name == "n").unwrap();
-        assert_eq!(n.data_type, want_n.data_type, "plain→plain re-derives data_type");
+        let want_n = want.tables["v"]
+            .columns
+            .iter()
+            .find(|c| c.name == "n")
+            .unwrap();
+        assert_eq!(
+            n.data_type, want_n.data_type,
+            "plain→plain re-derives data_type"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4452,7 +4777,12 @@ mod tests {
     // never emits types for a schema that can never deploy on SQLite (fail-OPEN).
     // -----------------------------------------------------------------------
 
-    fn create_with(name: &str, columns: Vec<IrColumn>, constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
+    fn create_with(
+        name: &str,
+        columns: Vec<IrColumn>,
+        constraints: Vec<IrConstraint>,
+        indexes: Vec<IrIndex>,
+    ) -> Op {
         Op::CreateTable {
             name: name.to_string(),
             columns,
@@ -4460,9 +4790,9 @@ mod tests {
             constraints,
             indexes,
 
-        partition_by: None,
+            partition_by: None,
 
-        runtime_options: Default::default(),
+            runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }
@@ -4486,7 +4816,7 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             }],
@@ -4511,13 +4841,16 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             }],
             Vec::new(),
         );
-        assert!(fold(&[parents, kids]).is_ok(), "table-level FK folds on Postgres");
+        assert!(
+            fold(&[parents, kids]).is_ok(),
+            "table-level FK folds on Postgres"
+        );
     }
 
     /// REGRESSION: a createTable TABLE-LEVEL UNIQUE is refused at
@@ -4555,10 +4888,10 @@ mod tests {
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
                 r#where: None,
-            include: Vec::new(),
-            with: None,
-            only: None,
-            nulls_not_distinct: None,
+                include: Vec::new(),
+                with: None,
+                only: None,
+                nulls_not_distinct: None,
             }],
         );
         let err = validate_ops(vec![op], Dialect::Sqlite);
@@ -4647,7 +4980,9 @@ mod tests {
                     name: "rank".to_string(),
                     ty: ColType::Int,
                     nullable: Some(false),
-                    default: Some(IrDefault::Literal { value: IrScalar::Int(7) }),
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Int(7),
+                    }),
                     unique: None,
                     id_prefix: None,
                     case_sensitive: None,
@@ -4686,10 +5021,18 @@ mod tests {
             "tier",
             ColType::Text,
             false,
-            Some(IrDefault::Literal { value: IrScalar::Str("beta".to_string()) }),
+            Some(IrDefault::Literal {
+                value: IrScalar::Str("beta".to_string()),
+            }),
         );
-        assert_eq!(tier.default, want_tier.default, "fold's emitted string default matches the shared builder");
-        assert!(want_tier.default.is_some(), "the string default golden is non-trivial");
+        assert_eq!(
+            tier.default, want_tier.default,
+            "fold's emitted string default matches the shared builder"
+        );
+        assert!(
+            want_tier.default.is_some(),
+            "the string default golden is non-trivial"
+        );
 
         let rank = t.columns.iter().find(|c| c.name == "rank").unwrap();
         let want_rank = builder_column(
@@ -4697,9 +5040,14 @@ mod tests {
             "rank",
             ColType::Int,
             false,
-            Some(IrDefault::Literal { value: IrScalar::Int(7) }),
+            Some(IrDefault::Literal {
+                value: IrScalar::Int(7),
+            }),
         );
-        assert_eq!(rank.default, want_rank.default, "fold's emitted int default matches the shared builder");
+        assert_eq!(
+            rank.default, want_rank.default,
+            "fold's emitted int default matches the shared builder"
+        );
         assert_eq!(
             want_rank.default.as_deref(),
             Some("7"),
@@ -4708,8 +5056,14 @@ mod tests {
 
         let meta = t.columns.iter().find(|c| c.name == "meta").unwrap();
         let want_meta = builder_column("g", "meta", ColType::Json, true, None);
-        assert_eq!(meta.default, want_meta.default, "fold's emitted json default matches the shared builder");
-        assert!(want_meta.default.is_some(), "the json default golden is non-trivial ('{{}}'::jsonb)");
+        assert_eq!(
+            meta.default, want_meta.default,
+            "fold's emitted json default matches the shared builder"
+        );
+        assert!(
+            want_meta.default.is_some(),
+            "the json default golden is non-trivial ('{{}}'::jsonb)"
+        );
     }
 
     /// GOLDEN (addColumn): the fold's emitted default + sentinels for an
@@ -4734,10 +5088,20 @@ mod tests {
             },
         ])
         .unwrap();
-        let secret = snap.tables["g"].columns.iter().find(|c| c.name == "secret").unwrap();
+        let secret = snap.tables["g"]
+            .columns
+            .iter()
+            .find(|c| c.name == "secret")
+            .unwrap();
         let want = builder_column("g", "secret", encrypted_text(), true, None);
-        assert_eq!(secret.encryption_sentinel, want.encryption_sentinel, "addColumn encryption_sentinel parity");
-        assert_eq!(secret.comment_sentinel, want.comment_sentinel, "addColumn comment_sentinel parity");
+        assert_eq!(
+            secret.encryption_sentinel, want.encryption_sentinel,
+            "addColumn encryption_sentinel parity"
+        );
+        assert_eq!(
+            secret.comment_sentinel, want.comment_sentinel,
+            "addColumn comment_sentinel parity"
+        );
         assert!(
             want.encryption_sentinel.is_some() || want.comment_sentinel.is_some(),
             "the addColumn encrypted golden is non-trivial"
@@ -4765,15 +5129,25 @@ mod tests {
             Vec::new(),
         )])
         .unwrap();
-        let folded = snap.tables["t"].constraints.iter().find(|c| c.name == "t_handle_uq").unwrap();
+        let folded = snap.tables["t"]
+            .constraints
+            .iter()
+            .find(|c| c.name == "t_handle_uq")
+            .unwrap();
         // The lower's snapshot half spells it via the SAME shared helper now.
         let cols = vec!["handle".to_string()];
-        let lower_body = format!("UNIQUE ({})", crate::render::declarative::constraintdef_cols(&cols));
+        let lower_body = format!(
+            "UNIQUE ({})",
+            crate::render::declarative::constraintdef_cols(&cols)
+        );
         assert_eq!(
             folded.definition, lower_body,
             "fold and lower must spell the UNIQUE definition identically"
         );
-        assert_eq!(folded.definition, "UNIQUE (handle)", "bare spelling matches pg_get_constraintdef");
+        assert_eq!(
+            folded.definition, "UNIQUE (handle)",
+            "bare spelling matches pg_get_constraintdef"
+        );
     }
 
     // ===================================================================
@@ -4816,8 +5190,11 @@ mod tests {
         };
         let m = defs(&[create("posts", vec![id])]);
         let def = field_def(&m, "posts", "id");
-        assert_eq!(def.get("idPrefix").and_then(|v| v.as_str()), Some("post"),
-            "the typed-id prefix is recovered onto the FieldDef: {def}");
+        assert_eq!(
+            def.get("idPrefix").and_then(|v| v.as_str()),
+            Some("post"),
+            "the typed-id prefix is recovered onto the FieldDef: {def}"
+        );
     }
 
     #[test]
@@ -4839,10 +5216,16 @@ mod tests {
         };
         let m = defs(&[create("docs", vec![embedding])]);
         let def = field_def(&m, "docs", "embedding");
-        assert_eq!(def.get("vectorMetric").and_then(|v| v.as_str()), Some("innerProduct"),
-            "the declared vector metric is recovered: {def}");
-        assert_eq!(def.get("vectorDims").and_then(|v| v.as_i64()), Some(1536),
-            "the vector dims ride alongside the metric: {def}");
+        assert_eq!(
+            def.get("vectorMetric").and_then(|v| v.as_str()),
+            Some("innerProduct"),
+            "the declared vector metric is recovered: {def}"
+        );
+        assert_eq!(
+            def.get("vectorDims").and_then(|v| v.as_i64()),
+            Some(1536),
+            "the vector dims ride alongside the metric: {def}"
+        );
     }
 
     /// A STANDALONE `.mask()` on a PLAINTEXT createTable column is CARRIED
@@ -4868,9 +5251,14 @@ mod tests {
         };
         let m = defs(&[create("people", vec![ssn])]);
         let def = field_def(&m, "people", "ssn");
-        let mask = def.get("mask").unwrap_or_else(|| panic!("mask must be recovered: {def}"));
+        let mask = def
+            .get("mask")
+            .unwrap_or_else(|| panic!("mask must be recovered: {def}"));
         assert_eq!(mask.get("kind").and_then(|v| v.as_str()), Some("last4"));
-        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("spi"));
+        assert_eq!(
+            mask.get("classification").and_then(|v| v.as_str()),
+            Some("spi")
+        );
     }
 
     /// Precedence — an EXPLICIT `.mask()` on an ENCRYPTED column OVERRIDES the
@@ -4881,7 +5269,9 @@ mod tests {
     fn explicit_mask_overrides_encrypted_auto_mask() {
         let secret = IrColumn {
             name: "secret".into(),
-            ty: ColType::Encrypted { of: Box::new(ColType::Text) },
+            ty: ColType::Encrypted {
+                of: Box::new(ColType::Text),
+            },
             nullable: Some(true),
             default: None,
             unique: None,
@@ -4897,13 +5287,18 @@ mod tests {
         };
         let m = defs(&[create("vault", vec![secret])]);
         let def = field_def(&m, "vault", "secret");
-        let mask = def.get("mask").unwrap_or_else(|| panic!("mask must be recovered: {def}"));
+        let mask = def
+            .get("mask")
+            .unwrap_or_else(|| panic!("mask must be recovered: {def}"));
         assert_eq!(
             mask.get("kind").and_then(|v| v.as_str()),
             Some("last4"),
             "the EXPLICIT mask wins over the encrypted auto-mask `full`: {def}"
         );
-        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("pci"));
+        assert_eq!(
+            mask.get("classification").and_then(|v| v.as_str()),
+            Some("pci")
+        );
     }
 
     /// A `mask` facet carried on `Op::AddColumn` is recovered onto the added
@@ -4932,9 +5327,14 @@ mod tests {
         ];
         let m = defs(&ops);
         let def = field_def(&m, "people", "card");
-        let mask = def.get("mask").unwrap_or_else(|| panic!("added-column mask must be recovered: {def}"));
+        let mask = def
+            .get("mask")
+            .unwrap_or_else(|| panic!("added-column mask must be recovered: {def}"));
         assert_eq!(mask.get("kind").and_then(|v| v.as_str()), Some("first4"));
-        assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("pci"));
+        assert_eq!(
+            mask.get("classification").and_then(|v| v.as_str()),
+            Some("pci")
+        );
     }
 
     #[test]
@@ -4942,7 +5342,9 @@ mod tests {
         // The FK target → the `ref` brand, recovered from the Ref ColType.
         let owner = IrColumn {
             name: "owner".into(),
-            ty: ColType::Ref { references: "orgs".into() },
+            ty: ColType::Ref {
+                references: "orgs".into(),
+            },
             nullable: Some(false),
             default: None,
             unique: None,
@@ -4956,8 +5358,11 @@ mod tests {
         let m = defs(&[create("teams", vec![owner])]);
         let def = field_def(&m, "teams", "owner");
         assert_eq!(def.get("type").and_then(|v| v.as_str()), Some("ref"));
-        assert_eq!(def.get("refTarget").and_then(|v| v.as_str()), Some("orgs"),
-            "the FK target collection is recovered as the ref brand: {def}");
+        assert_eq!(
+            def.get("refTarget").and_then(|v| v.as_str()),
+            Some("orgs"),
+            "the FK target collection is recovered as the ref brand: {def}"
+        );
     }
 
     #[test]
@@ -4967,8 +5372,10 @@ mod tests {
         let secret = col("secret", encrypted_text(), true);
         let m = defs(&[create("vaults", vec![secret])]);
         let def = field_def(&m, "vaults", "secret");
-        assert!(def.get("encrypted").is_some(),
-            "an encrypted column is recovered with the (default-mode) encrypted facet: {def}");
+        assert!(
+            def.get("encrypted").is_some(),
+            "an encrypted column is recovered with the (default-mode) encrypted facet: {def}"
+        );
     }
 
     #[test]
@@ -5054,7 +5461,10 @@ mod tests {
         use crate::model::expr::{BinaryOp, Expr, ScalarFn};
         let weird = Expr::BinOp {
             op: BinaryOp::Gt,
-            lhs: Box::new(Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] }),
+            lhs: Box::new(Expr::FnCall {
+                r#fn: ScalarFn::Length,
+                args: vec![Expr::col("name")],
+            }),
             rhs: Box::new(Expr::lit(IrScalar::Int(3))),
         };
         assert_eq!(
@@ -5069,7 +5479,13 @@ mod tests {
         // The reconstruction tracks the folded logical state: a column dropped after
         // creation must NOT appear in the rebuilt FieldDef map.
         let m = defs(&[
-            create("t", vec![col("keep", ColType::Text, true), col("gone", ColType::Int, true)]),
+            create(
+                "t",
+                vec![
+                    col("keep", ColType::Text, true),
+                    col("gone", ColType::Int, true),
+                ],
+            ),
             Op::DropColumn {
                 table: "t".into(),
                 column: "gone".into(),
@@ -5079,7 +5495,10 @@ mod tests {
         ]);
         let t = m.get("t").expect("table reconstructed");
         assert!(t.get("keep").is_some(), "a surviving column is present");
-        assert!(t.get("gone").is_none(), "a dropped column is absent from the reconstruction");
+        assert!(
+            t.get("gone").is_none(),
+            "a dropped column is absent from the reconstruction"
+        );
     }
 
     // ── The encrypted-mode finding ───────────────────────────────────────────
@@ -5119,7 +5538,9 @@ mod tests {
         });
         assert_eq!(
             field.encrypted,
-            Some(serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+            Some(
+                serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })
+            ),
             "op.* encrypted recovers the SDK kernel-DEFAULT triple (the `t.encrypted()` \
              byte-image) — a non-default mode is unrepresentable in ColType::Encrypted, \
              so the path is fail-closed by construction, never a wrong-mode sentinel"
@@ -5169,9 +5590,18 @@ mod tests {
         let fk = constraints
             .iter()
             .find_map(|c| match &c.kind {
-                IrConstraintKind::Fk { columns, on_delete, on_update, references_table, .. } => {
-                    Some((columns.clone(), *on_delete, *on_update, references_table.clone()))
-                }
+                IrConstraintKind::Fk {
+                    columns,
+                    on_delete,
+                    on_update,
+                    references_table,
+                    ..
+                } => Some((
+                    columns.clone(),
+                    *on_delete,
+                    *on_update,
+                    references_table.clone(),
+                )),
                 _ => None,
             })
             .expect("the ref column emits an Fk constraint carrying the policy");
@@ -5225,7 +5655,10 @@ mod tests {
                 }
             }
         }
-        assert!(recovered_range && recovered_enum, "both CHECK shapes round-trip via recover_check_facet");
+        assert!(
+            recovered_range && recovered_enum,
+            "both CHECK shapes round-trip via recover_check_facet"
+        );
     }
 
     #[test]
@@ -5235,13 +5668,31 @@ mod tests {
         let d = descriptor(
             "t",
             vec![
-                FieldDescriptor { name: "zeta".into(), ty: "string".into(), ..Default::default() },
-                FieldDescriptor { name: "alpha".into(), ty: "string".into(), ..Default::default() },
-                FieldDescriptor { name: "mid".into(), ty: "string".into(), ..Default::default() },
+                FieldDescriptor {
+                    name: "zeta".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "alpha".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "mid".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
             ],
         );
         let ops = descriptors_to_create_ops(&[d]).unwrap();
-        let Op::CreateTable { columns, primary_key, indexes, .. } = &ops[0] else {
+        let Op::CreateTable {
+            columns,
+            primary_key,
+            indexes,
+            ..
+        } = &ops[0]
+        else {
             panic!("createTable")
         };
         assert_eq!(
@@ -5268,7 +5719,12 @@ mod tests {
         );
         assert_eq!(indexes.len(), 3, "producer carries resolved system indexes");
         let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).unwrap();
-        let keys: Vec<&str> = defs["t"].as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = defs["t"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             keys,
             vec![
@@ -5291,9 +5747,16 @@ mod tests {
     fn producer_rejects_unmappable_type_token() {
         let d = descriptor(
             "t",
-            vec![FieldDescriptor { name: "x".into(), ty: "no_such_type".into(), ..Default::default() }],
+            vec![FieldDescriptor {
+                name: "x".into(),
+                ty: "no_such_type".into(),
+                ..Default::default()
+            }],
         );
         let err = descriptors_to_create_ops(&[d]).unwrap_err();
-        assert!(matches!(err, ProduceError::UnknownType { .. }), "unmappable token fails closed");
+        assert!(
+            matches!(err, ProduceError::UnknownType { .. }),
+            "unmappable token fails closed"
+        );
     }
 }

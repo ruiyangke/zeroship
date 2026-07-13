@@ -19,8 +19,8 @@
 //! (`VENDOR_OP_DENIED` at load) + the rendered-SQL deny-list (the guard at lower).
 //! This module is render-only; it assumes the op already passed both gates.
 
-use crate::render::dml::{quote_ident_checked, render_predicate_pg, DmlError, IdentQuoteError};
 use crate::model::ir::{is_valid_pg_type_ref, GrantTarget, Op, Privilege, TriggerAction};
+use crate::render::dml::{quote_ident_checked, render_predicate_pg, DmlError, IdentQuoteError};
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
@@ -142,7 +142,9 @@ fn grant_target_sql(target: &GrantTarget, default_schema: &str) -> Result<String
     Ok(match target {
         GrantTarget::Table { names, schema } => {
             if names.is_empty() {
-                return Err(VendorError::EmptyList { what: "grant table names" });
+                return Err(VendorError::EmptyList {
+                    what: "grant table names",
+                });
             }
             let sch = schema.as_deref().unwrap_or(default_schema);
             let parts: Result<Vec<_>, _> = names.iter().map(|n| qualified(sch, n)).collect();
@@ -150,7 +152,9 @@ fn grant_target_sql(target: &GrantTarget, default_schema: &str) -> Result<String
         }
         GrantTarget::Schema { names } => {
             if names.is_empty() {
-                return Err(VendorError::EmptyList { what: "grant schema names" });
+                return Err(VendorError::EmptyList {
+                    what: "grant schema names",
+                });
             }
             let parts: Result<Vec<_>, _> = names.iter().map(|n| qid(n)).collect();
             format!("SCHEMA {}", parts?.join(", "))
@@ -160,7 +164,9 @@ fn grant_target_sql(target: &GrantTarget, default_schema: &str) -> Result<String
         }
         GrantTarget::Database { names } => {
             if names.is_empty() {
-                return Err(VendorError::EmptyList { what: "grant database names" });
+                return Err(VendorError::EmptyList {
+                    what: "grant database names",
+                });
             }
             let parts: Result<Vec<_>, _> = names.iter().map(|n| qid(n)).collect();
             format!("DATABASE {}", parts?.join(", "))
@@ -177,7 +183,11 @@ fn privileges_sql(privs: &[Privilege]) -> Result<String, VendorError> {
     if privs.contains(&Privilege::All) {
         return Ok("ALL PRIVILEGES".to_string());
     }
-    Ok(privs.iter().map(|p| p.as_sql()).collect::<Vec<_>>().join(", "))
+    Ok(privs
+        .iter()
+        .map(|p| p.as_sql())
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// Render the comma-joined role list.
@@ -218,7 +228,11 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
 pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement>, VendorError> {
     Ok(match op {
         // ── Schemas ──────────────────────────────────────────────────────────
-        Op::CreateSchema { name, if_not_exists, authorization } => {
+        Op::CreateSchema {
+            name,
+            if_not_exists,
+            authorization,
+        } => {
             let mut up = String::from("CREATE SCHEMA ");
             if if_not_exists.unwrap_or(false) {
                 up.push_str("IF NOT EXISTS ");
@@ -233,7 +247,11 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 down: Some(format!("DROP SCHEMA IF EXISTS {}", qid(name)?)),
             }]
         }
-        Op::DropSchema { name, if_exists, cascade } => {
+        Op::DropSchema {
+            name,
+            if_exists,
+            cascade,
+        } => {
             let mut up = String::from("DROP SCHEMA ");
             if if_exists.unwrap_or(false) {
                 up.push_str("IF EXISTS ");
@@ -242,10 +260,18 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             if cascade.unwrap_or(false) {
                 up.push_str(" CASCADE");
             }
-            vec![VendorStatement { name: format!("drop_schema_{name}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_schema_{name}"),
+                up,
+                down: None,
+            }]
         }
         // ── Extensions ───────────────────────────────────────────────────────
-        Op::CreateExtension { name, if_not_exists, schema } => {
+        Op::CreateExtension {
+            name,
+            if_not_exists,
+            schema,
+        } => {
             let mut up = String::from("CREATE EXTENSION ");
             if if_not_exists.unwrap_or(false) {
                 up.push_str("IF NOT EXISTS ");
@@ -266,7 +292,11 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&qid(name)?);
-            vec![VendorStatement { name: format!("drop_extension_{name}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_extension_{name}"),
+                up,
+                down: None,
+            }]
         }
         // ── Roles ────────────────────────────────────────────────────────────
         Op::CreateRole {
@@ -345,7 +375,11 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             }
             out
         }
-        Op::AlterRole { name, set_search_path, reset_search_path } => {
+        Op::AlterRole {
+            name,
+            set_search_path,
+            reset_search_path,
+        } => {
             let qname = qid(name)?;
             // `setSearchPath` + `resetSearchPath:true` is contradictory (the
             // renderer would silently prefer RESET and drop the SET). Refuse it so
@@ -368,11 +402,20 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             let up = if reset_search_path.unwrap_or(false) {
                 format!("ALTER ROLE {qname} RESET search_path")
             } else if let Some(sp) = set_search_path.as_ref().filter(|s| !s.is_empty()) {
-                format!("ALTER ROLE {qname} SET search_path = {}", search_path_list(sp)?)
+                format!(
+                    "ALTER ROLE {qname} SET search_path = {}",
+                    search_path_list(sp)?
+                )
             } else {
-                return Err(VendorError::EmptyList { what: "alterRole instruction (setSearchPath or resetSearchPath)" });
+                return Err(VendorError::EmptyList {
+                    what: "alterRole instruction (setSearchPath or resetSearchPath)",
+                });
             };
-            vec![VendorStatement { name: format!("alter_role_{name}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("alter_role_{name}"),
+                up,
+                down: None,
+            }]
         }
         Op::DropRole { name, if_exists } => {
             let mut up = String::from("DROP ROLE ");
@@ -380,17 +423,26 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&qid(name)?);
-            vec![VendorStatement { name: format!("drop_role_{name}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_role_{name}"),
+                up,
+                down: None,
+            }]
         }
         Op::DropOwnedBy { roles } => {
             // Validate BEFORE the map+join: an empty list and the reserved
             // `PUBLIC` pseudo-role (`DROP OWNED BY PUBLIC` errors at apply) are both
             // refused fail-closed rather than rendered into an apply-time failure.
             if roles.is_empty() {
-                return Err(VendorError::EmptyList { what: "drop owned by roles" });
+                return Err(VendorError::EmptyList {
+                    what: "drop owned by roles",
+                });
             }
             if let Some(r) = roles.iter().find(|r| r.eq_ignore_ascii_case("public")) {
-                return Err(VendorError::ReservedRole { what: "drop owned by roles", role: r.clone() });
+                return Err(VendorError::ReservedRole {
+                    what: "drop owned by roles",
+                    role: r.clone(),
+                });
             }
             let parts: Result<Vec<_>, _> = roles.iter().map(|r| role_ref(r)).collect();
             let roles_sql = parts?.join(", ");
@@ -401,7 +453,12 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             }]
         }
         // ── Grants ───────────────────────────────────────────────────────────
-        Op::Grant { privileges, on, to, with_grant_option } => {
+        Op::Grant {
+            privileges,
+            on,
+            to,
+            with_grant_option,
+        } => {
             let privs = privileges_sql(privileges)?;
             let target = grant_target_sql(on, eff_schema)?;
             let grantees = roles_sql(to, "grant to roles")?;
@@ -410,9 +467,17 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 up.push_str(" WITH GRANT OPTION");
             }
             let down = format!("REVOKE {privs} ON {target} FROM {grantees}");
-            vec![VendorStatement { name: "grant".to_string(), up, down: Some(down) }]
+            vec![VendorStatement {
+                name: "grant".to_string(),
+                up,
+                down: Some(down),
+            }]
         }
-        Op::Revoke { privileges, on, from } => {
+        Op::Revoke {
+            privileges,
+            on,
+            from,
+        } => {
             let privs = privileges_sql(privileges)?;
             let target = grant_target_sql(on, eff_schema)?;
             let grantees = roles_sql(from, "revoke from roles")?;
@@ -423,17 +488,25 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             }]
         }
         // ── Row-Level Security ────────────────────────────────────────────────
-        Op::SetRls { table, enabled, forced, .. } => {
-            set_rls_stmts(eff_schema, table, *enabled, *forced)?
-        }
+        Op::SetRls {
+            table,
+            enabled,
+            forced,
+            ..
+        } => set_rls_stmts(eff_schema, table, *enabled, *forced)?,
         // ── Policies ─────────────────────────────────────────────────────────
-        Op::CreatePolicy { name, table, for_cmd, to, using, with_check, .. } => {
+        Op::CreatePolicy {
+            name,
+            table,
+            for_cmd,
+            to,
+            using,
+            with_check,
+            ..
+        } => {
             let qtable = qualified(eff_schema, table)?;
             let qname = qid(name)?;
-            let mut up = format!(
-                "CREATE POLICY {qname} ON {qtable} FOR {}",
-                for_cmd.as_sql()
-            );
+            let mut up = format!("CREATE POLICY {qname} ON {qtable} FOR {}", for_cmd.as_sql());
             if let Some(roles) = to {
                 if !roles.is_empty() {
                     up.push_str(&format!(" TO {}", roles_sql(roles, "policy roles")?));
@@ -449,24 +522,47 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 down: Some(format!("DROP POLICY IF EXISTS {qname} ON {qtable}")),
             }]
         }
-        Op::DropPolicy { name, table, if_exists, .. } => {
+        Op::DropPolicy {
+            name,
+            table,
+            if_exists,
+            ..
+        } => {
             let qtable = qualified(eff_schema, table)?;
             let mut up = String::from("DROP POLICY ");
             if if_exists.unwrap_or(false) {
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&format!("{} ON {qtable}", qid(name)?));
-            vec![VendorStatement { name: format!("drop_policy_{name}_{table}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_policy_{name}_{table}"),
+                up,
+                down: None,
+            }]
         }
         // ── Triggers ─────────────────────────────────────────────────────────
-        Op::CreateTrigger { name, table, timing, events, for_each, action, when, .. } => {
+        Op::CreateTrigger {
+            name,
+            table,
+            timing,
+            events,
+            for_each,
+            action,
+            when,
+            ..
+        } => {
             if events.is_empty() {
-                return Err(VendorError::EmptyList { what: "trigger events" });
+                return Err(VendorError::EmptyList {
+                    what: "trigger events",
+                });
             }
             let qtable = qualified(eff_schema, table)?;
             let qname = qid(name)?;
-            let events_sql =
-                events.iter().map(|e| e.as_sql()).collect::<Vec<_>>().join(" OR ");
+            let events_sql = events
+                .iter()
+                .map(|e| e.as_sql())
+                .collect::<Vec<_>>()
+                .join(" OR ");
             let mut up = format!(
                 "CREATE TRIGGER {qname} {} {events_sql} ON {qtable} FOR EACH {}",
                 timing.as_sql(),
@@ -479,10 +575,15 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 TriggerAction::ExecuteFunction { name } => {
                     // The function name is quoted and schema-qualified to the
                     // effective schema (the platform functions live there).
-                    up.push_str(&format!(" EXECUTE FUNCTION {}()", qualified(eff_schema, name)?));
+                    up.push_str(&format!(
+                        " EXECUTE FUNCTION {}()",
+                        qualified(eff_schema, name)?
+                    ));
                 }
                 TriggerAction::Body { .. } => {
-                    return Err(VendorError::UnsupportedTriggerAction { kind: "triggerBody" });
+                    return Err(VendorError::UnsupportedTriggerAction {
+                        kind: "triggerBody",
+                    });
                 }
             }
             vec![VendorStatement {
@@ -491,17 +592,35 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 down: Some(format!("DROP TRIGGER IF EXISTS {qname} ON {qtable}")),
             }]
         }
-        Op::DropTrigger { name, table, if_exists, .. } => {
+        Op::DropTrigger {
+            name,
+            table,
+            if_exists,
+            ..
+        } => {
             let qtable = qualified(eff_schema, table)?;
             let mut up = String::from("DROP TRIGGER ");
             if if_exists.unwrap_or(false) {
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&format!("{} ON {qtable}", qid(name)?));
-            vec![VendorStatement { name: format!("drop_trigger_{name}_{table}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_trigger_{name}_{table}"),
+                up,
+                down: None,
+            }]
         }
         // ── Functions ────────────────────────────────────────────────────────
-        Op::CreateFunction { name, schema, args, returns, language, replace, volatility, body } => {
+        Op::CreateFunction {
+            name,
+            schema,
+            args,
+            returns,
+            language,
+            replace,
+            volatility,
+            body,
+        } => {
             let qname = match schema {
                 Some(sch) => qualified(sch, name)?,
                 None => qid(name)?,
@@ -510,7 +629,10 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 Some(list) => list
                     .iter()
                     .map(|a| {
-                        let mode = a.mode.map(|m| format!("{} ", m.as_sql())).unwrap_or_default();
+                        let mode = a
+                            .mode
+                            .map(|m| format!("{} ", m.as_sql()))
+                            .unwrap_or_default();
                         let nm = a
                             .name
                             .as_ref()
@@ -524,8 +646,14 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                     .join(", "),
                 None => String::new(),
             };
-            let or_replace = if replace.unwrap_or(false) { "CREATE OR REPLACE" } else { "CREATE" };
-            let vol = volatility.map(|v| format!(" {}", v.as_sql())).unwrap_or_default();
+            let or_replace = if replace.unwrap_or(false) {
+                "CREATE OR REPLACE"
+            } else {
+                "CREATE"
+            };
+            let vol = volatility
+                .map(|v| format!(" {}", v.as_sql()))
+                .unwrap_or_default();
             let returns = type_ref_sql(returns, "createFunction.returns")?;
             // The raw `body` is embedded VERBATIM inside a `$zsfn$ … $zsfn$` dollar
             // tag; the WHOLE statement is `pg_query`-parsed + deny-scanned by the
@@ -544,7 +672,12 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 down: Some(down),
             }]
         }
-        Op::DropFunction { name, schema, arg_types, if_exists } => {
+        Op::DropFunction {
+            name,
+            schema,
+            arg_types,
+            if_exists,
+        } => {
             let qname = match schema {
                 Some(sch) => qualified(sch, name)?,
                 None => qid(name)?,
@@ -565,16 +698,28 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&format!("{qname}({args_sql})"));
-            vec![VendorStatement { name: format!("drop_function_{name}"), up, down: None }]
+            vec![VendorStatement {
+                name: format!("drop_function_{name}"),
+                up,
+                down: None,
+            }]
         }
         // ── The gated raw escape ──────────────────────────────────────────────
         Op::PgRaw { sql, .. } => {
             // The verbatim SQL is embedded as-is and the WHOLE statement is
             // `pg_query`-parsed + deny-scanned by the guard.
-            vec![VendorStatement { name: "pg_raw".to_string(), up: sql.clone(), down: None }]
+            vec![VendorStatement {
+                name: "pg_raw".to_string(),
+                up: sql.clone(),
+                down: None,
+            }]
         }
         // Non-vendor ops never reach here (the lower seam routes only vendor ops).
-        _ => return Err(VendorError::Predicate("non-vendor op routed to vendor renderer".to_string())),
+        _ => {
+            return Err(VendorError::Predicate(
+                "non-vendor op routed to vendor renderer".to_string(),
+            ))
+        }
     })
 }
 

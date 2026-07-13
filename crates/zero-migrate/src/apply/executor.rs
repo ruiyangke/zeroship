@@ -41,16 +41,16 @@ use crate::approval::Approval;
 // `host-pg`) — the generic executor entries below are driver-neutral, and the
 // dialect SQL leaves the backend drives live in
 // [`crate::apply::backend::postgres::session`].
-#[cfg(pg_seam)]
-use crate::driver::SqlSession;
 use crate::apply::backend::MigrationBackend;
 #[cfg(pg_seam)]
-use crate::apply::backend::PostgresBackend;
-#[cfg(pg_seam)]
 use crate::apply::backend::MysqlBackend;
-use crate::conn::ExecutorConfig;
-use crate::guard::{GuardError, SqlGuard};
+#[cfg(pg_seam)]
+use crate::apply::backend::PostgresBackend;
 use crate::apply::journal::{AppliedEntry, JournalError, Phase};
+use crate::conn::ExecutorConfig;
+#[cfg(pg_seam)]
+use crate::driver::SqlSession;
+use crate::guard::{GuardError, SqlGuard};
 use crate::model::migration::{Migration, MigrationId};
 
 /// Whether an apply sub-batch must acquire/release the project advisory lock
@@ -250,7 +250,9 @@ pub enum ApplyError {
     /// A pending migration's `depends_on` names a version that is neither already
     /// applied nor present in the supplied set — the dependency graph is
     /// unsatisfiable, so no ordering exists. Hard abort before any execution.
-    #[error("migration {version} depends on unknown migration {missing} (not in the set or journal)")]
+    #[error(
+        "migration {version} depends on unknown migration {missing} (not in the set or journal)"
+    )]
     MissingDependency {
         /// The migration with the dangling dependency.
         version: String,
@@ -439,8 +441,6 @@ impl From<crate::driver::DbError> for ApplyError {
     }
 }
 
-
-
 /// Apply the project's pending migrations. Idempotent: a re-run
 /// with no new migrations is a no-op.
 ///
@@ -474,7 +474,15 @@ pub async fn apply<D: SqlSession>(
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
     // Standalone callers own the lock: acquire it here, release it on exit.
-    apply_with_lock(conn, cfg, migrations, approval, applied_by, LockMode::Acquire).await
+    apply_with_lock(
+        conn,
+        cfg,
+        migrations,
+        approval,
+        applied_by,
+        LockMode::Acquire,
+    )
+    .await
 }
 
 /// [`apply`] with an explicit [`LockMode`].
@@ -585,9 +593,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // direct caller cannot bypass it. It is dialect-agnostic (reads only
     // `flags.destructive`), so it sits in the generic core — running identically for
     // PG and the engine path.
-    if approval != Approval::Approved
-        && migrations.iter().any(|m| m.flags.destructive)
-    {
+    if approval != Approval::Approved && migrations.iter().any(|m| m.flags.destructive) {
         return Err(ApplyError::ApprovalRequired);
     }
     // **Per-version approval scope (anti-bypass), defense in depth.** Even
@@ -655,8 +661,6 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
         Err(e) => Err(e),
     }
 }
-
-
 
 /// Pre-flight over the FULL supplied set: reject malformed
 /// repeatable/versioned combinations BEFORE the partition or any apply, so a
@@ -1146,19 +1150,20 @@ async fn apply_repeatables<B: MigrationBackend>(
 ///
 /// # Errors
 /// - [`ApplyError::DependencyCycle`] — the inter-repeatable edges form a cycle.
-fn order_repeatables<'a>(
-    repeatables: &[&'a Migration],
-) -> Result<Vec<&'a Migration>, ApplyError> {
+fn order_repeatables<'a>(repeatables: &[&'a Migration]) -> Result<Vec<&'a Migration>, ApplyError> {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-    let rep_versions: BTreeSet<&str> =
-        repeatables.iter().map(|m| m.version.as_str()).collect();
-    let by_version: HashMap<&str, &Migration> =
-        repeatables.iter().map(|m| (m.version.as_str(), *m)).collect();
+    let rep_versions: BTreeSet<&str> = repeatables.iter().map(|m| m.version.as_str()).collect();
+    let by_version: HashMap<&str, &Migration> = repeatables
+        .iter()
+        .map(|m| (m.version.as_str(), *m))
+        .collect();
 
     // in-degree over the repeatable subgraph; adj[dep] = repeatables after `dep`.
-    let mut indeg: BTreeMap<&str, usize> =
-        repeatables.iter().map(|m| (m.version.as_str(), 0usize)).collect();
+    let mut indeg: BTreeMap<&str, usize> = repeatables
+        .iter()
+        .map(|m| (m.version.as_str(), 0usize))
+        .collect();
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for m in repeatables {
         for dep in &m.depends_on {
@@ -1281,8 +1286,7 @@ fn check_expand_contract_gate(
         if m.depends_on.is_empty() {
             return Err(ApplyError::ExpandNotApplied {
                 version: m.version.as_str().to_string(),
-                expand: "<none declared: a contract must declare an expand dependency>"
-                    .to_string(),
+                expand: "<none declared: a contract must declare an expand dependency>".to_string(),
             });
         }
         for dep in &m.depends_on {
@@ -1350,8 +1354,7 @@ pub(crate) fn order_pending<'a>(
     let pending: Vec<&Migration> = migrations
         .iter()
         .filter(|m| {
-            !completed.contains_key(m.version.as_str())
-                && !satisfied.contains(m.version.as_str())
+            !completed.contains_key(m.version.as_str()) && !satisfied.contains(m.version.as_str())
         })
         .collect();
     // Dependency edges to versions already satisfied by the journal/squash are
@@ -1504,8 +1507,7 @@ pub(crate) fn compute_superseded(
     migrations: &[Migration],
     journal_superseded: &[String],
 ) -> std::collections::HashSet<String> {
-    let mut out: std::collections::HashSet<String> =
-        journal_superseded.iter().cloned().collect();
+    let mut out: std::collections::HashSet<String> = journal_superseded.iter().cloned().collect();
     for m in migrations {
         if m.supersedes.is_empty() {
             continue;
@@ -1623,12 +1625,9 @@ fn check_squash_all_or_none(
     Ok(())
 }
 
-
-
 // ===========================================================================
 // Rollback — apply `down` SQL in reverse to a target.
 // ===========================================================================
-
 
 /// How far [`rollback`] should unwind the applied migrations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1741,7 +1740,9 @@ pub enum RollbackError {
     /// independent of (and additional to) the engine's gate
     /// ([`crate::engine::MigrationEngine::rollback`]), so a caller driving
     /// [`rollback`] directly cannot bypass approval. Nothing was rolled back.
-    #[error("rollback requires Approval::Approved (every down is destructive) but it was not given")]
+    #[error(
+        "rollback requires Approval::Approved (every down is destructive) but it was not given"
+    )]
     ApprovalRequired,
     /// The [`RollbackTarget::ToVersion`] target is not a currently net-applied
     /// migration (never applied, or already rolled back). Nothing was rolled back.
@@ -1901,12 +1902,6 @@ impl From<crate::driver::DbError> for RollbackError {
     }
 }
 
-
-
-
-
-
-
 #[cfg(test)]
 mod order_tests {
     use super::*;
@@ -1942,7 +1937,10 @@ mod order_tests {
     }
 
     fn pos(ordered: &[&Migration], v: &str) -> usize {
-        ordered.iter().position(|x| x.version.as_str() == v).expect("present")
+        ordered
+            .iter()
+            .position(|x| x.version.as_str() == v)
+            .expect("present")
     }
 
     #[test]
@@ -1959,7 +1957,8 @@ mod order_tests {
             m(b.clone(), vec![]),
         ];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
+        let ordered =
+            order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
         assert_eq!(vs, vec![a.as_str(), b.as_str(), c.as_str()]);
     }
@@ -1972,14 +1971,18 @@ mod order_tests {
         let earlier = MigrationId::generate();
         std::thread::sleep(std::time::Duration::from_millis(2));
         let later = MigrationId::generate();
-        assert!(later.as_str() > earlier.as_str(), "later must sort after earlier");
+        assert!(
+            later.as_str() > earlier.as_str(),
+            "later must sort after earlier"
+        );
         // earlier depends_on later; later depends_on nothing.
         let set = vec![
             m(earlier.clone(), vec![later.clone()]),
             m(later.clone(), vec![]),
         ];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
-        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
+        let ordered =
+            order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         assert!(
             pos(&ordered, later.as_str()) < pos(&ordered, earlier.as_str()),
             "the depended-on (later-version) migration must run first"
@@ -1992,10 +1995,7 @@ mod order_tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let b = MigrationId::generate();
         // a -> b -> a
-        let set = vec![
-            m(a.clone(), vec![b.clone()]),
-            m(b.clone(), vec![a.clone()]),
-        ];
+        let set = vec![m(a.clone(), vec![b.clone()]), m(b.clone(), vec![a.clone()])];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
         let err = order_pending(&set, &completed, &std::collections::HashSet::new()).unwrap_err();
         match err {
@@ -2013,7 +2013,10 @@ mod order_tests {
         let set = vec![m(a, vec![ghost])];
         let completed: HashMap<&str, &AppliedEntry> = HashMap::new();
         let err = order_pending(&set, &completed, &std::collections::HashSet::new()).unwrap_err();
-        assert!(matches!(err, ApplyError::MissingDependency { .. }), "got {err:?}");
+        assert!(
+            matches!(err, ApplyError::MissingDependency { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -2033,7 +2036,8 @@ mod order_tests {
         completed.insert(done.as_str(), &entry);
         // Only `pend` is in the supplied set (depends on the completed `done`).
         let set = vec![m(pend.clone(), vec![done.clone()])];
-        let ordered = order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
+        let ordered =
+            order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
         assert_eq!(vs, vec![pend.as_str()], "only the pending one is ordered");
     }
