@@ -57,6 +57,8 @@ impl From<compio_postgres::Error> for RegistryError {
     fn from(e: compio_postgres::Error) -> Self {
         if matches!(e.code(), Some(code) if code == &SqlState::UNIQUE_VIOLATION) {
             Self::AlreadyExists("resource already exists".into())
+        } else if e.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
+            Self::Database(format!("retryable deadlock: {e}"))
         } else {
             let msg = e.to_string();
             let full = match source_chain(&e) {

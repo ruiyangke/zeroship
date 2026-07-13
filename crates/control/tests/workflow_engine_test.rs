@@ -3352,12 +3352,13 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
     let broadcast_id = zeroship_core::typed_id::new_workflow_broadcast_id();
     let signal_id = zeroship_core::typed_id::new_workflow_signal_id();
     let subscription_id = zeroship_core::typed_id::new_workflow_subscription_id();
+    let expires_at = Utc::now() + ChronoDuration::seconds(30);
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_subscriptions \
                 (id, app_id, topic, run_id, signal_name, type_filter, ordinal, created_at, expires_at) \
-             VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), now() + interval '30 seconds')",
-            &[&subscription_id, &app_id, &topic, &run_id],
+             VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), $5)",
+            &[&subscription_id, &app_id, &topic, &run_id, &expires_at],
         )
         .await
         .expect("insert topic subscription");
@@ -3365,7 +3366,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
         .execute(
             "INSERT INTO zeroship.workflow_broadcasts \
                 (id, app_id, topic, type, payload, origin, idempotency_key, deploy_id, fanout_state, expires_at) \
-             VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', now() + interval '30 seconds')",
+             VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', $7)",
             &[
                 &broadcast_id,
                 &app_id,
@@ -3373,6 +3374,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
                 &serde_json::json!({"ok": true}),
                 &format!("idem-{broadcast_id}"),
                 &deploy_id,
+                &expires_at,
             ],
         )
         .await
