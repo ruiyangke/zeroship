@@ -1,8 +1,8 @@
-//! The **Flyway-style file loader** (design §6) — turn a directory of plain
+//! The **Flyway-style file loader** — turn a directory of plain
 //! `.sql` files into an ordered list of [`Migration`]s the engine can plan +
 //! apply under the **Platform** profile.
 //!
-//! This is the Phase-2 peer of [`crate::ops::submit`]: where `submit_migration`
+//! This is the peer of [`crate::ops::submit`]: where `submit_migration`
 //! ingests ONE client-authored script, the loader ingests a whole **directory**
 //! of operator-authored platform-schema files. Like `submit`, it builds each
 //! [`Migration`] with **server-derived flags** (never author-declared) — the
@@ -10,7 +10,7 @@
 //! [`flags_for`] classifier `submit` uses, so a `DROP TABLE` file is gated and a
 //! non-transactional file routes to the two-phase path automatically.
 //!
-//! # The grammar (§6.1)
+//! # The grammar
 //!
 //! A migration directory holds plain `.sql` files; the **filename** encodes
 //! everything (there is no Liquibase `--changeset`/`--rollback` header parsing):
@@ -32,8 +32,8 @@
 //!
 //! # Why the loader does NOT need the operator `OperatorCapability` token
 //!
-//! Trust is decided at the OPERATOR CALL SITE (§5), never by the loader. The
-//! loader's job is purely to produce a `Vec<Migration>`; the CLI (Phase 3) supplies
+//! Trust is decided at the OPERATOR CALL SITE, never by the loader. The
+//! loader's job is purely to produce a `Vec<Migration>`; the CLI supplies
 //! the Platform [`GuardConfig`](crate::guard::GuardConfig)/`ExecutorConfig` to the
 //! engine when it plans + applies the loaded set. So the loader never constructs a
 //! Platform guard and never holds the token.
@@ -75,13 +75,13 @@ pub const PLATFORM_OWNER_APP: &str = "platform";
 pub enum LoaderError {
     /// A directory entry's filename matched NONE of the `V<NNNN>__`,
     /// `V<NNNN>__….down.sql`, or `R__` grammars. Hard error — a stray file is
-    /// never silently skipped (§6.1).
+    /// never silently skipped.
     #[error("unrecognized migration filename: '{name}' (expected V<NNNN>__<desc>.sql, V<NNNN>__<desc>.down.sql, or R__<desc>.sql)")]
     UnrecognizedFile {
         /// The offending filename.
         name: String,
     },
-    /// A `V<NNNN>__….down.sql` file with no matching `V<NNNN>__….sql` up (§6.1).
+    /// A `V<NNNN>__….down.sql` file with no matching `V<NNNN>__….sql` up.
     #[error("orphan down migration: '{name}' has no matching V{version}__ up migration")]
     OrphanDown {
         /// The offending `.down.sql` filename.
@@ -90,7 +90,7 @@ pub enum LoaderError {
         version: u64,
     },
     /// Two files share the same numeric `V<NNNN>` version (even with different
-    /// descriptions) (§6.1).
+    /// descriptions).
     #[error("duplicate version V{version}: files '{first}' and '{second}' share the same numeric version")]
     DuplicateVersion {
         /// The duplicated numeric version.
@@ -100,7 +100,7 @@ pub enum LoaderError {
         /// The second file seen with this version.
         second: String,
     },
-    /// A numeric file version exceeded the 48-bit ordering field (§6.2). Unreachable
+    /// A numeric file version exceeded the 48-bit ordering field. Unreachable
     /// for the real port (≤ 0057); rejected loudly rather than silently truncated.
     #[error("file version {version} exceeds the 48-bit ordering ceiling ({ceiling})")]
     VersionOutOfRange {
@@ -202,7 +202,7 @@ enum ParsedName {
     Repeatable { description: String },
 }
 
-/// Parse a single migration filename against the §6.1 grammar. Returns `None`
+/// Parse a single migration filename against the filename grammar. Returns `None`
 /// for a filename that matches no pattern (the caller turns that into a hard
 /// [`LoaderError::UnrecognizedFile`]).
 fn parse_filename(name: &str) -> Option<ParsedName> {
@@ -475,8 +475,8 @@ pub fn new_dbmate_migration(timestamp: &str, name: &str) -> (String, String) {
 /// `R__` filename. But where `submit` runs the full deny-list guard to obtain the
 /// [`GuardReport`], the loader builds the report directly from [`classify`] +
 /// [`analyze`]: the deny-list would reject privileged platform SQL (`CREATE ROLE`)
-/// under any profile the loader could construct, and trust is the operator's call
-/// (§5), not the loader's. `flags_for` reads ONLY statement kinds, so this derives
+/// under any profile the loader could construct, and trust is the operator's call,
+/// not the loader's. `flags_for` reads ONLY statement kinds, so this derives
 /// the identical flags the engine's later Platform guard would.
 fn flags_for_file(name: &str, up: &str, repeatable: bool) -> Result<MigrationFlags, LoaderError> {
     flags_for_file_opts(name, up, repeatable, false)
@@ -518,9 +518,9 @@ fn flags_for_file_opts(
 }
 
 /// Load a directory of Flyway-style `.sql` files into an ordered list of
-/// [`Migration`]s (design §6).
+/// [`Migration`]s.
 ///
-/// Files are parsed against the §6.1 grammar, paired with their `.down.sql`
+/// Files are parsed against the filename grammar, paired with their `.down.sql`
 /// siblings, classified for server-derived flags, checksummed, and returned
 /// **ordered by numeric version ascending, with repeatables last** (the existing
 /// repeatable semantics — repeatables run after all versioned migrations,
@@ -603,7 +603,7 @@ struct Classified {
     repeatables: Vec<(String, PathBuf)>,
 }
 
-/// First pass: parse every filename against the §6.1 grammar and run the hard
+/// First pass: parse every filename against the filename grammar and run the hard
 /// structural checks (unrecognized name, out-of-range version, duplicate
 /// `V<NNNN>`, orphan `.down.sql`). Returns the kind-split, version-sorted file set.
 fn classify_filenames(paths: &[PathBuf]) -> Result<Classified, LoaderError> {
@@ -910,7 +910,7 @@ fn read_body(path: &Path) -> Result<String, LoaderError> {
 mod tests {
     use super::*;
 
-    // ----- §6.1 filename grammar -----
+    // ----- filename grammar -----
 
     #[test]
     fn parses_versioned_up_down_and_repeatable() {
@@ -1002,7 +1002,7 @@ mod tests {
         );
     }
 
-    // ----- §6.2 canonical version→id derivation -----
+    // ----- canonical version→id derivation -----
 
     #[test]
     fn version_derivation_is_deterministic_and_parses() {

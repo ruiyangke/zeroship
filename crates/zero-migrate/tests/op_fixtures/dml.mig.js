@@ -1,6 +1,6 @@
 // op.* migration fixture — insert + update + delete + backfill, carrying mixed
 // scalar and closed expression-AST values in `set`, plus `(col) => Expr` `where`.
-// The OP SHAPE is frozen in PR1; this fixture pins the DML wire shape + the
+// The OP SHAPE is frozen; this fixture pins the DML wire shape + the
 // in-AST typed-literal canonicalization for the corpus + the round-trip gate.
 import { concatWs, table } from "zero-migrate";
 

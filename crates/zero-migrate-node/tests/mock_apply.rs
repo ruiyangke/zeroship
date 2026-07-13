@@ -1,21 +1,21 @@
-//! Behavioral integration test (design §C gate + §B.6): drive ONE real
+//! Behavioral integration test: drive ONE real
 //! `executor::apply` through the addon's [`NapiHostSession`] over a MOCK
 //! [`VerbDispatch`] that answers with canned `driver::Row`s — NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
-//! (`crates/zero_migrate-migrate/src/apply/backend/postgres.rs`), but exercised through
+//! (`crates/zero-migrate/src/apply/backend/postgres.rs`), but exercised through
 //! the *addon's* bridge types (`NapiHostSession` + `VerbDispatch`), so it proves:
 //!
 //! 1. `executor::apply::<NapiHostSession<MockDispatch>>` monomorphizes and runs the
-//!    whole DDL + lock + journal flow generically over the host bridge (the §C.5
+//!    whole DDL + lock + journal flow generically over the host bridge (the
 //!    convergence point) — a real behavioral assertion, not just "no error";
 //! 2. the recorded verb sequence contains the expected structural landmarks
 //!    (advisory lock acquire → confinement SET → the migration's `up` DDL →
 //!    journal write-back → advisory unlock), in order;
-//! 3. the one-in-flight guard (§B.6) never trips across the whole apply — proving
+//! 3. the one-in-flight guard never trips across the whole apply — proving
 //!    the engine is strictly one-verb-at-a-time over a pinned host connection;
 //! 4. the reactor-less `futures::executor::block_on` drives the whole engine future
-//!    to completion when every I/O leaf is answered inline (the §C.4 executor).
+//!    to completion when every I/O leaf is answered inline (the executor).
 //!
 //! The mock answers the journal net-state read with an EMPTY rowset (nothing
 //! applied yet), so the supplied migration is pending and IS applied; its version

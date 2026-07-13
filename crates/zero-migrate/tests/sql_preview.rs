@@ -1,4 +1,4 @@
-//! **PR14 — the OFFLINE `--sql` plan preview gate.**
+//! **The OFFLINE `--sql` plan preview gate.**
 //!
 //! These tests run with NO DB connection (no `_pg`/`_sqlite` suffix, not gated on
 //! `MIGRATE_REQUIRE_DB`): the preview's whole point is to render the SQL the engine
@@ -345,7 +345,7 @@ fn sql_dir_renders_offline() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// MED-1 — HONESTY ON THE RAW `.sql` LEG. Operator-authored raw `.sql` is rendered
+/// HONESTY ON THE RAW `.sql` LEG. Operator-authored raw `.sql` is rendered
 /// VERBATIM, never dialect-transformed. A PG-only `.sql` (`SERIAL`) rendered under
 /// `--dialect sqlite` must therefore NOT be captioned with a bare `(dialect: sqlite)`
 /// claim — that would mislead an operator reviewing a SQLite go-live into thinking
@@ -378,7 +378,7 @@ fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising, LOW-1). Scrubbing
+/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
 /// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
 /// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect
 /// (a path dialing a fixed host would still pass here). Named honestly for what it
@@ -435,7 +435,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
     }
 }
 
-/// LOW-2 — `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
+/// `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
 /// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
 /// OnlineRename step). It locks the no-fabrication contract for the rename render
 /// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
@@ -509,7 +509,7 @@ fn malformed_ir_is_error() {
     assert!(err.is_err(), "malformed IR must be an error");
 }
 
-// NOTE (redesign step 5c): the three offline `plan` CLI-smoke tests that shelled
+// NOTE: the three offline `plan` CLI-smoke tests that shelled
 // the retired Rust `zero-migrate` binary (`CARGO_BIN_EXE_zero-migrate`) were removed
 // with the bin. The offline SQL-preview surface they exercised — `render_ir_json_sql`
 // / `render_set_sql` / `render_plan_sql` + the `-- [runtime-resolved]` labeling — is

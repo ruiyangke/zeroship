@@ -1,5 +1,5 @@
 //! The SQLite journal: schema, immutability, native `event_seq`, and the atomic
-//! single-connection apply (SQLite-parity design §2.2 / §2.2.1 / §2.2.2).
+//! single-connection apply.
 //!
 //! The journal lives in the attached `_mig` database (a separate file), mirroring
 //! the PG per-project meta schema. It carries the SAME logical shape as
@@ -15,19 +15,19 @@
 //! recycled. There is NO standalone `event_seq` counter table and NO separate
 //! `_rolled_back` table (both removed in the "go native seq" consolidation).
 //!
-//! # Immutability (§2.2.1, defense in depth)
+//! # Immutability
 //!
 //! 1. `DEFENSIVE=ON` (set at open) makes `sqlite_master` read-only to SQL even
-//!    under `writable_schema=ON`.
+//! under `writable_schema=ON`.
 //! 2. `trusted_schema=OFF` (set at open) blocks schema objects from invoking
-//!    non-allowlisted functions.
+//! non-allowlisted functions.
 //! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on `_mig` in
-//!    CreatorUp (the primary deny, at prepare time).
+//! CreatorUp (the primary deny, at prepare time).
 //! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,…)`) are
-//!    the in-DB backstop for row mutation (the Trusted/operator path where the
-//!    authorizer relaxes; on the Confined path the authorizer already denied it).
+//! the in-DB backstop for row mutation (the Trusted/operator path where the
+//! authorizer relaxes; on the Confined path the authorizer already denied it).
 //!
-//! # Atomic apply (§2.2.2)
+//! # Atomic apply
 //!
 //! `BEGIN IMMEDIATE` → mode=CreatorUp → run the creator `up` → mode=EngineJournal
 //! → INSERT the journal row (the DB assigns `event_seq` via AUTOINCREMENT; no
@@ -42,7 +42,7 @@ use crate::model::migration::Migration;
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 
-/// The fixed, short, table-local immutability trigger names (§2.9/L2). ASCII-safe
+/// The fixed, short, table-local immutability trigger names. ASCII-safe
 /// literals — never embed the (hyphenated-UUID) app id, which appears only in the
 /// file path.
 const IMMUTABLE_TRG: &str = "zs_immutable_trg";
@@ -57,17 +57,17 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     actor.set_mode(Mode::EngineJournal).await?;
 
     // 1. The SINGLE consolidated append-only events table. `event_seq INTEGER
-    //    PRIMARY KEY AUTOINCREMENT` is the native total order — SQLite assigns it on
-    //    INSERT (never supplied); AUTOINCREMENT (not bare rowid) guarantees strictly
-    //    monotonic, never-reused values, so the latest event per version is a true
-    //    total order. One row per migration EVENT: an `applied` (forward) event or a
-    //    `rolled_back` event, discriminated by `event_kind`. version is NOT unique
-    //    (rollback ↔ re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
-    //    PG's TIMESTAMPTZ DEFAULT now(); `at`/`by` unify the old
-    //    applied_at/rolled_back_at and applied_by/rolled_back_by. The applied-only
-    //    columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
-    //    documents the per-event_kind shape (mirrors the PG side). There is NO
-    //    `event_seq` counter table and NO separate `_rolled_back` table any more.
+    // PRIMARY KEY AUTOINCREMENT` is the native total order — SQLite assigns it on
+    // INSERT (never supplied); AUTOINCREMENT (not bare rowid) guarantees strictly
+    // monotonic, never-reused values, so the latest event per version is a true
+    // total order. One row per migration EVENT: an `applied` (forward) event or a
+    // `rolled_back` event, discriminated by `event_kind`. version is NOT unique
+    // (rollback ↔ re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
+    // PG's TIMESTAMPTZ DEFAULT now; `at`/`by` unify the old
+    // applied_at/rolled_back_at and applied_by/rolled_back_by. The applied-only
+    // columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
+    // documents the per-event_kind shape (mirrors the PG side). There is NO
+    // `event_seq` counter table and NO separate `_rolled_back` table any more.
     actor
         .exec(
             "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations (\
@@ -103,8 +103,8 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
         .await?;
 
     // 3. The MUTABLE inflight side-table (NOT guarded by the immutability triggers
-    //    — markers are deleted on completion). Present for parity; the non-txn path
-    //    does not exist on SQLite, so this stays empty in P2.
+    // — markers are deleted on completion). Present for parity; the non-txn path
+    // does not exist on SQLite, so this stays empty.
     actor
         .exec(
             "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations_inflight (\
@@ -117,14 +117,14 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
         .await?;
 
     // 4. Append-only immutability triggers on the two append-only tables (the
-    //    consolidated events table + the supersedes edge table). SQLite has
-    //    `CREATE TRIGGER IF NOT EXISTS`, so no pg_trigger-style existence guard is
-    //    needed. Short table-local names (`zs_immutable_trg`) — disambiguated per
-    //    table by SQLite's per-table trigger namespace, but SQLite trigger names are
-    //    schema-global, so we suffix with the table to keep them unique. NOTE:
-    //    SQLite has no TRUNCATE and no DROP-fires-DELETE-trigger, so these defend
-    //    row mutation only; DROP TABLE / wholesale wipe is closed by the authorizer
-    //    + DEFENSIVE (§2.2.1), not by a trigger.
+    // consolidated events table + the supersedes edge table). SQLite has
+    // `CREATE TRIGGER IF NOT EXISTS`, so no pg_trigger-style existence guard is
+    // needed. Short table-local names (`zs_immutable_trg`) — disambiguated per
+    // table by SQLite's per-table trigger namespace, but SQLite trigger names are
+    // schema-global, so we suffix with the table to keep them unique. NOTE:
+    // SQLite has no TRUNCATE and no DROP-fires-DELETE-trigger, so these defend
+    // row mutation only; DROP TABLE / wholesale wipe is closed by the authorizer
+    // + DEFENSIVE, not by a trigger.
     for tbl in ["schema_migrations", "schema_migrations_supersedes"] {
         for op in ["UPDATE", "DELETE"] {
             let trg = format!("{IMMUTABLE_TRG}_{tbl}_{}", op.to_ascii_lowercase());
@@ -141,7 +141,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     Ok(())
 }
 
-/// Apply ONE additive migration atomically with confinement (§2.2.2).
+/// Apply ONE additive migration atomically with confinement.
 ///
 /// Idempotent: if the version's latest event is already `completed`, this is a
 /// no-op and returns `false`. Otherwise runs the full phase sequence and returns
@@ -164,12 +164,12 @@ pub(crate) async fn apply_one_additive(
         return Ok(false);
     }
 
-    // -- the atomic phase sequence (§2.2.2) --
+    // -- the atomic phase sequence --
     run_apply_txn(actor, m, applied_by, &version).await?;
     Ok(true)
 }
 
-/// **PR10 Part B** — journal `m` as a `completed`, `kind='apply'` event WITHOUT
+/// Journal `m` as a `completed`, `kind='apply'` event WITHOUT
 /// running its `up` DDL: the SQLite arm of an existence-guard
 /// [`SatisfiedNoop`](crate::render::existence_probe::GuardVerdict::SatisfiedNoop). The guarded
 /// object already has the declared shape (`ifNotExists`) or is already absent
@@ -245,14 +245,14 @@ pub(crate) async fn journal_satisfied_noop(
 }
 
 /// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
-/// `completed` journal event WITHOUT running its `up` (the adoption path,
-/// design §5 / H3). This is the SQLite arm behind the single neutral
+/// `completed` journal event WITHOUT running its `up` (the adoption path).
+/// This is the SQLite arm behind the single neutral
 /// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
-/// (multi-engine abstraction L5); it returns the dialect-neutral
+/// (multi-engine abstraction); it returns the dialect-neutral
 /// [`BaselineOutcome`](crate::apply::baseline::BaselineOutcome), the same shape the PG arm
 /// returns, so no SQLite-specific outcome type crosses the trait.
 ///
-/// The motivating case (H3): a dev developer who ran the OLD `run_sqlite_pipeline`
+/// The motivating case: a dev developer who ran the OLD `run_sqlite_pipeline`
 /// has a `zs-default.sqlite` with user tables but an EMPTY `_mig` journal (the old
 /// path was a stateless diff). The first engine boot against that file must NOT
 /// re-create the tables or drift-abort — so we adopt the live schema by journaling
@@ -262,7 +262,7 @@ pub(crate) async fn journal_satisfied_noop(
 /// First-entry semantics, mirroring the PG `baseline`:
 /// - idempotent for the SAME version (a retried boot is safe → `already_present`);
 /// - refuses if the journal already records a DIFFERENT net-applied migration
-///   (the engine already manages this file) — fail-closed, nothing journaled.
+/// (the engine already manages this file) — fail-closed, nothing journaled.
 ///
 /// The whole thing runs atomically inside one `BEGIN IMMEDIATE` under engine
 /// mode (the `up` is NEVER executed, so there is no CreatorUp phase — this is the
@@ -448,16 +448,16 @@ pub(crate) async fn record_loaded_versions(
     }
 }
 
-/// **PR6a** — apply a single parameterized one-shot DML step on SQLite (`insert`/
+/// Apply a single parameterized one-shot DML step on SQLite (`insert`/
 /// `update`/`del`), the SQLite peer of the PG `apply_dml_transactional`
 /// (`executor.rs`). The `template` carries `?n` placeholders and `binds` the typed
 /// values; they are bound NATIVELY (never interpolated) so a bind value cannot
-/// alter the statement shape (§2.3.2). The DML runs under the confined
+/// alter the statement shape. The DML runs under the confined
 /// **CreatorUp** authorizer mode (denied from `_mig`, from PRAGMA / transaction
 /// boundaries / vtables), then the `completed` journal row is written under
 /// **EngineJournal** — DML + journal atomic in one `BEGIN IMMEDIATE`.
 ///
-/// The journal checksum binds the DECLARING app's identity (`owner_app`, §2.0.1),
+/// The journal checksum binds the DECLARING app's identity (`owner_app`),
 /// the SAME `Checksum::of(template, owner_app)` discipline the PG path uses — so
 /// two DML steps with an identical `(template, binds)` authored by different apps
 /// hash to different checksums.
@@ -478,19 +478,19 @@ pub(crate) async fn run_dml(
     ensure_journal(actor).await?;
 
     // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows
-    //    SQLITE_TRANSACTION only in EngineJournal — the engine owns txn boundaries).
+    // SQLITE_TRANSACTION only in EngineJournal — the engine owns txn boundaries).
     actor.set_mode(Mode::EngineJournal).await?;
     actor.exec("BEGIN IMMEDIATE").await?;
 
     let result = async {
         // 2. Run the DML under the confined CreatorUp mode (denied from `_mig`,
-        //    PRAGMA, transaction boundaries, vtables) — exactly the confinement a
-        //    creator `up` runs under. The binds are positional `?n` params.
+        // PRAGMA, transaction boundaries, vtables) — exactly the confinement a
+        // creator `up` runs under. The binds are positional `?n` params.
         actor.set_mode(Mode::CreatorUp).await?;
         actor.exec_params(template, binds).await?;
 
         // 3. EngineJournal — INSERT the `completed` row. SEPARATE prepares from the
-        //    DML, with the mode flip strictly between (§2.2.2).
+        // DML, with the mode flip strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
         let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
             up: template,
@@ -550,25 +550,25 @@ async fn run_apply_txn(
     version: &str,
 ) -> Result<(), SqliteActorError> {
     // 1. BEGIN IMMEDIATE — one writer, RESERVED lock taken now. Issued under engine
-    //    mode (the authorizer allows SQLITE_TRANSACTION only in EngineJournal — the
-    //    engine owns transaction boundaries; the creator `up` in CreatorUp can never
-    //    open/close a transaction, §2.5.1).
+    // mode (the authorizer allows SQLITE_TRANSACTION only in EngineJournal — the
+    // engine owns transaction boundaries; the creator `up` in CreatorUp can never
+    // open/close a transaction).
     actor.set_mode(Mode::EngineJournal).await?;
     actor.exec("BEGIN IMMEDIATE").await?;
 
     // Run the rest; on ANY error, roll back and propagate.
     let result = async {
         // 2. Run the `up`. Ordinary creator/AI DDL runs under the confined
-        //    **CreatorUp** mode (denied from `_mig`, from transaction boundaries,
-        //    from PRAGMA, from making a vtable). The ONE exception is **engine-emitted
-        //    goodie DDL** (§2.6, `engine_goodie_ddl`): the SQLite FTS5 virtual table +
-        //    its sync triggers. That DDL is engine-AUTHORED from a `.fts()` descriptor
-        //    (no untrusted SQL string), and the hardened authorizer allows
-        //    `CREATE VIRTUAL TABLE … USING fts5(…)` ONLY in EngineJournal mode. So a
-        //    goodie-DDL `up` runs under EngineJournal; everything else stays confined.
-        //    (The `_mig` journal write below is a SEPARATE EngineJournal phase either
-        //    way; the goodie `up` never touches `_mig` — it only creates the vtable +
-        //    triggers in `main`.)
+        // **CreatorUp** mode (denied from `_mig`, from transaction boundaries,
+        // from PRAGMA, from making a vtable). The ONE exception is **engine-emitted
+        // goodie DDL**: the SQLite FTS5 virtual table +
+        // its sync triggers. That DDL is engine-AUTHORED from a `.fts` descriptor
+        // (no untrusted SQL string), and the hardened authorizer allows
+        // `CREATE VIRTUAL TABLE … USING fts5(…)` ONLY in EngineJournal mode. So a
+        // goodie-DDL `up` runs under EngineJournal; everything else stays confined.
+        // (The `_mig` journal write below is a SEPARATE EngineJournal phase either
+        // way; the goodie `up` never touches `_mig` — it only creates the vtable +
+        // triggers in `main`.)
         let up_mode = if m.flags.engine_goodie_ddl {
             Mode::EngineJournal
         } else {
@@ -583,8 +583,8 @@ async fn run_apply_txn(
         actor.exec(&m.up).await?;
 
         // 3. EngineJournal — INSERT the applied row (event_seq is AUTOINCREMENT, not
-        //    supplied). SEPARATE prepares from the creator `up`, with the mode flip
-        //    strictly between.
+        // supplied). SEPARATE prepares from the creator `up`, with the mode flip
+        // strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
         let name = sql_lit(&m.name);
         let checksum = sql_lit(m.checksum.as_str());
@@ -613,7 +613,7 @@ async fn run_apply_txn(
         Err(e) => {
             // Roll back so a denied/failed `up` never leaves a partial journal.
             //
-            // H1: the previous `let _ = actor.exec("ROLLBACK")` swallowed the result
+            // the previous `let _ = actor.exec("ROLLBACK")` swallowed the result
             // entirely, which is unsafe on a LONG-LIVED, REUSED connection: if the
             // rollback leaves a transaction open, the NEXT apply fails with "cannot
             // start a transaction within a transaction". The ROLLBACK *error* alone
@@ -649,8 +649,8 @@ pub(crate) fn sql_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// The net-applied + lone-`started` entries (§2.2), mirroring PG `applied()`.
-/// `DISTINCT ON` → `ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq
+/// The net-applied + lone-`started` entries, mirroring PG `applied`.
+/// `DISTINCT ON` → `ROW_NUMBER OVER (PARTITION BY version ORDER BY event_seq
 /// DESC)` (SQLite window functions, ≥3.25).
 pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>, SqliteActorError> {
     // Engine read of `_mig`: run under engine mode (the journal is engine
@@ -700,7 +700,7 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
     Ok(out)
 }
 
-/// The versions covered by a net-applied squash (§2.2). Mirrors PG
+/// The versions covered by a net-applied squash. Mirrors PG
 /// `superseded_versions`: only a GENUINE recorded squash (`mig_kind='squash'`,
 /// latest event completed) can supersede.
 pub(crate) async fn superseded_versions(
@@ -728,7 +728,7 @@ pub(crate) async fn superseded_versions(
     rows.iter().map(|r| cell(r, 0)).collect()
 }
 
-/// The latest `completed` checksum per repeatable identity (§2.2) — the
+/// The latest `completed` checksum per repeatable identity — the
 /// repeatable re-run oracle. Reads only `schema_migrations` where
 /// `kind='repeatable'`.
 pub(crate) async fn latest_completed_checksums(

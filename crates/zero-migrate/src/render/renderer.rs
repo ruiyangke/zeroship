@@ -242,7 +242,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         // Postgres has no `CREATE OR REPLACE MATERIALIZED VIEW`. Rather than
         // silently dropping `replace` (which would leave a populated matview in
         // place under a "replace" request) or destructively DROP+CREATE it, fail
-        // closed so the author resolves the contradiction explicitly. (SA-13)
+        // closed so the author resolves the contradiction explicitly.
         if materialized && replace {
             return Err(IrLowerError::UnsupportedOp(
                 "validated createView replace+materialized reached lower",

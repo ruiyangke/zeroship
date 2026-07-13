@@ -5,30 +5,29 @@
 //! [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl drives — the
 //! MySQL analogue of the Postgres
 //! [`session`](crate::apply::backend::postgres::session) leaves. Every one of them
-//! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor
-//! (C1):
+//! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
 //! - **project lock** — `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
-//!   named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
-//!   is derived from the project id (bounded to MySQL's 64-char lock-name limit).
+//! named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
+//! is derived from the project id (bounded to MySQL's 64-char lock-name limit).
 //! - **session setup** — `SET SESSION max_execution_time` +
-//!   `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
-//!   `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
-//!   search-path — a migration references its objects by explicit database, or the
-//!   connection's default database is the project database). No `SET ROLE`: the
-//!   least-privilege migrator-role confinement is a Postgres construct; on MySQL
-//!   the connecting user's grants ARE the confinement.
+//! `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
+//! `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
+//! search-path — a migration references its objects by explicit database, or the
+//! connection's default database is the project database). No `SET ROLE`: the
+//! least-privilege migrator-role confinement is a Postgres construct; on MySQL
+//! the connecting user's grants ARE the confinement.
 //! - **apply** — MySQL DDL is **auto-committing** (an implicit COMMIT brackets
-//!   every DDL statement), so a migration's `up` cannot be wrapped with its journal
-//!   row in one transaction. Every MySQL migration therefore takes the **two-phase
-//!   non-transactional path**: a `started` marker → run the `up` → an immutable
-//!   `completed` row + clear the marker, with idempotent crash recovery. This is
-//!   exactly the shape Postgres uses for its `CREATE INDEX CONCURRENTLY` non-txn
-//!   migrations, generalized to every MySQL migration.
+//! every DDL statement), so a migration's `up` cannot be wrapped with its journal
+//! row in one transaction. Every MySQL migration therefore takes the **two-phase
+//! non-transactional path**: a `started` marker → run the `up` → an immutable
+//! `completed` row + clear the marker, with idempotent crash recovery. This is
+//! exactly the shape Postgres uses for its `CREATE INDEX CONCURRENTLY` non-txn
+//! migrations, generalized to every MySQL migration.
 //! - **rollback** — the `down` runs, then a `rolled_back` event is appended. MySQL
-//!   DDL auto-commits, so the `down` + its journal append are NOT atomic (same
-//!   two-phase reality as apply); the append is best-effort-ordered after the
-//!   `down` succeeds.
+//! DDL auto-commits, so the `down` + its journal append are NOT atomic (same
+//! two-phase reality as apply); the append is best-effort-ordered after the
+//! `down` succeeds.
 //!
 //! Placeholders are the anonymous positional `?`
 //! ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
@@ -174,8 +173,8 @@ pub(crate) async fn configure_session<D: SqlSession>(
 /// non-txn path for every MySQL migration):
 ///
 /// 1. If `had_inflight`, clear the stale marker (idempotent recovery — the `up` is
-///    re-run, so it must tolerate having partially run; MySQL DDL is largely
-///    `IF (NOT) EXISTS`-guardable by the author).
+/// re-run, so it must tolerate having partially run; MySQL DDL is largely
+/// `IF (NOT) EXISTS`-guardable by the author).
 /// 2. (Re-)write the `started` marker (`INSERT IGNORE`).
 /// 3. Run the migration's `up` (auto-commits).
 /// 4. Append the immutable `completed` row + clear the marker.

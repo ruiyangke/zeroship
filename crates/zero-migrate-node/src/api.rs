@@ -1,4 +1,4 @@
-//! Sync, DB-free API surface (design §C.5): load + verify an IR document.
+//! Sync, DB-free API surface: load + verify an IR document.
 //!
 //! These functions run inline on the napi call thread — they touch NO database, so
 //! there is no host bridge and no worker thread. They build the typed
@@ -10,7 +10,7 @@
 //! The load-verify path is `zero_migrate::model::load::load_ir_document`, which
 //! deserializes the closed IR AST, fails closed on an unknown `ir_version`, runs the
 //! authoritative structural + schema-confinement validation, enforces ownership
-//! against the project registry, and compares the advisory checksum hint (§2.4/§2.7).
+//! against the project registry, and compares the advisory checksum hint.
 //! It is the single DB-free gate an authoring host runs before deploy.
 
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ use zero_migrate::model::validate::Dialect;
 use crate::wire::LoadVerifyReply;
 
 /// The IR-format version this addon was built against (`ir_version` fail-closed
-/// floor, §5.3). Surfaced so a host can pre-check an artifact's version.
+/// floor). Surfaced so a host can pre-check an artifact's version.
 #[must_use]
 pub const fn current_ir_version() -> u32 {
     CURRENT_IR_VERSION
@@ -40,7 +40,7 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
     }
 }
 
-/// Load + verify an IR document (the sync, DB-free deploy gate, §C.5).
+/// Load + verify an IR document (the sync, DB-free deploy gate).
 ///
 /// - `ir_json` — the `.ir.json` document bytes (UTF-8).
 /// - `deploying_app` — the app id claiming the deploy (ownership is checked against

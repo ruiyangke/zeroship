@@ -1,5 +1,5 @@
 //! MySQL [`MigrationBackend`](crate::apply::backend::MigrationBackend)
-//! implementation (redesign step 4d).
+//! implementation.
 //!
 //! Generic over the dialect-neutral [`SqlSession`](crate::driver::SqlSession) seam
 //! (engine root `crate::driver`) — a host driver (the napi `mysql2` shell) supplies
@@ -7,7 +7,7 @@
 //! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
 //! placeholders) differs, and all of it lives here + in [`session`] / [`journal_sql`]
-//! — never in the shared executor (the C1 structural fix that lets MySQL ride the
+//! — never in the shared executor (the structural fix that lets MySQL ride the
 //! same seam).
 //!
 //! **MySQL DDL is auto-committing** (an implicit COMMIT brackets every DDL
@@ -30,7 +30,7 @@
 //! journal-without-running, and the cross-deploy pending-contract partition — are
 //! **fail-closed** on this v1 MySQL backend (they surface a clear
 //! `ApplyError::Backend` / capability-absent `None` rather than a silent
-//! mis-apply), exactly as the host-PG backend fails closed on its native-pg-only
+//! mis-apply), exactly as the host-PG backend fails closed on its
 //! online/backfill harness and SQLite fails closed on its capability gaps. A later
 //! cut widens them behind live-MySQL tests.
 
@@ -303,7 +303,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         _applied_by: &str,
         _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<bool, ApplyError> {
-        // The parameterized-DML step executor (op.* §2.3.2) is a later MySQL cut.
+        // The parameterized-DML step executor (op.* DSL) is a later MySQL cut.
         // Fail closed rather than silently skip the DML.
         Err(ApplyError::Backend(format!(
             "mysql backend: parameterized DML step '{name}' is not yet implemented on \
@@ -346,7 +346,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 }
 
-/// UNIT / render tests for the MySQL backend (redesign step 4d).
+/// UNIT / render tests for the MySQL backend.
 ///
 /// These assert the **generated MySQL SQL** — `GET_LOCK`/`RELEASE_LOCK` for the
 /// project lock, MySQL journal DDL (`AUTO_INCREMENT`, `CURRENT_TIMESTAMP(6)`,

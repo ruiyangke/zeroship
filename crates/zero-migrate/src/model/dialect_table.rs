@@ -16,8 +16,8 @@ use crate::model::support::Dialect;
 pub enum Disposition {
     /// Core construct that renders/validates on this dialect.
     Portable,
-    /// P12 — native where supported, absence-tolerable elsewhere. Reserved for
-    /// the redesign; no current row uses it.
+    /// Native where supported, absence-tolerable elsewhere. Reserved; no current
+    /// row uses it.
     TransparentDegradable,
     /// Vendor-tier construct admitted on this dialect.
     Vendor,

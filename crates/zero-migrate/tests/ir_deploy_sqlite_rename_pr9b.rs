@@ -1,4 +1,4 @@
-//! PR9b (b) — SQLite renameColumn runnable IN PRODUCTION, faithful e2e through the
+//! SQLite renameColumn runnable IN PRODUCTION, faithful e2e through the
 //! NEW catalog-sourced entry [`apply_bundle_ir_sqlite_catalog`], on a REAL temp-file
 //! SQLite DB. No shims, no PG-gated skips, and — critically — NO hand-fed pre-rename
 //! descriptor set.
@@ -88,8 +88,8 @@ fn encrypted_field(name: &str) -> FieldDescriptor {
 }
 
 /// A string field carrying a SAME-AFFINITY data-transforming facet — a `default`
-/// (TEXT affinity preserved, so the PR9b affinity guard does NOT catch it; the PR9c
-/// LOW (ii) full-facet guard must). Used to prove the tightened guard refuses a rename
+/// (TEXT affinity preserved, so the affinity guard does NOT catch it; the
+/// full-facet guard must). Used to prove the tightened guard refuses a rename
 /// bundled with a facet change the rebuild's verbatim value-copy cannot certify.
 fn defaulted_text_field(name: &str) -> FieldDescriptor {
     FieldDescriptor {
@@ -142,8 +142,8 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     );
 
     // Seed a row with BOTH columns set — `secret` carries a NON-NULL encrypted BLOB
-    // (a `zero-migrate:enc:`-tagged ciphertext blob, the shape plugin-db writes at runtime). PR9b
-    // LOW (iii): the prior seed left `secret` NULL, so the rebuild's encrypted-column
+    // (a `zero-migrate:enc:`-tagged ciphertext blob, the shape the runtime writes).
+    // The prior seed left `secret` NULL, so the rebuild's encrypted-column
     // VALUE-COPY was never exercised with a real blob (copying NULL→NULL is vacuous).
     // We seed a concrete blob so the rebuild's `INSERT … SELECT` must carry the bytes
     // across the renamed table, and assert below it reads back BYTE-IDENTICAL.
@@ -252,7 +252,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
         "the rebuilt `secret` column keeps its encrypted BLOB affinity"
     );
 
-    // PR9b LOW (iii): the encrypted-column VALUE-COPY round-trips a REAL blob. The rebuild
+    // The encrypted-column VALUE-COPY round-trips a REAL blob. The rebuild
     // copies `secret` across the new table via `INSERT … SELECT`; the seeded ciphertext
     // bytes must survive BYTE-IDENTICAL (no truncation, no affinity coercion, no re-tag).
     // Pre-fix this was vacuous (the seed left `secret` NULL); now it proves the rebuild
@@ -284,7 +284,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     );
 }
 
-// REGRESSION (PR9b LOW): the catalog entry rebuilds the new table's CREATE from the
+// REGRESSION: the catalog entry rebuilds the new table's CREATE from the
 // descriptor-sourced `to` field, while the value-copy carries the live `from` bytes
 // across un-transformed. A rename PRESERVES facets by contract — so a descriptor whose
 // `to` field DIVERGES in affinity from the live `from` (e.g. a rename bundled with an
@@ -381,13 +381,13 @@ async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_li
     );
 }
 
-// REGRESSION (PR9c LOW (ii)) — affinity equality is NOT enough: a SAME-affinity
+// REGRESSION — affinity equality is NOT enough: a SAME-affinity
 // data-transforming facet change on the renamed column must ALSO fail closed. Deploy #1
 // creates `users(name TEXT)`; deploy #2 renames `name → full_name` but the post-rename
-// descriptor declares `full_name` with a `default` (still TEXT affinity, so the PR9b
+// descriptor declares `full_name` with a `default` (still TEXT affinity, so the
 // affinity guard PASSES). The rebuild would render the new CREATE with that facet while
 // value-copying the old un-defaulted bytes — a facet the verbatim copy cannot certify
-// the live `from` already carried. The PR9c full-facet guard refuses with
+// the live `from` already carried. The full-facet guard refuses with
 // `RenameHintFacetMismatch`. Pre-fix (affinity-only) this PASSED and rebuilt silently —
 // so this test FAILS RED pre-fix (the rebuild ran; no error).
 #[compio::test]

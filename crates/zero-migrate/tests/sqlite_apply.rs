@@ -1,5 +1,5 @@
-//! Journal + atomic-apply + idempotency proofs for the SQLite migration backend
-//! (design §2.2 / §2.2.2, P2 gate). Real temp-file SQLite throughout.
+//! Journal + atomic-apply + idempotency proofs for the SQLite migration backend.
+//! Real temp-file SQLite throughout.
 
 use std::path::PathBuf;
 
@@ -76,7 +76,7 @@ fn cfg() -> ExecutorConfig {
 async fn apply_create_table_then_idempotent_rerun() {
     let p = paths("apply1");
     let be = backend(&p);
-    // UNqualified DDL lands in `main` = the app file (C1).
+    // UNqualified DDL lands in `main` = the app file.
     let m = mig("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL);");
 
     // First apply: newly applied.
@@ -126,7 +126,7 @@ async fn apply_create_table_then_idempotent_rerun() {
 }
 
 // ---------------------------------------------------------------------------
-// C1 regression: an UNqualified `CREATE TABLE users(...)` lands in main = the
+// Regression: an UNqualified `CREATE TABLE users(...)` lands in main = the
 // app FILE and PERSISTS. We apply on one backend, drop it (closing the file),
 // reopen a SECOND backend on the SAME paths, and prove (1) the table is visible
 // in the persisted app file via a raw connection, (2) the second backend sees it
@@ -285,7 +285,7 @@ async fn journal_update_delete_denied_confined() {
 }
 
 // ---------------------------------------------------------------------------
-// The append-only TRIGGER backstop (§2.2.1 item 5) fires even when the authorizer
+// The append-only TRIGGER backstop fires even when the authorizer
 // is NOT in the path — proving the in-DB defense independently. We open the
 // journal file with a PLAIN connection (no authorizer) and attempt UPDATE/DELETE;
 // the RAISE(ABORT) trigger must reject it.
@@ -317,7 +317,7 @@ async fn journal_immutability_trigger_backstop() {
 }
 
 // ---------------------------------------------------------------------------
-// transaction:false on SQLite → rejected with a clear error (design §2.3/L3),
+// transaction:false on SQLite → rejected with a clear error,
 // through the trait's validate_non_txn.
 // ---------------------------------------------------------------------------
 #[compio::test]
@@ -353,7 +353,7 @@ async fn sqlite_backend_transactional_ddl_selector_matches_migration_flag() {
 }
 
 // ---------------------------------------------------------------------------
-// C3 SEAM PIN — squash routes THROUGH the backend. The SQLite backend never
+// SEAM PIN — squash routes THROUGH the backend. The SQLite backend never
 // produces a squash (the descriptor author emits empty `supersedes`), so a squash
 // reaching the SQLite `record_squash` is a routing bug: it fails closed with a
 // clear dialect-named error rather than silently journaling a supersession. This
@@ -378,7 +378,7 @@ async fn record_squash_rejected_on_sqlite_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// C3 SEAM PIN — precondition VALIDATION + EVALUATION route THROUGH the backend.
+// SEAM PIN — precondition VALIDATION + EVALUATION route THROUGH the backend.
 // A migration with NO preconditions is trivially `AllMet` (the descriptor-author
 // common case); a migration that DECLARES one fails closed (precondition
 // evaluation is a later-phase SQLite capability) rather than running `pg_query` /
@@ -449,7 +449,7 @@ async fn failed_up_rolls_back_atomically() {
 }
 
 // ---------------------------------------------------------------------------
-// H1 regression: a failed `up` must NOT wedge the long-lived reused connection.
+// Regression: a failed `up` must NOT wedge the long-lived reused connection.
 // Before the fix, the rollback path was `let _ = actor.exec("ROLLBACK")`, which
 // swallowed any ROLLBACK failure and left BEGIN IMMEDIATE open, so the NEXT apply
 // on the SAME backend failed with "cannot start a transaction within a
@@ -489,7 +489,7 @@ async fn failed_up_does_not_wedge_next_apply_on_same_backend() {
     assert_eq!(rows.len(), 1, "only the good table exists");
     assert_eq!(rows[0][0].as_deref(), Some("good"));
 
-    // And the connection is cleanly in autocommit (belt-and-suspenders on H1).
+    // And the connection is cleanly in autocommit (belt-and-suspenders).
     assert!(
         be.actor().is_autocommit().await.expect("probe autocommit"),
         "connection must be back in autocommit after the failed up"
@@ -497,7 +497,7 @@ async fn failed_up_does_not_wedge_next_apply_on_same_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// H1 mechanism: `is_autocommit()` — the load-bearing wedge detector the rollback
+// Mechanism: `is_autocommit()` — the load-bearing wedge detector the rollback
 // path now consults — correctly reports an OPEN transaction as NOT autocommit and
 // a clean connection as autocommit. This is the primitive the fix depends on; the
 // pre-fix code swallowed the ROLLBACK result and never consulted it. We drive the
@@ -516,7 +516,7 @@ async fn is_autocommit_detects_open_transaction() {
     );
 
     // Open a transaction under engine mode (which the authorizer allows) — now the
-    // connection is the WEDGED state the H1 fix detects.
+    // connection is the WEDGED state the fix detects.
     be.actor()
         .set_mode(zero_migrate::apply::backend::sqlite::Mode::EngineJournal)
         .await

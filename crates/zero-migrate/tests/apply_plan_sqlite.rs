@@ -1,8 +1,8 @@
-//! PR0 — faithful e2e for the single shared `apply_plan`'s SQLite leg of the
-//! dual-EXECUTION rename dispatch (`op.*` DSL §2.6.2), against REAL temp-file
+//! Faithful e2e for the single shared `apply_plan`'s SQLite leg of the
+//! dual-EXECUTION rename dispatch (`op.*` DSL), against REAL temp-file
 //! SQLite.
 //!
-//! Test (5): a `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` driven
+//! A `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` driven
 //! THROUGH `apply_plan` executes via `MigrationBackend::rebuild_one` (the 12-step
 //! offline rebuild), NOT `run_online` (SQLite has no online capability). A seeded
 //! row survives the rename, the old column is gone, and the journal records the
@@ -202,7 +202,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION (code-critic MED): apply_plan bootstraps the journal up front.
+// REGRESSION: apply_plan bootstraps the journal up front.
 //
 // A standalone plan whose FIRST step is `OnlineRename(SqliteRebuild)`, applied
 // against a FRESH SQLite file with NO `_mig` journal, made its first journal
@@ -303,7 +303,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
 }
 
 // ---------------------------------------------------------------------------
-// PR9a (§2.0.3 / Deliverable 7): the SQLite rebuild rename has NO pending-contract
+// The SQLite rebuild rename has NO pending-contract
 // partition, so the cross-deploy interlock can NEVER false-gate a SQLite deploy.
 //
 // After a SQLite rebuild rename completes, the backend reports an EMPTY outstanding

@@ -1,4 +1,4 @@
-//! The versioned executor — the apply flow (design §2.3 / §2.4).
+//! The versioned executor — the apply flow.
 //!
 //! The heart of the engine. Given a connection, an [`ExecutorConfig`], and the
 //! project's full migration set, [`apply`]:
@@ -8,7 +8,7 @@
 //! 2. bootstraps the journal (idempotent);
 //! 3. computes `pending = set − applied`, in `UUIDv7` version order;
 //! 4. re-verifies the checksums of already-applied migrations — a mismatch is a
-//!    hard abort (drift / tamper, design §1.5 / §3.6);
+//!    hard abort (drift / tamper);
 //! 5. **first pass (static, all-up-front):** runs the **[`SqlGuard`]** over the
 //!    `up` SQL of EVERY pending migration, and validates that every
 //!    non-transactional `up` is **idempotent** (each non-txn statement uses the
@@ -29,14 +29,15 @@
 //!      recording `completed`.
 //! 7. restores the session GUCs it touched and releases the lock.
 //!
-//! Runs out-of-band at deploy, async on compio — ZERO tokio.
+//! Runs out-of-band at deploy. The apply futures are driven by the host
+//! (the napi `block_on` worker + JS host) — ZERO tokio, ZERO compio.
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
 use crate::approval::Approval;
-// The generic `PostgresBackend` compiles on the whole PG seam (`native-pg` OR
+// The generic `PostgresBackend` compiles on the PG seam cfg (`pg_seam`, from
 // `host-pg`) — the generic executor entries below are driver-neutral, and the
 // dialect SQL leaves the backend drives live in
 // [`crate::apply::backend::postgres::session`].
@@ -53,8 +54,7 @@ use crate::apply::journal::{AppliedEntry, JournalError, Phase};
 use crate::model::migration::{Migration, MigrationId};
 
 /// Whether an apply sub-batch must acquire/release the project advisory lock
-/// itself, or whether an OUTER caller already holds it for the whole operation
-/// (H10).
+/// itself, or whether an OUTER caller already holds it for the whole operation.
 ///
 /// A standalone [`apply`] (engine `apply` / `apply_verified` / the versioned
 /// path) uses [`LockMode::Acquire`]: it takes the project advisory lock at the
@@ -62,7 +62,7 @@ use crate::model::migration::{Migration, MigrationId};
 /// concurrent deploys for the same project.
 ///
 /// A **declarative** deploy is several sub-batches — the plain set plus one
-/// expand per rename — that must be serialized **as a whole** (design §2.3:
+/// expand per rename — that must be serialized **as a whole** (to
 /// "serialize all migration activity"). The outer
 /// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)
 /// therefore acquires the lock ONCE up front and passes [`LockMode::AlreadyHeld`]
@@ -73,8 +73,8 @@ use crate::model::migration::{Migration, MigrationId};
 ///
 /// `AlreadyHeld` gates ONLY the advisory-lock acquire/release. The per-sub-batch
 /// session hygiene (GUC snapshot/restore, unconditional `RESET ROLE`) still runs
-/// every sub-batch regardless of lock mode — those are session-leak guards (H2 /
-/// L1), independent of who owns the lock.
+/// every sub-batch regardless of lock mode — those are session-leak guards,
+/// independent of who owns the lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
     /// This call owns the lock: acquire at the start, release on every exit.
@@ -153,7 +153,7 @@ impl From<crate::driver::DbError> for BackendError {
 
 // All network (PG/MySQL) DB errors now funnel through the dialect-neutral
 // `driver::DbError` seam: the only off-seam concrete-`Client` reader was the
-// retired Rust CLI's standalone trailer/status path (redesign step 5c), so
+// retired Rust CLI's standalone trailer/status path, so
 // `BackendError` boxes the single `DbError` shape above. It still `downcast_ref`s
 // to a concrete backend error type when a test needs SQLSTATE details.
 
@@ -172,7 +172,7 @@ pub enum ApplyError {
     #[error("backend error: {0}")]
     Backend(String),
     /// A migration requested the **non-transactional** path (`transaction:false`)
-    /// on a dialect that has no non-txn DDL to recover (SQLite, design §2.3/L3).
+    /// on a dialect that has no non-txn DDL to recover (SQLite).
     /// Rejected at the dialect boundary, before any apply. Postgres never returns
     /// this — its non-txn path is real.
     #[error("migration {version} is transaction:false but the {dialect} backend has no non-transactional DDL path (design §2.3/L3)")]
@@ -190,7 +190,7 @@ pub enum ApplyError {
     /// destructive batch without explicit approval. Nothing was applied.
     #[error("apply contains a destructive migration but Approval::Approved was not given")]
     ApprovalRequired,
-    /// **PR9b per-version approval scoping (anti-bypass).** The batch is approved
+    /// **Per-version approval scoping (anti-bypass).** The batch is approved
     /// ([`crate::Approval::Approved`]) but it carries a DESTRUCTIVE migration whose
     /// version-id is NOT in the operator's reviewed
     /// [`ApprovalScope::Versions`](crate::ApprovalScope::Versions) set. The
@@ -220,8 +220,8 @@ pub enum ApplyError {
     /// safe to re-run idempotently — e.g. `CREATE INDEX CONCURRENTLY` without
     /// `IF NOT EXISTS`, or `ALTER TYPE … ADD VALUE` without `IF NOT EXISTS`.
     ///
-    /// The two-phase non-txn path's crash-recovery re-runs `<up>` verbatim
-    /// (C1/C2), so a non-idempotent op would wedge the migration permanently on
+    /// The two-phase non-txn path's crash-recovery re-runs `<up>` verbatim,
+    /// so a non-idempotent op would wedge the migration permanently on
     /// a success-then-crash (`already exists` / `label already exists`). We
     /// reject such a migration **before any execution** with this clear error;
     /// the author must write the `IF NOT EXISTS` form.
@@ -237,7 +237,7 @@ pub enum ApplyError {
         reason: String,
     },
     /// An already-applied migration's recorded checksum no longer matches the
-    /// migration in the set — drift / tamper. Hard abort (design §3.6).
+    /// migration in the set — drift / tamper. Hard abort.
     #[error("checksum drift on {version}: journal has {recorded}, set has {expected}")]
     ChecksumDrift {
         /// The drifting migration's version.
@@ -261,7 +261,7 @@ pub enum ApplyError {
     /// order exists. Hard abort before any execution.
     #[error("dependency cycle among pending migrations: {0}")]
     DependencyCycle(String),
-    /// A `phase: Contract` online migration (Plan 8 v1.2) was about to be applied
+    /// A `phase: Contract` online migration was about to be applied
     /// while a depended-on `phase: Expand` migration is **not net-applied in the
     /// journal**. The contract (drop trigger/function, drop old column) must never
     /// land before its expand (add column, dual-write, backfill) is fully done and
@@ -330,7 +330,7 @@ pub enum ApplyError {
         /// The version both squashes supersede.
         shared: String,
     },
-    /// A pending migration carried a precondition (v3 Plan D) with
+    /// A pending migration carried a precondition with
     /// [`OnUnmet::Halt`](crate::model::precondition::OnUnmet::Halt) that was UNMET (it
     /// evaluated false), or a precondition that could not be evaluated at all (a
     /// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
@@ -346,7 +346,7 @@ pub enum ApplyError {
         which: String,
     },
     /// A `repeatable=true` migration ALSO carried a non-empty `supersedes` — a
-    /// repeatable cannot be a squash (v3 Plan E re-critic #4a). A repeatable has a
+    /// repeatable cannot be a squash. A repeatable has a
     /// stable identity and re-applies on change; a squash collapses once-only
     /// history. The two are mutually exclusive. Refused in the pre-flight over the
     /// FULL supplied set, before partition/apply; nothing was applied.
@@ -359,7 +359,7 @@ pub enum ApplyError {
         version: String,
     },
     /// A VERSIONED (once-only) migration's `depends_on` names a REPEATABLE in the
-    /// same supplied set (v3 Plan E re-critic #3d). Repeatables run AFTER all
+    /// same supplied set. Repeatables run AFTER all
     /// versioned migrations, so a once-only migration can never have a repeatable
     /// dependency satisfied in order. This is a DEDICATED error (not the misleading
     /// `MissingDependency` the partition would otherwise raise). Refused in the
@@ -374,7 +374,7 @@ pub enum ApplyError {
         /// The repeatable it depends on.
         dependency: String,
     },
-    /// A `repeatable=true` migration declared a `down` (v3 Plan E re-critic #4c).
+    /// A `repeatable=true` migration declared a `down`.
     /// A repeatable is replace-style (`CREATE OR REPLACE …`) with no true reverse,
     /// so its `down` MUST be `None` (the stated invariant). Refused in the pre-flight
     /// before any execution; nothing was applied.
@@ -396,7 +396,7 @@ pub enum ApplyError {
         #[source]
         source: BackendError,
     },
-    /// **PR10 Part B** — a guarded migration's `ifNotExists` existence guard found
+    /// A guarded migration's `ifNotExists` existence guard found
     /// the target object ALREADY PRESENT with a shape that DIVERGES from (or cannot
     /// be proven equal to) the declared one. This is a fail-closed drift error — the
     /// catalog probe ran under the held advisory lock + open txn and
@@ -441,13 +441,13 @@ impl From<crate::driver::DbError> for ApplyError {
 
 
 
-/// Apply the project's pending migrations (design §2.3). Idempotent: a re-run
+/// Apply the project's pending migrations. Idempotent: a re-run
 /// with no new migrations is a no-op.
 ///
 /// `applied_by` is the actor recorded in the journal (`app/actor/AI`).
 ///
 /// `approval` is the caller's approval decision. This is the executor's OWN
-/// defense-in-depth approval gate (design §1.6): if any pending migration is
+/// defense-in-depth approval gate: if any pending migration is
 /// flagged [`destructive`](crate::model::migration::MigrationFlags::destructive) and
 /// `approval != Approval::Approved`, the apply is refused with
 /// [`ApplyError::ApprovalRequired`] before any migration executes — independent
@@ -477,7 +477,7 @@ pub async fn apply<D: SqlSession>(
     apply_with_lock(conn, cfg, migrations, approval, applied_by, LockMode::Acquire).await
 }
 
-/// [`apply`] with an explicit [`LockMode`] (H10).
+/// [`apply`] with an explicit [`LockMode`].
 ///
 /// Identical to [`apply`] except the caller chooses whether this sub-batch takes
 /// the project advisory lock itself ([`LockMode::Acquire`], the standalone case)
@@ -501,22 +501,22 @@ pub async fn apply_with_lock<D: SqlSession>(
     applied_by: &str,
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
-    // Drive the whole apply through the dialect seam. P1: Postgres is the only
+    // Drive the whole apply through the dialect seam. Postgres is the only
     // backend; the public entry is now generic over the `SqlSession` seam (`&D`)
     // so a host (napi) driver can drive it, while the apply body below is generic
-    // over `MigrationBackend` (no `compio_postgres::Client` reaches `apply_locked`).
+    // over `MigrationBackend` (no concrete client reaches `apply_locked`).
     // The defense-in-depth approval gate lives in `apply_with_lock_backend` so it
-    // runs IDENTICALLY for both this entry and the generic engine path (P6a) — a
+    // runs IDENTICALLY for both this entry and the generic engine path — a
     // single source of the executor-layer gate.
     //
     // `new_generic` (not `new`) is used here: the apply path never reads the
     // backend's `online`/`shadow` harnesses (those are exercised only via the
-    // separate `run_expand`/`dry_run` entries), so on the native path the
-    // constructed backend is behaviorally identical to the pre-seam `new(conn)` —
+    // separate `run_expand`/`dry_run` entries), so the
+    // constructed backend is behaviorally identical to a plain `new(conn)` —
     // only the two unused `Option` fields differ (both stay `None`). This is what
-    // makes the `&Client → &D` generalization behavior-preserving for native-pg.
+    // makes the `&Client → &D` generalization behavior-preserving.
     //
-    // PR9b: this entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
+    // This entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
     // callers (the expand-contract EXPAND apply, the flat `engine.apply` path) carry
     // their own scope check at the engine layer when one is in play. A direct caller
     // of `apply_with_lock` is the trusted single-actor `.sql` surface (no co-bundling
@@ -540,8 +540,7 @@ pub async fn apply_with_lock<D: SqlSession>(
 /// placeholders, auto-committing two-phase apply). This is the dialect-selection
 /// entry: a caller that knows the target is MySQL constructs the MySQL backend
 /// here and reuses the identical generic [`apply_with_lock_backend`] orchestration
-/// shell — so the executor holds no dialect SQL and MySQL rides the same seam
-/// (the C1 structural fix).
+/// shell — so the executor holds no dialect SQL and MySQL rides the same seam.
 ///
 /// # Errors
 /// Same as [`apply`].
@@ -580,22 +579,22 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     applied_by: &str,
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
-    // Defense-in-depth approval gate (design §1.6) — refuse a destructive batch
+    // Defense-in-depth approval gate — refuse a destructive batch
     // without explicit approval BEFORE doing anything (not even the lock). The
     // engine has its own gate; this is the independent executor-layer check so a
     // direct caller cannot bypass it. It is dialect-agnostic (reads only
     // `flags.destructive`), so it sits in the generic core — running identically for
-    // PG and the engine path (P6a moved it here from `apply_with_lock`).
+    // PG and the engine path.
     if approval != Approval::Approved
         && migrations.iter().any(|m| m.flags.destructive)
     {
         return Err(ApplyError::ApprovalRequired);
     }
-    // **PR9b per-version approval scope (anti-bypass), defense in depth.** Even
+    // **Per-version approval scope (anti-bypass), defense in depth.** Even
     // under blanket `Approval::Approved`, a destructive migration runs ONLY if its
     // version-id is admitted by the operator's reviewed scope. Under
     // `ApprovalScope::All` (the default for every existing caller) this is vacuously
-    // true — byte-identical to pre-PR9b. Under `ApprovalScope::Versions`, a
+    // true. Under `ApprovalScope::Versions`, a
     // co-bundled destructive op the operator did NOT individually review is refused
     // here too, so a direct executor caller cannot bypass the engine-layer scope
     // check. Checked per-element (a coalesced DDL batch carries per-`Migration`
@@ -611,7 +610,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
             });
         }
     }
-    // H10: acquire the project advisory lock only when WE own it. Under
+    // Acquire the project advisory lock only when WE own it. Under
     // `AlreadyHeld` the outer `apply_declarative` already holds it for the whole
     // declarative deploy — re-acquiring here (and releasing below) would FREE the
     // lock between sub-batches (PG advisory locks are session-re-entrant, so a
@@ -621,12 +620,12 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     }
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
-    // leak onto the (pooled / long-lived) connection after apply (H2). This runs
+    // leak onto the (pooled / long-lived) connection after apply. This runs
     // regardless of lock mode: every sub-batch is responsible for its own session
     // hygiene even when the lock is owned outside it.
     let snapshot = backend.snapshot_session().await;
     let result = apply_locked(backend, cfg, migrations, applied_by).await;
-    // L1: RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
+    // RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
     // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
     // snapshot had failed we would otherwise skip `restore_session` entirely and
     // leak the migrator role onto the pooled/long-lived connection. So drop the
@@ -659,20 +658,20 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
 
 
 
-/// Pre-flight over the FULL supplied set (v3 Plan E re-critic): reject malformed
+/// Pre-flight over the FULL supplied set: reject malformed
 /// repeatable/versioned combinations BEFORE the partition or any apply, so a
 /// dropped or misrouted facet can never silently apply. Fail-closed per the
 /// no-back-compat stance — these shapes are author errors, not legacy inputs.
 ///
 /// Three rejections, each before any execution (nothing applied):
 ///
-/// - **#4a** — a `repeatable=true` migration with a non-empty `supersedes`: a
+/// - a `repeatable=true` migration with a non-empty `supersedes`: a
 ///   repeatable cannot be a squash ([`ApplyError::RepeatableCannotSquash`]). Without
 ///   this, the partition routes it into the repeatable phase and its `supersedes` is
 ///   silently dropped (never gated).
-/// - **#4c** — a `repeatable=true` migration with `down.is_some()`: a repeatable is
+/// - a `repeatable=true` migration with `down.is_some()`: a repeatable is
 ///   replace-style with no true reverse ([`ApplyError::RepeatableHasDown`]).
-/// - **#3d** — a VERSIONED (once-only) migration whose `depends_on` names a
+/// - a VERSIONED (once-only) migration whose `depends_on` names a
 ///   REPEATABLE in the same set: a once-only migration may not depend on a
 ///   repeatable (repeatables run AFTER all versioned migrations), so the dependency
 ///   can never be ordered ([`ApplyError::OnceOnlyDependsOnRepeatable`]). This is the
@@ -687,7 +686,7 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
     use std::collections::BTreeSet;
 
     // The set of versions whose SUPPLIED flag marks them repeatable — used by the
-    // #3d once-only-depends-on-repeatable check.
+    // once-only-depends-on-repeatable check.
     let repeatable_versions: BTreeSet<&str> = migrations
         .iter()
         .filter(|m| m.flags.repeatable)
@@ -701,20 +700,20 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
 
     for m in ordered {
         if m.flags.repeatable {
-            // #4a — a repeatable cannot be a squash.
+            // A repeatable cannot be a squash.
             if !m.supersedes.is_empty() {
                 return Err(ApplyError::RepeatableCannotSquash {
                     version: m.version.as_str().to_string(),
                 });
             }
-            // #4c — a repeatable must not declare a down.
+            // A repeatable must not declare a down.
             if m.down.is_some() {
                 return Err(ApplyError::RepeatableHasDown {
                     version: m.version.as_str().to_string(),
                 });
             }
         } else {
-            // #3d — a once-only migration may not depend on a repeatable in the set.
+            // A once-only migration may not depend on a repeatable in the set.
             for dep in &m.depends_on {
                 if repeatable_versions.contains(dep.as_str()) {
                     return Err(ApplyError::OnceOnlyDependsOnRepeatable {
@@ -743,14 +742,14 @@ async fn apply_locked<B: MigrationBackend>(
 ) -> Result<ApplyOutcome, ApplyError> {
     backend.ensure_journal(cfg).await?;
 
-    // v3 Plan E (re-critic) — PRE-FLIGHT over the FULL supplied set, before the
+    // PRE-FLIGHT over the FULL supplied set, before the
     // partition or any apply, rejecting malformed repeatable/versioned combinations
     // fail-closed (a dropped/misrouted facet must never silently apply). Refusing
     // here, before the partition, means the rejected shapes never reach the
     // versioned pipeline or the repeatable phase.
     check_repeatable_wellformed(migrations)?;
 
-    // v3 Plan E — partition the supplied set into VERSIONED (run-once) and
+    // Partition the supplied set into VERSIONED (run-once) and
     // REPEATABLE migrations. The entire versioned pipeline below (drift/tamper
     // abort, expand-contract gate, squash gates, pending ordering, execute) sees
     // ONLY the versioned migrations: a repeatable has a stable identity and a
@@ -794,7 +793,7 @@ async fn apply_locked<B: MigrationBackend>(
         }
     }
 
-    // Drift / tamper check (design §2.3 step 3): every migration in the set that
+    // Drift / tamper check: every migration in the set that
     // the journal records as net-applied must still match its recorded checksum.
     // This is the SHARED comparison — `crate::apply::drift::check_checksum_drift` builds
     // the full report (used read-only by the status/drift API), and apply aborts
@@ -820,7 +819,7 @@ async fn apply_locked<B: MigrationBackend>(
         });
     }
 
-    // M1: a version recorded net-applied in the journal but ABSENT from the
+    // A version recorded net-applied in the journal but ABSENT from the
     // supplied set (an orphan) is surfaced, not silently ignored — it usually
     // means the bundle is missing a migration the database already has (a
     // downgrade / a dropped slice). We log a warning; correctness is unaffected
@@ -833,12 +832,12 @@ async fn apply_locked<B: MigrationBackend>(
         );
     }
 
-    // EXPAND/CONTRACT GATE (Plan 8 v1.2) — refuse a pending contract whose expand
+    // EXPAND/CONTRACT GATE — refuse a pending contract whose expand
     // is not net-applied in the journal. Run BEFORE `order_pending` so it beats
     // the generic MissingDependency with a precise error.
     check_expand_contract_gate(migrations, &completed)?;
 
-    // Supersession (Plan 9 B): a version superseded by a net-applied squash (read
+    // Supersession: a version superseded by a net-applied squash (read
     // from the journal) OR by an in-set squash that will run this batch is SATISFIED
     // — it must not (re-)run. `compute_superseded` unions both sources; the squash
     // `S` itself is never in this set (it runs / is already applied). Computed
@@ -847,11 +846,11 @@ async fn apply_locked<B: MigrationBackend>(
     let journal_superseded = backend.superseded_versions(cfg).await?;
     let superseded_owned = compute_superseded(migrations, &journal_superseded);
 
-    // SQUASH ALL-OR-NONE GATE (Plan 9 B) — a pending squash may run its `up` only
+    // SQUASH ALL-OR-NONE GATE — a pending squash may run its `up` only
     // when NONE of its superseded versions are SATISFIED (fresh DB). All-satisfied
     // => use squash() (record without running); partial => inconsistent. A version
     // is satisfied when it is directly net-applied (`completed`) OR covered by a
-    // net-applied squash (`journal_superseded`) — the #1 fix: a chained/overlapping
+    // net-applied squash (`journal_superseded`): a chained/overlapping
     // squash over a prefix already covered by an EARLIER net-applied squash (whose
     // members were superseded-not-journaled) was miscounted `applied=0` and re-ran
     // its `up`, double-applying. We classify against `completed ∪ journal_superseded`
@@ -877,7 +876,7 @@ async fn apply_locked<B: MigrationBackend>(
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
     let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
-    // Multi-engine P0 (design 2026-06-21 §2.2 L3) — run the **per-engine** line-1
+    // Multi-engine — run the **per-engine** first-line
     // guard through the [`MigrationGuard`] seam, NOT an `if dialect == Sqlite`
     // branch. The guard is selected for `cfg`'s dialect (which equals
     // `backend.dialect()`) via [`guard_for`], so it carries the apply's project +
@@ -887,14 +886,14 @@ async fn apply_locked<B: MigrationBackend>(
     //     pre-seam `SqlGuard::new(cfg.guard_config())`;
     //   - SQLite → `SqliteDescriptorGuard` — the trusted descriptor-diff path
     //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
-    //     the line-1 vet is the descriptor emitter at the author boundary and the
-    //     line-2 defense is the backend authorizer applied per statement at apply).
+    //     the first-line vet is the descriptor emitter at the author boundary and the
+    //     second-line defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
     let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
-    // execution (H1). The guard runs per-migration inside the apply loop in the
+    // execution. The guard runs per-migration inside the apply loop in the
     // original design, which means an earlier migration could commit before a
     // later one is denied (a half-applied batch). Hoisting the static checks
     // (guard deny-list + non-txn idempotency) up front makes a denial apply
@@ -903,17 +902,17 @@ async fn apply_locked<B: MigrationBackend>(
     // checks are all-or-nothing.)
     for m in &pending {
         let version = m.version.as_str();
-        // GUARD GATE — line-1 per engine: PG denies RCE / priv-esc / cross-tenant /
+        // GUARD GATE — first-line per engine: PG denies RCE / priv-esc / cross-tenant /
         // file / network; SQLite trusts the descriptor-diff DDL (vetted by the
         // descriptor emitter + the backend authorizer).
         guard.check(&m.up).map_err(|source| ApplyError::Guard {
             version: version.to_string(),
             source,
         })?;
-        // C1/C2 — a migration taking the two-phase path must be idempotent
+        // A migration taking the two-phase path must be idempotent
         // (re-runnable by crash recovery). Reject the non-idempotent form with a
         // clear error. Behind the seam: PG parses with `pg_query`; SQLite rejects
-        // `transaction:false` at the dialect boundary (design §2.3/L3). The gate
+        // `transaction:false` at the dialect boundary. The gate
         // mirrors the backend-owned apply-path decision: a `transaction:false`
         // migration, or any migration on a non-transactional-DDL backend, must be
         // idempotent (re-runnable by crash recovery).
@@ -938,7 +937,7 @@ async fn apply_locked<B: MigrationBackend>(
     // already passed.
     execute_pending(backend, cfg, &pending, &started, applied_by, &mut outcome).await?;
 
-    // v3 Plan E — REPEATABLE PHASE. Runs AFTER every versioned pending migration
+    // REPEATABLE PHASE. Runs AFTER every versioned pending migration
     // has applied (the versioned schema the repeatables' views/functions reference
     // is now present). Each repeatable re-applies iff its checksum differs from the
     // latest journaled `completed` checksum for its identity (or it was never
@@ -948,8 +947,8 @@ async fn apply_locked<B: MigrationBackend>(
     Ok(outcome)
 }
 
-/// The execute pass (design §2.3 step 6): for each pending migration, evaluate
-/// its preconditions (v3 Plan D) read-only under the advisory lock, then apply
+/// The execute pass: for each pending migration, evaluate
+/// its preconditions read-only under the advisory lock, then apply
 /// the txn / non-txn path. Splits out of [`apply_locked`] so each stays focused.
 ///
 /// Precondition outcomes:
@@ -972,8 +971,8 @@ async fn execute_pending<B: MigrationBackend>(
     applied_by: &str,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    // Versions SKIPPED this run because an `OnUnmet::Skip` precondition was unmet
-    // (v3 Plan D). A skipped migration is NOT applied and NOT journaled — it stays
+    // Versions SKIPPED this run because an `OnUnmet::Skip` precondition was unmet.
+    // A skipped migration is NOT applied and NOT journaled — it stays
     // pending for the next deploy. Its dependents must also not run this batch: a
     // dependent's depended-on object does not exist (the dep did not run), so we
     // transitively skip any pending migration whose `depends_on` includes a
@@ -985,7 +984,7 @@ async fn execute_pending<B: MigrationBackend>(
         let version = m.version.as_str();
         let had_inflight = started.contains_key(version);
 
-        // v3 Plan D: a dependent of a Skip'd (still-pending) migration cannot run
+        // A dependent of a Skip'd (still-pending) migration cannot run
         // this batch — the object its `up` needs was never created. Transitively
         // skip it (and record it so ITS dependents skip too).
         let dep_skipped = m
@@ -1006,10 +1005,10 @@ async fn execute_pending<B: MigrationBackend>(
             continue;
         }
 
-        // Plan 9 B (fresh-DB squash): a squash whose `up` RUNS this batch records its
+        // Fresh-DB squash: a squash whose `up` RUNS this batch records its
         // supersession edges so future pending computations know `S` satisfies
         // `[v1..vN]`. The all-or-none gate already proved NONE of the superseded
-        // versions were satisfied, so this is the fresh path. #2 fix: the edges are
+        // versions were satisfied, so this is the fresh path. The edges are
         // written in the SAME transaction that journals `S`'s `completed` row (not a
         // separate post-commit statement) — a crash between would otherwise leave `S`
         // net-applied with edges missing, re-entering `v1..vN` into pending and
@@ -1036,7 +1035,7 @@ async fn execute_pending<B: MigrationBackend>(
     Ok(())
 }
 
-/// The REPEATABLE PHASE (v3 Plan E — Flyway `R__` / Liquibase `runOnChange`).
+/// The REPEATABLE PHASE (Flyway `R__` / Liquibase `runOnChange`).
 ///
 /// Runs AFTER every versioned pending migration has applied (so the schema the
 /// repeatables' views/functions/triggers reference exists). For each repeatable,
@@ -1048,7 +1047,7 @@ async fn execute_pending<B: MigrationBackend>(
 /// 2. otherwise (never applied, OR checksum DIFFERS) ⇒ **RE-APPLY**: run the SQL
 ///    guard over `up` (cross-schema / RCE / priv-esc denials — a repeatable's `up`
 ///    is held to the SAME security bar as a versioned one), evaluate its
-///    preconditions (v3 Plan D) read-only under the lock, then run `up` under the
+///    preconditions read-only under the lock, then run `up` under the
 ///    least-privilege migrator role inside a transaction and append a NEW
 ///    `completed` event carrying the new checksum (via [`apply_transactional`]).
 ///
@@ -1107,7 +1106,7 @@ async fn apply_repeatables<B: MigrationBackend>(
             continue;
         }
 
-        // Preconditions (v3 Plan D): a repeatable may gate its re-apply too. An
+        // Preconditions: a repeatable may gate its re-apply too. An
         // unmet Skip leaves it unchanged this deploy (re-evaluated next time); an
         // unmet/inevaluable Halt fails closed.
         if matches!(
@@ -1122,7 +1121,7 @@ async fn apply_repeatables<B: MigrationBackend>(
         // superseding. `apply_one` runs `up` under the migrator role and appends a
         // fresh `completed` event with the NEW checksum — exactly the re-apply record
         // the next deploy compares against.
-        // Stamped `kind='repeatable'` (v3 Plan E re-critic): the journaled kind is the
+        // Stamped `kind='repeatable'`: the journaled kind is the
         // tamper anchor, so the drift exemption can distinguish a genuine repeatable
         // re-run from a flipped once-only, and `latest_completed_checksums` reads only
         // `kind='repeatable'` rows for the re-run oracle.
@@ -1135,7 +1134,7 @@ async fn apply_repeatables<B: MigrationBackend>(
     Ok(())
 }
 
-/// Topologically order the repeatables among THEMSELVES (v3 Plan E), honoring
+/// Topologically order the repeatables among THEMSELVES, honoring
 /// `depends_on` edges between repeatables, version-tiebroken for determinism.
 ///
 /// A repeatable's `depends_on` may name a VERSIONED migration (e.g. a view depends
@@ -1207,7 +1206,7 @@ fn order_repeatables<'a>(
     Ok(ordered)
 }
 
-/// The verdict of evaluating a migration's preconditions (v3 Plan D).
+/// The verdict of evaluating a migration's preconditions.
 ///
 /// `pub` because it is the return type of
 /// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
@@ -1226,11 +1225,11 @@ pub enum PreconditionVerdict {
 /// The per-migration precondition verdict loop now lives in
 /// [`crate::apply::precondition::evaluate_all`] — the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions)
-/// (multi-engine abstraction C3). The generic apply body calls the backend method
+/// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
 /// `pg_query` / `information_schema` query directly.
 ///
-/// The EXPAND/CONTRACT gate (Plan 8 v1.2). A `phase: Contract` online migration
+/// The EXPAND/CONTRACT gate. A `phase: Contract` online migration
 /// may apply only when every `phase: Expand` migration it `depends_on` is
 /// NET-APPLIED (`completed`) in the journal — the single source of truth.
 ///
@@ -1307,7 +1306,7 @@ fn check_expand_contract_gate(
     Ok(())
 }
 
-/// Order the pending migrations honoring `depends_on` (design §4 cross-slice
+/// Order the pending migrations honoring `depends_on` (cross-slice
 /// ordering) when set, falling back to pure version order otherwise.
 ///
 /// The default order is UUIDv7 version (time-ordered), but `depends_on` can pull a
@@ -1342,7 +1341,7 @@ pub(crate) fn order_pending<'a>(
     // The pending set, indexed by version, plus the set of all known versions
     // (pending ∪ completed) for dependency-existence checks.
     //
-    // `satisfied` (Plan 9 squash) is the set of versions made redundant by a
+    // `satisfied` (squash) is the set of versions made redundant by a
     // SUPERSESSION — a version `v_i` superseded by a squash `S` that is net-applied
     // OR being applied in this batch. Such a version is treated like a completed
     // one: it is EXCLUDED from pending (its `up` must never run — `S` covers it),
@@ -1367,7 +1366,7 @@ pub(crate) fn order_pending<'a>(
     topo_order_version_tiebroken(&pending, &pre_satisfied)
 }
 
-/// The SHARED canonical ordering core (M2): a deterministic, **version-tiebroken
+/// The SHARED canonical ordering core: a deterministic, **version-tiebroken
 /// topological sort** of `nodes` over their `depends_on` edges. Both the apply
 /// path ([`order_pending`]) and the integrity manifest ([`canonical_set_order`],
 /// folded by [`crate::plan::manifest::compute_manifest`]) order through this one
@@ -1451,7 +1450,7 @@ fn topo_order_version_tiebroken<'a>(
     Ok(ordered)
 }
 
-/// The CANONICAL EXECUTED ORDER of a FULL supplied set (M2), used by
+/// The CANONICAL EXECUTED ORDER of a FULL supplied set, used by
 /// [`crate::plan::manifest::compute_manifest`] to fold the manifest over the order the
 /// executor will actually run — NOT the cosmetic slice order.
 ///
@@ -1463,7 +1462,7 @@ fn topo_order_version_tiebroken<'a>(
 /// - a pure **slice reorder** of an additive set (no `depends_on`) sorts back to
 ///   the SAME version order ⇒ the SAME manifest (no false mismatch);
 /// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
-///   manifest (also independently caught by C1's checksum fold).
+///   manifest (also independently caught by the checksum fold).
 ///
 /// On an unorderable set (a `depends_on` cycle, or a dangling dependency that
 /// names a version outside the set) there is no executed order — such a set never
@@ -1485,7 +1484,7 @@ pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
     })
 }
 
-/// Compute the set of versions made redundant by a SUPERSESSION (Plan 9 squash),
+/// Compute the set of versions made redundant by a SUPERSESSION (squash),
 /// for the supplied set + the journal's net state.
 ///
 /// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
@@ -1522,7 +1521,7 @@ pub(crate) fn compute_superseded(
 }
 
 /// Refuse a malformed set in which two distinct squashes both supersede the same
-/// version (Plan 9 sub-feature B). A version may be collapsed by at most one
+/// version. A version may be collapsed by at most one
 /// squash; two in-set squashes over an overlapping prefix would both be pending
 /// on a fresh DB (neither net-applied → the all-or-none gate sees nothing
 /// satisfied and lets both run), so the second's `up` would re-create what the
@@ -1563,7 +1562,7 @@ fn check_no_overlapping_squashes(
     Ok(())
 }
 
-/// Validate the squash all-or-none rule (Plan 9 sub-feature B) for every PENDING
+/// Validate the squash all-or-none rule for every PENDING
 /// squash in the set, BEFORE any execution.
 ///
 /// A squash `S` (`supersedes = [v1..vN]`) that is about to RUN its `up` (it is in
@@ -1577,7 +1576,7 @@ fn check_no_overlapping_squashes(
 ///
 /// `satisfied` is the SAME set the pending computation uses: a version is satisfied
 /// when it is directly net-applied (`completed`) OR covered by a net-applied squash
-/// (`journal::superseded_versions`). This is the #1 fix: a version covered by an
+/// (`journal::superseded_versions`): a version covered by an
 /// EARLIER net-applied squash was superseded-not-journaled, so it lives only as a
 /// supersession edge (in `satisfied`, NOT in `completed`). Counting against
 /// `completed` alone miscounted `applied=0` for a chained/overlapping squash and
@@ -1627,7 +1626,7 @@ fn check_squash_all_or_none(
 
 
 // ===========================================================================
-// Rollback (Plan 5) — apply `down` SQL in reverse to a target.
+// Rollback — apply `down` SQL in reverse to a target.
 // ===========================================================================
 
 
@@ -1691,7 +1690,7 @@ pub struct RollbackOptions {
     /// The operator's acknowledgement that a backup exists. `force` is honored
     /// ONLY when this is also set — forcing past an irreversible step is a
     /// data-loss operation, so it requires both a deliberate force and a backup
-    /// acknowledgement (design §5).
+    /// acknowledgement.
     pub backup_acknowledged: bool,
 }
 
@@ -1706,7 +1705,7 @@ pub struct RollbackOutcome {
     /// version-aligned case), so it is ≈ reverse apply order.
     pub rolled_back: Vec<String>,
     /// Versions skipped because they are irreversible (`down: None`) and `force`
-    /// was given (design §5). Empty unless forcing.
+    /// was given. Empty unless forcing.
     pub skipped_irreversible: Vec<String>,
 }
 
@@ -1797,7 +1796,7 @@ pub enum RollbackError {
         name: String,
     },
     /// The SQL guard denied a `down`'s SQL — the down is SQL too and goes through
-    /// the SAME defenses as an up (design §5). The whole rollback aborts before
+    /// the SAME defenses as an up. The whole rollback aborts before
     /// any down runs (all-up-front, mirroring apply).
     #[error("rollback of {version} denied by guard: {source}")]
     Guard {
@@ -1874,12 +1873,13 @@ pub enum RollbackError {
         /// The selected-for-rollback version it depends on.
         dependency: String,
     },
-    /// **SQLite, P5 additive-only.** The migration's `down` requires the 12-step
+    /// **SQLite, additive-only.** The migration's `down` requires the 12-step
     /// table REBUILD to reverse (a column TYPE-change reversal, a constraint
-    /// add/drop, or any `ALTER` SQLite cannot perform natively). P5 implements only
-    /// the ADDITIVE reversals SQLite ≥ 3.35 supports natively — `DROP TABLE` /
-    /// `DROP COLUMN` / `DROP INDEX` / `RENAME`. A rebuild-needing `down` is REFUSED
-    /// here (not half-rebuilt): the rebuild path is P3b. Nothing was rolled back.
+    /// add/drop, or any `ALTER` SQLite cannot perform natively). Only
+    /// the ADDITIVE reversals SQLite ≥ 3.35 supports natively are implemented —
+    /// `DROP TABLE` / `DROP COLUMN` / `DROP INDEX` / `RENAME`. A rebuild-needing
+    /// `down` is REFUSED here (not half-rebuilt): the rebuild path is not yet built.
+    /// Nothing was rolled back.
     #[error(
         "migration {version} has a SQLite `down` requiring the 12-step table rebuild ({reason}); \
          the rebuild path is P3b (not yet built). P5 reverses only the additive operations SQLite \

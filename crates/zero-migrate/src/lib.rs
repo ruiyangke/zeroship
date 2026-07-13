@@ -8,9 +8,9 @@
 //! backend the engine drives directly.
 //!
 //! This crate implements the **security core** + the **migration unit** (the
-//! migration data types §2.1 and the parse-time SQL security guard §1.4
-//! deny-list / §1.5 cross-schema confinement), and the **Postgres executor**
-//! (§2.3): the append-only journal ([`apply::journal`](crate::apply::journal)),
+//! migration data types and the parse-time SQL security guard
+//! deny-list / cross-schema confinement), and the **Postgres executor**:
+//! the append-only journal ([`apply::journal`](crate::apply::journal)),
 //! the project advisory lock, and the apply flow
 //! ([`apply::executor::apply`](crate::apply::executor::apply)) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
@@ -40,7 +40,7 @@
 //!    guard and the least-privilege `migrator` role** (defense in depth: the
 //!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!
-//! # Security stance (§1)
+//! # Security stance
 //!
 //! Migrations are **privileged arbitrary-SQL** authored by **untrusted**
 //! creators *and* a **prompt-injectable AI**. The threat surface is
@@ -57,16 +57,16 @@
 //!   inspected too, not just top-level statements. Unparseable input is
 //!   denied. The guard **denies** RCE / priv-esc / cross-tenant / file /
 //!   network, and only **flags** data loss (`DROP`/`TRUNCATE`/lossy type
-//!   change) — the apply gate (a later plan) decides on destructive ops.
-//! - **Line 2 — the least-privilege `migrator` role** (a later plan). The DB
+//!   change) — the apply gate decides on destructive ops.
+//! - **Line 2 — the least-privilege `migrator` role.** The DB
 //!   itself rejects the same ops even if SQL somehow slips past parse.
 //!
 //! The guard runs **out-of-band at deploy time** (not on the request hot path),
-//! so it is plain synchronous logic — no tokio/compio — and exhaustively
+//! so it is plain synchronous logic — no async runtime — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// The SQL security layer (`analysis` + `guard`) moved to the `zero-migrate-guard`
-// crate (redesign step 3b). Re-export its modules under their historical
+// The SQL security layer (`analysis` + `guard`) lives in the `zero-migrate-guard`
+// crate. Re-export its modules under their historical
 // `crate::{analysis,guard}` paths so the engine's ~dozens of
 // `crate::guard::…` / `crate::analysis::…` references keep resolving unchanged.
 pub use zero_migrate_guard::{analysis, guard};
@@ -77,17 +77,17 @@ pub mod db_url;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
-// The typed-id (base62/UUIDv7) machinery moved to the `zero-migrate-ir` leaf crate
-// (redesign step 3a); re-export it under its historical `crate::id` path.
+// The typed-id (base62/UUIDv7) machinery lives in the `zero-migrate-ir` leaf crate;
+// re-export it under its historical `crate::id` path.
 pub use zero_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
-// byte-identically from the upstream bundle layer (extraction Phase B) so the build
-// front-end emits bundle entries without a the upstream bundle layer normal-graph dep.
+// byte-identically from the upstream bundle layer so the build
+// front-end emits bundle entries without an upstream bundle-layer normal-graph dep.
 pub mod manifest_entry;
 pub mod model;
 // The reviewed-allowlist net-policy security types, vendored byte-identically
-// from the upstream core (extraction Phase B) so the recorder-sandbox / MySQL
-// JS-driver `NetPolicy` names no the upstream core type.
+// from the upstream core so the recorder-sandbox / MySQL
+// JS-driver `NetPolicy` names no upstream-core type.
 pub mod net_policy;
 pub mod ops;
 pub mod plan;
@@ -96,19 +96,17 @@ pub mod render;
 // runtime dependency the network-dialect backends (`PostgresBackend`, and the
 // forthcoming `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
 // in-process rusqlite actor). Gated on `pg_seam` (its only current implementor is
-// the compio PG adapter, lit by the `host-pg` feature); a `--no-default-features`
+// the host PG adapter, lit by the `host-pg` feature); a `--no-default-features`
 // build keeps a lean core.
 #[cfg(pg_seam)]
 pub mod driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
-// schema-shape descriptors) — dissolved in from the former `zero-migrate-schema`
-// leaf crate (redesign step 3c). The data-plane query language that used to ride
-// along there had zero engine callers and was deleted; only the write/diff/describe
+// schema-shape descriptors). The data-plane query language that used to ride
+// alongside had zero engine callers and was deleted; only the write/diff/describe
 // layer the engine uses survives here.
 pub mod schema;
 
-// The guard behaviour-lock suite (moved in from `zero-migrate-guard`'s
-// `guard/mod.rs` at redesign step 3b) — an in-crate test module so it can drive
+// The guard behaviour-lock suite — an in-crate test module so it can drive
 // the guard through the engine's `render::lower` / `conn` internals.
 #[cfg(test)]
 mod guard_vendor_lower_tests;
@@ -116,13 +114,13 @@ mod guard_vendor_lower_tests;
 pub use analysis::{analyze, classify};
 
 // ---------------------------------------------------------------------------
-// Public API surface — re-exports (later plans depend on these names).
+// Public API surface — re-exports.
 // ---------------------------------------------------------------------------
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
-// V8-free, driver-neutral re-exports (consumed by plugin-db / migrated per the
-// decoupling design §7). Name no compio type and back the SQLite path too — ungated.
+// V8-free, driver-neutral re-exports. Name no host-driver type and back the
+// SQLite path too — ungated.
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
@@ -176,13 +174,13 @@ pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
     RollbackError, RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
-// `apply` is generic over the `SqlSession` seam (§C.5 holdout 1) — on the whole PG
-// seam. `rollback` is still `&Client`-typed (out of v1 scope) — native-pg only.
+// `apply` is generic over the `SqlSession` seam — on the whole PG
+// seam. `rollback` is still `&Client`-typed (out of v1 scope) — PG-only.
 #[cfg(pg_seam)]
 pub use apply::executor::apply;
-// **Migration-first P1** — the OFFLINE ops→snapshot fold (the keystone). Pure, no
+// The OFFLINE ops→snapshot fold. Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
-// the offline companion of `snapshot_schema`. Later phases (`gen-types`) emit the
+// the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
 pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
@@ -202,8 +200,8 @@ pub use model::profile::{
     CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
 pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
-// The deploy-target dialect (§2.4.1) — re-exported so an embedding host's deploy
-// path can thread it into `IrAuthor::new` without depending on `zero-migrate-schema`.
+// The deploy-target dialect — re-exported so an embedding host's deploy
+// path can thread it into `IrAuthor::new`.
 pub use schema::query::SqlDialect;
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
@@ -219,7 +217,7 @@ pub use apply::journal::{
     record_baseline, record_completed, record_rolled_back, record_started,
     resolve_pending_contract, superseded_versions,
 };
-// The §8.8 structured pending-contract interlock payloads (§2.0.3 / §2.0.4).
+// The structured pending-contract interlock payloads.
 pub use plan::pending::{
     ActionPayload, DependencyPendingContract, OrphanedPendingContract, PendingContractRefusal,
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
@@ -233,11 +231,11 @@ pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
 };
-// `history` / `status` are generic over the `SqlSession` seam (§C.5 holdout 3) —
+// `history` / `status` are generic over the `SqlSession` seam —
 // on the whole PG seam so a host driver can drive the pending-migrations flow.
 #[cfg(pg_seam)]
 pub use ops::status::{history, status};
-// The confined submit path is PG-only (§4.5); gated with `mod ops::submit`.
+// The confined submit path is PG-only; gated with `mod ops::submit`.
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,
 };
@@ -251,9 +249,9 @@ pub use model::snapshot::{
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, ViewSnapshot,
 };
-// The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
+// The `op.*` portable IR: the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
-// `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
+// `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown`;
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
     CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
@@ -265,15 +263,15 @@ pub use model::ir::{
     TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
-// The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
+// The fail-closed `.ir.json` load gate: deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
 // compare. The loader's IR branch ([`render::lower::IrAuthor::load_and_lower`]) runs
-// this gate and then lowers the validated, owned IR to migrations (§7.2).
+// this gate and then lowers the validated, owned IR to migrations.
 pub use model::load::{
     enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
     recompute_hint_domain_checksum, IrLoadError,
 };
-// PR7 online-rename go-live (SQLite leg): the deploy/dev entry point that applies a
+// Online-rename go-live (SQLite leg): the deploy/dev entry point that applies a
 // bundle's `.ir.json` set against a SQLite backend, building the SQLite-dialect
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
@@ -283,21 +281,21 @@ pub use apply::ir_apply::{
     SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
 };
 // The PG `.ir.json` apply entry points take `&PostgresBackend<'_>` — PG-only.
-// The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
+// The IR-path DDL Lower phase: compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
 pub use render::lower::{
     FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema,
     LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
-// The closed expression AST (§3.3.1) the IR's transform/predicate positions
+// The closed expression AST the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
 pub use model::expr::{
     BinaryOp, CaseBranch, CastTarget, Duration, Expr, ExtractField, PgExtractField, ScalarFn,
     SynthFn, UnaryOp,
 };
-// The STRUCTURAL expression-AST validator + the structured-error envelope
-// (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
+// The STRUCTURAL expression-AST validator + the structured-error envelope.
+// No parser, no fuzzer — a pure allow-list walk.
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
@@ -307,15 +305,14 @@ pub use model::validate::{
     CODE_PARTITION_HASH_DROP_UNDERIVABLE, CODE_PARTITION_KEY_COVERAGE,
     CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
 };
-// The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
-// (re-exported from `engine`, unchanged): these are the net-new ordered
-// EXECUTION artifact + its steps. `+AppliedPlan, +PlanStep, +RenameStep` added;
-// `MigrationPlan` kept.
+// The `op.*` DSL plan model. Distinct from the dry-run `MigrationPlan`
+// (re-exported from `engine`): these are the ordered
+// EXECUTION artifact + its steps.
 pub use model::backfill::BackfillSpec;
 pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
 pub use render::plan::{AppliedPlan, NotSingleStep, SqliteRebuildSpec};
 pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, RenameStep};
-// PR14 — the OFFLINE `--sql` plan preview (operator go-live review). A pure,
+// The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.

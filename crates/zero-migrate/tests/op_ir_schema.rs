@@ -1,4 +1,4 @@
-//! Golden-file gate for `op-ir.schema.json` (Wave A deliverable 3).
+//! Golden-file gate for `op-ir.schema.json`.
 //!
 //! The JSON Schema of [`MigrationIr`] is the contract the JS `op.*` builder
 //! targets. This test emits it (`schemars::schema_for!`) and gates the on-disk
@@ -47,7 +47,7 @@ fn emit_op_ir_schema() {
     );
 }
 
-/// The Wave-E exhaustiveness seed: the schema must enumerate EXACTLY the closed
+/// The exhaustiveness seed: the schema must enumerate EXACTLY the closed
 /// set of `Op` discriminant strings (the internally-tagged `"op"` consts). This
 /// extracts every `"op"` const from the generated schema's oneOf branches and
 /// asserts it equals the hard-coded expected set — so adding/removing an `Op`

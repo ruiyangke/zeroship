@@ -1,4 +1,4 @@
-//! The `MigrationBackend` dialect seam (SQLite-parity design §2.0/§2.1, M3).
+//! The `MigrationBackend` dialect seam.
 //!
 //! The executor's apply/rollback **orchestration** — partition versioned vs
 //! repeatable, the drift/tamper gate, squash/expand gates, `order_pending`, the
@@ -37,11 +37,10 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-// The PG backend module compiles on the whole PG seam (`native-pg` OR `host-pg`):
-// its generic core (`PostgresBackend<D>` + the `SqlSession` trait + the neutral
-// seam types) names no compio type. The compio-concrete pieces inside it
-// (`impl SqlSession for Client`, PgOnline, PgShadow, the `new(&Client)` ctor) stay
-// `#[cfg(feature = "native-pg")]` internally.
+// The PG backend module compiles on the PG seam cfg (`pg_seam`, emitted by build.rs
+// from `host-pg`): its generic core (`PostgresBackend<D>` + the `SqlSession` trait +
+// the neutral seam types) names no driver-concrete type — a host driver (the napi
+// `pg` shell) supplies the `SqlSession` impl.
 #[cfg(pg_seam)]
 pub mod postgres;
 // The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres (only its
@@ -76,7 +75,7 @@ use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
-/// settings never leak onto the pooled/long-lived connection (H2).
+/// settings never leak onto the pooled/long-lived connection.
 ///
 /// The generic executor sees this only as
 /// [`MigrationBackend::SessionSnapshot`] and never inspects the fields.
@@ -136,7 +135,7 @@ pub type JournalFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, JournalErr
 /// structurally absent: reads are empty and writes are no-ops/unreachable routing
 /// for that backend.
 pub trait CrossDeployObligations {
-    /// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3) —
+    /// Read the OUTSTANDING cross-deploy pending-contract obligations —
     /// the apply-time interlock read-back + the `status` orphan/blocked source.
     /// No-op iff [`MigrationBackend::pending_contracts`] is `None`.
     fn outstanding_pending_contracts<'a>(
@@ -146,7 +145,7 @@ pub trait CrossDeployObligations {
 
     /// Open a `pending` cross-deploy obligation AND, when a
     /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
-    /// deploy-scoped recovery marker — in ONE transaction (PR9e). No-op iff
+    /// deploy-scoped recovery marker — in ONE transaction. No-op iff
     /// [`MigrationBackend::pending_contracts`] is `None`.
     fn record_pending_contract_with_recovery<'a>(
         &'a self,
@@ -167,7 +166,7 @@ pub trait CrossDeployObligations {
     ) -> JournalFuture<'a, ()>;
 
     /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
-    /// transaction (PR9e). No-op iff [`MigrationBackend::pending_contracts`] is
+    /// transaction. No-op iff [`MigrationBackend::pending_contracts`] is
     /// `None`.
     fn mark_deploy_recovery_committed_batch<'a>(
         &'a self,
@@ -198,11 +197,10 @@ pub trait CrossDeployObligations {
 }
 
 /// The dialect seam over execution I/O, journal I/O, parse-time non-txn
-/// validation, and drift introspection (design §2.0/§2.1, M3).
+/// validation, and drift introspection.
 ///
-/// See the module docs for the full rationale. P1 has exactly one impl,
-/// [`PostgresBackend`]; the methods are the EXACT pre-seam Postgres code, moved
-/// verbatim, so the existing PG suite is the regression bar.
+/// See the module docs for the full rationale. The methods are the EXACT pre-seam
+/// Postgres code, moved verbatim, so the existing PG suite is the regression bar.
 #[allow(async_fn_in_trait)]
 pub trait MigrationBackend {
     /// Opaque backend-owned session state. The generic executor only
@@ -211,7 +209,7 @@ pub trait MigrationBackend {
     type SessionSnapshot;
 
     /// The SQL dialect this backend targets. Drives the dialect-boundary rejects
-    /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
+    /// in the generic body (e.g. `transaction:false` on SQLite).
     fn dialect(&self) -> SqlDialect;
 
     /// The positional bind placeholder style this backend's SQL uses (`$N` on
@@ -297,7 +295,7 @@ pub trait MigrationBackend {
         kind: &str,
     ) -> Result<bool, ApplyError>;
 
-    /// Roll back ONE migration transactionally (design §5): `BEGIN; SET LOCAL …;
+    /// Roll back ONE migration transactionally: `BEGIN; SET LOCAL …;
     /// SET LOCAL ROLE migrator; <down>; RESET ROLE; INSERT rolled_back; COMMIT`.
     /// `down` + the `rolled_back` append commit atomically.
     async fn rollback_one_transactional(
@@ -313,7 +311,7 @@ pub trait MigrationBackend {
     /// (re-runnable by crash recovery). PG parses with `pg_query` and enforces
     /// `IF NOT EXISTS` on `CREATE INDEX CONCURRENTLY` / `ALTER TYPE … ADD VALUE`
     /// and forbids bare DML; a SQLite backend rejects `transaction:false`
-    /// outright (no non-txn DDL exists on SQLite, design §2.3/L3).
+    /// outright (no non-txn DDL exists on SQLite).
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError>;
 
     // -- journal row I/O (dialect-neutral owned rows) -----------------------
@@ -335,7 +333,7 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError>;
 
-    /// The cross-deploy pending-contract capability (§2.0.3).
+    /// The cross-deploy pending-contract capability.
     ///
     /// `Some(&dyn CrossDeployObligations)` for a backend that can open and
     /// discharge pending-contract rows and deploy-recovery markers. `None` for a
@@ -359,7 +357,7 @@ pub trait MigrationBackend {
     async fn snapshot_schema(&self, cfg: &ExecutorConfig)
         -> Result<SchemaSnapshot, DriftError>;
 
-    // -- preconditions (DB-coupled; full seam is post-P1) -------------------
+    // -- preconditions (DB-coupled) -----------------------------------------
 
     /// Evaluate a migration's preconditions read-only under the apply lock.
     /// Behind the trait so the generic body never holds a concrete connection;
@@ -374,7 +372,7 @@ pub trait MigrationBackend {
 
     /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running
     /// its `up`, plus the `S → v_i` supersession edges — the dialect-coupled write
-    /// behind the generic [`crate::ops::squash::squash`] (multi-engine abstraction C3).
+    /// behind the generic [`crate::ops::squash::squash`] (multi-engine abstraction).
     ///
     /// Called only after the generic body has verified, under the project lock,
     /// that ALL of `supersedes` are net-applied (the existing-DB squash path). The
@@ -395,10 +393,10 @@ pub trait MigrationBackend {
         supersedes: &[&str],
     ) -> Result<(), ApplyError>;
 
-    // -- declarative-only structured ops (P6a) ------------------------------
+    // -- declarative-only structured ops ------------------------------------
 
     /// Apply ONE structured SQLite 12-step table REBUILD atomically with
-    /// confinement + journal it (design §2.4), the dialect-coupled drive behind the
+    /// confinement + journal it, the dialect-coupled drive behind the
     /// generic declarative apply path. A rebuild is NOT a plain `up` statement — it
     /// is an engine-mode structured operation (drop-stale-temp / CREATE new / copy /
     /// drop old / rename / replay captured dependents) with `foreign_keys` toggles
@@ -415,7 +413,7 @@ pub trait MigrationBackend {
     /// reaching the PG backend is a routing bug, surfaced as a clear error rather than
     /// a silent pass.
     ///
-    /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
+    /// **Per-version approval scope (executor-layer defense in depth).** A
     /// rebuild on a populated table is destructive (drop + recreate + copy), so when
     /// `m.flags.destructive` (always true for a `SqliteRebuild` by construction,
     /// [`crate::render::declarative`]) the `scope` must admit `m.version` — mirroring
@@ -439,15 +437,14 @@ pub trait MigrationBackend {
         applied_by: &str,
     ) -> Result<(), ApplyError>;
 
-    /// Drive a single **batched data backfill** step (`op.*` DSL §2.0,
+    /// Drive a single **batched data backfill** step (`op.*` DSL,
     /// [`PlanStep::Backfill`](crate::render::step::PlanStep::Backfill)) through the
     /// dialect seam, journaling the spec's marker version. On Postgres this
-    /// delegates to the existing [`run_backfill`](crate::apply::backend::postgres::backfill::run_backfill)
-    /// (writable-CTE windowed `UPDATE`). On SQLite the batched-backfill executor
-    /// is **net-new and committed for PR6b** — until it lands, the SQLite arm
-    /// fails closed with a clear [`ApplyError::Backend`] rather than silently
+    /// delegates to the backfill runner (writable-CTE windowed `UPDATE`). On SQLite
+    /// the batched-backfill executor fails closed with a clear
+    /// [`ApplyError::Backend`] rather than silently
     /// skipping the data transform (a SQLite-targeted batched backfill is a hard
-    /// error, never a silent mis-apply, §6/§10 PR6a-PR6b).
+    /// error, never a silent mis-apply).
     ///
     /// `lock_mode` mirrors the per-`Migration` apply: under
     /// [`LockMode::AlreadyHeld`](crate::apply::executor::LockMode) the caller already
@@ -456,10 +453,10 @@ pub trait MigrationBackend {
     ///
     /// # Errors
     /// [`ApplyError::Backend`] on a backfill failure or the SQLite-unsupported
-    /// arm (PR0/PR6a); the failure is resumable from the last committed cursor on
+    /// arm; the failure is resumable from the last committed cursor on
     /// PG.
     ///
-    /// **PR9b — per-version approval scope (executor-layer defense in depth).** A
+    /// **Per-version approval scope (executor-layer defense in depth).** A
     /// standalone batched backfill is a NON-destructive data transform
     /// ([`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)
     /// returns `None` for `Backfill`), so the per-version scope never refuses it — the
@@ -478,18 +475,12 @@ pub trait MigrationBackend {
         lock_mode: crate::apply::executor::LockMode,
     ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError>;
 
-    /// Drive a single **parameterized DML** step (`op.*` DSL §2.3.2,
+    /// Drive a single **parameterized DML** step (`op.*` DSL,
     /// [`PlanStep::Dml`](crate::render::step::PlanStep::Dml)) through the dialect seam.
     /// The `template` is executed with `binds` bound NATIVELY (`$n` on PG, `?n`
     /// on SQLite) — never string-interpolated, so a bind value can never alter
     /// statement structure. The step is journaled under `version` (its
     /// sub-version), so a re-run is a net-applied-skip (idempotent).
-    ///
-    /// PR0 ships the PG executor + a trusted constructor for tests; the creator
-    /// DML *assembler* that produces `(template, binds)` from `op.insert`/
-    /// `op.update` is net-new in PR6a. The SQLite one-shot DML executor is also
-    /// PR6a (the shared SQLite-DML module); until it lands the SQLite arm fails
-    /// closed.
     ///
     /// `destructive` carries the step's data-loss flag (a `delete`). The
     /// implementation re-runs the approval gate as **defense in depth**: a
@@ -501,7 +492,7 @@ pub trait MigrationBackend {
     /// first; this is the independent executor-layer check so a direct seam caller
     /// cannot bypass it.
     ///
-    /// **PR9b — per-version approval scope (executor-layer defense in depth).** On top
+    /// **Per-version approval scope (executor-layer defense in depth).** On top
     /// of the coarse approval gate, a destructive DML runs ONLY if `scope` admits its
     /// `version` — mirroring
     /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
@@ -514,7 +505,7 @@ pub trait MigrationBackend {
     /// [`ChecksumInput`](crate::model::migration::ChecksumInput) so two DML steps with an
     /// identical `(template, binds)` authored by DIFFERENT apps hash to DIFFERENT
     /// journal checksums (correct multi-tenant journal identity/attribution for
-    /// PR6a's creator-DML assembler).
+    /// the creator-DML assembler).
     ///
     /// Returns `true` if the step was applied this run, `false` if it was already
     /// net-applied (skipped).
@@ -540,29 +531,29 @@ pub trait MigrationBackend {
         lock_mode: crate::apply::executor::LockMode,
     ) -> Result<bool, ApplyError>;
 
-    /// The **online schema-change capability** (multi-engine abstraction L1/L2/H1).
+    /// The **online schema-change capability** (multi-engine abstraction).
     ///
     /// `Some(&dyn OnlineSchemaChange)` for an engine that drives zero-downtime
     /// online operations (Postgres — expand-contract rename via dual-write trigger
-    /// plus paged backfill; the [`PgOnline`](crate::apply::backend::postgres::online::PgOnline) impl
-    /// owns its `Client` **internally**, so the connection NEVER appears on this
+    /// plus paged backfill; a `PgOnline` impl would own its connection
+    /// **internally**, so the connection NEVER appears on this
     /// neutral trait surface). `None` for an engine with no online path (SQLite,
     /// where every existing-table change, rename included, is routed to a
     /// [`rebuild_one`](Self::rebuild_one), so its declarative `renames` set is
     /// structurally EMPTY).
     ///
-    /// This REPLACES the old `expand_conn() -> Option<&compio_postgres::Client>`
-    /// escape hatch: the generic declarative apply path branches on
+    /// This REPLACES the old `expand_conn()` connection escape hatch:
+    /// the generic declarative apply path branches on
     /// `online().is_some()`, never holding a concrete connection, and a backend
     /// with no online capability MUST receive an empty `renames` (asserted at the
     /// call site — a non-empty rename set with `online() == None` is a routing bug).
     fn online(&self) -> Option<&dyn crate::apply::backend::capability::OnlineSchemaChange>;
 
-    /// The **shadow dry-run capability** (multi-engine abstraction C3).
+    /// The **shadow dry-run capability** (multi-engine abstraction).
     ///
     /// `Some(&dyn ShadowDryRun)` for an engine that can preview a migration batch
-    /// against a throwaway shadow clone before the real apply (Postgres — the
-    /// [`PgShadow`](crate::apply::backend::postgres::shadow::PgShadow) impl owns its admin `Client`
+    /// against a throwaway shadow clone before the real apply (Postgres — a
+    /// `PgShadow` impl would own its admin connection
     /// **internally**, so the connection NEVER appears on this neutral trait
     /// surface). `None` for an engine with no shadow path.
     ///
@@ -591,8 +582,8 @@ pub trait MigrationBackend {
 
     // -- baseline / adoption ------------------------------------------------
 
-    /// Adopt the LIVE schema as the project's **baseline** (design §5 / H3,
-    /// multi-engine abstraction L5) — a `kind='baseline'`, `completed` journal
+    /// Adopt the LIVE schema as the project's **baseline**
+    /// (multi-engine abstraction) — a `kind='baseline'`, `completed` journal
     /// event recorded WITHOUT running `m`'s `up`. The single neutral baseline entry
     /// point that folds the two former dialect-specific baseline functions
     /// (`baseline(&Client, …)` and `SqliteBackend::baseline_sqlite`) behind ONE

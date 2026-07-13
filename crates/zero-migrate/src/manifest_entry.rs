@@ -1,6 +1,6 @@
 //! The deploy-bundle migration-file record + content-addressed hash.
 //!
-//! Vendored byte-identically from the upstream bundle layer (extraction Phase B) so the
+//! Vendored byte-identically from the upstream bundle layer so the
 //! migrate engine's build front-end can emit bundle migration entries over
 //! committed `.ir.json` bytes without a normal-graph dependency on
 //! the upstream bundle layer:

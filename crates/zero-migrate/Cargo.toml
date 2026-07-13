@@ -6,26 +6,21 @@ license.workspace = true
 description = "Portable, security-first, multi-dialect DB migration engine — driver-neutral Postgres seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zero-migrate-node napi bridge; the engine ships NO embedded V8."
 
 [features]
-# Extraction: the engine is a clean, runtime-free, V8-FREE, tokio-AND-compio-free
-# LIBRARY. Authoring, MySQL, and Postgres all execute in the Node process (the
+# The engine is a clean, runtime-free, V8-FREE, tokio-AND-compio-free LIBRARY.
+# Authoring, MySQL, and Postgres all execute in the Node process (the
 # `zero-migrate` host-recorder evals the DSL → op-IR envelope; the
 # `zero-migrate-node` napi addon LOWERs + applies it over the host `pg` / `mysql2`
 # npm drivers). This standalone is **host-pg (network seam) + in-process SQLite
-# only** — there is NO native compio Postgres driver, and NO embedded V8 in the
-# Rust build graph. The engine's PG/MySQL path is the dialect-neutral
-# `seam::SqlSession` seam (host-callback / napi bridge); a native Rust network
+# only** — there is NO native Rust network Postgres driver, and NO embedded V8 in
+# the Rust build graph. The engine's PG/MySQL path is the dialect-neutral
+# `driver::SqlSession` seam (host-callback / napi bridge); a native Rust network
 # driver is intentionally absent. SQLite runs in-process on a sync rusqlite actor.
 # The command-line surface is the `zero-migrate-engine` TS CLI (`sdks/engine/
-# src/cli.ts`); this crate ships NO Rust bin (retired in redesign step 5c), so the
-# shipped library links neither tokio nor compio (compio is now a dev-dependency,
-# used only by the async-apply test harness's `#[compio::test]` sites).
-#
-# The former `v8-host` feature — which gated the in-Rust-V8 authoring front-end
-# (`src/frontend/`) and live-MySQL backend (`src/apply/backend/mysql/`) — is GONE.
-# That Rust source remains in-tree but is permanently never-compiled (gated on the
-# `v8_host` internal cfg, which build.rs never emits); Node owns that work now.
+# src/cli.ts`); this crate ships NO Rust bin, so the shipped library links neither
+# tokio nor compio (compio is now a dev-dependency, used only by the async-apply
+# test harness's `#[compio::test]` sites).
 default = ["host-pg"]
-# The host-callback PG plumbing: the dialect-neutral `seam::SqlSession` seam + the
+# The host-callback PG plumbing: the dialect-neutral `driver::SqlSession` seam + the
 # whole GENERIC PG apply path (journal/drift/precondition/baseline free fns, the
 # generic `PostgresBackend<S>`, the `<S: SqlSession>` executor entries,
 # `ops::status`). It supplies NO in-Rust `SqlSession` impl — the in-crate recording
@@ -33,23 +28,14 @@ default = ["host-pg"]
 # / Node `SqlSession` host is the production producer. `host-pg` lights up the shared
 # generic path via the internal `pg_seam` cfg (emitted by build.rs). The addon
 # build (`--no-default-features --features host-pg`) stays cross-platform (no
-# io_uring), since no compio PG driver is ever present.
+# io_uring), since no native network PG driver is ever present.
 host-pg = []
-# NOTE: the former `v8-host` / `addon-host` features are REMOVED. They used to gate the
-# in-Rust-V8 authoring front-end (`src/frontend/`) + live-MySQL backend
-# (`src/apply/backend/mysql/`). Node now owns authoring/MySQL/PG execution (via the
-# `zero-migrate` host-recorder + the `zero-migrate-node` napi bridge over the
-# `pg`/`mysql2` npm drivers), so no in-Rust V8 host exists. That Rust source stays
-# in-tree as permanently never-compiled dead code, still spelled
-# `#[cfg(feature = "v8-host")]` / `#[cfg(feature = "addon-host")]`; build.rs declares
-# those as expected cfg values (checked-cfg) so the build stays warning-free
-# without resurrecting the feature or pulling `v8`.
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
 # security PRECONDITION shape-gate + the idempotence/txn scans see exactly what
 # Postgres would execute. The parse-time SQL security GUARD (deny-list, classify,
-# advisories) now lives in the `zero-migrate-guard` crate (redesign step 3b); the
+# advisories) now lives in the `zero-migrate-guard` crate; the
 # engine still parses directly here for the precondition boolean-SELECT gate, the
 # non-transactional idempotence scan (executor), and the raw-view-body validate
 # scan. pg_query carries a C build dep (libpg_query).
@@ -65,24 +51,24 @@ schemars = { workspace = true }
 # Strict base64 decode + canonical encode for `IrScalar::Bytes`. The payload is
 # stored DECODED internally and re-encoded with the canonical STANDARD (padded)
 # alphabet on serialize, so two non-canonical encodings of the same bytes cannot
-# hash differently across the JS/Rust front doors (§2.5). The strict decoder
+# hash differently across the JS/Rust front doors. The strict decoder
 # refuses an invalid alphabet / wrong padding at LOAD, before any checksum.
 base64 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Migration-first P2b: `fold_to_field_defs` preserves the createTable column ORDER
-# (the keystone parity compares serialized FieldDef maps, so a sorted-vs-declared
-# order would false-mismatch). An insertion-ordered map is the clean carrier.
+# `fold_to_field_defs` preserves the createTable column ORDER (the parity check
+# compares serialized FieldDef maps, so a sorted-vs-declared order would
+# false-mismatch). An insertion-ordered map is the clean carrier.
 indexmap = { workspace = true }
-# The wire contract (redesign step 3a): MigrationIr, the closed Op enum, the
+# The wire contract: MigrationIr, the closed Op enum, the
 # closed Expr AST, IrScalar, the precondition/probe vocabulary, the typed-id
 # machinery, the canonical checksum, the fail-closed load gate's policy-free half,
 # and the STRUCTURAL validator. The engine re-exports the whole surface
 # (`pub use zero_migrate_ir as ir;` + flattened root re-exports) so downstream
 # `zero_migrate::{MigrationIr, Op, …}` names are unchanged.
 zero-migrate-ir = { workspace = true }
-# The SQL security layer (redesign step 3b): the `pg_query`-backed parse-time
+# The SQL security layer: the `pg_query`-backed parse-time
 # deny-list, cross-schema confinement, statement classification, and operational
 # advisories (`SqlGuard`, `GuardConfig`, `analyze`, `classify`, `Advisory`,
 # `Severity`, the `flags_for`/`guard_for` free fns, `check_ir_data_security_policy`,
@@ -90,35 +76,35 @@ zero-migrate-ir = { workspace = true }
 # re-exports this surface at its root so `zero_migrate::{SqlGuard, GuardConfig, …}`
 # names are unchanged.
 zero-migrate-guard = { workspace = true }
-# The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
+# The canonical version→id derivation (in the loader) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
 # `&uuid::Uuid`.
 uuid = { workspace = true }
-# NOTE: `compio` is NOT a runtime dependency (redesign step 5c). The Rust CLI that
+# NOTE: `compio` is NOT a runtime dependency. The Rust CLI that
 # used `#[compio::main]` was retired into the `zero-migrate-engine` TS CLI, and no
 # shipped engine code drives an executor: the network (PG/MySQL) apply flow always
-# runs host-side through the dialect-neutral `seam::SqlSession` seam (fed by the
+# runs host-side through the dialect-neutral `driver::SqlSession` seam (fed by the
 # napi/Node host in production, or the in-crate recording driver in tests), and the
 # SQLite backend is a sync rusqlite actor. `compio` remains only a `dev-dependency`
 # below — the async-apply test harness (`#[compio::test]`) drives the seam-generic
 # apply path over the recording driver. The shipped library links no async runtime.
-# SQLite migration backend (design 2026-06-19 §2.1.1). The migration connection
+# SQLite migration backend. The migration connection
 # is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse
 # plugin-db's data-plane SqliteSession. `bundled` pins SQLite 3.51.3 (the
 # version floor for DEFENSIVE/TRUSTED_SCHEMA/RETURNING/window-functions and the
-# authorizer `zDb`-on-DROP_TABLE semantics the journal-immutability proof needs,
-# §2.9). No `preupdate_hook`/vec0: the migration conn is CDC-free + extension-
-# free to creator SQL (§2.1.1).
+# authorizer `zDb`-on-DROP_TABLE semantics the journal-immutability proof needs).
+# No `preupdate_hook`/vec0: the migration conn is CDC-free + extension-free to
+# creator SQL.
 # `load_extension` is needed for `Connection::load_extension_disable()` — the
-# real API (NOT a DbConfig variant) that disables extension loading at open
-# (§2.1.1). Enabling the feature does NOT load any extension; it just exposes the
+# real API (NOT a DbConfig variant) that disables extension loading at open.
+# Enabling the feature does NOT load any extension; it just exposes the
 # enable/disable toggle, and we use it only to DISABLE.
 rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
 # The migration actor's single-writer queue (zero-tokio: same spawn-thread +
 # flume shape as plugin-db's SqliteSession, but a second security-scoped actor).
 flume = { workspace = true }
-# `FutureExt::catch_unwind` for panic-safe shadow-DB teardown (C1) — mirrors the
+# `FutureExt::catch_unwind` for panic-safe shadow-DB teardown — mirrors the
 # runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic
 # combinator crate, not a runtime.
 futures = { workspace = true }
@@ -129,7 +115,7 @@ tracing = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-# TEST-ONLY (redesign step 5c): the SEAM-generic async apply/backend surface is
+# TEST-ONLY: the SEAM-generic async apply/backend surface is
 # `async`, so the test harness drives it on a runtime. `#[compio::test]` spins a
 # throwaway compio run loop per test (zero tokio) to `.await` the seam-generic
 # apply/journal/drift/status paths over the in-crate recording driver + the
@@ -137,18 +123,18 @@ toml = { workspace = true }
 # dev-dependency only.
 compio = { workspace = true }
 # Per-test temp SQLite files for the confinement/journal/atomic-apply proofs
-# (design §3 P2 gate — every confinement claim proven on a REAL temp-file
-# SQLite, never a shim). Auto-cleaning; workspace-pinned.
+# (every confinement claim proven on a REAL temp-file SQLite, never a shim).
+# Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
-# The guard-vendor-lower behaviour-lock tests (moved in from `guard/mod.rs` at
-# step 3b) mint the operator-gated Platform/Trusted profiles via
-# `OperatorCapability::for_test`, which the ir leaf exposes behind `test-support`.
+# The guard-vendor-lower behaviour-lock tests mint the operator-gated
+# Platform/Trusted profiles via `OperatorCapability::for_test`, which the ir leaf
+# exposes behind `test-support`.
 zero-migrate-ir = { workspace = true, features = ["test-support"] }
-# TEST-ONLY live-Postgres driver (redesign step 6a). The blocking `postgres` crate
+# TEST-ONLY live-Postgres driver. The blocking `postgres` crate
 # backs `PgDevSession`, a `driver::SqlSession` impl that drives the SHIPPED generic
 # PostgresBackend/executor/journal/drift path against a live PG (:5440) in-crate, so
-# the host-PG apply path finally has in-crate live-DB regression coverage (closes
-# C4). It is a `[dev-dependency]` ONLY — it pulls `tokio` TRANSITIVELY (the blocking
+# the host-PG apply path has in-crate live-DB regression coverage.
+# It is a `[dev-dependency]` ONLY — it pulls `tokio` TRANSITIVELY (the blocking
 # `postgres` client wraps `tokio-postgres` on a private runtime), which is ACCEPTABLE
 # because it NEVER ships: `cargo tree -p zero-migrate -e normal` stays tokio-free.
 # The shipped engine's PG path is the dialect-neutral `driver::SqlSession` seam (fed

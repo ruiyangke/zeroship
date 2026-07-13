@@ -1,4 +1,4 @@
-//! **PR10 Part B** — faithful e2e for the executor-side existence-guard catalog
+//! Faithful e2e for the executor-side existence-guard catalog
 //! probe on REAL SQLite (temp-file backend). Each test builds a guarded `op.*` IR,
 //! lowers it through the REAL `IrAuthor` (SQLite dialect, which stamps the
 //! `GuardProbe` onto the lowered `Migration`), and applies it through the REAL
@@ -628,7 +628,7 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     assert!(table_has_column(&be, "t", "happened").await, "timestamp survives re-run");
 }
 
-/// **C1 regression — SQLite multi-unit secondary-index physical existence.**
+/// **Regression — SQLite multi-unit secondary-index physical existence.**
 /// A guarded `createTable ifNotExists` with a `unique:true` field lowers to
 /// MULTIPLE units on SQLite too: the CREATE TABLE (which inlines the system-field
 /// indexes) PLUS a SEPARATE `CREATE INDEX` unit for the unique field's index
@@ -636,12 +636,12 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
 /// declarative.rs:4587 — every other non-PK index, including a `unique:true`
 /// field's, is its own guarded `CREATE INDEX` unit; declarative.rs:4583-4604).
 ///
-/// Before the C1 fix the SAME `Table` probe was stamped on EVERY unit, so once
+/// Before the fix the SAME `Table` probe was stamped on EVERY unit, so once
 /// unit 0 created the table, the index unit saw the table PRESENT + base columns
 /// matching → SatisfiedNoop → the unique index was SILENTLY SKIPPED (but journaled
 /// completed). This asserts the unique index PHYSICALLY exists (via
 /// `PRAGMA index_list`) after a fresh guarded create, and that a RE-RUN is an
-/// idempotent no-op with the index surviving — the SQLite leg of the C1 fix that
+/// idempotent no-op with the index surviving — the SQLite leg of the fix that
 /// the PG `create_table_ifnotexists_fresh_creates_all_secondary_indexes_…` test
 /// covers on the PG leg.
 ///
@@ -724,7 +724,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
 /// `addColumn ifNotExists` of a timestamp column, re-run over the now-present
 /// column, must be a SatisfiedNoop (not a false `timestamp with time zone != text`
 /// drift). The timestamp is NOT a within-text-affinity SDK-facet ambiguity that the
-/// Column-leg H1 guards (that is for string↔ref/date authored as a bare string); a
+/// Column-leg guards (that is for string↔ref/date authored as a bare string); a
 /// timestamp authored as a timestamp folds to the `text` affinity and matches.
 #[compio::test]
 async fn add_column_ifnotexists_timestamp_rerun_is_noop() {

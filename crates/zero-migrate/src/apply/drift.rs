@@ -1,9 +1,9 @@
-//! Drift detection (design §5 "Drift", scenarios 35 + 36) — **read-only**.
+//! Drift detection — **read-only**.
 //!
 //! Drift is any divergence between what the journal says happened and either
 //! (a) the migration set the operator now ships, or (b) the live database
 //! schema. This module **surfaces** drift; it NEVER emits DDL and NEVER mutates
-//! anything (design §5: *"surface, don't auto-fix"*). The whole module runs as
+//! anything. The whole module runs as
 //! the admin/read connection over `information_schema`/`pg_catalog`, never as
 //! the privileged `migrator` role, and binds every identifier so an injected
 //! schema/table name cannot break the introspection queries.
@@ -11,25 +11,25 @@
 //! Two independent axes:
 //!
 //! - **B1 — checksum / tamper / orphan drift** ([`check_checksum_drift`]):
-//!   compares the journal's recorded checksum for each NET-applied version
-//!   against the checksum of the same version in the supplied set. A mismatch
-//!   means the migration SQL was edited after it applied, or the journal row was
-//!   tampered (design §1.5 / scenario 36). A net-applied version with NO matching
-//!   migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
-//!   bundle is missing a migration the database already has. This is the exact
-//!   comparison the executor's apply flow does as its abort-on-drift pre-check
-//!   (design §2.3 step 3); [`apply`](crate::apply()) calls this function and aborts
-//!   if it returns any [`ChecksumDrift`], so the report and the gate share one
-//!   implementation.
+//! compares the journal's recorded checksum for each NET-applied version
+//! against the checksum of the same version in the supplied set. A mismatch
+//! means the migration SQL was edited after it applied, or the journal row was
+//! tampered. A net-applied version with NO matching
+//! migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
+//! bundle is missing a migration the database already has. This is the exact
+//! comparison the executor's apply flow does as its abort-on-drift pre-check;
+//! [`apply`](crate::apply()) calls this function and aborts
+//! if it returns any [`ChecksumDrift`], so the report and the gate share one
+//! implementation.
 //!
 //! - **B2 — structural introspection** ([`snapshot_schema`] + [`diff_snapshots`]):
-//!   introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
-//!   and `diff` it against an **expected** snapshot the CALLER supplies. The
-//!   expected snapshot is owned by the control-plane / authoring layer (it holds
-//!   the declared/union schema, design §0); this module does NOT rebuild a schema
-//!   model by replaying DDL — that is the authoring layer's job. `diff_snapshots`
-//!   is a pure function returning a [`StructuralDrift`] report; it never returns
-//!   DDL.
+//! introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
+//! and `diff` it against an **expected** snapshot the CALLER supplies. The
+//! expected snapshot is owned by the control-plane / authoring layer (it holds
+//! the declared/union schema, design); this module does NOT rebuild a schema
+//! model by replaying DDL — that is the authoring layer's job. `diff_snapshots`
+//! is a pure function returning a [`StructuralDrift`] report; it never returns
+//! DDL.
 
 use std::collections::BTreeMap;
 
@@ -70,7 +70,7 @@ pub struct ChecksumDrift {
 
 /// A net-applied version with NO corresponding migration in the supplied set —
 /// the journal knows of a migration the shipped bundle does not (a dropped slice,
-/// a downgrade). Surfaced, not silently ignored (executor M1).
+/// a downgrade). Surfaced, not silently ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanJournal {
     /// The orphaned version recorded as net-applied in the journal.
@@ -125,14 +125,14 @@ impl ChecksumDriftReport {
 }
 
 /// Compare the journal's NET-applied checksums against the supplied migration
-/// set (design §2.3 step 3 / §5).
+/// set.
 ///
 /// For each net-applied version (the latest event is `completed`, per
 /// [`journal::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
-///   ⇒ [`ChecksumDrift`] (the migration SQL was mutated after apply, or the
-///   journal row was tampered — scenario 36);
+/// ⇒ [`ChecksumDrift`] (the migration SQL was mutated after apply, or the
+/// journal row was tampered — scenario 36);
 /// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`].
 ///
 /// The recorded checksum used is the one [`journal::applied`] returns, which is
@@ -164,8 +164,8 @@ pub async fn check_checksum_drift<D: SqlSession>(
 ///
 /// Extracted so EVERY [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl
 /// shares ONE comparison — the Postgres path and the SQLite path both call this
-/// with their own `applied()` read, so the repeatable-exemption / kind-mismatch /
-/// tamper / orphan rules can never diverge across dialects (design §2.7: the
+/// with their own `applied` read, so the repeatable-exemption / kind-mismatch /
+/// tamper / orphan rules can never diverge across dialects (design: the
 /// comparison is dialect-agnostic; only the journal read underneath differs).
 ///
 /// Pure: no I/O. See [`check_checksum_drift`] for the per-rule rationale.
@@ -186,7 +186,7 @@ pub fn compare_applied_to_set(
         }
         match by_version.get(entry.version.as_str()) {
             Some(m) => {
-                // v3 Plan E (re-critic) — DRIFT EXEMPTION anchored on the JOURNALED
+                // DRIFT EXEMPTION anchored on the JOURNALED
                 // kind, NEVER on the attacker-suppliable `m.flags.repeatable`.
                 //
                 // A repeatable migration's checksum changes by DESIGN (a changed
@@ -197,16 +197,16 @@ pub fn compare_applied_to_set(
                 // supplied flag is forgeable. So the exemption requires BOTH the
                 // journaled kind AND the supplied flag to agree on "repeatable":
                 //
-                //  - journaled `repeatable` AND supplied `repeatable=true` ⇒ EXEMPT
-                //    (the repeatable phase handles its re-apply);
-                //  - journaled once-only (apply/baseline/squash) but supplied
-                //    `repeatable=true` ⇒ KIND MISMATCH = TAMPER (the flip-flag attack:
-                //    turning an applied once-only into a repeatable to slip a mutated
-                //    `up` past the once-only abort) ⇒ ChecksumDrift / abort;
-                //  - journaled `repeatable` but supplied `repeatable=false` ⇒ reverse
-                //    re-classification (also a kind mismatch) ⇒ ChecksumDrift / abort;
-                //  - journaled once-only AND supplied once-only ⇒ the ordinary
-                //    once-only tamper guard (changed checksum still aborts).
+                // - journaled `repeatable` AND supplied `repeatable=true` ⇒ EXEMPT
+                // (the repeatable phase handles its re-apply);
+                // - journaled once-only (apply/baseline/squash) but supplied
+                // `repeatable=true` ⇒ KIND MISMATCH = TAMPER (the flip-flag attack:
+                // turning an applied once-only into a repeatable to slip a mutated
+                // `up` past the once-only abort) ⇒ ChecksumDrift / abort;
+                // - journaled `repeatable` but supplied `repeatable=false` ⇒ reverse
+                // re-classification (also a kind mismatch) ⇒ ChecksumDrift / abort;
+                // - journaled once-only AND supplied once-only ⇒ the ordinary
+                // once-only tamper guard (changed checksum still aborts).
                 let journaled_repeatable =
                     entry.kind.is_some_and(crate::apply::journal::JournaledKind::is_repeatable);
                 let supplied_repeatable = m.flags.repeatable;
@@ -277,7 +277,7 @@ pub struct AlteredObject {
 /// A structural-drift report (the pure [`diff_snapshots`] output).
 ///
 /// Names only — never DDL. The caller (control plane) decides what, if anything,
-/// to do; this module's job ends at *surfacing* (design §5).
+/// to do; this module's job ends at *surfacing*.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StructuralDrift {
     /// Objects the EXPECTED snapshot has that the LIVE DB does not — e.g. a table
@@ -305,8 +305,7 @@ impl StructuralDrift {
 }
 
 /// Introspect the LIVE structure of `project_schema` into a [`SchemaSnapshot`]
-/// (design §5 structural drift).
-///
+/// ///
 /// **Read-only.** Hits `information_schema` / `pg_catalog` only; emits no DDL,
 /// mutates nothing. Run as the admin/read connection (NOT the `migrator` role).
 ///
@@ -1130,19 +1129,19 @@ pub async fn snapshot_schema<D: SqlSession>(
 }
 
 /// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
-/// function, no I/O, no DDL (design §5: surface, don't auto-fix).
+/// function, no I/O, no DDL.
 ///
 /// The expected snapshot is **supplied by the caller** — the control-plane /
-/// authoring layer owns the declared/union schema (design §0) and is the only
+/// authoring layer owns the declared/union schema and is the only
 /// component that knows the intended shape. This function does NOT rebuild that
 /// model by replaying the migration DDL; that is deliberately the authoring
 /// layer's responsibility, and this seam keeps the two concerns separate.
 ///
 /// Returns:
 /// - `missing_objects` — present in `expected`, absent in `actual` (a declared
-///   table/column/index/constraint the DB never got).
+/// table/column/index/constraint the DB never got).
 /// - `unexpected_objects` — present in `actual`, absent in `expected` (an
-///   out-of-band object created outside the journal — scenario 35).
+/// out-of-band object created outside the journal — scenario 35).
 ///
 /// Object names are qualified for legibility: a table as `"users"`, a column as
 /// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
@@ -1826,8 +1825,7 @@ fn diff_named(
 ///
 /// Assembled by the caller from [`check_checksum_drift`] and
 /// [`diff_snapshots`]; it carries reports only, never DDL or a remediation plan
-/// (design §5).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriftReport {
     /// Net-applied versions whose journal checksum disagrees with the set.
     pub checksum_drift: Vec<ChecksumDrift>,

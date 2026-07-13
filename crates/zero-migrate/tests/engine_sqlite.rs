@@ -1,22 +1,22 @@
-//! PHASE 6a — the `MigrationEngine` drives SQLite end-to-end through a
+//! The `MigrationEngine` drives SQLite end-to-end through a
 //! `SqliteBackend`, against REAL temp-file SQLite (the faithful path: the actual
 //! `DeclarativeAuthor` builds the plan, and the engine's generic `apply_declarative`
 //! orchestrates the plain set + the 12-step rebuild under confinement + the `_mig`
-//! journal). This proves the P6a lift: the engine is now generic over
+//! journal). This proves the engine is now generic over
 //! `MigrationBackend`, the `plan_declarative` fail-close on SQLite rebuilds is gone,
 //! and a rebuild is driven through `SqliteBackend::rebuild_one` under the
 //! destructive/approval gate — NOT the direct executor-internal seam.
 //!
-//! Coverage (the P6a gate):
+//! Coverage:
 //! - the engine applies a declarative deploy with a rebuild (a column TYPE change)
 //!   END-TO-END through `apply_declarative` — table rebuilt, data preserved,
 //!   journaled `completed`;
 //! - a clean RE-RUN is a no-op (idempotent) on the engine path (empty desired-vs-live
 //!   diff AND the versioned-journal-completed rebuild path);
 //! - a SQLite declarative deploy with a RENAME routes to a rebuild (not run_expand);
-//!   `plan.renames` is empty for SQLite (H1);
+//!   `plan.renames` is empty for SQLite;
 //! - the destructive/approval gate is intact: a rebuild without `Approval::Approved`
-//!   is refused (not auto-approved — the dev-relaxed posture is P6b).
+//!   is refused (not auto-approved — the dev-relaxed posture is handled separately).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -319,7 +319,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// (3) RENAME ROUTES TO A REBUILD (H1): a SQLite declarative deploy with a hinted
+// (3) RENAME ROUTES TO A REBUILD: a SQLite declarative deploy with a hinted
 //     column RENAME is reconciled by a 12-step REBUILD (copying `to ← from`), NOT the
 //     PG-shaped expand-contract `run_expand`. `plan.renames` is EMPTY for SQLite, so
 //     `run_expand` is never reached. The engine applies the rebuild and the data
@@ -382,7 +382,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &hints, &guard_cfg())
         .expect("plan rename");
 
-    // H1 — the rename is a REBUILD, NOT an online expand-contract: renames is EMPTY,
+    // The rename is a REBUILD, NOT an online expand-contract: renames is EMPTY,
     // rebuilds carries the one rebuild. `run_expand` can never be reached.
     assert!(
         plan2.renames.is_empty(),
@@ -394,7 +394,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         "the SQLite rename is reconciled by exactly one rebuild"
     );
 
-    // L1/H1 — the SQLite backend has NO online schema-change capability: `online()`
+    // The SQLite backend has NO online schema-change capability: `online()`
     // is `None`. This is the honest capability the old `expand_conn() == None`
     // sentinel became — paired with the renames-empty invariant above, it proves the
     // online path is structurally never reached on SQLite (no `compio_postgres::Client`
@@ -441,7 +441,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
 // ---------------------------------------------------------------------------
 // (4) APPROVAL GATE INTACT: a SQLite rebuild (destructive) is REFUSED without
 //     `Approval::Approved` — the engine does NOT auto-approve (the dev-relaxed
-//     posture is P6b's concern). Nothing is applied; the live shape is unchanged.
+//     posture is handled separately). Nothing is applied; the live shape is unchanged.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn engine_sqlite_rebuild_refused_without_approval() {
@@ -705,7 +705,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 // isolate" RE-DEPLOY of the SAME declared set against the live file. The warm
 // re-plan against the REAL introspected live schema yields an EMPTY diff — no
 // spurious DROP of either table — and BOTH tables stay usable (a write into each
-// succeeds). This is the H1 declared-set path on the SQLite schema authority (the
+// succeeds). This is the declared-set path on the SQLite schema authority (the
 // migrate engine; `register_model`/`run_pipeline` is PG-only by construction —
 // its `RegisterBackend` bound requires `PgSqlExecutor` +
 // `LockManager<Client = compio_postgres::Client>`, which SQLite does not satisfy,
@@ -788,7 +788,7 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
 
     // --- WARM reboot: a fresh isolate re-introspects the live file and re-plans the
     //     SAME declared set. The diff against the REAL live schema must be EMPTY —
-    //     no spurious drop of either table (the H1 declared-set guard). ---
+    //     no spurious drop of either table (the declared-set guard). ---
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own: HashMap<String, String> =
         desired1.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
@@ -835,11 +835,11 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
 }
 
 // ---------------------------------------------------------------------------
-// (5) BASELINE (H3): a SQLite baseline records the live schema as a `'baseline'`
+// (5) BASELINE: a SQLite baseline records the live schema as a `'baseline'`
 //     journal entry WITHOUT running its `up`, adopting an existing journal-less
 //     file. First-entry semantics: idempotent for the same version, refuses a
 //     different baseline once one exists. This is the new SQLite `baseline`
-//     (the PG `baseline()` is &Client-typed and had no SQLite peer pre-P6b).
+//     (the PG `baseline()` is &Client-typed and previously had no SQLite peer).
 // ---------------------------------------------------------------------------
 
 /// A baseline migration whose `up` DOCUMENTS the live schema (recorded, not run).
@@ -1036,7 +1036,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
 }
 
 // ---------------------------------------------------------------------------
-// (C3) SHADOW DRY-RUN CAPABILITY GAP: the SQLite backend has NO shadow dry-run
+// SHADOW DRY-RUN CAPABILITY GAP: the SQLite backend has NO shadow dry-run
 //      capability (`shadow()` is `None`), and the engine's `dry_run` /
 //      `dry_run_declarative` surface the EXPLICIT `DryRunError::ShadowUnsupported`
 //      — NOT a false-success `DryRunReport`. This is the honest outcome of the

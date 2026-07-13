@@ -3,8 +3,9 @@
 //! *reads* it back at runtime to drive the mask read-pass).
 //!
 //! Relocated out of the original data-plane `crud::mask_backfill` module per the
-//! schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-model-design.md`
-//! §5): the *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
+//! schema-authority split
+//! (`docs/proposals/2026-06-18-schema-authority-drizzle-model-design.md`):
+//! the *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
 //! schema-shape concern and lives here; the backfill *runner*
 //! (`run_mask_backfill` / `run_mask_rewrite`, which execute UPDATE
 //! backfills) stays in the data plane.
@@ -53,7 +54,7 @@ impl Default for SentinelPrefix {
     }
 }
 
-/// **P4 HALF A** — the canonical wire string for an [`EncryptionMode`] in a
+/// The canonical wire string for an [`EncryptionMode`] in a
 /// `zero-migrate:enc:` sentinel. `randomised` is the canonical spelling (the US
 /// `randomized` is normalised to it at emit time so the parser only needs the
 /// one form). Kept here next to the codec rather than on `EncryptionMode` so the
@@ -66,7 +67,7 @@ fn encryption_mode_as_sql(mode: EncryptionMode) -> &'static str {
     }
 }
 
-/// **P4 HALF A** — parse a `zero-migrate:enc:` mode token. Accepts the canonical
+/// Parse a `zero-migrate:enc:` mode token. Accepts the canonical
 /// `randomised` plus the legacy US `randomized` spelling (the SDK historically
 /// emitted it; the emit path normalises to `randomised`, but a hand-written
 /// migration may carry either). `None` for any other token.
@@ -79,7 +80,7 @@ fn encryption_mode_from_sql(s: &str) -> Option<EncryptionMode> {
     }
 }
 
-/// **P4 HALF A** — the canonical wire string for a [`WrappedType`].
+/// The canonical wire string for a [`WrappedType`].
 #[must_use]
 fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
     match w {
@@ -89,7 +90,7 @@ fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
     }
 }
 
-/// **P4 HALF A** — parse a `zero-migrate:enc:` wraps token. `None` for an unknown token.
+/// Parse a `zero-migrate:enc:` wraps token. `None` for an unknown token.
 #[must_use]
 fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     match s {
@@ -100,7 +101,7 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     }
 }
 
-/// **P4 HALF A** — build the canonical encryption-sentinel BODY for an
+/// Build the canonical encryption-sentinel BODY for an
 /// [`EncryptionMeta`]: `zero-migrate:enc:<mode>:<keyId>:<wraps>`.
 ///
 /// This is the COMMENT-body form (no surrounding `/* */`): on PG it is stored
@@ -132,7 +133,7 @@ pub fn build_encryption_sentinel_with(prefix: &str, meta: &EncryptionMeta) -> St
     )
 }
 
-/// **P4 HALF A** — parse a `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel body back
+/// Parse a `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel body back
 /// into an [`EncryptionMeta`].
 ///
 /// Accepts either the bare comment body (`zero-migrate:enc:randomised:default:string`, the
@@ -200,7 +201,7 @@ pub fn parse_encryption_sentinel_with(
     })
 }
 
-/// **P5.5 PR 6** — build the canonical mask-sentinel string for a
+/// Build the canonical mask-sentinel string for a
 /// `(kind, classification)` pair.
 ///
 /// Stored on PG via `COMMENT ON COLUMN "<schema>"."<table>"."<sibling>"
@@ -228,7 +229,7 @@ pub fn build_mask_sentinel_with(
     )
 }
 
-/// **P5.5 PR 6** — parse a `zero-migrate:mask:kind=…,classification=…`
+/// Parse a `zero-migrate:mask:kind=…,classification=…`
 /// sentinel string back into a `(MaskKind, Classification)` pair.
 ///
 /// Returns `Err(MaskSentinelError)` whose `.message` carries the
@@ -396,7 +397,7 @@ mod tests {
         assert!(err.message().contains("mask_sentinel_malformed"));
     }
 
-    // ----- P4 HALF A — encryption sentinel codec -----
+    // ----- encryption sentinel codec -----
 
     fn enc(mode: EncryptionMode, key: &str, wraps: WrappedType) -> EncryptionMeta {
         EncryptionMeta {

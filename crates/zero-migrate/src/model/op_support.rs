@@ -2,7 +2,7 @@
 //! [`Op`](crate::model::ir::Op) wire type.
 //!
 //! These were inherent methods on `Op` in `model/ir.rs`. When the wire contract
-//! was extracted into the `zero-migrate-ir` leaf crate (redesign step 3a), the
+//! was extracted into the `zero-migrate-ir` leaf crate, the
 //! dialect-support / vendor-capability logic could NOT ride along: it reads the
 //! engine-owned portability tables ([`crate::model::support`],
 //! [`crate::model::dialect_table`], [`crate::model::capability`]) and the engine's
@@ -193,7 +193,7 @@ use crate::model::ir::{
                 "existenceGuard" => {
                     "renameColumn ifExists guards cannot be attributed to a single migration unit today"
                 }
-                _ => "renameColumn is not live-rendered for MySQL in render-only Phase 1",
+                _ => "renameColumn is render-only for MySQL, not live-rendered",
             },
             Op::AddConstraint { .. } => match variant {
                 "check" => {

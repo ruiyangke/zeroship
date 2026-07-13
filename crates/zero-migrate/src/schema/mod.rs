@@ -1,7 +1,7 @@
 //! # `schema` — the engine's schema-authority core (formerly the `zero-migrate-schema` crate)
 //!
 //! ONE schema implementation, consumed by the migration engine for
-//! write / diff / generate. Dissolved into the engine (redesign step 3c):
+//! write / diff / generate. Dissolved into the engine:
 //! the data-plane query language that used to ride along here (`build_find`,
 //! `build_aggregate`, the MongoDB-style filter→WHERE translator, the query
 //! limits) had **zero engine callers** and lived here only for a consumer

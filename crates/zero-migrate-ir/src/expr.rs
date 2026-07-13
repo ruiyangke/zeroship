@@ -1,11 +1,11 @@
-//! The CLOSED expression AST (design §3.3.1 / §3.3.1.1).
+//! The CLOSED expression AST.
 //!
 //! Every expression position in the `op.*` IR — a DML `set` value, a `where`,
 //! an `addCheck` body, a partial-index `where:` — is a node of this **closed**
 //! AST, constructed in JS by the fluent `(c) => Expr` builder and serialized to
 //! the `.ir.json` as data. **It is NEVER parsed from text** — there is no lexer,
 //! no Pratt parser, no `libpg_query`, and therefore no Rust-vs-JS parser drift
-//! and no differential fuzzer (HIGH-1 dissolved, §3.3.1.1). Validation is a
+//! and no differential fuzzer. Validation is a
 //! purely STRUCTURAL allow-list check over this enum ([`crate::model::validate`]).
 //!
 //! The variants are exactly:
@@ -24,10 +24,10 @@
 //!   parse path because there is no text to parse.
 //! - The numeric domain of a [`Literal`](Expr::Literal) is the constrained
 //!   [`IrScalar`](crate::ir::IrScalar) — a fractional/exponential/`>=2^53` value
-//!   is rejected at DESERIALIZE before any checksum runs (§2.5).
+//!   is rejected at DESERIALIZE before any checksum runs.
 //!
-//! NB: the per-dialect *rendering* of an `Expr` is the engine's job (Wave C /
-//! PR6a) — this module is the data + (with [`crate::model::validate`]) the structural
+//! NB: the per-dialect *rendering* of an `Expr` is the engine's job — this module
+//! is the data + (with [`crate::model::validate`]) the structural
 //! gate. Nothing here renders SQL.
 
 use schemars::JsonSchema;
@@ -35,12 +35,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::IrScalar;
 
-/// A binary operator admitted in the closed AST (§3.3.1 method↔node table).
+/// A binary operator admitted in the closed AST (method↔node table).
 ///
 /// Camel/lower-cased on the wire so the JS builder emits the same tokens
 /// (`{"node":"binOp","op":"eq", …}`). The set is closed: comparison, boolean,
 /// arithmetic, and string concatenation (`||`, the one place PG/SQLite NULL
-/// semantics agree — §3.3.1).
+/// semantics agree).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum BinaryOp {
@@ -72,7 +72,7 @@ pub enum BinaryOp {
     Concat,
 }
 
-/// A unary operator admitted in the closed AST (§3.3.1).
+/// A unary operator admitted in the closed AST.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum UnaryOp {
@@ -90,7 +90,7 @@ pub enum UnaryOp {
 
 /// The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-
 /// synthesized `FnSynth`). CLOSED — a function outside this set has no builder
-/// method and no AST variant (§3.3.1.1(a)). These are the provably-identical
+/// method and no AST variant. These are the provably-identical
 /// cross-dialect scalars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -112,7 +112,7 @@ pub enum ScalarFn {
     /// `(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a
     /// `mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;
     /// the `%` spelling is identical on PG, SQLite, and MySQL, so this stays a
-    /// dialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).
+    /// dialect-NEUTRAL `ScalarFn` (special-cased at the render seam).
     Mod,
     /// `round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on
     /// PG, SQLite, and MySQL. Optional second (precision) argument.
@@ -130,23 +130,23 @@ pub enum ScalarFn {
     /// `replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists
     /// on PG, SQLite, and MySQL with identical spelling and semantics.
     Replace,
-    /// **VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).
+    /// **VENDOR** — `current_setting('<name>', <missingOk>)`.
     /// A PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation
     /// policy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it
     /// is PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A
     /// closed-AST `FnCall` node — NOT a raw escape.
     CurrentSetting,
-    /// **VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;
+    /// **VENDOR** — `current_user`. A nullary identity scalar;
     /// renders WITHOUT parentheses (it is a reserved keyword, not a function call).
     CurrentUser,
 }
 
 /// The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
-/// engine pins (§9). CLOSED. `splitPart` is admitted only within its pinned
-/// single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally
-/// — §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
+/// engine pins. CLOSED. `splitPart` is admitted only within its pinned
+/// single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
+/// `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
 /// are apply-time DB-evaluated scalars (the structured replacement for a frozen
-/// `Date.now()` / UUID literal, §4.3).
+/// `Date.now()` / UUID literal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SynthFn {
@@ -160,7 +160,7 @@ pub enum SynthFn {
     GenRandomUuid,
 }
 
-/// The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A
+/// The closed cast-target set, aligned to scalar `ColType` tokens. A
 /// non-portable cast target is rejected (`UNSUPPORTED { kind: "expr" }`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -179,7 +179,7 @@ pub enum CastTarget {
     /// Needed for the VENDOR policy predicates — a tenant-isolation
     /// policy casts `current_setting('app.tenant_id', true)::uuid`, so a
     /// faithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,
-    /// not a `::text` substitute (vendor spec §2.10 / §5.3).
+    /// not a `::text` substitute.
     Uuid,
 }
 
@@ -244,7 +244,7 @@ pub enum PgExtractField {
     TimezoneMinute,
 }
 
-/// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
+/// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`).
 ///
 /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
 /// SQLite, and MySQL (only the surrounding identifier quoting differs), so there
@@ -273,32 +273,32 @@ pub enum AggFunc {
 }
 
 /// `skip_serializing_if` predicate: a `false` bool emits NOTHING on the wire, so a
-/// non-`distinct` [`Expr::Agg`] serializes byte-minimally (design §5 item 6). The
+/// non-`distinct` [`Expr::Agg`] serializes byte-minimally. The
 /// bool `default`s to `false` on deserialize, so the round-trip is faithful.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
+/// The CLOSED expression AST node. Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
 /// — same discipline as [`Op`](crate::ir::Op), so schemars derives a clean
 /// discriminated union and serde rejects any out-of-set node tag at deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(
-    description = "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize."
+    description = "The CLOSED expression AST node. Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize."
 )]
 #[serde(tag = "node", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Expr {
     /// A column reference (`c("name")`). The name is a plain string, resolved
     /// against the enclosing op's single target table at apply/render time
-    /// (§3.3.1.1(c)) — never `tsc`-bound to the live schema (§3.3).
+    /// — never `tsc`-bound to the live schema.
     ColRef {
         /// The column name (plain string).
         name: String,
         /// Optional qualifying table/alias (`c("orders", "customer_id")` →
         /// `table: Some("orders")`). Present only for the two-arg qualified form
-        /// (§3.4, the join-ON fix). An unqualified `c("col")` leaves this `None`
+        /// (the join-ON fix). An unqualified `c("col")` leaves this `None`
         /// and, via `skip_serializing_if`, serializes byte-identically to the
         /// pre-qualification wire shape — additive, no `ir_version` bump.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,7 +306,7 @@ pub enum Expr {
     },
     /// A typed scalar literal (a bare JS value auto-wrapped by a fluent operator
     /// method). Carries an [`IrScalar`] so the numeric domain is enforced at
-    /// deserialize (§2.5) and the value folds into the checksum (§2.4 point 3).
+    /// deserialize and the value folds into the checksum.
     Literal {
         /// The typed scalar value.
         value: IrScalar,
@@ -336,20 +336,20 @@ pub enum Expr {
         #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
         r#else: Option<Box<Expr>>,
     },
-    /// An allow-listed named scalar function call (§3.3.1.1(a)).
+    /// An allow-listed named scalar function call.
     FnCall {
         /// The function (allow-listed).
         r#fn: ScalarFn,
         /// The argument expressions.
         args: Vec<Expr>,
     },
-    /// An engine-SYNTHESIZED helper call (§9). The per-dialect lowering is the
+    /// An engine-SYNTHESIZED helper call. The per-dialect lowering is the
     /// engine's; the author never sees the rendered form.
     FnSynth {
         /// The synthesized function.
         r#fn: SynthFn,
         /// The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`
-        /// args, validated in-envelope structurally — §3.3.1.1(b)).
+        /// args, validated in-envelope structurally).
         args: Vec<Expr>,
     },
     /// A cast to a portable type (`.cast({ to: "int" })`).
@@ -375,8 +375,8 @@ pub enum Expr {
     ///
     /// NOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is
     /// case-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is
-    /// collation-dependent — so a dialect-uniform portability PROOF is a Phase-4
-    /// claiming-phase obligation (design §5). This slice adds the node + the
+    /// collation-dependent — so a dialect-uniform portability PROOF is a
+    /// claiming-phase obligation. This adds the node + the
     /// faithful syntax render only; it does not yet claim cross-dialect parity.
     Like {
         /// The expression under test.
@@ -397,7 +397,7 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// A **PORTABLE** aggregate function application (`c.agg.count()`,
-    /// `c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).
+    /// `c.agg.sum(e)`, `c.agg.count(e, { distinct: true })`).
     ///
     /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and
     /// MySQL (only identifier quoting differs), so there is NO dialect gate. `arg:
@@ -406,8 +406,8 @@ pub enum Expr {
     /// (`count(DISTINCT <arg>)`).
     ///
     /// NB: the "an aggregate is only legal in a grouped/SELECT context" check is
-    /// coupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this
-    /// additive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).
+    /// coupled with the view/select builder (`AGG_POSITION_INVALID`) — this
+    /// additive slice accepts the node STRUCTURALLY only.
     Agg {
         /// The aggregate function.
         func: AggFunc,
@@ -475,7 +475,7 @@ pub enum Expr {
         /// fields are omitted from the wire.
         duration: Duration,
     },
-    /// **The one Layer-2 portability escape (design §3.4 / §6.4)** — a
+    /// **The one Layer-2 portability escape** — a
     /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the
     /// engine renders the leg matching the render's TARGET dialect — the
     /// dialect's own leg if present, else `default`. This is `dialect({ default?,
@@ -497,7 +497,7 @@ pub enum Expr {
     /// four fields are `serde(default)` so an empty node deserializes, then the
     /// structural gate refuses it).
     ///
-    /// **RATCHET OBLIGATION (P11 / design §3.4).** The design counts each
+    /// **RATCHET OBLIGATION.** The design counts each
     /// `dialect()` leg as one of the four ratcheted budget counters. That budget
     /// / baseline mechanism is a LATER phase and is NOT YET BUILT (there is no
     /// baseline file in-tree). When it lands, the per-leg count of this node must

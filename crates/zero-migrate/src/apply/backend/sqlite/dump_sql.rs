@@ -9,16 +9,16 @@
 //! (it may be absent, and the DB is opened through our own hardened actor) — the
 //! DDL comes verbatim from `sqlite_master.sql`.
 //!
-//! # What is excluded (no journal / internal leakage, §2.5.2)
+//! # What is excluded (no journal / internal leakage)
 //!
 //! - The `_mig` journal lives in a SEPARATE attached database, so a `main`-scoped
-//!   `sqlite_master` read never sees `schema_migrations` / its triggers.
+//! `sqlite_master` read never sees `schema_migrations` / its triggers.
 //! - SQLite internal objects (`sqlite_sequence`, `sqlite_autoindex_*`,
-//!   `sqlite_stat*`, …) are filtered Rust-side (the hardened authorizer's function
-//!   allowlist has no `LIKE`, so we cannot `WHERE name NOT LIKE 'sqlite_%'`; we
-//!   match the prefix in Rust, exactly like the drift introspector).
+//! `sqlite_stat*`, …) are filtered Rust-side (the hardened authorizer's function
+//! allowlist has no `LIKE`, so we cannot `WHERE name NOT LIKE 'sqlite_%'`; we
+//! match the prefix in Rust, exactly like the drift introspector).
 //! - Rows with a NULL `sql` (the implicit rowid index of an `INTEGER PRIMARY KEY`,
-//!   internal auto-indexes) carry no DDL and are skipped.
+//! internal auto-indexes) carry no DDL and are skipped.
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -51,7 +51,7 @@ fn kind_rank(obj_type: &str) -> u8 {
 /// dump (before the applied-versions trailer the bin appends).
 ///
 /// Read-only; runs under engine mode (the `sqlite_master` read requires it on the
-/// hardened connection, §2.5.1). Tables/views are emitted before indexes/triggers,
+/// hardened connection). Tables/views are emitted before indexes/triggers,
 /// each kind name-ordered, so re-running `dump` on an unchanged schema is
 /// byte-identical. The `_mig` journal + `sqlite_*` internals never appear (see the
 /// module docs).
@@ -143,7 +143,7 @@ mod tests {
         assert!(!is_internal("idx_widgets_name"));
     }
 
-    /// Least-privilege regression (fix #4): the `dump` read must succeed under the
+    /// Least-privilege regression: the `dump` read must succeed under the
     /// confined `CreatorUp` authorizer mode — a plain `SELECT … FROM
     /// main.sqlite_master` is an `AuthAction::Read` on `main`, which CreatorUp
     /// already allows (the `_ => Allow` catch-all). `dump_schema` itself sets

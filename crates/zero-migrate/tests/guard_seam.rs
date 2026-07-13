@@ -1,5 +1,4 @@
-//! The `MigrationGuard` trait boundary (multi-engine abstraction P0, design
-//! 2026-06-21 §2.2 L3).
+//! The `MigrationGuard` trait boundary (the multi-engine abstraction).
 //!
 //! Pins the per-engine line-1 seam that replaced the three `if dialect == Sqlite`
 //! guard branches (engine.rs `plan()`, executor.rs apply FIRST PASS, the
@@ -8,7 +7,7 @@
 //! - `PgGuard` (the Postgres line-1) still **denies** exactly the deny-list set
 //!   it did before — COPY … PROGRAM (RCE) and a `CREATE EXTENSION` outside the
 //!   allowlist — and still **passes** benign DDL, now through the neutral
-//!   `GuardOutcome` (no PG-specific `classes` on the seam, H2).
+//!   `GuardOutcome` (no PG-specific `classes` on the seam).
 //! - `SqliteDescriptorGuard` (the SQLite line-1) **trusts** descriptor-diff DDL
 //!   (its `check` returns the empty clean outcome) — the apply/plan path on
 //!   SQLite feeds it descriptor-generated DDL, which must NOT be rejected.
@@ -65,7 +64,7 @@ fn pg_guard_passes_benign_ddl_with_neutral_outcome() {
         .check(r#"CREATE TABLE "project_acme"."users" (id text primary key)"#)
         .expect("benign in-schema DDL must pass the PG line-1");
     // Neutral seam: a non-destructive CREATE TABLE, no advisories. The PG-specific
-    // `classes` are NOT on `GuardOutcome` (H2) — they stay inside `SqlGuard`.
+    // `classes` are NOT on `GuardOutcome` — they stay inside `SqlGuard`.
     assert!(!outcome.destructive, "CREATE TABLE is not destructive");
 }
 

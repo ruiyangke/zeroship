@@ -1,5 +1,5 @@
-//! **PR14 — the offline `--sql` plan preview** (the canonical Alembic `--sql` /
-//! Atlas / Flyway / dbmate feature, here for OPERATOR GO-LIVE REVIEW).
+//! The offline `--sql` plan preview (the canonical Alembic `--sql` /
+//! Atlas / Flyway / dbmate feature).
 //!
 //! This module is a **surfacing / formatting layer over the SQL the engine ALREADY
 //! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
@@ -9,7 +9,7 @@
 //! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It NEVER renders SQL
 //! itself.
 //!
-//! # The honest boundary (the load-bearing design point, deliverable 2)
+//! # The honest boundary (the load-bearing design point)
 //!
 //! DB-INDEPENDENT ops — `createTable`/`dropTable`/`addColumn`/`dropColumn`/
 //! `addForeignKey`/`addUnique`/`addCheck`/`dropConstraint`/`createIndex`/
@@ -55,8 +55,8 @@ pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 /// Options for the offline preview render.
 #[derive(Debug, Clone)]
 pub struct PreviewOpts {
-    /// The trust profile's effective schema for an op that omits its own qualifier
-    /// (§2.7). The general/Trusted CLI default is `public`
+    /// The trust profile's effective schema for an op that omits its own qualifier.
+    /// The general/Trusted CLI default is `public`
     /// ([`DEFAULT_GENERIC_SCHEMA`](crate)); the Confined platform path pins the
     /// project schema. NEVER requires a DB to pick — it is a flag/profile value.
     pub default_schema: String,
@@ -82,7 +82,7 @@ fn dialect_label(d: SqlDialect) -> &'static str {
 }
 
 /// How a plan's body relates to the requested `--dialect` — drives the HONEST header
-/// caption (MED-1). The `.ir.json` leg is genuinely per-dialect LOWERED, so its
+/// caption. The `.ir.json` leg is genuinely per-dialect LOWERED, so its
 /// header may claim the dialect. The raw `.sql` (Flyway, operator-authored) leg is
 /// printed VERBATIM — it is NOT dialect-transformed — so captioning it with a
 /// `(dialect: sqlite)` claim would mislead an operator reviewing a SQLite go-live
@@ -135,8 +135,8 @@ impl Rendered {
     }
 }
 
-/// Render ONE already-lowered [`AppliedPlan`] to its offline SQL preview string
-/// (deliverable 1). Pure + DB-free: it reads back the SQL the lowering already
+/// Render ONE already-lowered [`AppliedPlan`] to its offline SQL preview string.
+/// Pure + DB-free: it reads back the SQL the lowering already
 /// produced. `dialect` is used only for the header label (the plan's steps were
 /// already lowered for a dialect by the caller).
 #[must_use]
@@ -152,7 +152,7 @@ pub fn render_plan_sql(plan: &AppliedPlan, dialect: SqlDialect, _opts: &PreviewO
 /// with a leading honest header and a trailing tally.
 ///
 /// This is the RAW `.sql` (Flyway, operator-authored) leg: each plan's body is the
-/// verbatim operator SQL, which is NOT dialect-transformed (MED-1). The headers
+/// verbatim operator SQL, which is NOT dialect-transformed. The headers
 /// therefore carry a `(verbatim raw .sql — NOT dialect-transformed)` caption rather
 /// than a `(dialect: …)` claim, so an operator reviewing a SQLite go-live is never
 /// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` here
@@ -661,7 +661,7 @@ fn indent_sql(sql: &str) -> String {
 }
 
 /// Write the per-plan header block. `caption` decides whether the parenthetical is a
-/// dialect claim (lowered `.ir.json`) or a verbatim-raw-`.sql` disclaimer (MED-1).
+/// dialect claim (lowered `.ir.json`) or a verbatim-raw-`.sql` disclaimer.
 fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCaption) {
     let _ = writeln!(out, "-- ============================================================");
     let _ = writeln!(
@@ -675,7 +675,7 @@ fn write_plan_header(out: &mut String, plan: &AppliedPlan, caption: DialectCapti
 }
 
 /// Write the document-level honest header. `caption` carries the dialect claim (for
-/// the lowered legs) or the verbatim-raw-`.sql` disclaimer (the raw `.sql` leg, MED-1).
+/// the lowered legs) or the verbatim-raw-`.sql` disclaimer (the raw `.sql` leg).
 fn write_doc_header(out: &mut String, caption: DialectCaption) {
     let _ = writeln!(
         out,

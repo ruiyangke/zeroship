@@ -1,4 +1,4 @@
-//! The migration journal — `schema_migrations` (design §2.2).
+//! The migration journal — `schema_migrations`.
 //!
 //! Append-only + tamper-evident. The journal of record,
 //! `<meta>.schema_migrations`, is the SINGLE events table: one row per migration
@@ -15,7 +15,7 @@
 //! object and NO separate rolled-back table: a single IDENTITY column assigns a
 //! strictly-increasing `event_seq` that never ties (even across two events in
 //! one transaction), and the net state of a version is its **latest event** on
-//! that scale. `applied()` reads net state off it.
+//! that scale. `applied` reads net state off it.
 //!
 //! Non-transactional migrations (`CREATE INDEX CONCURRENTLY`, …) cannot wrap
 //! their DDL + journal write in one transaction, so they use a **two-phase**
@@ -36,7 +36,7 @@ use crate::driver::SqlSession;
 use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
 
-/// A journal phase (design §2.2).
+/// A journal phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     /// A non-transactional migration begun but not yet confirmed complete
@@ -71,7 +71,7 @@ impl Phase {
 /// How a `completed` event was RECORDED (the journaled `kind` column).
 ///
 /// This is the migration's recorded IDENTITY-class, not anything the caller
-/// supplies at apply time. The tamper guard (v3 Plan E re-critic) decides the
+/// supplies at apply time. The tamper guard decides the
 /// repeatable drift exemption on THIS journaled value — never on the
 /// attacker-suppliable `flags.repeatable` — so a once-only migration cannot be
 /// reclassified into a repeatable (or vice-versa) by flipping the flag.
@@ -83,7 +83,7 @@ pub enum JournaledKind {
     Baseline,
     /// A squash supersession (`kind='squash'`).
     Squash,
-    /// A repeatable migration's re-apply (`kind='repeatable'`, v3 Plan E). The
+    /// A repeatable migration's re-apply (`kind='repeatable'`). The
     /// only kind whose changed checksum is a legitimate re-run signal.
     Repeatable,
 }
@@ -158,7 +158,7 @@ impl EventKind {
 }
 
 /// The lifecycle state of a cross-deploy online-rename pending-contract
-/// obligation (§2.0.3). An obligation is born `pending` when a `PgExpandContract`
+/// obligation. An obligation is born `pending` when a `PgExpandContract`
 /// EXPAND completes (its C1/C2 contract is deferred to a later deploy); it is
 /// discharged by appending a `resolved` row (history is append-only — a discharge
 /// is NEVER a DELETE, exactly like the journal of record). The NET state of an
@@ -167,7 +167,7 @@ impl EventKind {
 pub enum PendingState {
     /// The obligation is outstanding: the EXPAND ran, the contract (drop trigger
     /// and drop old column) has not yet been applied. Any new op touching the
-    /// rename's table is fail-closed refused (§2.0.3 item 2).
+    /// rename's table is fail-closed refused.
     Pending,
     /// The obligation is discharged: the contract was applied (`--apply`) or the
     /// shadow column + trigger were dropped (`--abort`). Carries a [`Resolution`].
@@ -195,7 +195,7 @@ impl PendingState {
     }
 }
 
-/// How a `resolved` pending-contract obligation was discharged (§2.0.3 item 3 /
+/// How a `resolved` pending-contract obligation was discharged (via
 /// the `resolve-pending` CLI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
@@ -230,7 +230,7 @@ impl Resolution {
     }
 }
 
-/// An OUTSTANDING cross-deploy pending-contract obligation (§2.0.3), as read back
+/// An OUTSTANDING cross-deploy pending-contract obligation, as read back
 /// by [`outstanding_pending_contracts`]. Its net state is `pending` (no later
 /// `resolved` row discharges it). The read-back is the source of truth for the
 /// apply-time interlock and the `status` orphan/blocked surfacing.
@@ -246,17 +246,17 @@ pub struct PendingContract {
     /// the drop, and an `--apply` can re-author C1/C2 if needed).
     pub ty: String,
     /// The APPLY-TIME obligation key: the E2 trigger migration version (the
-    /// "expand" id the §2.0.2 partition keys on), deterministic per rename
-    /// (§2.0.1). The engine interlock's idempotent-skip + self-EXPAND exemption +
+    /// "expand" id the partition keys on), deterministic per rename
+    /// The engine interlock's idempotent-skip + self-EXPAND exemption +
     /// the `resolve-pending` lookup key on this. It is a deep sub-step id that the
     /// plan-level supplied set never exposes — so orphan/blocked do NOT key on it.
     pub pending_version: String,
     /// The rename's PLAN-GROUP version (the `PgExpandContract` plan's E1-anchored
     /// id, `render::lower::plan_step_version`). This is the STABLE identity the SUPPLIED
-    /// migration set carries (a re-lowered IR's `lower_plan().version`) and an
-    /// author's `depends_on` references, so `status`'s orphan (§2.0.3 item 3) and
-    /// blocked (§2.0.4) surfacing keys on THIS — not the deep E2 `pending_version`
-    /// no plan-level set ever exposes (PR9a HIGH).
+    /// migration set carries (a re-lowered IR's `lower_plan.version`) and an
+    /// author's `depends_on` references, so `status`'s orphan and
+    /// blocked surfacing keys on THIS — not the deep E2 `pending_version`
+    /// no plan-level set ever exposes.
     pub plan_version: String,
     /// The C1/C2 contract migration versions (so resolve can journal them and the
     /// status/orphan surfacing can name them).
@@ -278,7 +278,7 @@ pub struct PendingContractRecord<'a> {
     /// The apply-time obligation key — the E2 trigger version.
     pub pending_version: &'a str,
     /// The rename's plan-group version (E1-anchored) — the stable identity the
-    /// supplied set / `depends_on` key on for orphan/blocked (PR9a HIGH).
+    /// supplied set / `depends_on` key on for orphan/blocked.
     pub plan_version: &'a str,
     /// The C1/C2 contract version ids, comma-separated-free (serialized as a JSON
     /// array on write; carried here as a slice).
@@ -289,10 +289,10 @@ pub struct PendingContractRecord<'a> {
 
 /// The deploy-scoped recovery SCOPE threaded into the EXPAND obligation write so
 /// the obligation row and its recovery marker are committed in ONE transaction
-/// (PR9e). When present, [`record_pending_contract_with_recovery`] appends a
+/// When present, [`record_pending_contract_with_recovery`] appends a
 /// `state='in_progress'` row to `schema_deploy_recovery` in the SAME `BEGIN … COMMIT`
 /// as the `pending` obligation row — so every outstanding obligation ALWAYS has a
-/// marker (closing the PR9d-rev finding-1 obligation-vs-marker crash window: the two
+/// marker (closing the obligation-vs-marker crash window: the two
 /// rows commit atomically or not at all).
 ///
 /// The marker is born `in_progress`, meaning "the deploy that opened this EXPAND has
@@ -301,7 +301,7 @@ pub struct PendingContractRecord<'a> {
 /// a same-deploy / crash abort closes it `aborted` / `reconciled`. The
 /// crash-recovery leg recovers ONLY net-`in_progress` markers — so a phase-1
 /// promotion FAILURE leaves the marker in the *recoverable* (fail-safe) state, never
-/// the *protected* state (PR9e: the inversion that closes the MED false-abort).
+/// the *protected* state (the inversion that closes the false-abort).
 #[derive(Debug, Clone, Copy)]
 pub struct DeployRecoveryScope<'a> {
     /// The per-deploy id (UUIDv7) the marker is keyed on — generated once per deploy
@@ -324,7 +324,7 @@ pub struct AppliedEntry {
     /// The journaled `kind` of the LATEST `completed` event for this version
     /// (`None` for a lone `started` inflight marker, which has no completed kind).
     /// The drift/tamper guard anchors the repeatable exemption on THIS value, not
-    /// on the supplied `flags.repeatable` (v3 Plan E re-critic).
+    /// on the supplied `flags.repeatable`.
     pub kind: Option<JournaledKind>,
 }
 
@@ -376,14 +376,14 @@ fn quote_ident(ident: &str) -> Result<String, JournalError> {
     Ok(crate::render::dml::quote_ident_checked(ident)?)
 }
 
-/// #150 test seam (see `dml::tests::all_engine_seams_render_uniformly`).
+/// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> {
     quote_ident(ident)
 }
 
 /// Bootstrap (idempotently) the meta schema + journal table + inflight
-/// side-table + immutability trigger (design §2.2).
+/// side-table + immutability trigger.
 ///
 /// Safe to call on every apply: `CREATE SCHEMA/TABLE IF NOT EXISTS`, `CREATE OR
 /// REPLACE FUNCTION`, and a `pg_trigger`-guarded `CREATE TRIGGER` make a
@@ -402,41 +402,41 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
         .await?;
 
     // 2. The append-only journal of record — the SINGLE consolidated events table
-    //    (design §2.2 columns). ONE row per migration EVENT: an `applied` (forward)
-    //    event or a `rolled_back` event, discriminated by `event_kind`.
+    // ONE row per migration EVENT: an `applied` (forward)
+    // event or a `rolled_back` event, discriminated by `event_kind`.
     //
-    //    **Native total order.** `event_seq BIGINT GENERATED ALWAYS AS IDENTITY` is
-    //    the PK and the total order: the DB assigns a strictly-increasing value on
-    //    every INSERT (the INSERTs never supply it). It never ties — `now()` can be
-    //    equal across two events in one transaction, but the IDENTITY is monotonic
-    //    — so the latest event per version decides net state. There is NO standalone
-    //    sequence object (the old `CREATE SEQUENCE … schema_migrations_event_seq` +
-    //    `DEFAULT nextval(...)` are gone; the column is its OWN identity).
+    // **Native total order.** `event_seq BIGINT GENERATED ALWAYS AS IDENTITY` is
+    // the PK and the total order: the DB assigns a strictly-increasing value on
+    // every INSERT (the INSERTs never supply it). It never ties — `now` can be
+    // equal across two events in one transaction, but the IDENTITY is monotonic
+    // — so the latest event per version decides net state. There is NO standalone
+    // sequence object (the old `CREATE SEQUENCE … schema_migrations_event_seq` +
+    // `DEFAULT nextval(...)` are gone; the column is its OWN identity).
     //
-    //    Rollback is append-only too (Plan 5): an `applied` row is NEVER deleted on
-    //    rollback — a `rolled_back` event is appended to THIS SAME table. A
-    //    rolled-back migration becomes pending again and may be RE-APPLIED, which
-    //    appends a NEW `applied` row for the same version. So `version` is NOT a
-    //    primary key here (multiple events per version are legal, across
-    //    rollback↔re-apply cycles); `event_seq` is the PK and the total order. The
-    //    immutability trigger forbids UPDATE/DELETE, so the log stays append-only.
+    // Rollback is append-only too: an `applied` row is NEVER deleted on
+    // rollback — a `rolled_back` event is appended to THIS SAME table. A
+    // rolled-back migration becomes pending again and may be RE-APPLIED, which
+    // appends a NEW `applied` row for the same version. So `version` is NOT a
+    // primary key here (multiple events per version are legal, across
+    // rollback↔re-apply cycles); `event_seq` is the PK and the total order. The
+    // immutability trigger forbids UPDATE/DELETE, so the log stays append-only.
     //
-    //    `event_kind` ∈ {`applied`,`rolled_back`} is the event DIRECTION. Distinct
-    //    from `kind` ∈ {`apply`,`baseline`,`squash`,`repeatable`}, the migration
-    //    TYPE of an `applied` event (Plan 9): an ordinary `apply` (the `up` actually
-    //    ran), a `baseline` (the schema already existed; the `up` recorded NOT run —
-    //    adoption path), a `squash` (a supersession; the squash's `up` recorded NOT
-    //    run because `[v1..vN]` were already applied — see [`record_baseline`] /
-    //    [`crate::ops::squash`]), or a `repeatable` (v3 Plan E — a re-applied
-    //    repeatable's `up` ran, but the version's IDENTITY is a repeatable). The
-    //    `repeatable` kind is LOAD-BEARING for the tamper guard: the drift exemption
-    //    anchors on the JOURNALED kind, not the attacker-suppliable
-    //    `flags.repeatable`, so flipping an applied once-only to `repeatable=true` is
-    //    a kind mismatch ⇒ tamper. The applied-only columns (`kind`/`phase`/
-    //    `outcome`) are NULL on a `rolled_back` row; a CHECK documents the
-    //    per-`event_kind` shape (`applied` ⇒ all three NOT NULL; `rolled_back` ⇒ all
-    //    three NULL). `by`/`at` unify the old `applied_by`/`rolled_back_by` and
-    //    `applied_at`/`rolled_back_at`.
+    // `event_kind` ∈ {`applied`,`rolled_back`} is the event DIRECTION. Distinct
+    // from `kind` ∈ {`apply`,`baseline`,`squash`,`repeatable`}, the migration
+    // TYPE of an `applied` event: an ordinary `apply` (the `up` actually
+    // ran), a `baseline` (the schema already existed; the `up` recorded NOT run —
+    // adoption path), a `squash` (a supersession; the squash's `up` recorded NOT
+    // run because `[v1..vN]` were already applied — see [`record_baseline`] /
+    // [`crate::ops::squash`]), or a `repeatable` (— a re-applied
+    // repeatable's `up` ran, but the version's IDENTITY is a repeatable). The
+    // `repeatable` kind is LOAD-BEARING for the tamper guard: the drift exemption
+    // anchors on the JOURNALED kind, not the attacker-suppliable
+    // `flags.repeatable`, so flipping an applied once-only to `repeatable=true` is
+    // a kind mismatch ⇒ tamper. The applied-only columns (`kind`/`phase`/
+    // `outcome`) are NULL on a `rolled_back` row; a CHECK documents the
+    // per-`event_kind` shape (`applied` ⇒ all three NOT NULL; `rolled_back` ⇒ all
+    // three NULL). `by`/`at` unify the old `applied_by`/`rolled_back_by` and
+    // `applied_at`/`rolled_back_at`.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -461,22 +461,22 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     ))
     .await?;
 
-    // 2a-bis. The append-only SUPERSESSION log (Plan 9 squash). One row per
-    //     (squash_version → superseded_version) edge, written by the ADMIN when a
-    //     squash migration `S` is journaled (whether via `apply` running its `up`
-    //     on a fresh DB, or via [`crate::ops::squash`] recording it baseline-style on a
-    //     DB that already ran `[v1..vN]`). The pending computation joins this
-    //     against net-applied squashes to decide that a superseded version is
-    //     SATISFIED. Append-only + immutable (trigger below): a squash's
-    //     supersession edges are part of history and never edited/deleted. Edges
-    //     are recorded LAST (after the `completed` row), so a net-applied squash
-    //     always has its full edge set; a partial edge set never exists because the
-    //     squash's `completed` row + its edges are written in one transaction by the
-    //     caller. (No FK to `schema_migrations` — that table allows multiple
-    //     `completed` rows per version, so there is no single PK to reference; the
-    //     squash_version is validated by the caller before journaling.)
-    //     (No shared sequence: supersedes is a relation [set-membership of edges],
-    //     not part of the event total order, so it gets its OWN native IDENTITY PK.)
+    // 2a-bis. The append-only SUPERSESSION log. One row per
+    // (squash_version → superseded_version) edge, written by the ADMIN when a
+    // squash migration `S` is journaled (whether via `apply` running its `up`
+    // on a fresh DB, or via [`crate::ops::squash`] recording it baseline-style on a
+    // DB that already ran `[v1..vN]`). The pending computation joins this
+    // against net-applied squashes to decide that a superseded version is
+    // SATISFIED. Append-only + immutable (trigger below): a squash's
+    // supersession edges are part of history and never edited/deleted. Edges
+    // are recorded LAST (after the `completed` row), so a net-applied squash
+    // always has its full edge set; a partial edge set never exists because the
+    // squash's `completed` row + its edges are written in one transaction by the
+    // caller. (No FK to `schema_migrations` — that table allows multiple
+    // `completed` rows per version, so there is no single PK to reference; the
+    // squash_version is validated by the caller before journaling.)
+    // (No shared sequence: supersedes is a relation [set-membership of edges],
+    // not part of the event total order, so it gets its OWN native IDENTITY PK.)
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
             id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -488,41 +488,41 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     .await?;
 
     // 2a-ter. The append-only CROSS-DEPLOY PENDING-CONTRACT obligation log
-    //     (§2.0.3 / §2.0.4). A `PgExpandContract` online rename applies its EXPAND
-    //     (E1..E3 + backfill) in deploy N and DEFERS its contract (C1 drop trigger
-    //     + C2 drop old column) to a later deploy (§2.0.2). The deferred contract
-    //     is a DURABLE OBLIGATION — not a transient return value — so a later deploy
-    //     (or a restarted process) can READ IT BACK and fail closed on any op that
-    //     touches the rename's table while the contract is still outstanding.
+    // A `PgExpandContract` online rename applies its EXPAND
+    // (E1..E3 + backfill) in deploy N and DEFERS its contract (C1 drop trigger
+    // + C2 drop old column) to a later deploy. The deferred contract
+    // is a DURABLE OBLIGATION — not a transient return value — so a later deploy
+    // (or a restarted process) can READ IT BACK and fail closed on any op that
+    // touches the rename's table while the contract is still outstanding.
     //
-    //     **Append-only + immutable (trigger below), exactly like
-    //     `schema_migrations`.** An obligation is born `pending`; it is discharged
-    //     by APPENDING a `resolved` row (never a DELETE/UPDATE). The NET state per
-    //     `pending_version` is the latest `event_seq` row (DISTINCT-ON-latest, the
-    //     same pattern `applied()` uses). A `pending` row with no later `resolved`
-    //     row is OUTSTANDING.
+    // **Append-only + immutable (trigger below), exactly like
+    // `schema_migrations`.** An obligation is born `pending`; it is discharged
+    // by APPENDING a `resolved` row (never a DELETE/UPDATE). The NET state per
+    // `pending_version` is the latest `event_seq` row (DISTINCT-ON-latest, the
+    // same pattern `applied` uses). A `pending` row with no later `resolved`
+    // row is OUTSTANDING.
     //
-    //     **Unforgeable by the migrator (deny-by-absence).** It lives in the meta
-    //     schema, which the migrator role has NO grant on (`role.rs` REVOKE +
-    //     search_path exclusion). All writes are by the ADMIN role on the executor
-    //     path, mirroring the journal-forgery defense for `schema_migrations`: a
-    //     creator migration's `up` (running as the migrator) can neither plant a
-    //     bogus `resolved` row (suppressing the interlock) nor a bogus `pending`
-    //     row (wedging an unrelated table).
+    // **Unforgeable by the migrator (deny-by-absence).** It lives in the meta
+    // schema, which the migrator role has NO grant on (`role.rs` REVOKE +
+    // search_path exclusion). All writes are by the ADMIN role on the executor
+    // path, mirroring the journal-forgery defense for `schema_migrations`: a
+    // creator migration's `up` (running as the migrator) can neither plant a
+    // bogus `resolved` row (suppressing the interlock) nor a bogus `pending`
+    // row (wedging an unrelated table).
     //
-    //     `state` ∈ {`pending`,`resolved`}; `resolution` ∈ {`applied`,`aborted`}
-    //     and is NULL iff `state='pending'` (the per-state shape CHECK). `table` is
-    //     the rename's bare target table (the interlock's match key);
-    //     `pending_version` is the APPLY-TIME obligation key (the E2 trigger id) —
-    //     deterministic per rename (§2.0.1), used by the engine interlock's
-    //     idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
-    //     `plan_version` is the rename's PLAN-GROUP version (the PgExpandContract
-    //     plan's E1-anchored id, `render::lower::plan_step_version`) — the STABLE
-    //     identity the SUPPLIED migration set carries (a re-lowered IR's
-    //     `lower_plan().version`) and an author's `depends_on` references, so
-    //     `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
-    //     sub-version that no plan-level set ever exposes (PR9a HIGH);
-    //     `contract_versions` is the JSON array of C1/C2 ids.
+    // `state` ∈ {`pending`,`resolved`}; `resolution` ∈ {`applied`,`aborted`}
+    // and is NULL iff `state='pending'` (the per-state shape CHECK). `table` is
+    // the rename's bare target table (the interlock's match key);
+    // `pending_version` is the APPLY-TIME obligation key (the E2 trigger id) —
+    // deterministic per rename, used by the engine interlock's
+    // idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
+    // `plan_version` is the rename's PLAN-GROUP version (the PgExpandContract
+    // plan's E1-anchored id, `render::lower::plan_step_version`) — the STABLE
+    // identity the SUPPLIED migration set carries (a re-lowered IR's
+    // `lower_plan.version`) and an author's `depends_on` references, so
+    // `status`'s orphan/blocked surfacing keys on THIS, not the deep E2
+    // sub-version that no plan-level set ever exposes;
+    // `contract_versions` is the JSON array of C1/C2 ids.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
             event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -546,58 +546,58 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     ))
     .await?;
 
-    // 2a-quater. The append-only DEPLOY-SCOPED RECOVERY marker log (PR9d MED / PR9e).
-    //     A multi-file APPROVED bundle applies per-step with NO whole-bundle
-    //     transaction (`executor.rs`: BEGIN;up;journal;COMMIT per migration). So an
-    //     in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
-    //     dual-write trigger + the `schema_pending_contracts` obligation) BEFORE a
-    //     LATER file B in the SAME deploy can fail at apply for a runtime reason the
-    //     read-only pre-validation cannot predict. Pre-PR9d that left file A's table
-    //     half-renamed behind the creator's 4xx, owing a pending contract.
+    // 2a-quater. The append-only DEPLOY-SCOPED RECOVERY marker log.
+    // A multi-file APPROVED bundle applies per-step with NO whole-bundle
+    // transaction (`executor.rs`: BEGIN;up;journal;COMMIT per migration). So an
+    // in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
+    // dual-write trigger + the `schema_pending_contracts` obligation) BEFORE a
+    // LATER file B in the SAME deploy can fail at apply for a runtime reason the
+    // read-only pre-validation cannot predict. Pre- that left file A's table
+    // half-renamed behind the creator's 4xx, owing a pending contract.
     //
-    //     This log makes the WHOLE deploy a RECOVERABLE unit. Each same-deploy EXPAND
-    //     writes an `in_progress` row keyed on a per-deploy `deploy_id` (a UUIDv7
-    //     generated once at the start of the IR loop) + the EXPAND's `pending_version`
-    //     — and that row is committed in the SAME transaction as the obligation row
-    //     (PR9e — [`record_pending_contract_with_recovery`]), so every outstanding
-    //     obligation ALWAYS has a marker. If a later same-deploy file fails, the
-    //     control loop drives the SHARED abort (`build_abort_steps`) over exactly THIS
-    //     deploy's net-`in_progress` rows under the still-held project lock, discharging
-    //     each obligation `aborted` and marking the recovery row `reconciled` — so the
-    //     refused bundle leaves NO half-renamed table. On a process CRASH between the
-    //     EXPAND+marker commit and the in-process abort, the `in_progress` row SURVIVES;
-    //     the NEXT same-app deploy (serialized by the project lock) reconciles it FIRST,
-    //     before applying the new bundle. On deploy SUCCESS the loop promotes its rows to
-    //     `committed` (the EXPANDs legitimately remain pending as the §2.0.2 cross-deploy
-    //     partition — NOT a half-state).
+    // This log makes the WHOLE deploy a RECOVERABLE unit. Each same-deploy EXPAND
+    // writes an `in_progress` row keyed on a per-deploy `deploy_id` (a UUIDv7
+    // generated once at the start of the IR loop) + the EXPAND's `pending_version`
+    // — and that row is committed in the SAME transaction as the obligation row,
+    // so every outstanding
+    // obligation ALWAYS has a marker. If a later same-deploy file fails, the
+    // control loop drives the SHARED abort (`build_abort_steps`) over exactly THIS
+    // deploy's net-`in_progress` rows under the still-held project lock, discharging
+    // each obligation `aborted` and marking the recovery row `reconciled` — so the
+    // refused bundle leaves NO half-renamed table. On a process CRASH between the
+    // EXPAND+marker commit and the in-process abort, the `in_progress` row SURVIVES;
+    // the NEXT same-app deploy (serialized by the project lock) reconciles it FIRST,
+    // before applying the new bundle. On deploy SUCCESS the loop promotes its rows to
+    // `committed` (the EXPANDs legitimately remain pending as the cross-deploy
+    // partition — NOT a half-state).
     //
-    //     **Strictly same-deploy-scoped.** Both legs operate only over rows whose
-    //     `deploy_id` is THIS deploy's (in-process) or a net-`in_progress` prior-deploy
-    //     row whose obligation is still `outstanding` (crash leg).
+    // **Strictly same-deploy-scoped.** Both legs operate only over rows whose
+    // `deploy_id` is THIS deploy's (in-process) or a net-`in_progress` prior-deploy
+    // row whose obligation is still `outstanding` (crash leg).
     //
-    //     **The crash-vs-legit discriminator (PR9e — the inversion).** The marker is
-    //     born `in_progress` (with the obligation, atomically), and `in_progress` itself
-    //     IS the "this deploy has not durably reached a terminal outcome" signal. The
-    //     success arm PROMOTES it to `committed` in one atomic batch; the crash leg's
-    //     resume query (`outstanding_deploy_recoveries`) recovers ONLY net-`in_progress`
-    //     markers. A net-`committed` marker is a fully-reached go-live ⇒ EXCLUDED, never
-    //     aborted. Crucially, if the `committed` promotion FAILS (DB unreachable the
-    //     instant the go-live reaches its success arm) the marker stays net-`in_progress`
-    //     — the *recoverable* (fail-safe) state — so the next deploy AUTO-ABORTS the
-    //     half-rename rather than silently mistaking a no-longer-protected marker for a
-    //     committed one. A *pending* contract has not cut over reads/writes to the shadow
-    //     column (the dual-write trigger keeps both in sync, and the drop-old-column
-    //     contract has not run), so aborting it loses no data. This is the inverse of the
-    //     pre-PR9e `open`+later-stamp design, whose stamp-failure direction *protected*
-    //     the marker and let a later deploy silently revert a live contract it could not
-    //     distinguish from a crash.
+    // **The crash-vs-legit discriminator.** The marker is
+    // born `in_progress` (with the obligation, atomically), and `in_progress` itself
+    // IS the "this deploy has not durably reached a terminal outcome" signal. The
+    // success arm PROMOTES it to `committed` in one atomic batch; the crash leg's
+    // resume query (`outstanding_deploy_recoveries`) recovers ONLY net-`in_progress`
+    // markers. A net-`committed` marker is a fully-reached go-live ⇒ EXCLUDED, never
+    // aborted. Crucially, if the `committed` promotion FAILS (DB unreachable the
+    // instant the go-live reaches its success arm) the marker stays net-`in_progress`
+    // — the *recoverable* (fail-safe) state — so the next deploy AUTO-ABORTS the
+    // half-rename rather than silently mistaking a no-longer-protected marker for a
+    // committed one. A *pending* contract has not cut over reads/writes to the shadow
+    // column (the dual-write trigger keeps both in sync, and the drop-old-column
+    // contract has not run), so aborting it loses no data. This is the inverse of the
+    // the earlier `open`+later-stamp design, whose stamp-failure direction *protected*
+    // the marker and let a later deploy silently revert a live contract it could not
+    // distinguish from a crash.
     //
-    //     **Append-only + immutable + admin-only** (same posture as
-    //     `schema_pending_contracts`): `state` transitions
-    //     in_progress→committed/aborted/reconciled by APPENDING a row (never
-    //     UPDATE/DELETE); the net state per (deploy_id, pending_version) is the latest
-    //     `event_seq` row. The migrator role has NO grant on the meta schema, so a
-    //     creator migration can neither forge nor suppress a recovery marker.
+    // **Append-only + immutable + admin-only** (same posture as
+    // `schema_pending_contracts`): `state` transitions
+    // in_progress→committed/aborted/reconciled by APPENDING a row (never
+    // UPDATE/DELETE); the net state per (deploy_id, pending_version) is the latest
+    // `event_seq` row. The migrator role has NO grant on the meta schema, so a
+    // creator migration can neither forge nor suppress a recovery marker.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_deploy_recovery (
             event_seq        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -611,8 +611,8 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     .await?;
 
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
-    //     guarded by the immutability trigger — the marker is deleted on
-    //     completion / recovery.
+    // guarded by the immutability trigger — the marker is deleted on
+    // completion / recovery.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_inflight (
             version     TEXT PRIMARY KEY,
@@ -625,9 +625,9 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     .await?;
 
     // 3. Immutability trigger function (billing-ledger pattern,
-    //    0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
-    //    append-only tables (the consolidated schema_migrations events table +
-    //    …_supersedes).
+    // 0048_credit_ledger). Reject UPDATE + DELETE outright. Shared by both
+    // append-only tables (the consolidated schema_migrations events table +
+    // …_supersedes).
     conn.batch(&format!(
         "CREATE OR REPLACE FUNCTION {trg_fn}() RETURNS trigger AS $fn$
          BEGIN
@@ -638,32 +638,32 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
     .await?;
 
     // 4. Attach the immutability triggers idempotently to BOTH append-only
-    //    tables — the consolidated events table + …_supersedes (PG 16 has no
-    //    CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger). Fewer triggers overall
-    //    now that the two event tables are one.
+    // tables — the consolidated events table + …_supersedes (PG 16 has no
+    // CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger). Fewer triggers overall
+    // now that the two event tables are one.
     //
-    //    TWO triggers per table, both calling the same RAISE function:
-    //      - `BEFORE UPDATE OR DELETE ... FOR EACH ROW` — blocks row mutation.
-    //      - `BEFORE TRUNCATE ... FOR EACH STATEMENT` — blocks TRUNCATE, which
-    //        row-level triggers DO NOT fire on. Without the statement-level
-    //        TRUNCATE trigger, `TRUNCATE {meta}.schema_migrations` would silently
-    //        wipe the append-only journal. (Defense-in-depth: TRUNCATE is only
-    //        reachable on the trusted-admin path — the migrator role has no grant
-    //        on the meta schema — but the journal must be immutable by
-    //        construction, not by least-privilege alone.)
+    // TWO triggers per table, both calling the same RAISE function:
+    // - `BEFORE UPDATE OR DELETE... FOR EACH ROW` — blocks row mutation.
+    // - `BEFORE TRUNCATE... FOR EACH STATEMENT` — blocks TRUNCATE, which
+    // row-level triggers DO NOT fire on. Without the statement-level
+    // TRUNCATE trigger, `TRUNCATE {meta}.schema_migrations` would silently
+    // wipe the append-only journal. (Defense-in-depth: TRUNCATE is only
+    // reachable on the trusted-admin path — the migrator role has no grant
+    // on the meta schema — but the journal must be immutable by
+    // construction, not by least-privilege alone.)
     //
-    //    Trigger names are SHORT and table-local (`zs_immutable_trg`,
-    //    `zs_immutable_truncate_trg`) — a trigger name only needs to be unique
-    //    per table, not per schema, so it need NOT embed the meta_schema. This is
-    //    deliberate: the meta_schema under the per-app deploy model is
-    //    `"<app_id>_migrations"` (a hyphenated UUID, ~37 chars). Embedding it in
-    //    the trigger name overflows PostgreSQL's 63-byte NAMEDATALEN limit — the
-    //    name is silently truncated, which (a) makes distinct row vs TRUNCATE
-    //    names collide and (b) makes the full-name pg_trigger existence guard
-    //    never match the truncated catalog name (re-bootstrap churn). Short
-    //    fixed names sidestep all of that. They are still quoted as identifiers
-    //    (`trg_q`) for uniformity, and the existence check compares the raw name
-    //    as a string literal (`trg_lit`).
+    // Trigger names are SHORT and table-local (`zs_immutable_trg`,
+    // `zs_immutable_truncate_trg`) — a trigger name only needs to be unique
+    // per table, not per schema, so it need NOT embed the meta_schema. This is
+    // deliberate: the meta_schema under the per-app deploy model is
+    // `"<app_id>_migrations"` (a hyphenated UUID, ~37 chars). Embedding it in
+    // the trigger name overflows PostgreSQL's 63-byte NAMEDATALEN limit — the
+    // name is silently truncated, which (a) makes distinct row vs TRUNCATE
+    // names collide and (b) makes the full-name pg_trigger existence guard
+    // never match the truncated catalog name (re-bootstrap churn). Short
+    // fixed names sidestep all of that. They are still quoted as identifiers
+    // (`trg_q`) for uniformity, and the existence check compares the raw name
+    // as a string literal (`trg_lit`).
     for tbl in [
         "schema_migrations",
         "schema_migrations_supersedes",
@@ -706,7 +706,7 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
 /// Read the **net applied state** of the journal for the drift check + pending
 /// computation, ordered by version (`UUIDv7` apply order).
 ///
-/// The journal is append-only, including rollback (Plan 5): an `applied` row is
+/// The journal is append-only, including rollback: an `applied` row is
 /// never deleted; rollback **appends** a `rolled_back` event to the SAME
 /// `schema_migrations` events table, and a re-apply appends a fresh `applied`
 /// row. So a version can carry several events over rollback↔re-apply cycles. The
@@ -714,13 +714,13 @@ pub async fn ensure_journal<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Re
 /// monotonic `event_seq` (IDENTITY PK) scale:
 ///
 /// - latest event is `applied` ⇒ the version is **applied** (returned as a
-///   [`Phase::Completed`] entry carrying that latest applied row's checksum, so
-///   the drift check compares against the current incarnation);
+/// [`Phase::Completed`] entry carrying that latest applied row's checksum, so
+/// the drift check compares against the current incarnation);
 /// - latest event is `rolled_back` ⇒ the version is **pending again** (NOT
-///   returned as completed; it re-enters `pending = set − completed` and can be
-///   re-applied);
+/// returned as completed; it re-enters `pending = set − completed` and can be
+/// re-applied);
 /// - no completed row at all but a lone `started` inflight marker ⇒ returned as a
-///   [`Phase::Started`] entry (the non-txn crash-recovery key), exactly as before.
+/// [`Phase::Started`] entry (the non-txn crash-recovery key), exactly as before.
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
@@ -898,7 +898,7 @@ pub async fn net_rolled_back<D: SqlSession>(
 }
 
 /// Read the FULL append-only event log (every `applied` + every `rolled_back`
-/// event) in `event_seq` order — the audit trail (design §2.2, scenario 46). One
+/// event) in `event_seq` order — the audit trail. One
 /// table, ordered by the native IDENTITY PK.
 ///
 /// This is NOT net state: a version that was applied, rolled back, and re-applied
@@ -948,13 +948,13 @@ pub async fn history<D: SqlSession>(
     Ok(out)
 }
 
-/// Append a `rolled_back` event for a version (Plan 5 rollback).
+/// Append a `rolled_back` event for a version.
 ///
-/// Run by the **ADMIN** (the migrator has no grant on the meta schema — Plan 3
-/// C1): the executor brackets a rollback's `down` SQL under the migrator role,
+/// Run by the **ADMIN** (the migrator has no grant on the meta schema):
+/// the executor brackets a rollback's `down` SQL under the migrator role,
 /// then `RESET ROLE`s back to admin before this journal append, exactly mirroring
 /// the up path. The append is immutable (UPDATE/DELETE forbidden by trigger); a
-/// later re-apply appends a fresh `applied` row, and `applied()` reads the latest
+/// later re-apply appends a fresh `applied` row, and `applied` reads the latest
 /// event per version off the native `event_seq` IDENTITY. A `rolled_back` row
 /// carries NULL for the applied-only columns (`kind`/`phase`/`outcome`), per the
 /// `event_kind` shape CHECK.
@@ -1055,10 +1055,10 @@ pub async fn record_completed<D: SqlSession>(
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
-    // Plain INSERT (consistent with the transactional path, M3). `event_seq` is a
+    // Plain INSERT (consistent with the transactional path). `event_seq` is a
     // surrogate identity PK, so this appends a fresh `completed` event — including
-    // a re-apply after a rollback (Plan 5), where a prior `completed` + a later
-    // `rolled_back` already exist for this version and `applied()` made it pending
+    // a re-apply after a rollback, where a prior `completed` + a later
+    // `rolled_back` already exist for this version and `applied` made it pending
     // again. Append-only: never an UPDATE.
     let n = conn
         .exec(
@@ -1087,7 +1087,7 @@ pub async fn record_completed<D: SqlSession>(
     Ok(())
 }
 
-/// Read the OUTSTANDING cross-deploy pending-contract obligations (§2.0.3).
+/// Read the OUTSTANDING cross-deploy pending-contract obligations.
 ///
 /// The net state per `pending_version` is its **latest event** on the
 /// `event_seq` IDENTITY scale (the same DISTINCT-ON-latest pattern [`applied`]
@@ -1153,7 +1153,7 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
 }
 
 /// Open a cross-deploy pending-contract obligation: INSERT a `state='pending'`
-/// row (§2.0.3 item 1). Called once per `PgExpandContract` whose EXPAND completed.
+/// row. Called once per `PgExpandContract` whose EXPAND completed.
 ///
 /// **Idempotent by membership-guard (Deliverable 5).** The caller checks the
 /// outstanding set under the held project lock and only records if this
@@ -1165,10 +1165,10 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
 ///
 /// Open a cross-deploy pending-contract obligation AND, when a
 /// [`DeployRecoveryScope`] is supplied, its deploy-scoped recovery marker — in ONE
-/// transaction (PR9e).
+/// transaction.
 ///
 /// This is the engine-stamped write that closes the obligation-vs-marker crash
-/// window (PR9d-rev finding 1): the `pending` obligation row and the `in_progress`
+/// window: the `pending` obligation row and the `in_progress`
 /// recovery marker are bracketed in a single `BEGIN … COMMIT`, so either BOTH commit
 /// or NEITHER does. Every outstanding obligation therefore ALWAYS has a marker — the
 /// auto crash-recovery leg's JOIN can never miss one.
@@ -1214,7 +1214,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     ];
 
     // No recovery scope (routine / resolve / abort path) — a single autocommit
-    // obligation INSERT, byte-identical to the pre-PR9e behavior.
+    // obligation INSERT, byte-identical to the earlier behavior.
     let Some(scope) = scope else {
         let n = conn.exec(&obligation_sql, &obligation_params).await?;
         debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
@@ -1222,7 +1222,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     };
 
     // Deploy path — bracket the obligation row AND its `in_progress` recovery marker
-    // in ONE transaction so they commit atomically (PR9e: no obligation-without-marker
+    // in ONE transaction so they commit atomically (no obligation-without-marker
     // window). Roll the whole thing back on any failure.
     conn.batch("BEGIN").await?;
     let result = async {
@@ -1257,7 +1257,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
 }
 
 /// Discharge a cross-deploy pending-contract obligation: APPEND a
-/// `state='resolved'` row (§2.0.3 item 1 / the `resolve-pending` CLI). History is
+/// `state='resolved'` row. History is
 /// append-only — the `pending` row is never edited or deleted.
 ///
 /// The obligation's identity fields (`table`/`from_col`/`to_col`/`ty`/
@@ -1307,7 +1307,7 @@ pub async fn resolve_pending_contract<D: SqlSession>(
     Ok(())
 }
 
-// -- deploy-scoped recovery markers (PR9d MED) ------------------------------
+// -- deploy-scoped recovery markers ------------------------------
 
 /// An OUTSTANDING deploy-scoped recovery obligation: a same-deploy EXPAND whose
 /// recovery row is net-`in_progress` (never promoted to `committed`, never closed
@@ -1322,12 +1322,12 @@ pub struct DeployRecovery {
     pub pending_version: String,
 }
 
-/// Promote a deploy-scoped recovery marker to `committed` (PR9e): APPEND a
+/// Promote a deploy-scoped recovery marker to `committed`: APPEND a
 /// `committed` row keyed on `(deploy_id, pending_version)`.
 ///
 /// This is the crash-vs-legit-pending DISCRIMINATOR. A net-`committed` marker means
 /// the deploy that opened the EXPAND reached its success arm — i.e. the online-rename
-/// went go-live and the obligation is LEGITIMATELY pending (the §2.0.2 cross-deploy
+/// went go-live and the obligation is LEGITIMATELY pending (the cross-deploy
 /// partition), NOT a crashed half-state. A net-`in_progress` marker means the deploy
 /// has not durably reached its terminal outcome (a later same-deploy file failed and
 /// the process died before the in-process abort, OR the `committed` promotion itself
@@ -1336,8 +1336,8 @@ pub struct DeployRecovery {
 /// `committed` go-live. And because a *failure* to promote leaves the marker in the
 /// `in_progress` (recoverable / fail-safe) state — never a protected state it would
 /// later be unable to distinguish — there is no window in which a committed go-live
-/// is mistaken for recoverable-but-shouldn't-be (PR9e: the inversion that closes the
-/// MED false-abort).
+/// is mistaken for recoverable-but-shouldn't-be (the inversion that closes the
+/// false-abort).
 ///
 /// Admin-written, append-only, under the immutability trigger.
 ///
@@ -1369,8 +1369,8 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
     Ok(())
 }
 
-/// Promote a WHOLE deploy's recovery markers to `committed` in ONE transaction
-/// (PR9e): a single `BEGIN … COMMIT` brackets every per-obligation `committed`
+/// Promote a WHOLE deploy's recovery markers to `committed` in ONE transaction:
+/// a single `BEGIN … COMMIT` brackets every per-obligation `committed`
 /// INSERT, so the success-arm promotion is ATOMIC across a multi-EXPAND go-live — it
 /// either promotes ALL of this deploy's markers to net-`committed` or none of them
 /// (no partial window where one go-live obligation is protected and a sibling stays
@@ -1378,7 +1378,7 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
 /// back, leaving every marker net-`in_progress` — the *recoverable* (fail-safe)
 /// state: the next deploy AUTO-ABORTS the half-rename (safe because a pending
 /// contract has not cut over to the shadow column, so no data is lost). This is the
-/// PR9e inversion — a promotion failure degrades to "safely re-runnable crash
+/// — a promotion failure degrades to "safely re-runnable crash
 /// recovery", never "silent revert of a live contract a later deploy mistakes for
 /// committed".
 ///
@@ -1423,7 +1423,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     Ok(())
 }
 
-/// Mark a deploy-scoped recovery obligation `reconciled` (PR9d MED): APPEND a
+/// Mark a deploy-scoped recovery obligation `reconciled`: APPEND a
 /// `reconciled` row (append-only — the `in_progress` row is never edited). Called
 /// after a same-deploy abort or a crash-recovery abort to CLOSE the marker (the
 /// EXPAND was rolled back). Admin-written.
@@ -1458,7 +1458,7 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 
 /// Read the deploy-recovery markers that are net-`in_progress` (latest event per
 /// `(deploy_id, pending_version)` is `in_progress`) AND whose obligation is STILL
-/// outstanding in `schema_pending_contracts` (PR9d MED / PR9e — the crash-recovery
+/// outstanding in `schema_pending_contracts` (/ — the crash-recovery
 /// leg's resume input).
 ///
 /// The outstanding-obligation join is what makes resume idempotent + correct: a
@@ -1466,7 +1466,7 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 /// resume attempt, or applied by a go-live) is NOT re-driven. Ordered by
 /// `(deploy_id, pending_version)` for determinism.
 ///
-/// **The crash-vs-legit discriminator (PR9e — the inversion).** The
+/// **The crash-vs-legit discriminator.** The
 /// `r.state = 'in_progress'` predicate is load-bearing: the marker is BORN
 /// `in_progress` atomically with the obligation
 /// ([`record_pending_contract_with_recovery`]), and a deploy that reaches its SUCCESS
@@ -1477,9 +1477,9 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 /// promotion itself failed. BOTH are correctly recoverable — aborting the half-rename
 /// is SAFE because a *pending* contract has not cut over reads/writes to the shadow
 /// column (the dual-write trigger keeps both in sync; the drop-old-column contract
-/// has not run), so no data is lost. This is the PR9e inversion: a promotion failure
+/// has not run), so no data is lost. This is the: a promotion failure
 /// leaves the marker in the *recoverable* state, never a *protected* state a later
-/// deploy would silently revert (the pre-PR9e MED false-abort vector).
+/// deploy would silently revert (the earlier false-abort vector).
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure.
@@ -1555,7 +1555,7 @@ pub async fn applied_count<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Res
     Ok(row.try_get("n")?)
 }
 
-/// Read the set of versions **superseded by a net-applied squash** (Plan 9).
+/// Read the set of versions **superseded by a net-applied squash**.
 ///
 /// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge
 /// `S → v_i` in `schema_migrations_supersedes` is itself **net-applied** (its
@@ -1613,7 +1613,7 @@ pub async fn superseded_versions<D: SqlSession>(
 }
 
 /// Read the **latest `completed` checksum per version** from the journal of
-/// record (v3 Plan E — repeatables).
+/// record.
 ///
 /// A repeatable migration ([`MigrationFlags::repeatable`](crate::model::migration::MigrationFlags::repeatable))
 /// has a STABLE identity (its `version`/name never changes across edits) and is
@@ -1636,7 +1636,7 @@ pub async fn superseded_versions<D: SqlSession>(
 /// keeps the intent legible.) The drift/pending machinery still uses [`applied`]
 /// for versioned migrations; this is the repeatable-specific lens.
 ///
-/// **Kind-aware (v3 Plan E re-critic #2).** Only events whose journaled
+/// **Kind-aware.** Only events whose journaled
 /// `kind='repeatable'` are consulted — the re-run oracle must never read a
 /// once-only `kind='apply'` (or baseline/squash) row's checksum as a repeatable's
 /// "prior" value. Combined with the [`applied`]-driven kind-mismatch abort in the
@@ -1676,7 +1676,7 @@ pub async fn latest_completed_checksums<D: SqlSession>(
 }
 
 /// The fields of a baseline/squash `completed` event recorded WITHOUT running its
-/// `up` (Plan 9), bundled so [`record_baseline`] takes one descriptor.
+/// `up`, bundled so [`record_baseline`] takes one descriptor.
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineRecord<'a> {
     /// The migration version (`mig_…`).
@@ -1694,7 +1694,7 @@ pub struct BaselineRecord<'a> {
     pub supersedes: &'a [&'a str],
 }
 
-/// Journal a baseline/squash `completed` event WITHOUT running its `up` (Plan 9).
+/// Journal a baseline/squash `completed` event WITHOUT running its `up`.
 ///
 /// The event carries an explicit `kind` (`'baseline'` or `'squash'`) and an
 /// optional supersession edge set. Run by the ADMIN (the migrator has no
@@ -1837,7 +1837,7 @@ mod tests {
     /// The cross-deploy pending-contract `state`/`resolution` wire contract is
     /// byte-exact: the `schema_pending_contracts` CHECK constraints, the writers,
     /// and the net-state reader (`outstanding_pending_contracts`) all interpolate these
-    /// literals from this single typed source (§2.0.3). A drift here would
+    /// literals from this single typed source. A drift here would
     /// silently un-gate the interlock (a `pending` row never read back). Pin them.
     #[test]
     fn pending_contract_wire_literals_are_exact() {

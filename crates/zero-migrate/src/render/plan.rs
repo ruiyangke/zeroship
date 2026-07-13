@@ -1,7 +1,7 @@
-//! The applied-execution plan model (`op.*` DSL design §2.0) and the single
+//! The applied-execution plan model (`op.*` DSL) and the single
 //! shared plan orchestrator's data types.
 //!
-//! One authored migration artifact — a `.sql` file *or* (after PR1) an
+//! One authored migration artifact — a `.sql` file *or* an
 //! `.ir.json` — lowers to an [`AppliedPlan`]: an ordered sequence of
 //! [`PlanStep`]s the engine's single shared `apply_plan`
 //! ([`MigrationEngine::apply_plan`](crate::engine::MigrationEngine::apply_plan))
@@ -9,9 +9,9 @@
 //! ([`Migration`], [`BackfillSpec`](crate::model::backfill::BackfillSpec),
 //! [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan), and the
 //! existing [`declarative::SqliteRebuild`](crate::render::declarative::SqliteRebuild)) —
-//! PR0 introduces **no** new rebuild struct and **no** change to [`Migration`].
+//! this introduces **no** new rebuild struct and **no** change to [`Migration`].
 //!
-//! # Naming — a deliberate collision avoidance (§2.0)
+//! # Naming — a deliberate collision avoidance
 //!
 //! This is **`AppliedPlan`**, NOT `MigrationPlan`. `MigrationPlan`
 //! ([`engine::MigrationPlan`](crate::engine::MigrationPlan)) is the read-only
@@ -19,20 +19,20 @@
 //! `AppliedPlan` is the net-new *ordered execution artifact*. The two coexist on
 //! the public surface as distinct symbols.
 //!
-//! # The single-`Migration` case is the degenerate one-step plan (§2.0)
+//! # The single-`Migration` case is the degenerate one-step plan
 //!
 //! A pure-DDL `.sql` (or `.ir.json` with no DML/backfill/online op) lowers to a
 //! plan whose `steps == [Ddl(one Migration)]` — the overwhelming common case,
 //! and the only shape the legacy Flyway/dbmate loader ever produces. The
 //! [`AppliedPlan::single_step`] facade builds exactly that, and
 //! [`AppliedPlan::single_step_migration`] reads it back out (fail-closed on a
-//! multi-step plan, §5.2).
+//! multi-step plan).
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
 use crate::render::step::{DialectScope, PlanStep};
 
-/// The fully-resolved specification for ONE table rebuild (design §2.4).
+/// The fully-resolved specification for ONE table rebuild.
 #[derive(Debug, Clone)]
 pub struct SqliteRebuildSpec {
     /// The existing table being rebuilt (the final name; the new table is renamed
@@ -61,8 +61,8 @@ impl SqliteRebuildSpec {
     }
 }
 
-/// What one authored artifact (`.sql` today; `.ir.json` after PR1) becomes after
-/// lowering — an ordered execution plan (§2.0). NOT a single [`Migration`]; NOT
+/// What one authored artifact (`.sql` or `.ir.json`) becomes after
+/// lowering — an ordered execution plan. NOT a single [`Migration`]; NOT
 /// the dry-run [`MigrationPlan`](crate::engine::MigrationPlan).
 #[derive(Debug, Clone)]
 pub struct AppliedPlan {
@@ -74,19 +74,19 @@ pub struct AppliedPlan {
     pub steps: Vec<PlanStep>,
     /// ONE checksum over the canonical artifact (for a `.sql` plan this is the
     /// single step's `Migration.checksum`; for an `.ir.json` it is
-    /// `Checksum::of_ir` over the op list, PR1).
+    /// `Checksum::of_ir` over the op list).
     pub checksum: Checksum,
-    /// Flags derived ∪ overridden from the artifact (§2.1.1).
+    /// Flags derived ∪ overridden from the artifact.
     pub flags: MigrationFlags,
-    /// The plan's dialect reach (§2.0); a separate journaled facet, not folded
+    /// The plan's dialect reach; a separate journaled facet, not folded
     /// into the checksum.
     pub dialect_scope: DialectScope,
-    /// `false` if ANY step is `down: None` (Backfill/Dml/in-flight OnlineRename);
-    /// surfaced by status/rollback BEFORE attempt (§2.1.2).
+    /// `false` if ANY step is `down: None` (Backfill/Dml/incomplete OnlineRename);
+    /// surfaced by status/rollback BEFORE attempt.
     pub rollbackable: bool,
-    /// The declaring app (server-stamped on the IR path, §8.6).
+    /// The declaring app (server-stamped on the IR path).
     pub owner_app: String,
-    /// Cross-plan ordering deps (attach to the first step, §2.0.1).
+    /// Cross-plan ordering deps (attach to the first step).
     pub depends_on: Vec<MigrationId>,
     /// Squash supersession identity.
     pub supersedes: Vec<MigrationId>,
@@ -94,7 +94,7 @@ pub struct AppliedPlan {
     pub preconditions: Vec<PreconditionCheck>,
 }
 
-/// The fail-closed error of [`AppliedPlan::single_step_migration`] (§5.2): the
+/// The fail-closed error of [`AppliedPlan::single_step_migration`]: the
 /// plan is not a single `Ddl` step, so a `Migration`-only consumer (the platform
 /// Flyway-mode runner) cannot operate on it. This arm is provably unreachable on
 /// the platform path (a Flyway `.sql` always lowers to one `Ddl` step) — it
@@ -113,7 +113,7 @@ pub struct NotSingleStep {
 
 impl AppliedPlan {
     /// Build the **degenerate one-step plan** for a single pure-DDL [`Migration`]
-    /// — the loader facade for a `.sql` file (§2.0, §5.2). The plan's identity
+    /// — the loader facade for a `.sql` file. The plan's identity
     /// fields mirror the migration; `dialect_scope` is `Both` (a `.sql` plan is
     /// not `op.raw`-pinned), and `rollbackable` follows the migration's `down`.
     #[must_use]
@@ -142,8 +142,8 @@ impl AppliedPlan {
         }
     }
 
-    /// The thin `Migration`-facade the legacy SQL runner consumes
-    /// (§5.2): a plan whose `steps == [Ddl(_)]` yields that one `&Migration`;
+    /// The thin `Migration`-facade the legacy SQL runner consumes:
+    /// a plan whose `steps == [Ddl(_)]` yields that one `&Migration`;
     /// any other shape fails closed with [`NotSingleStep`]. This keeps the
     /// SQL runner operating over [`Migration`] and decoupled from
     /// `PlanStep`/`RenameStep` evolution.
@@ -160,14 +160,14 @@ impl AppliedPlan {
         }
     }
 
-    /// True iff the plan is a single `Ddl` step (the platform-path precondition,
-    /// §5.2). Convenience over [`single_step_migration`](Self::single_step_migration).
+    /// True iff the plan is a single `Ddl` step (the platform-path precondition).
+    /// Convenience over [`single_step_migration`](Self::single_step_migration).
     #[must_use]
     pub fn is_single_step(&self) -> bool {
         matches!(self.steps.as_slice(), [PlanStep::Ddl(_)])
     }
 
-    /// Recompute `rollbackable` from the current steps (§2.1.2): `true` iff every
+    /// Recompute `rollbackable` from the current steps: `true` iff every
     /// step has a defined `down`. Used by adapters that assemble `steps`
     /// directly.
     #[must_use]

@@ -1,4 +1,4 @@
-//! Preconditions — state/data-conditional apply (v3 Plan D, Liquibase-style).
+//! Preconditions — state/data-conditional apply.
 //!
 //! A migration may carry **preconditions**: assertions evaluated against the
 //! live DB *before* its `up` runs, gating whether the migration applies. This is
@@ -8,39 +8,39 @@
 //! # Two evaluation paths, by trust
 //!
 //! - **Structured checks** ([`Precondition::TableExists`],
-//!   [`Precondition::ColumnExists`], [`Precondition::RowCount`], …) are
-//!   ENGINE-BUILT, fully parameterized catalog queries
-//!   (`information_schema` / `pg_catalog`). The project schema is bound as `$1`;
-//!   the table/column identifiers are validated with [`validate_ident`] (bare
-//!   `[A-Za-z_][A-Za-z0-9_]*` only — no schema qualifier, no quotes, no
-//!   punctuation) and then bound as parameters too. There is **no string
-//!   interpolation of user input into SQL**, so these are injection-safe by
-//!   construction.
+//! [`Precondition::ColumnExists`], [`Precondition::RowCount`], …) are
+//! ENGINE-BUILT, fully parameterized catalog queries
+//! (`information_schema` / `pg_catalog`). The project schema is bound as `$1`;
+//! the table/column identifiers are validated with [`validate_ident`] (bare
+//! `[A-Za-z_][A-Za-z0-9_]*` only — no schema qualifier, no quotes, no
+//! punctuation) and then bound as parameters too. There is **no string
+//! interpolation of user input into SQL**, so these are injection-safe by
+//! construction.
 //! - **[`Precondition::SqlBoolean`]** is UNTRUSTED creator/AI SQL. It is the
-//!   escape hatch for assertions the structured checks cannot express, and it is
-//!   confined three ways before it is allowed to run:
-//!   1. it MUST pass the [`SqlGuard`](crate::guard::SqlGuard) (read-only SELECT;
-//!      a cross-schema / file / network / dangerous precondition is denied — the
-//!      same line-1 defense the `up` gets);
-//!   2. it MUST pass the **shape gate** ([`validate_single_select`]): a SINGLE
-//!      `SELECT` (no second statement, no non-SELECT) with NO data-modifying
-//!      statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) anywhere in its tree
-//!      (catches a data-modifying CTE at any nesting), NO locking clause (`FOR
-//!      UPDATE`/`FOR SHARE`/…), and NO sequence-mutating or advisory-lock builtin
-//!      (`nextval`/`setval`/`pg_advisory_*lock`/…). This gate is the REAL
-//!      pre-execution line: it is statically provable that a precondition can
-//!      **NEVER mutate state or acquire a leaking lock — it is rejected before it
-//!      touches the DB**. It returns exactly one boolean column (verified
-//!      result-side at execution);
-//!   3. it runs under the least-privilege **`migrator` role** (`SET LOCAL ROLE`,
-//!      transaction-scoped) inside a **`BEGIN READ ONLY`** transaction — the same
-//!      line-2 DB-privilege confinement the `up` gets. These are
-//!      DEFENSE-IN-DEPTH: the shape gate (step 2) already proves no mutation, but
-//!      `READ ONLY` + the migrator role backstop it. (Note `READ ONLY` does NOT
-//!      block advisory locks or sequence mutation — which is exactly why the
-//!      shape gate, not `READ ONLY`, owns that confinement.)
+//! escape hatch for assertions the structured checks cannot express, and it is
+//! confined three ways before it is allowed to run:
+//! 1. it MUST pass the [`SqlGuard`](crate::guard::SqlGuard) (read-only SELECT;
+//! a cross-schema / file / network / dangerous precondition is denied — the
+//! same line-1 defense the `up` gets);
+//! 2. it MUST pass the **shape gate** ([`validate_single_select`]): a SINGLE
+//! `SELECT` (no second statement, no non-SELECT) with NO data-modifying
+//! statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) anywhere in its tree
+//! (catches a data-modifying CTE at any nesting), NO locking clause (`FOR
+//! UPDATE`/`FOR SHARE`/…), and NO sequence-mutating or advisory-lock builtin
+//! (`nextval`/`setval`/`pg_advisory_*lock`/…). This gate is the REAL
+//! pre-execution line: it is statically provable that a precondition can
+//! **NEVER mutate state or acquire a leaking lock — it is rejected before it
+//! touches the DB**. It returns exactly one boolean column (verified
+//! result-side at execution);
+//! 3. it runs under the least-privilege **`migrator` role** (`SET LOCAL ROLE`,
+//! transaction-scoped) inside a **`BEGIN READ ONLY`** transaction — the same
+//! line-2 DB-privilege confinement the `up` gets. These are
+//! DEFENSE-IN-DEPTH: the shape gate (step 2) already proves no mutation, but
+//! `READ ONLY` + the migrator role backstop it. (Note `READ ONLY` does NOT
+//! block advisory locks or sequence mutation — which is exactly why the
+//! shape gate, not `READ ONLY`, owns that confinement.)
 //!
-//! # Where this is evaluated — the backend seam (multi-engine abstraction C3)
+//! # Where this is evaluated — the backend seam (multi-engine abstraction)
 //!
 //! [`crate::apply::executor::apply`] evaluates a pending migration's preconditions
 //! **inside the apply flow, under the project advisory lock**, immediately before
@@ -171,10 +171,10 @@ fn quote_ident(ident: &str) -> String {
 ///
 /// # Errors
 /// - [`PreconditionError::InvalidIdentifier`] — a structured check's table/column
-///   is not a bare identifier.
+/// is not a bare identifier.
 /// - [`PreconditionError::Guard`] — a `SqlBoolean` was guard-denied.
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
-///   boolean-returning `SELECT`.
+/// boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] — a query failed.
 #[cfg(pg_seam)]
 pub async fn evaluate<D: SqlSession>(
@@ -210,10 +210,10 @@ pub async fn evaluate<D: SqlSession>(
     }
 }
 
-/// Evaluate ALL of a migration's preconditions (v3 Plan D), in declaration order,
+/// Evaluate ALL of a migration's preconditions, in declaration order,
 /// BEFORE its `up` runs — the **Postgres** precondition path behind
 /// [`PostgresBackend::evaluate_preconditions`](crate::apply::backend::PostgresBackend),
-/// reached only via the backend seam (multi-engine abstraction C3). Folds the
+/// reached only via the backend seam (multi-engine abstraction). Folds the
 /// former generic-executor `evaluate_preconditions` loop into the PG leaf, so the
 /// `&Client` + per-check `pg_query`/`information_schema` evaluation never sits in
 /// the dialect-agnostic executor body.
@@ -227,12 +227,12 @@ pub async fn evaluate<D: SqlSession>(
 ///
 /// # Errors
 /// - [`ApplyError::PreconditionFailed`] — an `OnUnmet::Halt` check was UNMET (the
-///   assertion evaluated false), or ANY check could not be evaluated (a
-///   guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
-///   an inevaluable precondition is treated as a hard failure regardless of its
-///   `on_unmet`, so a precondition that cannot even be checked never silently
-///   waves a migration through. The caller aborts the whole apply, applying
-///   nothing for this migration.
+/// assertion evaluated false), or ANY check could not be evaluated (a
+/// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
+/// an inevaluable precondition is treated as a hard failure regardless of its
+/// `on_unmet`, so a precondition that cannot even be checked never silently
+/// waves a migration through. The caller aborts the whole apply, applying
+/// nothing for this migration.
 ///
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
@@ -347,19 +347,19 @@ async fn row_count<D: SqlSession>(
 ///
 /// Rejects (all as [`PreconditionError::NotABooleanSelect`], before any query
 /// runs):
-///   - more than one statement, or a single statement that is not a `SELECT`;
-///   - a data-modifying statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) ANYWHERE
-///     in the parsed tree — a data-modifying CTE
-///     (`WITH x AS (DELETE … RETURNING …) SELECT …`) hangs its `DeleteStmt` off
-///     the `SelectStmt`'s `with_clause`, so a top-node check alone would miss it. We
-///     walk the whole serialized tree (the same `serde_json` approach the guard
-///     uses) and reject any DML node at any nesting;
-///   - a non-empty locking clause (`FOR UPDATE`/`FOR SHARE`/`FOR NO KEY
-///     UPDATE`/`FOR KEY SHARE`) — a `LockingClause` node acquires row locks, not
-///     a read-only assertion;
-///   - a sequence-mutating or advisory-lock builtin
-///     ([`MUTATING_OR_LOCK_BUILTINS`]) — `READ ONLY` does NOT block these, and a
-///     session-scoped advisory lock would leak onto the pooled connection.
+/// - more than one statement, or a single statement that is not a `SELECT`;
+/// - a data-modifying statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) ANYWHERE
+/// in the parsed tree — a data-modifying CTE
+/// (`WITH x AS (DELETE … RETURNING …) SELECT …`) hangs its `DeleteStmt` off
+/// the `SelectStmt`'s `with_clause`, so a top-node check alone would miss it. We
+/// walk the whole serialized tree (the same `serde_json` approach the guard
+/// uses) and reject any DML node at any nesting;
+/// - a non-empty locking clause (`FOR UPDATE`/`FOR SHARE`/`FOR NO KEY
+/// UPDATE`/`FOR KEY SHARE`) — a `LockingClause` node acquires row locks, not
+/// a read-only assertion;
+/// - a sequence-mutating or advisory-lock builtin
+/// ([`MUTATING_OR_LOCK_BUILTINS`]) — `READ ONLY` does NOT block these, and a
+/// session-scoped advisory lock would leak onto the pooled connection.
 ///
 /// Shape (single boolean column) is enforced at execution by reading exactly one
 /// `bool` column from the single result row. Parse failure is rejected
@@ -471,9 +471,9 @@ async fn evaluate_sql_boolean<D: SqlSession>(
     sql: &str,
 ) -> Result<bool, PreconditionError> {
     // 1. Line-1 guard: the SAME deny-list + cross-schema confinement the `up`
-    //    gets. A precondition reaching `control.*` / a file/network func / a
-    //    dangerous construct is denied here, before anything runs.
-    // §4.1/HIGH-2: trust-aware. Confined ⇒ `confined(project_schema)`;
+    // gets. A precondition reaching `control.*` / a file/network func / a
+    // dangerous construct is denied here, before anything runs.
+    // Trust-aware. Confined ⇒ `confined(project_schema)`;
     // Platform ⇒ the operator allowlist. Latent for the port (the loader sets
     // `preconditions = []`), but threaded so it is correct the day a platform
     // precondition is written.
@@ -481,20 +481,20 @@ async fn evaluate_sql_boolean<D: SqlSession>(
     guard.check(sql)?;
 
     // 2. Shape gate (THE pre-execution line): a single SELECT with no DML
-    //    anywhere (incl. data-modifying CTEs), no locking clause, and no
-    //    sequence-mutating / advisory-lock builtin. After this gate it is
-    //    statically provable the SQL cannot mutate state or take a leaking lock —
-    //    before it touches the DB.
+    // anywhere (incl. data-modifying CTEs), no locking clause, and no
+    // sequence-mutating / advisory-lock builtin. After this gate it is
+    // statically provable the SQL cannot mutate state or take a leaking lock —
+    // before it touches the DB.
     validate_single_select(sql)?;
 
     // 3. Run read-only under the least-privilege migrator role — DEFENSE-IN-DEPTH
-    //    on top of the shape gate (step 2 already proves no mutation). A READ ONLY
-    //    transaction backstops any write; the migrator role backstops privilege.
-    //    NOTE READ ONLY does NOT block advisory locks or sequence mutation —
-    //    those are denied by the shape gate above, which is why the gate (not
-    //    READ ONLY) is the real line. `SET LOCAL` (search_path/role) is
-    //    transaction-scoped, so it vanishes at COMMIT and never leaks onto the
-    //    session — the same H2 discipline the executor uses.
+    // on top of the shape gate (step 2 already proves no mutation). A READ ONLY
+    // transaction backstops any write; the migrator role backstops privilege.
+    // NOTE READ ONLY does NOT block advisory locks or sequence mutation —
+    // those are denied by the shape gate above, which is why the gate (not
+    // READ ONLY) is the real line. `SET LOCAL` (search_path/role) is
+    // transaction-scoped, so it vanishes at COMMIT and never leaks onto the
+    // session — the same discipline the executor uses.
     conn.batch("BEGIN READ ONLY").await?;
     let result = run_sql_boolean_in_txn(conn, cfg, sql).await;
     // Always end the transaction. A read-only txn has nothing to persist, so we

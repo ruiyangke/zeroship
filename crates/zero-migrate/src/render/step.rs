@@ -5,19 +5,19 @@ use crate::render::declarative::SqliteRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
 use crate::model::backfill::BackfillSpec;
 
-/// The dialect reach of an applied plan, derived from its ops (§2.0). A separate,
+/// The dialect reach of an applied plan, derived from its ops. A separate,
 /// journaled facet — **not** folded into the identity checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialectScope {
     /// Applies faithfully to both Postgres and SQLite.
     Both,
     /// Postgres-only (a `PgOnly` `op.raw` artifact); refused against a SQLite
-    /// deploy target at load (PR1+). Never produced by the PR0 `.sql` path.
+    /// deploy target at load. Never produced by the `.sql` path.
     PgOnly,
 }
 
 /// A rename lowered to ONE of two **dialect-distinct executable shapes**, chosen
-/// by the deploy-target dialect at lowering (§2.6.2).
+/// by the deploy-target dialect at lowering.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RenameStep {
@@ -34,37 +34,37 @@ pub enum BindValue {
     Null,
     /// A boolean.
     Bool(bool),
-    /// An exact 64-bit integer (the only integer domain the IR admits, §2.3.2).
+    /// An exact 64-bit integer (the only integer domain the IR admits).
     Int(i64),
-    /// A decimal/float carried as its canonical string form (§2.3.2 numeric
+    /// A decimal/float carried as its canonical string form (numeric
     /// domain: no `f64` in the IR identity).
     Decimal(String),
     /// A UTF-8 text value.
     Text(String),
 }
 
-/// One ordered step of an [`AppliedPlan`](crate::render::plan::AppliedPlan) (§2.0).
+/// One ordered step of an [`AppliedPlan`](crate::render::plan::AppliedPlan).
 #[derive(Debug, Clone)]
 pub enum PlanStep {
     /// A transactional or non-txn DDL statement bundle — an existing
     /// [`Migration`] (single `up: String`, no parameter slot).
     Ddl(Migration),
     /// A parameterized DML statement (insert/update/delete) — the net-new
-    /// variant (§2.3.2).
+    /// variant.
     Dml {
-        /// The journal version this DML step records under (its sub-version,
-        /// §2.0.1). A `Migration`-less step still needs an identity to journal.
+        /// The journal version this DML step records under (its sub-version).
+        /// A `Migration`-less step still needs an identity to journal.
         version: MigrationId,
         /// Human-readable label for status/diagnostics.
         name: String,
         /// The placeholder SQL (the journal hashes this; the binds fold into the
-        /// plan checksum, §2.3.2).
+        /// plan checksum).
         template: String,
         /// The ordered typed values bound natively to the template.
         binds: Vec<BindValue>,
         /// `true` ⇒ the step's DDL/journal runs inside a transaction.
         transactional: bool,
-        /// `true` ⇒ data loss (a `delete`); the gate decides (§2.1.1).
+        /// `true` ⇒ data loss (a `delete`); the gate decides.
         destructive: bool,
         /// The declaring app's `owner_app` — the journal-identity attribution.
         owner_app: String,
@@ -88,7 +88,7 @@ impl PlanStep {
         }
     }
 
-    /// **PR9b** — the version-id the per-version
+    /// The version-id the per-version
     /// [`ApprovalScope`](crate::ApprovalScope) gate consults for this step, when the
     /// step is SCOPE-GATED, else `None`.
     #[must_use]
@@ -110,7 +110,7 @@ impl PlanStep {
         }
     }
 
-    /// Whether this step has a defined `down` for plan-level rollback (§2.1.2).
+    /// Whether this step has a defined `down` for plan-level rollback.
     #[must_use]
     pub fn has_down(&self) -> bool {
         match self {
@@ -119,7 +119,7 @@ impl PlanStep {
         }
     }
 
-    /// The table this step STRUCTURALLY targets, when known (§2.0.3 interlock
+    /// The table this step STRUCTURALLY targets, when known (interlock
     /// touched-set).
     #[must_use]
     pub fn touched_table(&self) -> Option<&str> {
@@ -134,7 +134,7 @@ impl PlanStep {
     }
 }
 
-/// The set of tables a plan's steps STRUCTURALLY touch (§2.0.3 interlock).
+/// The set of tables a plan's steps STRUCTURALLY touch (interlock).
 #[must_use]
 pub fn tables_touched_by(steps: &[PlanStep]) -> std::collections::BTreeSet<String> {
     steps

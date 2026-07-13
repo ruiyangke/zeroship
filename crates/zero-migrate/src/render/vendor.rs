@@ -1,4 +1,4 @@
-//! The VENDOR (`zero-migrate`) Postgres render seam (vendor spec §4.4).
+//! The VENDOR (`zero-migrate`) Postgres render seam.
 //!
 //! Renders the privileged vendor [`Op`](crate::model::ir::Op) variants to **structured**
 //! Postgres DDL: identifiers double-quoted via the crate's single quoting seam
@@ -7,15 +7,15 @@
 //! ([`render_predicate_pg`]) — **never string concatenation**. The function `body`
 //! and the `pgRaw` escape are the two raw-string fields: they are embedded
 //! VERBATIM and the WHOLE rendered statement is then `pg_query`-parsed by the
-//! guard at the lower seam (so the body is scanned, vendor spec §3.3).
+//! guard at the lower seam (so the body is scanned).
 //!
 //! Every vendor op is `dialect_scope = PgOnly`: this module only renders Postgres,
 //! and the lower seam ([`crate::render::lower`]) hard-rejects a SQLite target before
-//! reaching here (vendor spec §4.3). The render is pure (no DB, no live schema).
+//! reaching here. The render is pure (no DB, no live schema).
 //!
 //! # NOT in this module
 //!
-//! The capability GATE (vendor spec §3.2) lives in [`crate::model::validate`]
+//! The capability GATE lives in [`crate::model::validate`]
 //! (`VENDOR_OP_DENIED` at load) + the rendered-SQL deny-list (the guard at lower).
 //! This module is render-only; it assumes the op already passed both gates.
 
@@ -112,7 +112,7 @@ fn role_ref(name: &str) -> Result<String, VendorError> {
 
 /// Pick a dollar-quote tag that does NOT occur in `body`, so a function body
 /// containing the literal `$zsfn$` cannot prematurely terminate the dollar-quoted
-/// literal (SA-14). Returns the canonical `$zsfn$` when the body is collision-free
+/// literal. Returns the canonical `$zsfn$` when the body is collision-free
 /// (so existing renders / goldens are byte-stable), else `$zsfn0$`, `$zsfn1$`, …
 fn function_body_dollar_tag(body: &str) -> String {
     let mut tag = String::from("$zsfn$");
@@ -205,7 +205,7 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
     }
 }
 
-/// Render a VENDOR op to its ordered Postgres statement list (vendor spec §4.4).
+/// Render a VENDOR op to its ordered Postgres statement list.
 /// `eff_schema` is the effective schema the lower seam resolved (the op's own
 /// `schema` qualifier → connection default → project schema), used to qualify
 /// table-/policy-/trigger-scoped objects.
@@ -302,7 +302,7 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 opts.push_str(" CREATEDB");
             }
             // SUPERUSER renders verbatim; the guard deny-list REFUSES it in all
-            // profiles (vendor spec §3.4) — render-here, refuse-at-guard.
+            // profiles — render-here, refuse-at-guard.
             if superuser.unwrap_or(false) {
                 opts.push_str(" SUPERUSER");
             }
@@ -314,7 +314,7 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             }
             let create_stmt = format!("CREATE ROLE {qname}{opts}");
             // `ifNotExists` is engine-synthesized via a `pg_roles` probe (there is
-            // no native CREATE ROLE IF NOT EXISTS) — vendor spec §2.9. The DO body
+            // no native CREATE ROLE IF NOT EXISTS). The DO body
             // is re-parsed + deny-scanned by the guard.
             let up_create = if if_not_exists.unwrap_or(false) {
                 format!(
@@ -347,7 +347,7 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
         }
         Op::AlterRole { name, set_search_path, reset_search_path } => {
             let qname = qid(name)?;
-            // SA-16: `setSearchPath` + `resetSearchPath:true` is contradictory (the
+            // `setSearchPath` + `resetSearchPath:true` is contradictory (the
             // renderer would silently prefer RESET and drop the SET). Refuse it so
             // the author resolves the intent. NOTE the createRole-vs-alterRole
             // asymmetry below: createRole's search_path push carries a RESET `down`
@@ -361,8 +361,8 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 });
             }
             // An `alterRole` carrying NEITHER a `setSearchPath` nor an explicit
-            // `resetSearchPath` has no instruction. Fail CLOSED (vendor review
-            // LOW-5): an instruction-less alter must NOT silently fabricate a
+            // `resetSearchPath` has no instruction. Fail CLOSED:
+            // an instruction-less alter must NOT silently fabricate a
             // destructive `RESET search_path` (which would wipe a role's pinned
             // search_path the author never asked to touch).
             let up = if reset_search_path.unwrap_or(false) {
@@ -383,7 +383,7 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement { name: format!("drop_role_{name}"), up, down: None }]
         }
         Op::DropOwnedBy { roles } => {
-            // Validate BEFORE the map+join (SA-15): an empty list and the reserved
+            // Validate BEFORE the map+join: an empty list and the reserved
             // `PUBLIC` pseudo-role (`DROP OWNED BY PUBLIC` errors at apply) are both
             // refused fail-closed rather than rendered into an apply-time failure.
             if roles.is_empty() {
@@ -529,8 +529,8 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             let returns = type_ref_sql(returns, "createFunction.returns")?;
             // The raw `body` is embedded VERBATIM inside a `$zsfn$ … $zsfn$` dollar
             // tag; the WHOLE statement is `pg_query`-parsed + deny-scanned by the
-            // guard at the lower seam (vendor spec §3.3). The tag is chosen to not
-            // collide with the body (SA-14) — a body literally containing `$zsfn$`
+            // guard at the lower seam. The tag is chosen to not
+            // collide with the body — a body literally containing `$zsfn$`
             // would otherwise terminate the quote early.
             let tag = function_body_dollar_tag(body);
             let up = format!(

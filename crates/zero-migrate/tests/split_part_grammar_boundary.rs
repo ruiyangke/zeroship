@@ -1,4 +1,4 @@
-//! PR6b — the two-list separation (§9): `instr` is added to the SQLite AUTHORIZER
+//! The two-list separation: `instr` is added to the SQLite AUTHORIZER
 //! allow-list ONLY (for the engine's pinned `splitPart` lowering), NOT to the
 //! portable-expression grammar a creator authors against. So a creator-authored
 //! raw `instr` / `substr` / `split_part` named function is REJECTED at IR load
@@ -39,7 +39,7 @@ fn registry() -> std::collections::BTreeMap<String, String> {
 /// EITHER dialect. There is no raw escape: an author cannot name `instr` even
 /// though the engine's own lowering uses it (the two lists are distinct). NB:
 /// `substr`/`replace` are NO LONGER in this list — they are now first-class
-/// portable `ScalarFn`s (§3.4), so a `fnCall` naming them loads fine.
+/// portable `ScalarFn`s, so a `fnCall` naming them loads fine.
 #[test]
 fn raw_split_funcs_rejected_at_load_both_dialects() {
     for raw_fn in ["instr", "split_part"] {
@@ -82,7 +82,7 @@ fn in_envelope_split_part_helper_accepted() {
 }
 
 /// An OUT-of-envelope `FnSynth(splitPart)` is rejected on the SQLite leg
-/// (EXPR_NOT_PORTABLE) but loads on PG — the §2.4.1 dialect-gated verdict, now at
+/// (EXPR_NOT_PORTABLE) but loads on PG — the dialect-gated verdict, now at
 /// its expression level for splitPart (multi-char delim).
 #[test]
 fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
@@ -101,14 +101,14 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
     );
 }
 
-/// HIGH (PR6b code-critic): the RENDER-path companion to the load-only test above.
+/// The RENDER-path companion to the load-only test above.
 /// The grammar test proved an out-of-envelope splitPart LOADS on PG; this proves it
 /// actually LOWERS to native `split_part(col, 'delim', n)` on a Postgres target
-/// (the `dialect_scope=PgOnly` escape, §2.4.1/§9) instead of hard-erroring at
+/// (the `dialect_scope=PgOnly` escape) instead of hard-erroring at
 /// render — and that the SAME node still rejects at lower on a SQLite target.
 #[test]
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
-    // multi-char delimiter, the §9 grammar-boundary example.
+    // multi-char delimiter, the grammar-boundary example.
     let set = BTreeMap::from([("x".to_string(), IrValue::Expr(split("v", ", ", 1)))]);
     let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None)
         .expect("out-of-envelope splitPart must LOWER to native split_part on PG");

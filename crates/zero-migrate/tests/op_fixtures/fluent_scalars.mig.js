@@ -1,4 +1,4 @@
-// op.* migration fixture — the typed-scalar AUTHORING ergonomics (§3.5): a
+// op.* migration fixture — the typed-scalar AUTHORING ergonomics: a
 // branded `decimal()` value and a `Uint8Array` passed through the FLUENT insert / column default,
 // authored via the SOLE public `table()` entry. The builder MUST normalize them
 // into the closed `IrScalar` WIRE carriers before recording:

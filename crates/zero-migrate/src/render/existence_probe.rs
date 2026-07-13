@@ -1,9 +1,8 @@
-//! **PR10 Part B** — executor-side existence-guard catalog probe (§2.7).
+//! Executor-side existence-guard catalog probe.
 //!
-//! PR10 (Part A) shipped the existence-guard IR/JS SHAPE in `ir_version 2`
-//! (`ExistenceGuard::{IfNotExists,IfExists}` on every DDL op) but DEFERRED guard
-//! EXECUTION — every guarded op was REFUSED fail-closed at lower. This module is
-//! the execution: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
+//! The existence-guard IR/JS SHAPE (`ExistenceGuard::{IfNotExists,IfExists}` on
+//! every DDL op) is carried in `ir_version 2`. This module is the guard
+//! EXECUTION: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
 //! onto each lowered [`Migration`](crate::model::migration::Migration); at apply time the
 //! executor reads the LIVE catalog under the ALREADY-HELD project advisory lock +
 //! the open per-step transaction, and [`decide`] returns a [`GuardVerdict`]:
@@ -549,7 +548,7 @@ fn decide_constraint(
                     if live_con.definition.is_empty() { "<present>" } else { &live_con.definition },
                 );
             }
-            // **MED finding (fail-closed over a catalog-exposed divergence).** With NO
+            // Fail-closed over a catalog-exposed divergence. With NO
             // byte-comparable declared definition (the stand-alone `addConstraint
             // ifNotExists` path), a same-name + same-kind constraint is NOT a
             // SatisfiedNoop: the live `pg_get_constraintdef` definition cannot be
@@ -805,11 +804,11 @@ mod tests {
 
     #[test]
     fn table_ifnotexists_sqlite_text_affinity_reruns_idempotent_noop() {
-        // **F1 — the createTable Table leg is presence + affinity only.** A guarded
+        // The createTable Table leg is presence + affinity only. A guarded
         // createTable re-run over a table THIS engine made: the declared `timestamp
         // with time zone` (date) / `text` columns fold to the SQLite `text` affinity
         // and MATCH the live `text` affinity → SatisfiedNoop (idempotent re-run), NOT
-        // a false `timestamp with time zone != text` drift and NOT an H1 fail-closed.
+        // a false `timestamp with time zone != text` drift and NOT a fail-closed.
         let probe = GuardProbe::Table {
             schema: "app".into(),
             table: "events".into(),
@@ -919,7 +918,7 @@ mod tests {
         }
     }
 
-    // -- Constraint ifNotExists (MED finding) ------------------------------
+    // -- Constraint ifNotExists ------------------------------
 
     fn constraint(name: &str, kind: &str, definition: &str) -> ConstraintSnapshot {
         ConstraintSnapshot {
@@ -964,7 +963,7 @@ mod tests {
 
     #[test]
     fn constraint_ifnotexists_present_same_kind_fails_definition_not_noop() {
-        // MED finding: a same-name + same-kind constraint must NOT be SatisfiedNoop
+        // A same-name + same-kind constraint must NOT be SatisfiedNoop
         // — the live pg_get_constraintdef body cannot be proven equal to the IR's
         // un-normalized constraint, so a possibly-divergent CHECK/FK is refused.
         let probe = GuardProbe::Constraint {
@@ -1146,7 +1145,7 @@ mod tests {
 
     #[test]
     fn normalize_fk_definition_quoted_dotted_schema_keeps_dotfree_table() {
-        // **LOW (latent-invariant pin)** — the rsplit('.') table extraction is safe
+        // Latent-invariant pin — the rsplit('.') table extraction is safe
         // ONLY because the referenced TABLE segment is dot-free post-validation
         // (`validate_ident` rejects dots; `reject_cross_app_ref` rejects dotted FK
         // targets). The qualifier ahead of it may itself be quoted, but the FINAL

@@ -1,5 +1,5 @@
-// op.* migration fixture — `insert { onConflict }` (the PG-only upsert facet,
-// §PR6a / §9). Authored via the fluent table() surface. This pins the `onConflict`
+// op.* migration fixture — `insert { onConflict }` (the PG-only upsert facet).
+// Authored via the fluent table() surface. This pins the `onConflict`
 // wire shape on `Op::Insert` and is the corpus member behind the op-level PG-only
 // portability boundary: the IDENTICAL `.ir.json` LOADS on BOTH dialects (the load
 // gate / structural `validate_op` does NOT inspect `Op::Insert.onConflict`), then

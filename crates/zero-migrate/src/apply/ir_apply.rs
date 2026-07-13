@@ -1,10 +1,10 @@
-//! **PR7 online-rename go-live SEAM — SQLite leg (engine-wired, deploy-handler
+//! **Online-rename go-live SEAM — SQLite leg (engine-wired, deploy-handler
 //! deferred; NOT an end-to-end production path).** The library entry point that
 //! applies a bundle's `.ir.json` creator artifacts against a **SQLite** backend —
 //! the SQLite peer of control's PG `apply_bundle_ir_migrations`
 //! (`crates/control/src/deploy_migrate.rs`).
 //!
-//! TRUTH-IN-LABELING (code-critic Q3). This is engine/library-level wiring, NOT a
+//! TRUTH-IN-LABELING. This is engine/library-level wiring, NOT a
 //! deployable rename. There is NO production caller: the SQLite rename path is
 //! **structurally test-only** — a production caller derives descriptors from
 //! `registerModel` = the POST-deploy desired schema, in which the rename's PRE-rename
@@ -14,13 +14,13 @@
 //! PRODUCTION-WIRING TODO below). The test-only status is LOAD-BEARING and pinned by
 //! the control interlock regression
 //! (`production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`):
-//! wiring this before the §2.0.3 cross-deploy pending-contract interlock is
+//! wiring this before the cross-deploy pending-contract interlock is
 //! persisted/enforced would open a real hazard.
 //!
-//! Before PR7 there was NO production/dev path that built a SQLite-dialect
+//! Previously there was NO production/dev path that built a SQLite-dialect
 //! [`LiveSchema`] (the `table_snapshots` + `sqlite_schemas` SDK-`Value` facts a
 //! SQLite `renameColumn` rebuild needs), so a SQLite-targeted IR rename was
-//! engine-proven (PR2 unit + temp-file e2e) but never go-live-wired: it failed
+//! engine-proven but never go-live-wired: it failed
 //! closed before lowering. This module wires the SEAM (engine library surface); the
 //! deploy-handler call site is deferred to the SQLite go-live wave (TODO below).
 //!
@@ -260,7 +260,7 @@ pub enum SqliteIrApplyError {
     /// invalid field/type token rejected at the author boundary).
     #[error("build SQLite live schema: {0}")]
     LiveSchema(#[source] DeclarativeError),
-    /// **PR9b** — reading the live SQLite catalog (`sqlite_master` + PRAGMA) to source
+    /// reading the live SQLite catalog (`sqlite_master` + PRAGMA) to source
     /// the rename rebuild's PRE-rename column facts failed
     /// ([`apply_bundle_ir_sqlite_catalog`] via [`LiveSchema::from_sqlite_catalog`]).
     #[error("read SQLite catalog for live facts: {0}")]
@@ -284,7 +284,7 @@ pub enum SqliteIrApplyError {
 }
 
 /// Apply a bundle's `.ir.json` creator artifacts against a **SQLite** backend
-/// (§2.6.2 SQLite leg). Discovers `*.ir.json` files in `migrations_dir`
+/// Discovers `*.ir.json` files in `migrations_dir`
 /// (version-ordered by filename), builds the SQLite-dialect [`LiveSchema`] from the
 /// app's `descriptors`, then for each file runs the fail-closed load + guard lower
 /// (`IrAuthor::load_and_lower_guarded`, SQLite dialect) and applies the resulting
@@ -360,25 +360,25 @@ pub async fn apply_bundle_ir_sqlite(
     // `sqlite_master` read can't recover). The descriptor set plays TWO DISTINCT roles
     // here, and they have OPPOSITE state requirements — do not conflate them:
     //
-    //   (A) OWNERSHIP / FK-INLINE REGISTRY — the union END-STATE. Every table any file
-    //       in this directory creates or references is present in the descriptor set
-    //       (the union of all member apps' registerModel schemas), so the ownership +
-    //       inline-FK registry is complete from the start and needs NO per-file advance
-    //       (unlike the PG path, which discovers tables per file from a live catalog).
+    // (A) OWNERSHIP / FK-INLINE REGISTRY — the union END-STATE. Every table any file
+    // in this directory creates or references is present in the descriptor set
+    // (the union of all member apps' registerModel schemas), so the ownership +
+    // inline-FK registry is complete from the start and needs NO per-file advance
+    // (unlike the PG path, which discovers tables per file from a live catalog).
     //
-    //   (B) RENAME COLUMN FACTS — the PRE-rename LIVE shape. A SQLite `renameColumn`
-    //       lowers to a 12-step REBUILD that reads the live `from` column off
-    //       `table_snapshots`/`sqlite_schemas` to author the post-rename CREATE +
-    //       value-copy. So for a rename, the descriptor set MUST carry the table's
-    //       PRE-rename column facts (the `from` column must be PRESENT). A descriptor
-    //       set derived from the app's registerModel = the POST-deploy DESIRED schema
-    //       (post-rename: only `to` exists, `from` is gone) makes the rebuild author
-    //       FAIL CLOSED (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`) — no
-    //       data loss, but the rename is un-runnable from a post-rename descriptor set.
-    //       The production SQLite wiring wave (see the module-level TODO) MUST source
-    //       these PRE-rename column facts from a real pre-deploy SQLite-catalog/snapshot
-    //       read (the SDK-Value facets reconstructed at deploy start), OR carry the
-    //       pre-rename column in the IR — NOT from the post-deploy desired descriptor set.
+    // (B) RENAME COLUMN FACTS — the PRE-rename LIVE shape. A SQLite `renameColumn`
+    // lowers to a 12-step REBUILD that reads the live `from` column off
+    // `table_snapshots`/`sqlite_schemas` to author the post-rename CREATE +
+    // value-copy. So for a rename, the descriptor set MUST carry the table's
+    // PRE-rename column facts (the `from` column must be PRESENT). A descriptor
+    // set derived from the app's registerModel = the POST-deploy DESIRED schema
+    // (post-rename: only `to` exists, `from` is gone) makes the rebuild author
+    // FAIL CLOSED (`RenameNeedsLiveColumn` / `SqliteRenameNeedsLiveTable`) — no
+    // data loss, but the rename is un-runnable from a post-rename descriptor set.
+    // The production SQLite wiring wave (see the module-level TODO) MUST source
+    // these PRE-rename column facts from a real pre-deploy SQLite-catalog/snapshot
+    // read (the SDK-Value facets reconstructed at deploy start), OR carry the
+    // pre-rename column in the IR — NOT from the post-deploy desired descriptor set.
     //
     // Consequently a multi-file deploy whose LATER file depends on an INTERMEDIATE
     // structural state produced by an EARLIER file in the SAME directory is NOT
@@ -418,7 +418,7 @@ pub async fn apply_bundle_ir_sqlite(
     .await
 }
 
-/// **PR9b — the PRODUCTION SQLite IR-deploy entry (catalog-sourced live facts).**
+/// The PRODUCTION SQLite IR-deploy entry (catalog-sourced live facts).
 /// The faithful peer of the PG `apply_bundle_ir_migrations`: it sources the rename
 /// rebuild's PRE-rename column facts from a REAL pre-deploy SQLite-catalog read
 /// (`LiveSchema::from_sqlite_catalog`), so a production caller — which naturally
@@ -427,11 +427,11 @@ pub async fn apply_bundle_ir_sqlite(
 /// hand-fed pre-rename descriptor set:
 ///
 /// - the live `from` column (+ the whole live table shape) for the value-copy comes
-///   from the live catalog (`table_snapshots`), NOT the descriptors;
+/// from the live catalog (`table_snapshots`), NOT the descriptors;
 /// - the post-rename SDK `Value` for the new-table CREATE comes from the `descriptors`
-///   (the desired `to` field, with FULL facets — no lossy catalog reconstruction);
+/// (the desired `to` field, with FULL facets — no lossy catalog reconstruction);
 /// - the rebuild author pairs them (a rename preserves facets, so the desired `to`
-///   facets ARE the live `from` facets).
+/// facets ARE the live `from` facets).
 ///
 /// The descriptors are still the ownership-registry source (role A — the END-STATE
 /// union the IR-load gate checks). A rename whose live `from` column is genuinely

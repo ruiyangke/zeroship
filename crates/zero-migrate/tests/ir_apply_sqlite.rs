@@ -1,8 +1,8 @@
-//! §6 / §8.6 — faithful e2e for the creator `.ir.json` path on the SQLite leg,
+//! Faithful e2e for the creator `.ir.json` path on the SQLite leg,
 //! driven through the REAL fail-closed LOAD GATE + lower (`IrAuthor::load_and_lower`)
 //! and APPLIED on a real temp-file SQLite backend via the engine.
 //!
-//! This is the SQLite peer of the control-plane `deploy_migrate_test.rs` PG e2e:
+//! This is the SQLite peer of the PG deploy e2e:
 //! a valid `.ir.json` lowers + applies (the table exists, the migration journals),
 //! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
 //! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
@@ -134,7 +134,7 @@ async fn ir_json_date_column_lowers_and_applies_on_sqlite() {
     assert_eq!(rows[0][0].as_deref(), Some("TEXT"));
 }
 
-// MED (code-critic): a LEGITIMATE portable string-literal column DEFAULT whose
+// A LEGITIMATE portable string-literal column DEFAULT whose
 // value contains the substring `;\n` (and a bare `;`) must lower CLEANLY through
 // the PRODUCTION guarded path (`load_and_lower_guarded`) and APPLY on a real
 // SQLite backend — the renderer's interior `;\n` (from `DEFAULT 'a;\nb'`) must NOT
@@ -231,7 +231,7 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
 
 // HOSTILE (SQLite-specific) — an out-of-envelope `.splitPart` in a backfill
 // SET against a SQLite target is refused by the gate (EXPR_NOT_PORTABLE) BEFORE
-// any apply. `splitPart` is PG-expressible but out-of-envelope on SQLite (§9), so
+// any apply. `splitPart` is PG-expressible but out-of-envelope on SQLite, so
 // the dialect-parameterized validate refuses it fail-closed.
 #[compio::test]
 async fn ir_json_out_of_envelope_splitpart_refused_on_sqlite() {

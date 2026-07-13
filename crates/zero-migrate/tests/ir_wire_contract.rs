@@ -1,8 +1,8 @@
-//! Wave-A contract-strictness regression suite (code-critic findings).
+//! Contract-strictness regression suite.
 //!
-//! These tests pin the FROZEN `.ir.json` wire contract before the JS `op.*`
-//! builder (Wave E) is written against it. Each test is RED against the
-//! pre-fix Wave-A code and GREEN after:
+//! These tests pin the FROZEN `.ir.json` wire contract the JS `op.*`
+//! builder is written against. Each test is RED against the
+//! pre-fix code and GREEN after:
 //!
 //! - **wire casing** — the op-region (every `Op` struct-variant field, the
 //!   constraint/index/batch/expr-AST/coltype operands) is camelCase, matching
@@ -25,7 +25,7 @@
 //! - **property A (no raw SQL)** — `createIndex.where` + `setColumnType.using`
 //!   are closed `Expr` AST nodes (not raw SQL strings), and `createIndex.using`
 //!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
-//!   out-of-set method is rejected at load (code-critic HIGH + MED).
+//!   out-of-set method is rejected at load.
 
 use zero_migrate::model::ir::{CanonicalOpList, IndexElement, IrScalar, MigrationIr, Op};
 use zero_migrate::EXPR_INVALID_NUMERIC;
@@ -36,7 +36,7 @@ use zero_migrate::EXPR_INVALID_NUMERIC;
 
 #[test]
 fn drop_table_fields_are_camel_case() {
-    // **PR10** — the legacy native `if_exists`/`ifExists` boolean field is GONE; the
+    // The legacy native `if_exists`/`ifExists` boolean field is GONE; the
     // existence guard is the uniform `existenceGuard` enum (engine-synthesized via a
     // catalog probe, NOT native `IF EXISTS`). The intentional wire break.
     use zero_migrate::model::ir::ExistenceGuard;
@@ -119,11 +119,11 @@ fn fk_constraint_fields_are_camel_case_and_nested() {
 
 #[test]
 fn ir_column_facet_fields_are_camel_case() {
-    // **Migration-first P2a (MED-2)** — the two declared-only IrColumn facets are the
+    // The two declared-only IrColumn facets are the
     // FIRST multi-word op-region fields, so they are the first to actually exercise
     // the camelCase nested-field convention every sibling silently obeyed (each was
     // single-word). They MUST serialize camelCase (`idPrefix` / `vectorMetric`),
-    // matching `FieldDescriptor`'s `#[serde(rename = …)]` and the design §4 — one
+    // matching `FieldDescriptor`'s `#[serde(rename = …)]` — one
     // spelling across IR↔descriptor. And because `IrColumn` is `deny_unknown_fields`,
     // the snake_case spelling must NOT deserialize (the inverse of the bug: pre-fix
     // a camelCase `.ir.json` following the codebase convention was REJECTED).
@@ -296,7 +296,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
 
 #[test]
 fn migration_ir_envelope_stays_snake_case() {
-    // The envelope + flags keep snake_case per the §2.3 normative example.
+    // The envelope + flags keep snake_case per the normative example.
     let json = r#"{"ir_version":1,"name":"n","owner_app":"app_x","ops":[],
         "flags":{"requires_approval":true,"engine_goodie_ddl":false},
         "depends_on":["mig_a"],"supersedes":[],"preconditions":[]}"#;
@@ -426,7 +426,7 @@ fn structural_ints_below_2pow53_accepted() {
 }
 
 /// The `SafeU64` JSON Schema MUST carry the same `< 2^53` upper bound the Rust
-/// deserializer enforces (code-critic MED): `batchSize`/`limit`/`timeout_ms` are
+/// deserializer enforces: `batchSize`/`limit`/`timeout_ms` are
 /// exactly the JS-safe-integer boundary `SafeU64` exists to police, and the
 /// schemars schema is the single source a JS best-effort hint validates against.
 /// Without `maximum`, a schema-driven JS validator would ACCEPT a `2^53` count
@@ -486,7 +486,7 @@ fn invalid_base64_bytes_is_rejected() {
 }
 
 // ----------------------------------------------------------------------------
-// Closed expression-AST wire contract (§3.3.1) — no raw template; unknown node
+// Closed expression-AST wire contract — no raw template; unknown node
 // tag rejected at load.
 // ----------------------------------------------------------------------------
 
@@ -514,7 +514,7 @@ fn expr_ast_is_camel_case_and_round_trips() {
 fn unknown_expr_node_tag_is_rejected_at_load() {
     use zero_migrate::model::expr::Expr;
     // A hand-crafted IR carrying an unknown AST node tag (`subquery`) — not in the
-    // closed set — must fail to deserialize (the §3.3.1.1 "UNSUPPORTED kind:expr
+    // closed set — must fail to deserialize (the "UNSUPPORTED kind:expr
     // at load" obligation: an unknown node simply cannot parse).
     let json = r#"{"node":"subquery","sql":"SELECT 1"}"#;
     let err = serde_json::from_str::<Expr>(json).unwrap_err();
@@ -537,7 +537,7 @@ fn expr_node_with_unknown_field_is_rejected() {
 
 // ----------------------------------------------------------------------------
 // property A (no raw SQL) — createIndex.where / .using are NOT raw strings
-// (code-critic HIGH + MED: the partial-index predicate must be a closed Expr
+// (the partial-index predicate must be a closed Expr
 // AST, and the index method must be a closed enum — never a raw SQL string).
 // ----------------------------------------------------------------------------
 
@@ -692,8 +692,8 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
     // downstream checksum) is determined by the payload, not the source
     // spelling. NB: the decoder is STRICT (`BASE64_STANDARD.decode`) — a
     // non-canonical encoding is REJECTED at load rather than normalized (a
-    // defensible, deterministic choice; see the code-critic LOW finding that
-    // this test's old name over-promised "normalizes non-canonical").
+    // defensible, deterministic choice; this test's old name over-promised
+    // "normalizes non-canonical").
     let canonical: IrScalar = serde_json::from_str(r#"{"bytes":"AAEC"}"#).unwrap();
     // re-serialize must be canonical base64
     let reser = serde_json::to_string(&canonical).unwrap();
@@ -712,19 +712,19 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
 }
 
 // ----------------------------------------------------------------------------
-// Absent-optional canonicalization (code-critic HIGH): an unset Option field is
+// Absent-optional canonicalization: an unset Option field is
 // OMITTED on the wire, never emitted as `"field":null`. This is the
 // cross-impl-determinism invariant: an idiomatic JS builder drops `undefined`
 // keys (`JSON.stringify` omits them), so a Rust serialization that emitted
 // explicit nulls would fold a DIFFERENT byte image into `Checksum::of_ir` than
 // the JS side for the SAME logical migration — breaking the single-artifact /
-// single-checksum invariant (items 2 & 10). These tests are RED before the
+// single-checksum invariant. These tests are RED before the
 // `skip_serializing_if = "Option::is_none"` fix and GREEN after.
 // ----------------------------------------------------------------------------
 
 #[test]
 fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
-    // **#173** — `vectorMetric` + `mask` are now CARRIED on `Op::AddColumn` (a vector /
+    // `vectorMetric` + `mask` are now CARRIED on `Op::AddColumn` (a vector /
     // masked ADD COLUMN is meaningful), so a wire `addColumn` declaring them DESERIALIZES
     // cleanly. `idPrefix` STAYS create-only: an added column is never the system PK, so
     // `Op::AddColumn` deliberately has NO `idPrefix` slot — a hand-crafted `.ir.json`
@@ -741,7 +741,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
          facet, no slot), got: {id_err}"
     );
 
-    // vectorMetric on addColumn: now ACCEPTED (the #173 slot) and round-trips.
+    // vectorMetric on addColumn: now ACCEPTED and round-trips.
     let metric_op: Op = serde_json::from_str(
         r#"{"op":"addColumn","table":"t","column":"x","type":{"vector":{"vector":8}},"vectorMetric":"cosine"}"#,
     )
@@ -755,7 +755,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
         other => panic!("expected AddColumn, got {other:?}"),
     }
 
-    // mask on addColumn: now ACCEPTED (the #174 slot) and round-trips.
+    // mask on addColumn: now ACCEPTED and round-trips.
     let mask_op: Op = serde_json::from_str(
         r#"{"op":"addColumn","table":"t","column":"ssn","type":"text","mask":{"kind":"last4","classification":"spi"}}"#,
     )
@@ -1026,7 +1026,7 @@ fn expr_case_omits_absent_else() {
 #[test]
 fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
     // The portable single-checksum invariant across the JS and Rust front doors
-    // (code-critic HIGH, items 2 & 10): a JS builder emits ops with UNSET
+    // a JS builder emits ops with UNSET
     // optionals OMITTED. The Rust `Op` (built with `None`) must hash IDENTICALLY
     // to the same op deserialized from that idiomatic JS-shaped JSON. Before the
     // fix, the Rust side folded `"nullable":null,"default":null` while the JS

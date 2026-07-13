@@ -23,7 +23,7 @@ serde_json = { workspace = true }
 # Emits `op-ir.schema.json` (the discriminated union the JS builder targets) via
 # `schemars::schema_for!`. Sync + leaf.
 schemars = { workspace = true }
-# Strict base64 decode + canonical encode for `IrScalar::Bytes` (§2.5).
+# Strict base64 decode + canonical encode for `IrScalar::Bytes`.
 base64 = { workspace = true }
 # The canonical IR checksum (`Checksum::of_ir`) is SHA-256 over the domain-tagged
 # canonical byte encoding; typed-id encodes the migration UUID.

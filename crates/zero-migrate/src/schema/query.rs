@@ -24,7 +24,7 @@ pub enum QueryError {
     /// field reference). Carries a path-keyed message so the SDK can surface
     /// it back to the user without losing the offending input.
     InvalidIdent(String),
-    /// **P7 PR 1** — creator declared a field whose name collides with one
+    /// Creator declared a field whose name collides with one
     /// of the seven platform-managed system fields (`id`, `created_at`,
     /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
     /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
@@ -34,9 +34,9 @@ pub enum QueryError {
     /// (`db.users.find({ id: ... })` is the canonical query shape); the
     /// fence only fires on declaration paths (`field_to_column`).
     ReservedSystemFieldName(String),
-    /// **P7 PR 4** — creator UPDATE patch attempted to overwrite one of
+    /// Creator UPDATE patch attempted to overwrite one of
     /// the three write-once system fields (`id`, `created_at`,
-    /// `created_by`). These are auto-populated at INSERT (PR 3) and
+    /// `created_by`). These are auto-populated at INSERT and
     /// immutable thereafter. The carried string names the offending
     /// field for the SDK error envelope. Distinct from
     /// `ReservedSystemFieldName` (which fires only at declaration
@@ -581,7 +581,7 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// **P5.5 PR 1** — true for top-level schema keys that carry
+/// True for top-level schema keys that carry
 /// metadata rather than a field declaration (e.g. `"_meta"`,
 /// `"_indexes"`). These keys are produced by the SDK normaliser
 /// or appear in test schemas; they MUST be skipped before the
@@ -595,7 +595,7 @@ pub fn is_schema_metadata_key(key: &str) -> bool {
     matches!(key, "_meta" | "_indexes")
 }
 
-/// **P5.5 PR 1** — taxonomy of reserved name shapes the platform
+/// Taxonomy of reserved name shapes the platform
 /// enforces on creator-declared field names.
 ///
 /// Three match arms cover the patterns we currently reserve:
@@ -604,11 +604,11 @@ pub fn is_schema_metadata_key(key: &str) -> bool {
 /// - `Suffix(s)` — refuse any field name ending with `s`.
 ///
 /// The `_masked` suffix is reserved for sibling columns auto-emitted
-/// by the platform's `.mask()` / `.encrypted()` machinery (Path B,
-/// PR 2 onwards). The six default classifications
+/// by the platform's `.mask()` / `.encrypted()` machinery (Path B).
+/// The six default classifications
 /// (`public`/`pii`/`spi`/`phi`/`pci`/`internal`) are reserved as
 /// exact names so creator schemas cannot collide with the
-/// classification taxonomy used by audit + authorization (PR 4).
+/// classification taxonomy used by audit + authorization.
 pub(crate) enum ReservedName {
     /// Literal name match — refuse a field named exactly `&str`.
     Exact(&'static str),
@@ -618,10 +618,10 @@ pub(crate) enum ReservedName {
     Suffix(&'static str),
 }
 
-/// **P7 PR 1** — the seven platform-managed system fields.
+/// The seven platform-managed system fields.
 ///
-/// Every creator table receives these at CREATE TABLE time (PR 2 wires
-/// that); creators cannot declare their own field with any of these
+/// Every creator table receives these at CREATE TABLE time;
+/// creators cannot declare their own field with any of these
 /// names. Filter-time use is unrestricted — `db.users.find({ id: "..." })`
 /// is the canonical query shape.
 ///
@@ -663,16 +663,16 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     ReservedName::Prefix("__zero_migrate_"),
     ReservedName::Prefix("__zero_migrate_"),
     ReservedName::Prefix("sqlite_"),
-    // **P5.5 PR 1** — masked-column sibling suffix. The platform
+    // Masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
     // declare a column ending in `_masked` themselves. Refused at
     // both schema-registration time (in `field_to_column`) and
     // filter-time (so `db.users.find({ ssn_masked: ... })` is
     // refused with the same code path).
     ReservedName::Suffix("_masked"),
-    // **P5.5 PR 1** — six default-classification names. Reserved at
+    // Six default-classification names. Reserved at
     // the column-name level so creator schemas can't accidentally
-    // collide with the classification taxonomy (used by PR 4
+    // collide with the classification taxonomy (used by
     // authorization + audit). Matches the SDK's `Classification`
     // union.
     ReservedName::Exact("public"),
@@ -694,14 +694,14 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
 /// that whole class.
 ///
-/// **P5.5 PR 1** — also refuses any field name matching the
+/// Also refuses any field name matching the
 /// [`RESERVED_NAMES`] table (platform suffixes / prefixes / exact
 /// names). The `_masked` suffix is reserved for Path B sibling
 /// columns; the six default-classification names (`public`, `pii`,
 /// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
 /// level.
 ///
-/// **P7 PR 1** — note this function does NOT fence the seven
+/// Note this function does NOT fence the seven
 /// system-field names (`id`, `created_at`, `updated_at`, `created_by`,
 /// `updated_by`, `version`, `deleted_at`). Those names are reserved
 /// only at SCHEMA-DECLARATION time, not at filter time —
@@ -732,7 +732,7 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
             "invalid field name: {name} (allowed: ASCII alphanumeric + underscore)"
         )));
     }
-    // **P5.5 PR 1** — reserved-name check. Run after the ASCII
+    // Reserved-name check. Run after the ASCII
     // allowlist so a name like `"café"` reports the encoding error
     // (not a spurious reserved-name hit on a bogus suffix match).
     for reserved in RESERVED_NAMES {
@@ -766,7 +766,7 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// **P7 PR 1** — declaration-time wrapper around [`validate_field_name`]
+/// Declaration-time wrapper around [`validate_field_name`]
 /// that additionally fences the seven platform-managed system field
 /// names ([`SYSTEM_FIELD_NAMES`]).
 ///
@@ -802,7 +802,7 @@ pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError>
 /// `sdks/db/src/types.ts`).
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
-/// **P7** — validate a creator-declared typed-id prefix (`t.id("blog")`).
+/// Validate a creator-declared typed-id prefix (`t.id("blog")`).
 ///
 /// Defense-in-depth mirror of the SDK-side check in
 /// the db SDK types: the SDK throws at `pnpm dev` build time, but
@@ -957,7 +957,7 @@ pub enum SqliteEmitScope {
 
 // pub (not pub): external consumer tests/integration.rs calls this via glob import.
 //
-// **P7 PR 2** — PG-flavoured shim around
+// PG-flavoured shim around
 // [`build_create_table_with_fks_for_dialect`]. Every existing call site
 // (orchestrator `register_model::plan`, integration tests, internal
 // query helpers) stays on this signature; the dialect-aware emitter
@@ -971,7 +971,7 @@ pub fn build_create_table_with_fks(
     build_create_table_with_fks_for_dialect(app_id, collection, schema, fk_emit, SqlDialect::Postgres)
 }
 
-/// **P7 PR 2** — dialect-aware CREATE TABLE emitter.
+/// Dialect-aware CREATE TABLE emitter.
 ///
 /// Prepends the seven platform-managed system fields
 /// ([`SYSTEM_FIELD_NAMES`]) before any user-declared columns and
@@ -991,8 +991,8 @@ pub fn build_create_table_with_fks(
 ///   `/* zero-migrate:mask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
-/// The `id TEXT PRIMARY KEY` is identical on both backends. **P7 PR 3**
-/// cascades the FK column type to `TEXT` so ref columns match the new
+/// The `id TEXT PRIMARY KEY` is identical on both backends. The FK
+/// column type cascades to `TEXT` so ref columns match the new
 /// PK type — see [`def_to_pg_type`].
 pub fn build_create_table_with_fks_for_dialect(
     app_id: &str,
@@ -1096,7 +1096,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
-            // **P5.5 PR 1** — skip top-level metadata keys (e.g.
+            // Skip top-level metadata keys (e.g.
             // `_meta`, `_indexes`). The `_` prefix is reserved for
             // synthetic-result columns at the field-name level
             // (`validate_field_name`), so these keys would otherwise
@@ -1105,7 +1105,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             if is_schema_metadata_key(field) {
                 continue;
             }
-            // **P7** — `id: t.id("prefix")` is a PREFIX DECLARATION for
+            // `id: t.id("prefix")` is a PREFIX DECLARATION for
             // the system `id` PK column already emitted by
             // `build_system_field_columns`, NOT a second column. Skip it
             // so we neither duplicate the `id` column nor trip the
@@ -1124,7 +1124,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             let col_def = field_to_column_for_dialect(field, def, dialect)?;
             columns.push(col_def);
 
-            // **P5.5 PR 2** — Path B sibling-column emission. When the
+            // Path B sibling-column emission. When the
             // field carries a `.mask({...})` declaration (or the
             // auto-default mask attached to `t.encrypted(...)` columns)
             // AND the mask kind is NOT `"none"`, emit a sibling
@@ -1134,17 +1134,16 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // The sibling stores the pre-computed masked representation
             // (e.g. `"***-**-6789"`) computed at INSERT/UPDATE time by
             // `crud::mask_pass::apply_mask_on_write`. Reads default to
-            // the sibling (PR 3 flips the read path); writes dual-bind
-            // both columns atomically (PR 2 SQL builder change).
+            // the sibling; writes dual-bind both columns atomically.
             //
-            // The sibling type is `TEXT` for every PR 2 mask kind
+            // The sibling type is `TEXT` for every mask kind
             // (full / last4 / first4 / email / name / dateYear /
             // dateDecade) — the union of mask outputs is string-shaped.
             // Future BYTEA-shaped masks would extend this with a per-
             // kind type lookup.
             //
             // Explicit `.mask({ kind: "none" })` opt-out → no sibling
-            // emission. The P5 decrypt-on-read path continues to serve
+            // emission. The decrypt-on-read path continues to serve
             // such columns; the parent column is the only storage site.
             if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
                 // `_masked` suffix is platform-reserved
@@ -1152,7 +1151,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 // forbids creator-declared columns ending in
                 // `_masked`); no collision possible.
                 //
-                // **P5.5 PR 6** — attach a `/* zero-migrate:mask:kind=…,
+                // Attach a `/* zero-migrate:mask:kind=…,
                 // classification=… */` inline comment to the sibling
                 // DDL so the SQLite introspector can recover the mask
                 // metadata from `sqlite_master.sql`. PG ignores SQL
@@ -1171,7 +1170,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 ));
             }
 
-            // B2 — append FOREIGN KEY clause when this is a ref. Inline
+            // Append FOREIGN KEY clause when this is a ref. Inline
             // FK clauses live in the same CREATE TABLE statement as the
             // column, after the column definition.
             if def.get("type").and_then(|t| t.as_str()) == Some("ref") {
@@ -1196,7 +1195,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 }
             }
 
-            // C2 — per-variant CHECK constraints for a flat-expanded
+            // Per-variant CHECK constraints for a flat-expanded
             // discriminated union. The SDK tags the discriminator
             // column with `discriminator: "__discriminator__"` and
             // attaches the full `variants` map; we emit one CHECK per
@@ -1217,12 +1216,12 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         }
     }
 
-    // **P7 PR 2** — `created_at` / `updated_at` are emitted as part of
+    // `created_at` / `updated_at` are emitted as part of
     // the seven system-field prefix at the top of `columns`; the
     // legacy trailing emission is gone. See `build_system_field_columns`
     // for the canonical declaration order.
 
-    // **P7 PR 2** — defensive last-line-of-defence assertion. The
+    // Defensive last-line-of-defence assertion. The
     // declaration-time validator in `field_to_column` (via
     // `validate_field_name_for_declaration`) already rejects creator
     // schemas that declare any of the seven system-field names; the
@@ -1270,7 +1269,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     columns.extend(deferred_fks);
     columns.extend(union_checks);
 
-    // **P5.5 PR 6** — append `COMMENT ON COLUMN` statements for every
+    // Append `COMMENT ON COLUMN` statements for every
     // sibling column carrying a mask sentinel. Multi-statement SQL is
     // accepted by `pool.query_text_params` (the underlying libpq
     // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
@@ -1285,7 +1284,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         columns.join(",\n  ")
     );
 
-    // **P7 PR 2** — append the three implicit B-tree indexes
+    // Append the three implicit B-tree indexes
     // (`deleted_at`, `updated_at`, `created_by`) as semicolon-
     // separated `CREATE INDEX IF NOT EXISTS` statements. Bound 1:1
     // to the table lifecycle — emitted here so a drop-table cascade
@@ -1294,8 +1293,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     //
     // The index for `id` is not emitted (the PRIMARY KEY constraint
     // already builds an implicit unique index). The index for
-    // `version` is not emitted (per §5 of the proposal —
-    // `version` bumps on every UPDATE and an index would thrash).
+    // `version` is not emitted (`version` bumps on every UPDATE and
+    // an index would thrash).
     let system_index_stmts =
         build_system_field_indexes(app_id, collection, dialect, sqlite_scope);
 
@@ -1307,11 +1306,11 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     Ok(statements)
 }
 
-/// **P4 HALF B** — render the `COMMENT ON COLUMN … 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
+/// Render the `COMMENT ON COLUMN … 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::schema::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
-/// what the migration engine emits (HALF A) and what the runtime parser
+/// what the migration engine emits and what the runtime parser
 /// ([`crate::schema::mask_codec::parse_encryption_sentinel`], via `read_live_schema`)
 /// expects. Returns the empty vector when no column is encrypted.
 #[must_use]
@@ -1344,7 +1343,7 @@ pub fn build_encryption_sentinel_comments(
     out
 }
 
-/// **P7 PR 2** — emit the seven platform-managed system-field column
+/// Emit the seven platform-managed system-field column
 /// declarations in canonical order ([`SYSTEM_FIELD_NAMES`]).
 ///
 /// Order MUST match `SYSTEM_FIELD_NAMES`. The dialect controls
@@ -1354,24 +1353,24 @@ pub fn build_encryption_sentinel_comments(
 /// `INTEGER` affinity for `version` are dialect-identical.
 ///
 /// The `id` PK uses inline `PRIMARY KEY` (not a `CONSTRAINT ...`
-/// table-level form) — matches the convention P0 already used for
+/// table-level form) — matches the convention used for
 /// the legacy `id SERIAL PRIMARY KEY` line this replaces. The
-/// existing FK-attachment logic (B2 — `build_fk_clause`) references
+/// existing FK-attachment logic (`build_fk_clause`) references
 /// the `id` column by name, so the switch from `SERIAL` to `TEXT`
-/// is transparent to the FK emitter (FK column TYPE narrowing
-/// cascades in PR 3).
+/// is transparent to the FK emitter (the FK column TYPE narrowing
+/// cascades separately).
 fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
     renderer(dialect).system_field_columns()
 }
 
-/// **P7 PR 2** — emit the three implicit B-tree indexes the platform
+/// Emit the three implicit B-tree indexes the platform
 /// auto-creates for every new table: `deleted_at` (soft-delete
-/// filtering — PR 5), `updated_at` (cursor-paged read paths), and
+/// filtering), `updated_at` (cursor-paged read paths), and
 /// `created_by` (per-actor lookups + audit).
 ///
 /// The PK on `id` covers `id` lookups via the implicit unique index;
 /// `version` is not indexed (every UPDATE bumps it; the index would
-/// thrash). See §5 of `docs/proposals/platform-system-fields.md` for
+/// thrash). See `docs/proposals/platform-system-fields.md` for
 /// the rationale.
 ///
 /// Dialect controls the `ON` clause syntax:
@@ -1565,20 +1564,20 @@ pub fn build_add_column(
     .trim()
     .to_string();
 
-    // **P5.5 PR 6** — when the field carries a `.mask({...})`
+    // When the field carries a `.mask({...})`
     // declaration, also emit the sibling `<col>_masked TEXT NULL` ADD
     // COLUMN op and the `COMMENT ON COLUMN` sentinel attachment in the
     // same multi-statement payload. Only the sibling is NULL here
     // (versus NOT NULL on CREATE TABLE) — existing rows would refuse
-    // the ALTER if the sibling were NOT NULL; the 6a backfill flips it
+    // the ALTER if the sibling were NOT NULL; the mask backfill flips it
     // to NOT NULL after every row has its sibling populated.
     //
     // Note: this branch is taken ONLY when the diff classifier emits
     // an `AddColumn` for a fresh top-level field declared with
     // `.mask({...})` — for that case the sibling tags along in the
     // same payload. The separate `MaskBackfill`-paired
-    // `AddColumn(<col>_masked)` op the diff classifier emits for 6a
-    // sets `mask_sibling_for` in `details` and the field IS the
+    // `AddColumn(<col>_masked)` op the diff classifier emits for the
+    // backfill sets `mask_sibling_for` in `details` and the field IS the
     // sibling itself; `mask_sibling_column_for_field(sibling, def)`
     // returns `None` there because the synthetic def carries no
     // mask block. So we don't double-emit.
@@ -1599,7 +1598,7 @@ pub fn build_add_column(
 }
 
 // ---------------------------------------------------------------------------
-// Index builders for registerModel — A1 of the db proposal
+// Index builders for registerModel — see the db proposal
 // (docs/proposals/db.md). Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.
@@ -1612,10 +1611,10 @@ pub fn build_add_column(
 /// executed outside a transaction (CONCURRENTLY cannot run inside `BEGIN`).
 /// `unique` is exposed so callers can apply different recovery policies for
 /// unique-index failures (which surface `23505 unique_violation` errors that
-/// must not be retried — see proposal A1 INVALID-index recovery).
+/// must not be retried — see the proposal's INVALID-index recovery).
 ///
-/// **P4 PR 1**: `kind` carries the index *shape* — B-tree (the default for
-/// every P0-P3 call site), vector (pgvector / Rust flat-scan), full-text
+/// `kind` carries the index *shape* — B-tree (the default for
+/// every existing call site), vector (pgvector / Rust flat-scan), full-text
 /// (tsvector+GIN on PG, FTS5 on SQLite), or spatial (PostGIS GIST on PG,
 /// haversine post-filter on SQLite). The default is [`IndexKind::BTree`]
 /// so existing call sites that build B-tree indexes (`build_create_indexes`,
@@ -1632,23 +1631,22 @@ pub struct IndexSpec {
     pub unique: bool,
     /// `CREATE …` DDL ready for execution.
     pub sql: String,
-    /// Index shape — selects the backend builder branch. P4 PR 1
-    /// introduces the field; P4 PR 2-5 wire `Vector` / `Fts` /
-    /// `Spatial` dispatch through the `register_model::apply` Pass 2.
+    /// Index shape — selects the backend builder branch. `Vector` /
+    /// `Fts` / `Spatial` dispatch through the `register_model::apply` Pass 2.
     pub kind: IndexKind,
 }
 
 /// Index shape — the closed sum over the four kinds of indexes
 /// `registerModel` can materialise.
 ///
-/// **P4 PR 1** (`docs/proposals/p4-search-implementation-plan.md` §2).
-/// The default is [`IndexKind::BTree`] so every P0-P3 call site keeps
-/// the same observable behaviour; PR 2/3 wire `Vector` / `Fts` /
+/// See `docs/proposals/p4-search-implementation-plan.md`.
+/// The default is [`IndexKind::BTree`] so every existing call site keeps
+/// the same observable behaviour; `Vector` / `Fts` /
 /// `Spatial` dispatch through the `register_model::apply` Pass 2.
 ///
 /// **Why an enum, not a string**: same rationale as
 /// [`crate::schema::descriptors::VectorMetric`] — the rustc exhaustiveness check
-/// trips every match arm if a future PR adds a fifth kind, rather
+/// trips every match arm if a future change adds a fifth kind, rather
 /// than a default branch silently routing the new kind to the B-tree
 /// builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1713,8 +1711,8 @@ pub fn build_create_indexes(
 
     let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
-    // **P4 PR 3** — accumulate FTS-marked columns into a single composite
-    // index per collection (Q-P4-B from the design plan). The SDK's
+    // Accumulate FTS-marked columns into a single composite
+    // index per collection. The SDK's
     // `.fts()` per-field modifier sets `def.fts = true; def.ftsLanguage =
     // <lang>` on each text column; we collect those into one
     // `IndexSpec { kind: Fts { language } }` after the per-field loop.
@@ -1729,14 +1727,14 @@ pub fn build_create_indexes(
     let mut fts_language: Option<String> = None;
 
     for (field, def) in obj {
-        // **P5.5 PR 1** — skip top-level metadata keys (`_meta`,
+        // Skip top-level metadata keys (`_meta`,
         // `_indexes`) so the `_` reserved-prefix check in
-        // `validate_field_name` (PR 1) doesn't trip on schema
+        // `validate_field_name` doesn't trip on schema
         // bookkeeping.
         if is_schema_metadata_key(field) {
             continue;
         }
-        // **P4 PR 3** — geoPoint fields always emit an
+        // GeoPoint fields always emit an
         // `IndexKind::Spatial` spec regardless of the `index`/`unique`
         // markers. The impl builds the `USING GIST` DDL itself; the
         // `sql` field stays empty (same shape as the Vector branch).
@@ -1752,7 +1750,7 @@ pub fn build_create_indexes(
             continue;
         }
 
-        // **P4 PR 3** — collect FTS-marked text columns. A column is
+        // Collect FTS-marked text columns. A column is
         // FTS-marked when `def.fts === true`; the language defaults to
         // `english` (matches the SDK default in `t.string().fts()`).
         if def.get("fts").and_then(|v| v.as_bool()) == Some(true) {
@@ -1770,7 +1768,7 @@ pub fn build_create_indexes(
             // composite FTS index is emitted once after the loop.
         }
 
-        // **P4 PR 2** — vector fields always emit an `IndexKind::Vector`
+        // Vector fields always emit an `IndexKind::Vector`
         // spec regardless of the `index`/`unique` markers; the SDK's
         // `t.vector()` builder doesn't expose those modifiers (they
         // would be meaningless on an ivfflat-indexed column). The
@@ -1816,7 +1814,7 @@ pub fn build_create_indexes(
             continue;
         }
 
-        // **P5 PR 2** — deterministic-encrypted columns get an
+        // Deterministic-encrypted columns get an
         // automatic B-tree index. The SDK refuses range / regex / LIKE
         // on deterministic columns (only equality + `$in`), so a
         // B-tree on the ciphertext is sufficient and matches the
@@ -1851,7 +1849,7 @@ pub fn build_create_indexes(
             // (two identical-shape indexes are cheap to ignore in
             // theory, but our deterministic-name contract collapses
             // them to a single entry if both were B-tree). We rely on
-            // the caller-side scope check (Q-P5-H) to refuse
+            // the caller-side scope check to refuse
             // randomised+unique earlier; deterministic+unique is OK.
         }
 
@@ -1899,10 +1897,10 @@ pub fn build_create_indexes(
             });
         }
 
-        // **P5.5 PR 2** — auto-emit a B-tree index on the sibling
+        // Auto-emit a B-tree index on the sibling
         // `<col>_masked` column when the parent column has `.index()`
         // or `.uniqueIndex()` declared AND the field carries a mask
-        // declaration with `kind != "none"`. The sibling index lets PR 3
+        // declaration with `kind != "none"`. The sibling index lets reads
         // route equality / sort queries through the masked sibling
         // without a sequential scan. Naming: `<coll>__<col>_masked_idx`
         // (double-underscore separator, matching `named_index_name`'s
@@ -1929,8 +1927,8 @@ pub fn build_create_indexes(
         }
     }
 
-    // **P4 PR 3** — emit a single composite FTS spec covering every
-    // `.fts()`-marked column on this collection (Q-P4-B). The PG impl
+    // Emit a single composite FTS spec covering every
+    // `.fts()`-marked column on this collection. The PG impl
     // builds the `__fts tsvector` column + GIN index + trigger; the
     // `sql` field stays empty because the impl builds its own DDL.
     if !fts_cols.is_empty() {
@@ -2132,7 +2130,7 @@ fn short_hash_base32(input: &str) -> String {
     String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
 }
 
-/// **P5.5 PR 2** — return the sibling column name `<field>_masked` IFF
+/// Return the sibling column name `<field>_masked` IFF
 /// the field's schema entry carries a `.mask({...})` declaration with
 /// `kind != "none"`. Returns `None` for non-masked columns and for
 /// columns that explicitly opt out via `.mask({ kind: "none" })`.
@@ -2154,7 +2152,7 @@ pub fn mask_sibling_column_for_field(
     Some(format!("{field}_masked"))
 }
 
-/// **P5.5 PR 6** — render the canonical mask-sentinel comment payload
+/// Render the canonical mask-sentinel comment payload
 /// for a field's `.mask({...})` declaration, IFF the declaration is
 /// present AND `kind != "none"`. Returns `None` when there's no
 /// sibling to attach a sentinel to.
@@ -2181,7 +2179,7 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
     ))
 }
 
-/// **P5.5 PR 6** — render the `COMMENT ON COLUMN` statements that
+/// Render the `COMMENT ON COLUMN` statements that
 /// attach the mask sentinel to every sibling column. Returns one
 /// statement per masked field in `schema` (in declared order); the
 /// caller joins them onto the CREATE TABLE / ALTER TABLE SQL via
@@ -2229,7 +2227,7 @@ pub fn build_mask_sentinel_comments(
     out
 }
 
-/// **P5.5 PR 6** — render the `COMMENT ON COLUMN` statement for one
+/// Render the `COMMENT ON COLUMN` statement for one
 /// masked field, IFF the field has a `.mask({...})` declaration
 /// (`kind != "none"`). Used by the diff classifier's `MaskBackfill`
 /// op to attach the sentinel at the same time as the
@@ -2256,7 +2254,7 @@ pub fn build_mask_sentinel_comment_for_field(
     ))
 }
 
-/// **P4 HALF A** — render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
+/// Render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
@@ -2276,7 +2274,7 @@ pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> 
     encryption_sentinel_body_for_field(def).map(|body| format!("/* {body} */"))
 }
 
-/// **P4** — the bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
+/// The bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: [`encryption_sentinel_for_field`] wraps it in `/* */` for the inline
@@ -2309,13 +2307,13 @@ fn field_to_column_for_dialect(
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_field_name_for_declaration(field)?;
-    // **P5 PR 2** — `t.encrypted(...)`-declared columns always store the
+    // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
     //
-    // **P5 PR 3** — emit a `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` sentinel
+    // Emit a `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` sentinel
     // comment alongside the column type so the SQLite-arm introspector
     // can regex-recover the encryption metadata from `sqlite_master.sql`.
     // PG ignores SQL comments at parse time (the type is still BYTEA);
@@ -2323,10 +2321,10 @@ fn field_to_column_for_dialect(
     // type affinity treats "BYTEA" as NUMERIC (no INT/CHAR/TEXT/BLOB/
     // FLOA/REAL/DOUB substring match), which still accepts BLOB values
     // — same column shape both engines see byte-identical inserts.
-    // Sentinel-on-DDL is the same regex-on-DDL pattern P4 PR 4 used for
+    // Sentinel-on-DDL is the same regex-on-DDL pattern used for
     // vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path
-    // (Q-P5 deferred). See
-    // `docs/proposals/p5-encryption-backup-implementation-plan.md` §5.
+    // (deferred). See
+    // `docs/proposals/p5-encryption-backup-implementation-plan.md`.
     let enc_comment_owned;
     let enc_comment: &str = if let Some(body) = encryption_sentinel_for_field(def) {
         enc_comment_owned = format!(" {body}");
@@ -2356,7 +2354,7 @@ fn field_to_column_for_dialect(
 /// `vector(N)`, `geography(POINT,4326)` (geoPoint), `BYTEA`/`BLOB`
 /// (encrypted), `literal`'s primitive, and the plain B-tree types. This is
 /// the single source of truth the migration engine's declarative differ
-/// adopts (schema-authority P2): the engine builds a `def` from its
+/// adopts (schema-authority): the engine builds a `def` from its
 /// `FieldDescriptor` and calls this, so it reaches full capability
 /// (vector/encrypted/geo) by reuse rather than re-implementing — and never
 /// rejects those types again. The returned spelling is DDL (`vector(N)`,
@@ -2382,8 +2380,8 @@ fn parse_character_type_len(data_type: &str) -> Option<u64> {
     inner.parse::<u64>().ok().filter(|len| *len > 0)
 }
 
-/// C2 — emit per-variant CHECK constraints for a flat-expanded
-/// discriminated union (proposal §C2). The discriminator field carries
+/// Emit per-variant CHECK constraints for a flat-expanded
+/// discriminated union. The discriminator field carries
 /// the per-variant shape map; for each variant we emit a clause like
 /// ```sql
 /// CONSTRAINT events_kind_login_chk CHECK (
@@ -2524,26 +2522,19 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 
 /// Map schema type to PostgreSQL type.
 ///
-/// **P7 PR 3** — `ref` columns now emit `TEXT` so they match the new
-/// `id TEXT PRIMARY KEY` introduced by PR 2's system-field DDL. Pre-PR 2
-/// behaviour was `INTEGER` to match the legacy `id SERIAL PRIMARY KEY`;
-/// after PR 2 the parent PK is `TEXT` (typed_id wire format), so an
+/// `ref` columns emit `TEXT` so they match the
+/// `id TEXT PRIMARY KEY` of the system-field DDL. The parent PK is
+/// `TEXT` (typed_id wire format), so an
 /// `INTEGER` FK would fail with `column type mismatch` at FK-constraint
 /// creation time on Postgres. SQLite tolerates type mismatch (declared
 /// types are advisory) but the typed_id values inserted into a ref
 /// column are TEXT-shaped strings, so the storage class is TEXT either
 /// way.
-///
-/// This change cascades the PR 2 deferred TODO: PR 2 prepended
-/// `id TEXT PRIMARY KEY` but left `Some("ref") => "INTEGER"` because
-/// the FK-emission unit tests would have flipped from substring-pass
-/// to substring-fail without a coordinated test-fixture update. PR 3
-/// ships both halves atomically (DDL + test fixture updates).
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
         Some("char") => "TEXT",
-        // **P4 PR 2** — `t.vector(dims)` maps to pgvector's `vector(N)`.
+        // `t.vector(dims)` maps to pgvector's `vector(N)`.
         // Returning the bare `"vector"` token would lose the dims, so
         // this arm is unused; column DDL composes the dims back in via
         // [`def_to_pg_type_with_dims`]. Kept here to keep the
@@ -2559,7 +2550,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // ints.
         Some("number") => "DOUBLE PRECISION",
         Some("real") => "REAL",
-        // M1 — `int`/`integer` are first-class integer tokens (the SQLite arm of
+        // `int`/`integer` are first-class integer tokens (the SQLite arm of
         // `def_to_column_type_for_dialect` already maps them to `INTEGER`; the dev
         // `registerModel` JSON declares `{ type: "int" }`). Before this arm the PG
         // map degraded them to the `_ => TEXT` fallback, so the engine's
@@ -2577,31 +2568,31 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("bigInt") => "BIGINT",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
-        // D3 — `t.calendarDate()` is a `YYYY-MM-DD` value with no time
+        // `t.calendarDate()` is a `YYYY-MM-DD` value with no time
         // and no timezone, distinct from `t.date()` (TIMESTAMPTZ stored
         // as Unix-ms numbers at the SDK layer).
         Some("calendarDate") => "DATE",
         Some("json") => "JSONB",
-        // D2 — `t.object({...})` declares a JSONB column. The nested
+        // `t.object({...})` declares a JSONB column. The nested
         // shape is enforced application-side by `validate.ts`; no
         // CHECK constraint is emitted (Postgres JSONB CHECKs are
-        // expressible but expensive at write time, see proposal D2).
+        // expressible but expensive at write time).
         Some("object") => "JSONB",
         Some("array") => "JSONB",
         Some("textArray") => "text[]",
-        // **P7 PR 3** — cascades to TEXT so FK column type matches the
-        // `id TEXT PRIMARY KEY` PR 2 introduced. See doc-comment on
-        // [`def_to_pg_type`] for the back-compat rationale.
+        // Cascades to TEXT so FK column type matches the
+        // `id TEXT PRIMARY KEY`. See doc-comment on
+        // [`def_to_pg_type`] for the rationale.
         Some("ref") => "TEXT",
         Some("inet") => "INET",
-        // C2 — a top-level `t.union(...)` is flattened to discrete
+        // A top-level `t.union(...)` is flattened to discrete
         // columns by the SDK before it reaches the DDL emitter, so this
         // path should never fire for the discriminator column itself
         // (it has the discriminator's primitive type, not "union").
         // A *nested* `t.union(...)` (inside `t.object`) falls through
         // to JSONB storage; per-variant integrity is application-side.
         Some("union") => "JSONB",
-        // C2 — a top-level `t.literal()` field outside a union would
+        // A top-level `t.literal()` field outside a union would
         // store as TEXT/NUMERIC/BOOLEAN based on its literal type, but
         // by the time the DDL emitter sees it the SDK normaliser keeps
         // the `literal` tag. We pick the primitive type from the
@@ -2791,7 +2782,7 @@ fn def_to_constraints_for_dialect(
         parts.push(format!("CHECK ({col} <= {max})"));
     }
 
-    // C2 — standalone literal field. The value's primitive type is
+    // Standalone literal field. The value's primitive type is
     // already mapped by `def_to_pg_type`; here we attach a CHECK so the
     // column can hold only the literal value. Note this only fires for
     // a `t.literal()` used as a top-level *non-union* column — inside a
@@ -2905,20 +2896,20 @@ mod tests {
 
 
     // -----------------------------------------------------------------------
-    // **P7 PR 4** — UPDATE auto-bumps version + updated_at + updated_by
+    // UPDATE auto-bumps version + updated_at + updated_by
     //
     // The auto-bumps fire only on the new dispatch path (signalled by
     // an `actor_id` being threaded through OR by `skip_*` hints).
-    // continue to see the pre-PR-4 single-column auto-bump
+    // continue to see the single-column auto-bump
     // (`updated_at = NOW()` on PG) so the regression tests above stay
     // green.
     // -----------------------------------------------------------------------
 
 
     // -----------------------------------------------------------------------
-    // A1 — Materialised indexes (db proposal §A1).
+    // Materialised indexes (db proposal).
     //
-    // Before A1, `t.string().index()` and `t.string().unique()` set
+    // Previously, `t.string().index()` and `t.string().unique()` set
     // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced
     // no index. These tests lock the materialisation contract: every
     // marker yields a `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS …`
@@ -3227,7 +3218,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // B2 — typed cross-table relations
+    // typed cross-table relations
     // -----------------------------------------------------------------
 
     #[test]
@@ -3237,8 +3228,8 @@ mod tests {
             "authorId": {"type": "ref", "refTarget": "users"},
         });
         let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
-        // **P7 PR 3** — TEXT column for the FK (cascades to match the
-        // new `id TEXT PRIMARY KEY`; was INTEGER pre-PR 3).
+        // TEXT column for the FK (cascades to match the
+        // `id TEXT PRIMARY KEY`).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
         // Inline FK clause with SQL/Postgres defaults omitted.
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
@@ -3409,7 +3400,7 @@ mod tests {
         )
         .unwrap();
         // FK is deferred — column still present but no FOREIGN KEY clause.
-        // **P7 PR 3** — TEXT (was INTEGER pre-PR 3 cascade).
+        // TEXT (cascades to match the `id TEXT PRIMARY KEY`).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
         assert!(
             !sql.contains("FOREIGN KEY"),
@@ -3441,11 +3432,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P7 PR 3 — FK column type cascade (TEXT, was INTEGER pre-PR 3)
+    // FK column type cascade (TEXT)
     // -----------------------------------------------------------------
 
     /// `def_to_pg_type` returns TEXT for a ref field so the FK column
-    /// matches the new `id TEXT PRIMARY KEY` shape PR 2 introduced.
+    /// matches the `id TEXT PRIMARY KEY` shape.
     /// Pin via the single-arm helper so a future regression that
     /// switches the arm back to INTEGER trips here.
     #[test]
@@ -3454,7 +3445,7 @@ mod tests {
         let pg_type = super::def_to_pg_type(&def);
         assert_eq!(
             pg_type, "TEXT",
-            "ref column type must cascade to TEXT (was INTEGER pre-PR 3 — see proposal §9 PR 3)"
+            "ref column type must cascade to TEXT to match the id TEXT PRIMARY KEY"
         );
     }
 
@@ -3495,7 +3486,7 @@ mod tests {
     }
 
     /// Negative pin: NO ref column anywhere in the DDL should emit
-    /// `INTEGER` for the column type post-PR 3. A regression that
+    /// `INTEGER` for the column type. A regression that
     /// flipped the arm back would trip the `b2_create_table_with_ref_emits_inline_fk`
     /// test too, but this assertion stays independent so a future
     /// fixture-touch can't mask the regression.
@@ -3509,16 +3500,16 @@ mod tests {
             .expect("build DDL");
         // The column itself must NOT carry INTEGER. (The CONSTRAINT
         // clause text contains nothing about INTEGER, so a substring
-        // check on the whole sql is safe — pre-PR 3 the substring
+        // check on the whole sql is safe — the substring
         // `"authorId" INTEGER` was present.)
         assert!(
             !sql.contains("\"authorId\" INTEGER"),
-            "ref column must not emit INTEGER (PR 3 cascade): {sql}"
+            "ref column must not emit INTEGER (TEXT cascade): {sql}"
         );
     }
 
     // -----------------------------------------------------------------
-    // D2 — nested object validators (JSONB column)
+    // nested object validators (JSONB column)
     // -----------------------------------------------------------------
 
     #[test]
@@ -3561,7 +3552,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // D3 — calendar dates → DATE column type
+    // calendar dates → DATE column type
     // -----------------------------------------------------------------
 
     #[test]
@@ -3603,18 +3594,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // D4 — version column injected by the SDK is treated as a plain
+    // version column injected by the SDK is treated as a plain
     // INTEGER (well, NUMERIC) column at the DDL level. The SDK uses
     // model.ts to inject `version: { type: "number", default: 1 }`
     // so the DDL emission below matches.
     //
-    // **P7 PR 1** — `version` is now a reserved system-field name
+    // `version` is a reserved system-field name
     // (`SYSTEM_FIELD_NAMES`); the declaration-time validator refuses
-    // a creator-declared `version` column. PR 2 will rework
-    // `build_create_table_with_fks` to inject the seven system fields
-    // directly (not via a creator-shape entry), at which point this
-    // test transitions to asserting the system-field emission path.
-    // For PR 1 (foundation-only), the test uses a placeholder field
+    // a creator-declared `version` column. `build_create_table_with_fks`
+    // injects the seven system fields directly (not via a creator-shape
+    // entry). The test uses a placeholder field
     // name (`schema_revision`) to keep exercising the
     // `t.number().default(N)` DDL path that produces `DOUBLE PRECISION
     // ... DEFAULT 1`.
@@ -3632,7 +3621,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // C2 — discriminated union document shapes (Phase 7)
+    // discriminated union document shapes
     //
     // The SDK normalises `t.union(t.object({...}), t.object({...}))` into
     // a flat schema where each variant's fields are top-level entries
@@ -3688,7 +3677,7 @@ mod tests {
 
     #[test]
     fn c2_union_emits_per_variant_check_constraints() {
-        // Per proposal §C2, each variant gets a CHECK constraint of the
+        // Each variant gets a CHECK constraint of the
         // form: `kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`.
         let schema = c2_events_union_schema();
         let sql = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
@@ -3995,7 +3984,7 @@ mod tests {
 
     /// ASCII allowlist must accept the same shape `validate_collection`
     /// accepts: alphanumeric + underscore. `_private` was historically
-    /// accepted but P5.5 PR 1 reserves the `_` prefix for synthetic-
+    /// accepted but the `_` prefix is now reserved for synthetic-
     /// `validate_field_name_rejects_reserved_underscore_prefix` for the
     /// updated rule.
     #[test]
@@ -4018,7 +4007,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 1 — reserved-name validator
+    // reserved-name validator
     // -----------------------------------------------------------------
 
     /// emitted by `.mask()` / `.encrypted()`. Creator-declared fields
@@ -4100,7 +4089,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P7 PR 1 — platform system-field reservation (declaration-only)
+    // platform system-field reservation (declaration-only)
     // -----------------------------------------------------------------
 
     /// Each of the 7 platform-managed system field names must be refused
@@ -4137,7 +4126,7 @@ mod tests {
     /// Filter-time validation (`validate_field_name`) MUST continue to
     /// accept all 7 system field names. `db.users.find({ id: "..." })`
     /// is the canonical query shape — fencing `id` at filter time would
-    /// break the entire SDK. PR 1's reservation is declaration-only.
+    /// break the entire SDK. The reservation is declaration-only.
     #[test]
     fn system_field_names_allowed_in_filter_path() {
         for name in SYSTEM_FIELD_NAMES {
@@ -4180,7 +4169,7 @@ mod tests {
     // `code = "reserved_system_field_name"` — was relocated to the data plane's
     // `error.rs` test module as part of the schema-authority extraction.
     // `DbError` lives in the data plane (it is built on a runtime `OpError`)
-    // and cannot be named from this leaf crate. The validator
+    // and cannot be named from this schema layer. The validator
     // (`validate_field_name_for_declaration`) and the `QueryError`
     // variant it produces are tested here; the *mapping* to `DbError` is
     // tested where `DbError` lives.
@@ -4221,7 +4210,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P7 PR 2 — CREATE TABLE prepends 7 system fields + 3 auto-indexes
+    // CREATE TABLE prepends 7 system fields + 3 auto-indexes
     //
     // Tests the dialect-aware emitter
     // (`build_create_table_with_fks_for_dialect`) and the PG-flavoured
@@ -4303,7 +4292,7 @@ mod tests {
     }
 
     /// `id TEXT PRIMARY KEY` — identical on both engines. Replaces the
-    /// legacy `id SERIAL PRIMARY KEY` that P0 emitted.
+    /// legacy `id SERIAL PRIMARY KEY` previously emitted.
     #[test]
     fn create_table_emits_id_text_primary_key() {
         let schema = serde_json::json!({});
@@ -4381,7 +4370,7 @@ mod tests {
     }
 
     /// `version INTEGER NOT NULL DEFAULT 1` — identical on both
-    /// backends. Auto-bumped by CRUD updates in PR 4.
+    /// backends. Auto-bumped by CRUD updates.
     #[test]
     fn create_table_emits_version_default_one() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
@@ -4401,8 +4390,8 @@ mod tests {
     }
 
     /// `deleted_at <ts_type> NULL` — soft-delete sentinel. The
-    /// nullability is load-bearing for the find() auto-filter PR 5
-    /// will wire (`WHERE deleted_at IS NULL`).
+    /// nullability is load-bearing for the find() auto-filter
+    /// (`WHERE deleted_at IS NULL`).
     #[test]
     fn create_table_emits_deleted_at_nullable() {
         let schema = serde_json::json!({});
@@ -4486,9 +4475,8 @@ mod tests {
         );
     }
 
-    /// `version` is bumped on every UPDATE (PR 4 wires the auto-bump);
-    /// an index on it would thrash. Per §5 of the proposal it stays
-    /// unindexed.
+    /// `version` is bumped on every UPDATE (the auto-bump wiring);
+    /// an index on it would thrash, so it stays unindexed.
     #[test]
     fn create_table_does_not_emit_index_for_version() {
         let sql = build_create_table_with_fks_for_dialect(
@@ -4534,7 +4522,7 @@ mod tests {
 
     /// FK emission on a user-declared `ref` field continues to work
     /// alongside the system-field prefix. Pins the structural invariant
-    /// that B2 (P0) FK clauses ride after the column declarations.
+    /// that FK clauses ride after the column declarations.
     #[test]
     fn create_table_with_fk_user_field_still_creates_fk_constraint() {
         let schema = serde_json::json!({
@@ -4562,7 +4550,7 @@ mod tests {
 
     /// SQLite places the schema name on the INDEX, not the TABLE:
     /// `CREATE INDEX "<schema>"."<idx>" ON "<table>" (...)`. Per the
-    /// p5.5 PR 4 sqlite ATTACH alias correction.
+    /// sqlite ATTACH alias correction.
     #[test]
     fn create_table_sqlite_uses_dotted_schema_for_index() {
         let sql = build_create_table_with_fks_for_dialect(
@@ -4610,7 +4598,7 @@ mod tests {
     /// The system-field index names go through the existing
     /// [`index_name`] helper, so an overlong collection name gets the
     /// sha2 hash truncation at 60 bytes. Regression fence for the
-    /// NAMEDATALEN-safety contract from P0.
+    /// NAMEDATALEN-safety contract.
     #[test]
     fn index_name_truncates_with_sha2_suffix_at_60_bytes() {
         // 63-byte collection name (the Postgres NAMEDATALEN ceiling).
@@ -4636,7 +4624,7 @@ mod tests {
     /// The debug_assert at the end of `build_create_table_with_fks_for_dialect`
     /// is the last line of defence: under debug builds it panics if two
     /// declarations end up referencing the same system-field name in
-    /// the column list. The PR 1 validator catches creator-declared
+    /// the column list. The declaration-time validator catches creator-declared
     /// system fields before this point — so this test exercises the
     /// assertion's *unreachable* path under a hand-rolled internal
     ///
@@ -4649,7 +4637,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn debug_assert_panics_when_user_schema_collides_with_system_field() {
-        // The validator (PR 1) raises `ReservedSystemFieldName` before
+        // The validator raises `ReservedSystemFieldName` before
         // the debug_assert runs — verify the rejection happens at the
         // validator layer (the canonical first line of defence).
         for name in SYSTEM_FIELD_NAMES {
@@ -4747,7 +4735,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // P5.5 PR 2 — Path B sibling-column DDL emission
+    // Path B sibling-column DDL emission
     // -----------------------------------------------------------------
 
     /// `mask_sibling_column_for_field` returns `Some("<col>_masked")`
@@ -4807,7 +4795,7 @@ mod tests {
         );
     }
 
-    /// **P5.5 PR 6** — masked column CREATE TABLE emits `COMMENT ON
+    /// Masked column CREATE TABLE emits `COMMENT ON
     /// COLUMN` for the sibling so PG introspection round-trips the
     /// mask metadata via `pg_description`.
     #[test]
@@ -4830,7 +4818,7 @@ mod tests {
         );
     }
 
-    /// **P5.5 PR 6** — sibling DDL inline `/* zero-migrate:mask:... */` comment
+    /// Sibling DDL inline `/* zero-migrate:mask:... */` comment
     /// for SQLite-arm introspection (PG ignores SQL comments; SQLite
     /// preserves them in `sqlite_master.sql`).
     #[test]
@@ -4849,7 +4837,7 @@ mod tests {
         );
     }
 
-    /// **P5.5 PR 6** — `kind: "none"` opt-out emits no sibling and no
+    /// `kind: "none"` opt-out emits no sibling and no
     /// `COMMENT ON COLUMN`.
     #[test]
     fn build_create_table_no_comment_when_mask_kind_none() {
@@ -4871,7 +4859,7 @@ mod tests {
         );
     }
 
-    /// **P5.5 PR 6** — `build_add_column` for a fresh field with a
+    /// `build_add_column` for a fresh field with a
     /// `.mask({...})` declaration emits BOTH the parent ADD + the
     /// sibling ADD + the `COMMENT ON COLUMN` sentinel in one
     /// multi-statement payload.
@@ -4894,7 +4882,7 @@ mod tests {
         );
     }
 
-    /// **P5.5 PR 6** — `build_add_column` for a non-masked field emits
+    /// `build_add_column` for a non-masked field emits
     /// only the single parent ADD; no sibling DDL, no comment.
     #[test]
     fn build_add_column_no_sibling_when_unmasked() {
@@ -4905,7 +4893,7 @@ mod tests {
     }
 
     /// **DDL shape** — `t.encrypted(...)` (default-mask path) gets the
-    /// sibling because PR 1 auto-populates `mask: {kind: "full", ...}`
+    /// sibling because the SDK auto-populates `mask: {kind: "full", ...}`
     #[test]
     fn build_create_table_emits_sibling_for_encrypted_with_default_mask() {
         // Mirror the SDK's auto-fill: `t.encrypted(...)` -> mask = full.
@@ -4933,7 +4921,7 @@ mod tests {
     }
 
     /// **DDL shape** — `kind: "none"` explicit opt-out → no sibling.
-    /// The parent encrypted column behaves like P5 baseline.
+    /// The parent encrypted column behaves like a plain encrypted column.
     #[test]
     fn build_create_table_no_sibling_when_mask_kind_none() {
         let schema = serde_json::json!({
@@ -4954,7 +4942,7 @@ mod tests {
 
 
     // -----------------------------------------------------------------
-    // P5.5 PR 8 — §11 closeout SELECT-shape gates
+    // SELECT-shape gates
     //
     // Three invariants pinned at the SQL-build layer (the production
     // expr_with_unmask`):
@@ -4966,8 +4954,8 @@ mod tests {
     //    select-list (it appears in the alias's right-hand side only
     //    and not as a top-level select expression).
     //    refuses filter keys ending in `_masked` because
-    //    `validate_field_name` is on the reserved-suffix path. PR 1
-    //    pinned this; we double-check the end-to-end path through
+    //    `validate_field_name` is on the reserved-suffix path.
+    //    We double-check the end-to-end path through
     // 3. `sibling_masked_column_not_visible_in_sdk_introspection` —
     //    the SDK `Row<S>` shape excludes `<col>_masked`. The Rust-
     //    side dual to that invariant is that callers never need to
@@ -4979,20 +4967,20 @@ mod tests {
 
 
     // ----------------------------------------------------------------
-    // P7 PR 5 — soft-delete / restore SQL builders +
+    // soft-delete / restore SQL builders +
     // compose-where-with-soft-delete behaviour
     // ----------------------------------------------------------------
 
 
     // -----------------------------------------------------------------------
-    // PHASE 4 — `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
+    // `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
     // engine). The `MainUnqualified` scope drops the `<app_id>` qualifier on
     // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
     // `AttachAlias` SQLite default are unchanged (regression guard).
     // -----------------------------------------------------------------------
 
     /// A descriptor carrying a masked column, an encrypted column, and an FK —
-    /// the goodies PHASE 4 must round-trip through emit→apply→drift.
+    /// the goodies the emitter must round-trip through emit→apply→drift.
     fn goodies_schema() -> serde_json::Value {
         json!({
             "ssn": {
@@ -5119,7 +5107,7 @@ mod tests {
     /// `MainUnqualified` SQLite carries the goodies: the inline `zero-migrate:mask:` mask
     /// sentinel on the `_masked` sibling, the inline `zero-migrate:enc:` encryption
     /// sentinel on the BLOB column, and an unqualified FK clause — so all three
-    /// survive into `sqlite_master.sql` for the P5 drift snapshot to recover.
+    /// survive into `sqlite_master.sql` for the drift snapshot to recover.
     #[test]
     fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
         let sql = build_create_table_with_fks_for_dialect_scoped(

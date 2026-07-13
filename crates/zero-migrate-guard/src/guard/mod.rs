@@ -1,5 +1,5 @@
 //! The SQL security guard — parse-time deny-list + cross-schema confinement
-//! (design §1.4 / §1.5). **The security heart of the engine.**
+//!. **The security heart of the engine.**
 //!
 //! Migrations are privileged arbitrary-SQL authored by untrusted creators AND a
 //! prompt-injectable AI. This guard is the *first* line of defense-in-depth: it
@@ -55,7 +55,7 @@ pub mod data_security_rule {
 
 /// The in-crate enforcement primitive for the OPERATOR-gated profiles —
 /// `Platform` (the platform-internal posture) AND `Trusted` (the public
-/// dbmate-like posture) — (design §4.1, HIGH-1). A zero-sized capability token
+/// dbmate-like posture). A zero-sized capability token
 /// owned by [`zero_migrate_ir::capability`].
 ///
 /// [`GuardConfig::platform`] / [`GuardConfig::trusted`] and
@@ -66,12 +66,12 @@ pub mod data_security_rule {
 /// profiles because both share the identical security model: the operator
 /// running the binary holds it; no creator path can.
 ///
-/// Per-guard configuration (design §4.1).
+/// Per-guard configuration.
 ///
 /// All fields are **private**: a `GuardConfig` is obtained ONLY through
 /// [`GuardConfig::confined`] (the safe default anyone may construct),
 /// [`GuardConfig::platform`], or [`GuardConfig::trusted`] (both require an
-/// [`OperatorCapability`] token). This is what makes the §5 trust invariant
+/// [`OperatorCapability`] token). This is what makes the trust invariant
 /// true at the public boundary — an external crate cannot write a
 /// `GuardConfig { trust: Platform, .. }` / `{ trust: Trusted, .. }` literal, and
 /// in-crate operator code produces `Platform`/`Trusted` through named token-mint
@@ -106,7 +106,7 @@ pub struct GuardConfig {
     /// - `Postgres` (the default) — the libpg_query line-1 guard runs
     ///   ([`SqlGuard::check`] parses + deny-walks the SQL). Every pre-PHASE-4
     ///   call site keeps this dialect, byte-identical.
-    /// - `Sqlite` — the **descriptor-diff-only** Confined path (design §2.5.3):
+    /// - `Sqlite` — the **descriptor-diff-only** Confined path:
     ///   `libpg_query` cannot parse SQLite, so there is NO line-1 parse guard;
     ///   the line-2 defense is the `SqliteBackend`'s runtime authorizer. The
     ///   Confined SQLite path accepts ONLY descriptor-diff-generated DDL — an
@@ -136,7 +136,7 @@ impl GuardConfig {
         }
     }
 
-    /// PHASE 4 — the Confined **SQLite** config (design §2.5.3). Like
+    /// PHASE 4 — the Confined **SQLite** config. Like
     /// [`GuardConfig::confined`] but for the SQLite dialect: there is NO
     /// libpg_query line-1 guard (it cannot parse SQLite); the line-2 defense is
     /// the `SqliteBackend`'s runtime authorizer, and authoring is
@@ -329,8 +329,8 @@ impl GuardConfig {
         self.skip_denylist_belt
     }
 
-    /// **PR10** — the schema-confinement scope this guard config enforces, for the
-    /// validate-time cross-schema gate (§2.7). Returns:
+    /// The schema-confinement scope this guard config enforces, for the
+    /// validate-time cross-schema gate. Returns:
     /// - `Some(SchemaScope)` for **Confined** (the `Single(project_schema)` pin) and
     ///   **Platform** (the configured `Allowlist`) — an op's explicit `schema` must
     ///   be permitted by it.
@@ -340,7 +340,7 @@ impl GuardConfig {
     ///
     /// This is the SINGLE source of truth that maps the guard's trust posture to the
     /// validator's confinement scope, so the parse-guard cross-schema denial (line 1)
-    /// and the friendlier validate-time refusal (PR10) agree on the permitted set.
+    /// and the friendlier validate-time refusal agree on the permitted set.
     #[must_use]
     pub fn schema_scope(&self) -> Option<SchemaScope> {
         match self.trust {
@@ -477,7 +477,7 @@ pub enum GuardError {
     Parse(#[from] ParseError),
     /// PHASE 4 — a raw SQL string was presented to [`SqlGuard::check`] on the
     /// Confined **SQLite** path, which accepts ONLY descriptor-diff-generated DDL
-    /// (design §2.5.3). `libpg_query` cannot vet SQLite, so there is no line-1
+    ///. `libpg_query` cannot vet SQLite, so there is no line-1
     /// parse guard for raw SQLite SQL; the only safe SQLite DDL comes from the
     /// engine's descriptor emitter (validated at the author boundary, line-2
     /// enforced by the `SqliteBackend` authorizer). A hand-written / untrusted
@@ -803,12 +803,12 @@ impl SqlGuard {
             }
             // ALTER SYSTEM — cluster-wide config, always denied (BOTH profiles).
             NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
-            // Role management — privilege escalation. ALLOW iff Platform (§4.1):
+            // Role management — privilege escalation. ALLOW iff Platform:
             // the platform schema migrations must CREATE/ALTER/DROP roles and
             // pin their search_path (0025/0027). Confined still hard-denies.
             //
             // SUPERUSER is the ONE role attribute that stays HARD-DENIED even
-            // under Platform (vendor spec §3.4): a superuser bypasses RLS and
+            // under Platform: a superuser bypasses RLS and
             // reaches the host (file I/O, `COPY … PROGRAM`). Platform widens
             // privilege *within* the DB, never *host* reach — so a
             // `CREATE/ALTER ROLE … SUPERUSER` is refused before the Platform
@@ -840,7 +840,7 @@ impl SqlGuard {
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
             }
             // GRANT / REVOKE / role-membership grants — privilege management.
-            // ALLOW iff Platform (§4.1): the platform schema migrations grant
+            // ALLOW iff Platform: the platform schema migrations grant
             // CONNECT/USAGE/etc. (0025/0027). Confined still hard-denies.
             NodeEnum::GrantStmt(s) => {
                 if grant_stmt_grants_privileged_role(s) {
@@ -958,13 +958,13 @@ impl SqlGuard {
                 // OWNER TO / INHERIT / REPLICA IDENTITY / generic-options are
                 // out of remit and denied. Under Platform the four RLS subtypes
                 // (ENABLE/FORCE/NO FORCE/DISABLE ROW LEVEL SECURITY) are also
-                // admitted (§4.1; 0025).
+                // admitted (0025).
                 self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
                 let caps = self.cfg.vendor_capabilities();
                 // DROP ROLE via the DropStmt spelling — ALLOW iff Platform
-                // (§4.1; the `.down.sql` reverse of CREATE ROLE), else deny.
+                // (the `.down.sql` reverse of CREATE ROLE), else deny.
                 if d.remove_type == ObjectType::ObjectRole as i32 {
                     if caps.allow_role {
                         return Ok(());
@@ -973,7 +973,7 @@ impl SqlGuard {
                 }
                 // DROP is safe only for the enumerated object types. Under
                 // Platform the extra set (schema/extension/policy — the
-                // `.down.sql`-only reverses) is also admitted (§4.1).
+                // `.down.sql`-only reverses) is also admitted.
                 let drop_allowed = is_safe_drop_object(d.remove_type)
                     || platform_drop_object_allowed(d.remove_type, caps);
                 if !drop_allowed {
@@ -981,7 +981,7 @@ impl SqlGuard {
                 }
             }
             // CREATE SCHEMA — deny-by-default for Confined; ALLOW iff Platform
-            // (§4.1; platform migrations create platform schemas). When
+            // (platform migrations create platform schemas). When
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
             NodeEnum::CreateSchemaStmt(_) => {
@@ -990,7 +990,7 @@ impl SqlGuard {
                 }
             }
             // CREATE POLICY (RLS) — deny-by-default for Confined; ALLOW iff
-            // Platform (§4.1; 0025 RLS policies). When Platform, fall through;
+            // Platform (0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
             NodeEnum::CreatePolicyStmt(_) => {
                 if !self.cfg.vendor_capabilities().allow_policy {
@@ -998,7 +998,7 @@ impl SqlGuard {
                 }
             }
             // DROP OWNED BY <role> — deny-by-default for Confined; ALLOW iff
-            // Platform (§4.1; 0025 rollback DO-block).
+            // Platform (0025 rollback DO-block).
             NodeEnum::DropOwnedStmt(_) => {
                 if self.cfg.vendor_capabilities().allow_role {
                     return Ok(());
@@ -1058,7 +1058,7 @@ impl SqlGuard {
     }
 
     /// Reject `ALTER TABLE` subcommands outside the safe migration set. Under
-    /// Platform the four RLS subtypes are additionally admitted (§4.1).
+    /// Platform the four RLS subtypes are additionally admitted.
     fn check_alter_table_cmds(
         &self,
         at: &protobuf::AlterTableStmt,
@@ -1362,7 +1362,7 @@ impl SqlGuard {
             }
         }
         // search_path escape / alter system / role mgmt hidden in EXECUTE text.
-        // Under Platform (§4.2) the role-management + search_path needles are
+        // Under Platform the role-management + search_path needles are
         // relaxed — 0025's bootstrap DO-block legitimately EXECUTEs
         // `CREATE ROLE …` / `ALTER ROLE … SET search_path …` — but `ALTER
         // SYSTEM` and `SUPERUSER` STAY hard in BOTH profiles (neither has any
@@ -1484,7 +1484,7 @@ fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<Str
         // (1) platform schema named directly. The `PLATFORM_SCHEMAS` lexical
         //     backstop fires for any schema in PLATFORM_SCHEMAS that the scope
         //     did NOT permit (port schemas `zero_migrate`/`public`
-        //     are not in PLATFORM_SCHEMAS, so they already pass — §4.2/HIGH-3).
+        //     are not in PLATFORM_SCHEMAS, so they already pass).
         if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit) {
             return Some(lit.to_string());
         }
@@ -1548,7 +1548,7 @@ fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
                 // `schema.eq_ignore_ascii_case(s)` — the project schema, case-
                 // insensitively). The
                 // `PLATFORM_SCHEMAS` backstop fires for any non-permitted schema
-                // in PLATFORM_SCHEMAS (the port schemas are not in it — HIGH-3).
+                // in PLATFORM_SCHEMAS (the port schemas are not in it).
                 if !scope.permits(schema)
                     && denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, schema)
                 {
@@ -1561,20 +1561,20 @@ fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
     None
 }
 
-/// Derive the migration flags from a passing [`GuardReport`] (design §1.6).
+/// Derive the migration flags from a passing [`GuardReport`].
 ///
 /// - `destructive` (data loss) ⇒ `requires_approval` (the gate must confirm;
 ///   AI never auto-applies destructive ops).
 /// - any non-transactional statement (CONCURRENTLY, ALTER TYPE ADD VALUE,
 ///   VACUUM) ⇒ `transactional = false` (the two-phase apply path).
 /// - a `RENAME COLUMN` / `RENAME TABLE` ⇒ `requires_approval` even though it is
-///   NOT data-loss `destructive` (MED-1): a rename is app-breaking /
+///   NOT data-loss `destructive`: a rename is app-breaking /
 ///   backward-incompatible (it silently breaks every reader of the old name), so
 ///   it must be operator-confirmed, never auto-applied. (The declarative
 ///   expand-contract rename path does NOT emit a bare `RenameStmt` — it emits
 ///   ADD COLUMN + trigger + backfill + DROP via `ExpandContractAuthor` — so this
 ///   gate is scoped to a literal `RENAME` in a submitted `up`.)
-/// - an `ALTER COLUMN … SET NOT NULL` ⇒ `requires_approval` (MED-2): it takes an
+/// - an `ALTER COLUMN … SET NOT NULL` ⇒ `requires_approval`: it takes an
 ///   ACCESS EXCLUSIVE lock + a full-table validating scan and ABORTS if any
 ///   existing row is NULL — and the row-less shadow CANNOT catch that abort/lock,
 ///   so it is gated regardless of the (necessarily clean) dry-run.
@@ -1584,13 +1584,13 @@ fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
 #[must_use]
 pub fn flags_for(report: &GuardReport) -> MigrationFlags {
     let non_transactional = report.classes.iter().any(|c| c.non_transactional);
-    // MED-1 — a bare RENAME COLUMN / RENAME TABLE is gated (requires_approval) even
+    // A bare RENAME COLUMN / RENAME TABLE is gated (requires_approval) even
     // though it is not data-loss-destructive: it is backward-incompatible.
     let has_rename = report
         .classes
         .iter()
         .any(|c| matches!(c.kind, DdlKind::RenameColumn | DdlKind::RenameTable));
-    // MED-2 — SET NOT NULL is gated regardless of the dry-run: the row-less shadow
+    // SET NOT NULL is gated regardless of the dry-run: the row-less shadow
     // has no data, so it can never reproduce the populated-column abort / the
     // ACCESS EXCLUSIVE validating-scan lock a SET NOT NULL takes on a real table.
     let has_set_not_null = report
@@ -1623,8 +1623,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 }
 
 // ---------------------------------------------------------------------------
-// The per-engine line-1 guard seam (multi-engine abstraction, P0 / design
-// 2026-06-21 §2.2 L3).
+// The per-engine line-1 guard seam (multi-engine abstraction).
 // ---------------------------------------------------------------------------
 
 /// The **dialect-neutral** result of a passing [`MigrationGuard::check`].
@@ -1636,7 +1635,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 /// PG-specific `classes: Vec<StatementClass>` (the libpg_query `DdlKind`
 /// vocabulary): that stays *inside* the PG guard ([`SqlGuard`]/[`GuardReport`]),
 /// because a non-PG engine (SQLite descriptor diff, a future non-PG parser) has no
-/// `DdlKind` to populate. Keeping the neutral seam free of PG vocabulary (H2) is
+/// `DdlKind` to populate. Keeping the neutral seam free of PG vocabulary is
 /// what lets a new engine bring its own line-1 without inheriting libpg_query.
 ///
 /// The PG-only consumers of `classes` ([`flags_for`], the author/submit/loader
@@ -1670,7 +1669,7 @@ pub struct GuardOutcome {
 /// - A future non-PG engine brings its own parser/allowlist impl.
 ///
 /// `GuardOutcome` / [`GuardError`] are shared + neutral; each engine's parser is
-/// its own concern (design §2.2 / §6 G1).
+/// its own concern.
 pub trait MigrationGuard {
     /// Run line-1 over a migration's `up` SQL. `Ok(GuardOutcome)` when every
     /// statement is safe (destructive ops flagged, not denied); `Err` on the
@@ -1686,7 +1685,7 @@ pub trait MigrationGuard {
 /// The Postgres line-1: the existing [`SqlGuard`] (libpg_query deny-list +
 /// cross-schema confinement + classify + analyze) behind [`MigrationGuard`].
 /// Behavior-identical to calling [`SqlGuard::check`] — `check` only drops the
-/// PG-specific `classes` from the returned report (the neutral seam, H2).
+/// PG-specific `classes` from the returned report (the neutral seam).
 #[derive(Debug, Clone)]
 pub struct PgGuard(SqlGuard);
 
@@ -1708,7 +1707,7 @@ impl MigrationGuard for PgGuard {
     fn check(&self, up: &str) -> Result<GuardOutcome, GuardError> {
         let report = self.0.check(up)?;
         // Drop the PG-specific `classes`; expose only the neutral fields the
-        // engine seam consumes (H2). `flags_for` and the other `classes`
+        // engine seam consumes. `flags_for` and the other `classes`
         // consumers call `SqlGuard::check` directly, never through this seam.
         Ok(GuardOutcome {
             destructive: report.destructive,
@@ -1724,7 +1723,7 @@ impl MigrationGuard for PgGuard {
 /// author. libpg_query cannot parse SQLite, so there is no string deny-list to
 /// run; the line-1 vet is the descriptor emitter at the author boundary and the
 /// line-2 defense is the `SqliteBackend`'s runtime authorizer applied per
-/// statement at execution (design §2.5.3). So `check` returns the **empty**
+/// statement at execution. So `check` returns the **empty**
 /// [`GuardOutcome`] — exactly the pre-seam `plan_sqlite_trusted` report + the
 /// executor's `run_string_guard == false` skip, now expressed as a per-engine
 /// guard instead of an `if dialect == Sqlite` branch.
@@ -1986,7 +1985,7 @@ fn is_safe_drop_object(remove_type: i32) -> bool {
 }
 
 /// Whether the loaded capability composition admits a DROP object class beyond
-/// [`is_safe_drop_object`] (design §4.1, the `.down.sql`-only reverses).
+/// [`is_safe_drop_object`] (the `.down.sql`-only reverses).
 fn platform_drop_object_allowed(remove_type: i32, caps: &VendorCapabilities) -> bool {
     if remove_type == ObjectType::ObjectRole as i32 {
         return caps.allow_role;
@@ -2004,7 +2003,7 @@ fn platform_drop_object_allowed(remove_type: i32, caps: &VendorCapabilities) -> 
 }
 
 /// The additional `AlterTableType` subtypes a **Platform** migration may use
-/// beyond [`is_safe_alter_table_subtype`] (design §4.1): the four RLS toggles
+/// beyond [`is_safe_alter_table_subtype`]: the four RLS toggles
 /// (ENABLE / FORCE / NO FORCE / DISABLE ROW LEVEL SECURITY). Confined never
 /// admits these.
 fn is_platform_alter_table_subtype(subtype: i32) -> bool {
@@ -2079,7 +2078,7 @@ fn is_safe_transaction_kind(kind: i32) -> bool {
 }
 
 /// True if a `CREATE ROLE` / `ALTER ROLE` options list grants the `SUPERUSER`
-/// attribute (vendor spec §3.4). The attribute is a `DefElem` named `superuser`
+/// attribute. The attribute is a `DefElem` named `superuser`
 /// with a boolean arg (`SUPERUSER` ⇒ true, `NOSUPERUSER` ⇒ false). Denied in
 /// ALL profiles including Platform — superuser is host-reaching, not merely
 /// in-DB privilege.

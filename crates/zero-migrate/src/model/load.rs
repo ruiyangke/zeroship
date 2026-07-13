@@ -3,7 +3,7 @@
 //! The policy-free pieces of the load gate — [`IrLoadError`], the ownership
 //! checker [`enforce_ir_ownership`], the checksum helpers, and the table-collection
 //! walkers — live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
-//! below. THIS module keeps [`load_ir_document`]: the full §5.2 chain, which
+//! below. THIS module keeps [`load_ir_document`]: the full load chain, which
 //! threads a [`SchemaScope`](crate::model::policy::SchemaScope) /
 //! [`PolicyProfile`](crate::model::profile::PolicyProfile) into the POLICY
 //! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
@@ -21,18 +21,18 @@ use crate::model::validate::Dialect;
 // checksum helpers, etc. unchanged.
 pub use zero_migrate_ir::load::*;
 
-/// Load + GATE a `.ir.json` document (the fail-closed §5.2 chain). Returns the
+/// Load + GATE a `.ir.json` document (the fail-closed chain). Returns the
 /// validated, ownership-checked [`MigrationIr`] with its `owner_app` STAMPED to
 /// `deploying_app` (a spoofed/absent value in the artifact is discarded) — ready
-/// for `IrAuthor::lower` (a later wave).
+/// for `IrAuthor::lower`.
 ///
-/// The steps run in the security-critical order (§5.2): deserialize →
+/// The steps run in the security-critical order: deserialize →
 /// `ir_version` → `validate_ir` (for `target_dialect`) → ownership → checksum-hint
 /// compare. Every step is fail-closed; lowering NEVER sees an artifact that
 /// failed any gate.
 ///
 /// `registry` is the project's table→owner map; `target_dialect` is threaded from
-/// the deploy backend selection (`deploy_migrate.rs` / `--engine`, design §2.4.1).
+/// the deploy backend selection (`deploy_migrate.rs` / `--engine`).
 ///
 /// # Errors
 /// [`IrLoadError`] for a malformed document, an unknown future `ir_version`, a
@@ -50,13 +50,13 @@ pub fn load_ir_document(
     let mut ir: MigrationIr =
         serde_json::from_str(bytes).map_err(|e| IrLoadError::Deserialize(e.to_string()))?;
 
-    // 2. ir_version fail-closed — BEFORE any checksum/lower (§5.3).
+    // 2. ir_version fail-closed — BEFORE any checksum/lower.
     ir.check_ir_version()?;
 
     // 3. structural validation — the authoritative gate over every Expr slot, plus
-    //    (PR10) the schema-confinement + guard-direction gate threaded with the
+    //    the schema-confinement + guard-direction gate threaded with the
     //    active [`SchemaScope`]: a Confined cross-schema op is REFUSED here,
-    //    fail-closed, BEFORE lower (§2.7).
+    //    fail-closed, BEFORE lower.
     let confined_profile;
     let policy_profile = match policy_profile {
         Some(profile) => profile,
@@ -71,14 +71,14 @@ pub fn load_ir_document(
     //    against the deploying app + the project registry (fail-closed unknown).
     enforce_ir_ownership(&ir, deploying_app, registry)?;
 
-    // 5. advisory checksum-hint compare (§2.4 point 2) — recompute + compare, then
+    // 5. advisory checksum-hint compare — recompute + compare, then
     //    DROP the hint (it never folds into the authoritative checksum). Done
     //    against the artifact's claimed hint BEFORE we stamp owner_app, since the
     //    hint domain excludes owner_app anyway.
     if let Some(hint) = ir.checksum.clone() {
-        // Fail closed if the §2.4 hint domain is not yet fully computable for this
-        // IR (a non-default flags / deps / supersedes contribution the Wave-C
-        // merge has not landed). Never compare a hint against a PARTIAL domain.
+        // Fail closed if the hint domain is not yet fully computable for this
+        // IR (a non-default flags / deps / supersedes contribution is not yet
+        // foldable). Never compare a hint against a PARTIAL domain.
         if let Some((field, detail)) = hint_domain_uncomputable_field(&ir) {
             return Err(IrLoadError::ChecksumHintNotComputable { field, detail });
         }
@@ -91,7 +91,7 @@ pub fn load_ir_document(
         }
     }
 
-    // Server-stamp the owner (a spoofed/absent artifact value is discarded, §8.6).
+    // Server-stamp the owner (a spoofed/absent artifact value is discarded).
     // owner_app is excluded from the hint domain, so stamping it never invalidates
     // the just-verified hint.
     ir.owner_app = deploying_app.to_string();
@@ -136,7 +136,7 @@ mod tests {
         )
     }
 
-    // ── ir_version fail-closed on the PRODUCTION path (finding 3) ────────────
+    // ── ir_version fail-closed on the PRODUCTION path ───────────────────────
 
     #[test]
     fn load_rejects_future_ir_version_before_anything_else() {
@@ -146,7 +146,7 @@ mod tests {
         assert!(matches!(err, IrLoadError::Version(_)), "got: {err}");
     }
 
-    // ── validate_ir wired as the loader's gate (finding 3) ──────────────────
+    // ── validate_ir wired as the loader's gate ──────────────────────────────
     // A hostile .ir.json driven through the REAL loader (not the validator unit
     // test) must have the structural gate FIRE on the production path.
 
@@ -183,7 +183,7 @@ mod tests {
         assert!(matches!(err, IrLoadError::Validate(_)), "got: {err}");
     }
 
-    // ── deserialize gate: unknown node tag / out-of-domain scalar (finding) ──
+    // ── deserialize gate: unknown node tag / out-of-domain scalar ───────────
 
     #[test]
     fn load_rejects_unknown_expr_node_tag_at_deserialize() {
@@ -208,7 +208,7 @@ mod tests {
         }
     }
 
-    // ── ownership fail-closed (finding 6) ───────────────────────────────────
+    // ── ownership fail-closed ───────────────────────────────────────────────
 
     #[test]
     fn load_refuses_op_on_another_apps_table() {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn load_refuses_bare_name_drop_index_fail_closed() {
-        // §8.6 fail-closed (HIGH): a bare-name DropIndex (`table: None`) has no
+        // fail-closed: a bare-name DropIndex (`table: None`) has no
         // ownership-checkable target, so the ownership pass `continue`d over it —
         // letting a hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}`
         // (no table hint) DROP another app's index cross-tenant. The fix refuses a
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn load_allows_dml_positioned_before_its_create_table_in_same_migration() {
-        // ORDER-INDEPENDENCE (code-critic LOW): the createTable ownership pre-pass
+        // ORDER-INDEPENDENCE: the createTable ownership pre-pass
         // registers ALL createTable names BEFORE the per-op check, so an op that
         // appears POSITIONALLY BEFORE its createTable still passes ownership — the
         // table is pre-registered to the deploying app. This is who-may-touch, not
@@ -518,9 +518,9 @@ mod tests {
         assert!(enforce_ir_ownership(&ir, "app_a", &registry(&[])).is_ok());
     }
 
-    // ── checksum-hint compare wired (finding 5) ─────────────────────────────
+    // ── checksum-hint compare wired ─────────────────────────────────────────
 
-    /// FROZEN-HEX hint golden (code-critic MED): pin the §2.4 hint-domain
+    /// FROZEN-HEX hint golden: pin the hint-domain
     /// checksum for a FIXED IR to a hard-coded literal, then drive the loader
     /// with that literal embedded in the `.ir.json` bytes. This breaks the
     /// self-reference of [`load_accepts_a_correct_checksum_hint`] (which computes
@@ -529,8 +529,7 @@ mod tests {
     /// `recompute_hint_domain_checksum` (the hint-domain fold — incl. how it
     /// folds `MigrationFlags::default()` when the override is all-None) OR the
     /// loader's compare is caught. The JS builder MUST emit this same hex for
-    /// this IR (a JS-produced fixture lands with the #80 JS golden); until then
-    /// this frozen literal is the independent oracle.
+    /// this IR; this frozen literal is the independent oracle.
     ///
     /// If this hex changes, the hint-domain wire format drifted — the JS `op.*`
     /// author would emit a hint the engine rejects. Not allowed without a
@@ -607,16 +606,15 @@ mod tests {
 
     #[test]
     fn load_accepts_an_absent_checksum_hint() {
-        // The hint is advisory and need not be present (§2.4).
+        // The hint is advisory and need not be present.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).is_ok());
     }
 
-    // ── HIGH: hint domain is not yet fully computable (deps/supersedes/flags) ─
-    // Until the Wave-C IrFlagsOverride→MigrationFlags + String→MigrationId merge
-    // lands, the recompute folds ONLY ops+preconditions (neutral flags, empty
+    // ── hint domain is not yet fully computable (deps/supersedes/flags) ──────
+    // The recompute currently folds ONLY ops+preconditions (neutral flags, empty
     // deps). A hint-bearing IR that ALSO carries depends_on/supersedes or
     // non-default flags must NOT be silently compared against a PARTIAL domain
     // (that would both false-reject a spec-correct hint AND false-accept tampering
@@ -625,8 +623,8 @@ mod tests {
     #[test]
     fn load_rejects_hint_bearing_ir_with_depends_on_fail_closed() {
         // A hint over an IR that carries a depends_on entry: the hint domain
-        // (per §2.4 / ir.rs doc) includes depends_on, but PR1 cannot fold it, so
-        // the loader refuses rather than compare a partial domain.
+        // (per ir.rs doc) includes depends_on, but the recompute cannot fold it,
+        // so the loader refuses rather than compare a partial domain.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(
             ops,
@@ -657,7 +655,7 @@ mod tests {
 
     #[test]
     fn load_rejects_hint_bearing_ir_with_non_default_flags_fail_closed() {
-        // A non-default flag override (transactional:false) is outside the PR1
+        // A non-default flag override (transactional:false) is outside the
         // foldable domain (neutral defaults), so a hint over it fails closed.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = ir_json(
@@ -692,7 +690,7 @@ mod tests {
     fn version_gate_precedes_ownership_and_checksum() {
         // A future-version artifact that ALSO has an ownership violation + bad hint
         // must surface the VERSION error (the first fail-closed gate), proving the
-        // ordering (§5.2).
+        // ordering.
         let bytes = r#"{"ir_version": 999, "name": "m", "ops": [{"op":"dropTable","table":"foreign"}], "checksum": "deadbeef"}"#;
         let reg = registry(&[("foreign", "other_app")]);
         let err = load_ir_document(bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap_err();

@@ -1,4 +1,4 @@
-// op.* migration fixture — the §2.5 cross-implementation scalar footguns carried
+// op.* migration fixture — the cross-implementation scalar footguns carried
 // through the typed-bind domain, authored via the fluent table() surface. Each is
 // asserted to round-trip + checksum identically on both the JS and Rust sides:
 //   - a large integer BEYOND the JS safe-integer range, carried via decimal()

@@ -1,4 +1,4 @@
-//! The host-callback [`SqlSession`] bridge (design §B + §B.6).
+//! The host-callback [`SqlSession`] bridge.
 //!
 //! [`NapiHostSession`] implements [`SqlSession`] by marshaling each verb to a host
 //! *verb dispatcher* and awaiting the reply on a `futures::channel::oneshot`. The
@@ -6,17 +6,17 @@
 //!
 //! - the **napi transport** ([`crate::bridge::TsfnDispatch`], `napi` feature)
 //!   fires a `ThreadsafeFunction` at the JS host driver and resolves the oneshot
-//!   from the Rust-supplied `done` callback (§B.3);
+//!   from the Rust-supplied `done` callback;
 //! - a **mock dispatcher** (the integration test) returns canned rows synchronously
 //!   and asserts the recorded SQL sequence — proving the bridge drives a real apply
 //!   without a Node host.
 //!
-//! Either way, [`NapiHostSession`] carries the **one-in-flight `AtomicBool` guard**
-//! (§B.6): each verb `compare_exchange(false, true)`s on entry and clears on the
+//! Either way, [`NapiHostSession`] carries the **one-in-flight `AtomicBool` guard**:
+//! each verb `compare_exchange(false, true)`s on entry and clears on the
 //! completion arm (RAII), panicking on re-entry. On a real pinned host connection a
 //! second concurrent verb would deadlock (its `tsfn.call` blocks on a socket the
 //! first hasn't released); the guard converts that into a loud panic. Only
-//! `Send + 'static` data crosses the dispatcher boundary (§B.3): the owned
+//! `Send + 'static` data crosses the dispatcher boundary: the owned
 //! [`JsRequest`](crate::marshal::JsRequest) payload out, and an owned
 //! `Result<Vec<JsRow>, JsError>` back.
 
@@ -38,7 +38,7 @@ pub const KIND_QUERY_ONE: &str = "queryOne";
 
 /// The reply the host returns for a verb: either the rows + affected count, or a
 /// neutral error. `Send + 'static` (plain owned data) so it may cross back from the
-/// JS thread through the `done` callback (§B.3).
+/// JS thread through the `done` callback.
 pub type VerbReply = Result<JsReply, JsError>;
 
 /// The host-side transport [`NapiHostSession`] dispatches each verb through.
@@ -47,7 +47,7 @@ pub type VerbReply = Result<JsReply, JsError>;
 /// eventually produce a [`VerbReply`]. The napi impl fires a `ThreadsafeFunction`
 /// and parks the engine future on a oneshot the host's `done` callback fires; the
 /// mock impl answers inline. `dispatch` is `async` in the trait but its body never
-/// awaits a JS `Promise` — only a `oneshot::Receiver` (§B.3), so the engine's
+/// awaits a JS `Promise` — only a `oneshot::Receiver`, so the engine's
 /// reactor-less `block_on` stays sufficient.
 #[allow(async_fn_in_trait)] // !Send single-thread engine, by design (mirrors SqlSession)
 pub trait VerbDispatch {
@@ -58,7 +58,7 @@ pub trait VerbDispatch {
 /// A host-driven [`SqlSession`] over an abstract [`VerbDispatch`] transport.
 pub struct NapiHostSession<D: VerbDispatch> {
     dispatch: D,
-    /// The mechanically-enforced one-verb-at-a-time guard (§B.6).
+    /// The mechanically-enforced one-verb-at-a-time guard.
     in_flight: AtomicBool,
 }
 
@@ -78,7 +78,7 @@ impl<D: VerbDispatch> NapiHostSession<D> {
         self.dispatch
     }
 
-    /// RAII arm of the one-in-flight guard (§B.6). Panics on re-entry.
+    /// RAII arm of the one-in-flight guard. Panics on re-entry.
     fn enter(&self) -> InFlightGuard<'_> {
         InFlightGuard::enter(&self.in_flight)
     }
@@ -132,7 +132,7 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
         params: &[Option<String>],
     ) -> Result<u64, DbError> {
         let _g = self.enter();
-        // Text-format params: cross verbatim as `(string | null)[]` (§B.2) — NO
+        // Text-format params: cross verbatim as `(string | null)[]` — NO
         // type coercion, NO explicit OID. `None → null → PG NULL`.
         let req = JsRequest {
             kind: KIND_EXECUTE_TEXT.to_string(),
@@ -169,7 +169,7 @@ fn affected(reply: &JsReply) -> u64 {
     }
 }
 
-/// The one-in-flight guard (§B.6) — the exact discipline the MySQL `JsDriverBackend`
+/// The one-in-flight guard — the exact discipline the MySQL `JsDriverBackend`
 /// uses (`transport.rs` `in_flight`), lifted to `AtomicBool` because the seam is
 /// `&self`.
 struct InFlightGuard<'a>(&'a AtomicBool);
@@ -182,7 +182,7 @@ impl<'a> InFlightGuard<'a> {
         {
             panic!(
                 "SqlSession verb issued while another is in flight — the host bridge \
-                 pins ONE connection and the engine must be strictly one-verb-at-a-time (§B.6)"
+                 pins ONE connection and the engine must be strictly one-verb-at-a-time"
             );
         }
         Self(flag)

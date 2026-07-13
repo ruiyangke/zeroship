@@ -1,7 +1,7 @@
-//! PR7 online-rename GO-LIVE (SQLite leg) — faithful e2e through the REAL deploy/
+//! Online-rename GO-LIVE (SQLite leg) — faithful e2e through the REAL deploy/
 //! apply entry point [`apply_bundle_ir_sqlite`], NOT a hand-built `lower_steps` call.
 //!
-//! Before PR7 the SQLite IR rename was engine-proven but never deploy-wired (no path
+//! Earlier the SQLite IR rename was engine-proven but never deploy-wired (no path
 //! constructed a SQLite-dialect `LiveSchema` with the `sqlite_schemas` SDK `Value`s
 //! the rebuild needs). This test proves the wiring: a `renameColumn` `.ir.json`
 //! deployed through `apply_bundle_ir_sqlite` applies as a 12-step REBUILD on a real
@@ -185,7 +185,7 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
     );
 }
 
-// PR7 code-critic MED (SQLite go-live descriptor semantics) — a `renameColumn`
+// SQLite go-live descriptor semantics — a `renameColumn`
 // deployed with a descriptor set derived from the app's registerModel = the POST-deploy
 // DESIRED schema (post-rename: only `handle` exists, `nickname` is GONE) FAILS CLOSED,
 // with NO data loss. This is the production-NATURAL descriptor set: a real caller
@@ -358,7 +358,7 @@ fn descriptor_unique(table: &str, field: &str, index: &str) -> CollectionDescrip
     }
 }
 
-// PR7 code-critic MED-3 (this fix) — the SQLite peer of
+// The SQLite peer of
 // `deploy_migrate_refuses_understated_unique_drop_from_live_fact`. A `dropIndex`
 // that LIES about uniqueness (`unique:false`) on an actually-UNIQUE index must be
 // REFUSED on the SQLite go-live path under Approval::None — the authoritative source
@@ -415,7 +415,7 @@ async fn deploy_understated_unique_drop_refused_on_real_sqlite() {
     );
 }
 
-// PR7 code-critic MED-4 (this fix) — the descriptor-set contract is FAIL-CLOSED. The
+// The descriptor-set contract is FAIL-CLOSED. The
 // SQLite leg's structural rebuild facts come from the END-STATE descriptor set (a
 // `sqlite_master` read can't recover the SDK-`Value` facets), so a multi-file deploy
 // whose LATER file depends on an INTERMEDIATE structural state produced by an EARLIER
@@ -486,8 +486,8 @@ fn descriptor3(table: &str, a: &str, b: &str, c: &str) -> CollectionDescriptor {
     }
 }
 
-// PR7 EVIDENCE (SQLite leg) — the headline "op.* replaces raw-SQL authoring" proof on
-// SQLite, through the REAL deploy entry point `apply_bundle_ir_sqlite`: the §3.1 hero
+// EVIDENCE (SQLite leg) — the headline "op.* replaces raw-SQL authoring" proof on
+// SQLite, through the REAL deploy entry point `apply_bundle_ir_sqlite`: the hero
 // DDL+backfill (addColumn first_name/last_name + a splitPart backfill + dropColumn
 // name) authored ENTIRELY as op.* `.ir.json`, NO raw `.sql` anywhere, applies on real
 // SQLite and produces the split columns. The peer of the PG `deploy_migrate_no_raw_

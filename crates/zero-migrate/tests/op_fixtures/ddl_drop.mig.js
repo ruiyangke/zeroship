@@ -1,8 +1,8 @@
 // op.* migration fixture — dropIndex + dropColumn + dropTable. Authored via the
 // fluent table() surface.
 //
-// PR10 review (LOW, corpus coverage): this fixture is the corpus carrier for BOTH
-// new PR10 fields PRESENT — an `existenceGuard` token (via `ifExists`) AND an
+// This fixture is the corpus carrier for BOTH
+// the fields PRESENT — an `existenceGuard` token (via `ifExists`) AND an
 // explicit `schema` qualifier. It closes the gap between `full_surface` (proves the
 // recorder EMITS schema/existenceGuard) and the JS↔Rust `Checksum::of_ir` corpus
 // parity (proves both impls FOLD them identically): a JS impl that mis-folded a

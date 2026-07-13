@@ -1,4 +1,4 @@
-//! Statement parsing + classification (design §2.1 / §1.4 foundation).
+//! Statement parsing + classification.
 //!
 //! `classify` runs each statement through the **real Postgres parser**
 //! (`pg_query`/`libpg_query`) and maps it to a [`StatementClass`]: its DDL kind,
@@ -726,7 +726,7 @@ fn node_variant_name(node: &NodeEnum) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Ownership-relevant relation extraction (HIGH-2)
+// Ownership-relevant relation extraction
 // ---------------------------------------------------------------------------
 
 /// Whether a statement **establishes** ownership of the relation it targets (a
@@ -757,7 +757,7 @@ pub struct TouchedRelation {
 }
 
 /// Extract the ownership-relevant target relations of every statement in `sql`,
-/// in source order, for the submit-path ownership enforcement (HIGH-2 — the
+/// in source order, for the submit-path ownership enforcement (the
 /// adapter peer of the declarative differ's `enforce_ownership`).
 ///
 /// The submit path takes a raw `up` script, so — unlike the declarative differ,

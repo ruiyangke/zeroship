@@ -1,4 +1,4 @@
-//! Resurrected live-Postgres DECLARATIVE-deploy scenarios (redesign step 6a).
+//! Resurrected live-Postgres DECLARATIVE-deploy scenarios.
 //!
 //! The desired-vs-live diff → DDL path: given a set of `CollectionDescriptor`s (the
 //! `registerModel` shape the SDK emits), `desired_snapshot` compiles the desired schema,
@@ -98,7 +98,7 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
 
 /// A declarative deploy of a fresh collection creates the table (with the injected
 /// system fields + the declared column), and a re-introspection of live PG then
-/// round-trips to the desired snapshot with ZERO structural drift — the P0
+/// round-trips to the desired snapshot with ZERO structural drift — the
 /// type-fidelity proof, over the shipped seam.
 #[compio::test]
 async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {

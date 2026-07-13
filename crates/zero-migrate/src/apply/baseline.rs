@@ -1,4 +1,4 @@
-//! Baseline an existing project DB (design §5 "Baseline existing db", scenario
+//! Baseline an existing project DB (design "Baseline existing db", scenario
 //! 31) — the **adoption path**.
 //!
 //! A project DB may already physically carry its schema (created outside the
@@ -9,24 +9,24 @@
 //! but on the existing DB it is recorded-not-run. Future migrations then apply on
 //! top normally ([`crate::apply::executor::apply`]).
 //!
-//! # Safety (design §1, §5)
+//! # Safety
 //!
 //! - **Guard-checked.** The baseline SQL is still run through the
-//!   [`SqlGuard`](crate::guard::SqlGuard) (defense-in-depth): it represents the
-//!   real schema and must not carry a denied/cross-schema construct, even though
-//!   it does not execute here.
+//! [`SqlGuard`](crate::guard::SqlGuard) (defense-in-depth): it represents the
+//! real schema and must not carry a denied/cross-schema construct, even though
+//! it does not execute here.
 //! - **First-entry only.** Baseline refuses if the journal already records ANY
-//!   net-applied migration — you cannot baseline a DB the engine already manages
-//!   ([`BaselineError::AlreadyManaged`]). Re-baselining the *same* baseline
-//!   version is an idempotent no-op (so a retried deploy is safe); a *different*
-//!   baseline once one exists is refused.
+//! net-applied migration — you cannot baseline a DB the engine already manages
+//! ([`BaselineError::AlreadyManaged`]). Re-baselining the *same* baseline
+//! version is an idempotent no-op (so a retried deploy is safe); a *different*
+//! baseline once one exists is refused.
 //! - **Privileged.** Baseline is an operator/admin operation (not creator
-//!   self-service): it runs as the ADMIN (it journals, which the migrator role has
-//!   no grant for) under the project advisory lock, serialized against every other
-//!   migration activity exactly like [`apply`](crate::apply::executor::apply).
+//! self-service): it runs as the ADMIN (it journals, which the migrator role has
+//! no grant for) under the project advisory lock, serialized against every other
+//! migration activity exactly like [`apply`](crate::apply::executor::apply).
 //! - **Append-only journal preserved.** The baseline event is an ordinary
-//!   immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
-//!   deleted.
+//! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
+//! deleted.
 
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
@@ -108,12 +108,12 @@ pub enum BaselineError {
     Backend(String),
 }
 
-/// Record `baseline_migration` as the project's baseline (design §5, scenario 31)
+/// Record `baseline_migration` as the project's baseline
 /// — a `completed` journal event WITHOUT running its `up`.
 ///
 /// This is the **Postgres impl behind**
 /// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
-/// (multi-engine abstraction L5): it is `pub(crate)`, reached only through
+/// (multi-engine abstraction): it is `pub(crate)`, reached only through
 /// [`PostgresBackend::baseline_one`](crate::apply::backend::PostgresBackend), which keeps the
 /// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
 /// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
@@ -127,9 +127,9 @@ pub enum BaselineError {
 ///
 /// # Errors
 /// - [`BaselineError::Guard`] — the baseline SQL was denied (held to the same
-///   deny-list as any `up`).
+/// deny-list as any `up`).
 /// - [`BaselineError::AlreadyManaged`] — the journal already records net-applied
-///   migrations (not a first-entry DB).
+/// migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
 #[cfg(pg_seam)]
@@ -149,7 +149,7 @@ pub(crate) async fn baseline<D: SqlSession>(
             source,
         })?;
 
-    // Privileged: serialize against all migration activity (design §2.3 step 1),
+    // Privileged: serialize against all migration activity,
     // exactly like apply. Held for the whole operation; released on every exit.
     conn.exec(
         "SELECT pg_advisory_lock(hashtext($1)::bigint)",

@@ -1,11 +1,11 @@
-//! Confinement proofs for the hardened SQLite migration backend (design §2.5,
-//! P2 gate). EVERY claim is proven against a REAL temp-file SQLite — never a shim.
+//! Confinement proofs for the hardened SQLite migration backend.
+//! EVERY claim is proven against a REAL temp-file SQLite — never a shim.
 //!
 //! Each `confine_*` test drives a creator `up` that attempts one escape and
 //! asserts it is DENIED (by the authorizer or DEFENSIVE), AND that the failure did
 //! not corrupt the journal (the version is NOT recorded `completed`).
 //!
-//! Attacks proven denied (design §3 P2 gate list):
+//! Attacks proven denied:
 //!   (a) ATTACH an arbitrary file
 //!   (b) PRAGMA writable_schema=ON then a sqlite_master write
 //!   (c) SELECT load_extension(...)
@@ -72,7 +72,7 @@ fn mig(up: &str) -> Migration {
     }
 }
 
-/// How an attack is expected to be rejected. H2: the gate-list attacks that are
+/// How an attack is expected to be rejected. The gate-list attacks that are
 /// AUTHORIZER denials must assert `is_authorizer_denied()` SPECIFICALLY, so a test
 /// cannot green-pass on an unrelated `Exec` error. The looser acceptance is
 /// reserved for genuinely-defensive cases — e.g. the creator-trigger-targeting-
@@ -123,7 +123,7 @@ async fn assert_denied_and_journal_clean(be: &SqliteBackend, attack_up: &str, ki
     );
 }
 
-/// POSITIVE CONTROL (H2): prove the SAME attack SQL SUCCEEDS on a raw, unhardened
+/// POSITIVE CONTROL: prove the SAME attack SQL SUCCEEDS on a raw, unhardened
 /// connection — no authorizer, no DEFENSIVE, no _mig confinement. This proves the
 /// deny in the hardened case was caused by CONFINEMENT, not by an unrelated error
 /// (a malformed statement, a missing table, etc.). The control runs against
@@ -288,7 +288,7 @@ async fn confine_f_direct_journal_insert_denied() {
 
 // ---------------------------------------------------------------------------
 // (g) CREATE TRIGGER on an app table whose body writes _mig — denied at the
-//     trigger's CREATE-prepare time (accessor + database_name == _mig, §2.2.1 #6).
+//     trigger's CREATE-prepare time (accessor + database_name == _mig).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_g_creator_trigger_writing_mig_denied() {
@@ -301,9 +301,9 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
         .await
         .expect("benign app table applies");
 
-    // SECURITY FINDING (documented during the P2 fix): under the C1 connection model
+    // SECURITY FINDING: under the confinement connection model
     // (`main` = the app file, `_mig` = the attached journal), a creator trigger body
-    // CANNOT reach `_mig` by ANY name form, so §2.2.1 #6's authorizer accessor+_mig
+    // CANNOT reach `_mig` by ANY name form, so the authorizer accessor+_mig
     // rule is belt-and-suspenders that this vector never actually exercises:
     //   * QUALIFIED `"_mig".schema_migrations` in a trigger body is rejected by
     //     SQLite's PARSER ("qualified table names are not allowed ... within
@@ -438,7 +438,7 @@ async fn confine_detach_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// P5 regression: the authorizer now ALLOWS a write to `sqlite_master` /
+// Regression: the authorizer now ALLOWS a write to `sqlite_master` /
 // `sqlite_temp_master` as an action (so SQLite's INTERNAL ALTER machinery can run
 // `ALTER TABLE … DROP COLUMN`). This must NOT open a DIRECT-write hole: a creator
 // `up` issuing `UPDATE main.sqlite_master …` directly is still blocked by
@@ -488,7 +488,7 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
 }
 
 // ---------------------------------------------------------------------------
-// REINDEX confinement + motivation (PHASE 4, faithful on the REAL hardened
+// REINDEX confinement + motivation (faithful on the REAL hardened
 // backend). Two faithful proofs:
 //
 //   (1) A creator `up` containing a no-arg `REINDEX;` is REJECTED. The no-arg
@@ -501,7 +501,7 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
 //   (2) A real `CREATE TABLE` whose emission carries system-field indexes
 //       APPLIES cleanly under CreatorUp. CREATE INDEX fires SQLITE_REINDEX
 //       INTRINSICALLY (SQLite reindexes the fresh index to populate it); before
-//       the PHASE-4 REINDEX-on-main relaxation that intrinsic reindex was denied,
+//       the REINDEX-on-main relaxation that intrinsic reindex was denied,
 //       so a system-field-index-bearing CREATE TABLE failed to apply. This is the
 //       regression for the relaxation's MOTIVATION.
 // ---------------------------------------------------------------------------
@@ -552,7 +552,7 @@ async fn create_table_with_system_field_indexes_applies_under_creator_up() {
 
     // A CREATE TABLE followed by the platform system-field indexes, exactly the
     // shape the engine emits inside a creator `up`. Each CREATE INDEX fires an
-    // intrinsic SQLITE_REINDEX on `main` — which the PHASE-4 relaxation allows.
+    // intrinsic SQLITE_REINDEX on `main` — which the relaxation allows.
     let up = "CREATE TABLE accounts (\
                 id TEXT PRIMARY KEY, \
                 title TEXT NOT NULL, \
@@ -587,7 +587,7 @@ async fn create_table_with_system_field_indexes_applies_under_creator_up() {
 }
 
 // ---------------------------------------------------------------------------
-// Version floor (§2.9): the bundled SQLite satisfies the floor the
+// Version floor: the bundled SQLite satisfies the floor the
 // journal-immutability proof needs (authorizer zDb-on-DROP_TABLE semantics +
 // RETURNING + window functions). If the linked lib were below floor, open() would
 // have returned UnsupportedVersion — so a successful open IS the proof, and we
