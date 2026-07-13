@@ -1472,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_skips_ir_json_artifacts() {
+    fn loader_skips_ir_envelope_artifacts() {
         // A `.zship` may carry BOTH `.sql` and IR envelope. The Flyway loader must
         // SKIP the IR envelope (a SEPARATE seam) — not hard-error UnrecognizedFile —
         // so the `.sql` set loads cleanly and the IR file flows through its own

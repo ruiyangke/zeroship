@@ -191,12 +191,12 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &Previe
 /// Returns the load/parse error string if the IR document itself is unparseable /
 /// rejected by the load gate (a hard, clear non-zero for the CLI). A single op that
 /// merely cannot be lowered offline is NOT an error — it degrades to a label.
-pub fn render_ir_json_sql(
+pub fn render_ir_envelope_sql(
     bytes: &str,
     dialect: SqlDialect,
     opts: &PreviewOpts,
 ) -> Result<String, String> {
-    let (name, rendered) = render_ir_json_rendered(bytes, dialect, opts)?;
+    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts)?;
     let mut out = String::new();
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
     // a single un-lowerable op would otherwise make `lower_plan` abort).
@@ -219,7 +219,7 @@ pub fn render_ir_json_sql(
 }
 
 /// Load + lower an IR envelope artifact through the SAME tolerant path used by
-/// [`render_ir_json_sql`], returning only executable statement text.
+/// [`render_ir_envelope_sql`], returning only executable statement text.
 ///
 /// This is the DB-free lint seam: callers can feed these statements to the
 /// advisory analyzers without scraping SQL back out of the human preview, while
@@ -229,12 +229,12 @@ pub fn render_ir_json_sql(
 ///
 /// Returns an error when the IR document cannot be parsed or structurally
 /// validated for offline rendering.
-pub fn render_ir_json_sql_statements(
+pub fn render_ir_envelope_sql_statements(
     bytes: &str,
     dialect: SqlDialect,
     opts: &PreviewOpts,
 ) -> Result<(String, Vec<String>), String> {
-    let (name, rendered) = render_ir_json_rendered(bytes, dialect, opts)?;
+    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts)?;
     let statements = rendered
         .into_iter()
         .filter(|r| r.statement)
@@ -243,7 +243,7 @@ pub fn render_ir_json_sql_statements(
     Ok((name, statements))
 }
 
-fn render_ir_json_rendered(
+fn render_ir_envelope_rendered(
     bytes: &str,
     dialect: SqlDialect,
     opts: &PreviewOpts,

@@ -130,7 +130,7 @@ mod tests {
         }
     }
 
-    fn ir_json(ops_json: &str, extra: &str) -> String {
+    fn envelope_json(ops_json: &str, extra: &str) -> String {
         format!(
             r#"{{"ir_version": 1, "name": "m", "ops": {ops_json}{extra}}}"#
         )
@@ -155,7 +155,7 @@ mod tests {
         // A createTable whose Check references a column NOT on the table — rule
         // (c). The gate must reject it via validate_ir on the real load path.
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}],"constraints":[{"kind":{"kind":"check","expr":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"ghost"}}}}]}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         let profile = platform_profile();
         let err =
@@ -175,7 +175,7 @@ mod tests {
         // The gate threads target_dialect into validate_ir, so a SQLite deploy
         // refuses it on the production path.
         let ops = r#"[{"op":"update","table":"users","set":{"name":{"node":"fnSynth","fn":"splitPart","args":[{"node":"colRef","name":"first"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         // PG accepts (validation OK), SQLite rejects.
         assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).is_ok());
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn load_rejects_unknown_expr_node_tag_at_deserialize() {
         let ops = r#"[{"op":"delete","table":"users","where":{"node":"evilNode"}}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap_err();
         assert!(matches!(err, IrLoadError::Deserialize(_)), "got: {err}");
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn load_rejects_lossy_numeric_scalar_at_deserialize() {
         let ops = r#"[{"op":"insert","table":"users","columns":["a"],"rows":[[9007199254740992]]}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap_err();
         match err {
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn load_refuses_op_on_another_apps_table() {
         let ops = r#"[{"op":"dropColumn","table":"users","column":"x"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]); // owned by a DIFFERENT app
         let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None, None).unwrap_err();
         match err {
@@ -233,7 +233,7 @@ mod tests {
         // refused fail-closed (unknown-owner), exactly as the declarative drop
         // path refuses an unknown-owner drop.
         let ops = r#"[{"op":"delete","table":"never_declared","where":{"node":"literal","value":true}}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]); // no entry for `never_declared`
         let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap_err();
         match err {
@@ -255,7 +255,7 @@ mod tests {
         // exists), so the bypass is closed. An intruder targeting another app's
         // index by NAME is now REFUSED, not silently applied.
         let ops = r#"[{"op":"dropIndex","name":"victim_secret_idx"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         // The registry knows the victim app owns tables; the intruder owns nothing.
         let reg = registry(&[("victim_secrets", "app_victim")]);
         let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None, None).unwrap_err();
@@ -280,7 +280,7 @@ mod tests {
         // table-hinted drop on a table the deployer owns is allowed — the fix
         // refuses ONLY the un-checkable bare-name form.
         let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("mine", "app_a")]);
         load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None)
             .expect("a table-hinted DropIndex on an owned table is allowed");
@@ -291,7 +291,7 @@ mod tests {
         // And a table-hinted DropIndex against ANOTHER app's table is refused by the
         // ownership pass (the table hint resolves to a foreign owner).
         let ops = r#"[{"op":"dropIndex","name":"theirs_idx","table":"theirs"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("theirs", "app_owner")]);
         let err = load_ir_document(&bytes, "app_intruder", Dialect::Postgres, &reg, None, None).unwrap_err();
         match err {
@@ -308,7 +308,7 @@ mod tests {
         // A createTable establishes ownership for its NEW table (the declarer);
         // a following op on that same new table is then allowed.
         let ops = r#"[{"op":"createTable","name":"fresh","columns":[{"name":"first","type":"text"}]},{"op":"addColumn","table":"fresh","column":"x","type":"int"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — not in the project registry
         let profile = platform_profile();
         let ir =
@@ -346,7 +346,7 @@ mod tests {
                 "events":["update"],"forEach":"row",
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[]);
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
         let profile = platform_profile();
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn load_refuses_unknown_table_structural_attach_fail_closed() {
         let ops = r#"[{"op":"setRls","table":"never_declared","schema":"zero_migrate","enabled":true}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
         let profile = platform_profile();
         let err = load_ir_document(
@@ -438,7 +438,7 @@ mod tests {
         // security relaxation: the table is still owned by the deploying app, and a
         // collision with ANOTHER app's table is still refused (see the test below).
         let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — declared later in THIS migration
         let profile = platform_profile();
         let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, Some(&profile))
@@ -454,7 +454,7 @@ mod tests {
         // existing foreign owner is never overwritten). A createTable colliding
         // with that foreign table is likewise refused.
         let ops = r#"[{"op":"insert","table":"users","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"users","columns":[{"name":"id","type":"int"}]}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
         let profile = platform_profile();
         let err = load_ir_document(
@@ -482,7 +482,7 @@ mod tests {
         // take ownership — the per-op check refuses it (the working registry only
         // inserts when ABSENT).
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}]}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
         let profile = platform_profile();
         let err = load_ir_document(
@@ -552,7 +552,7 @@ mod tests {
         // deliberate, matched break.
         const FROZEN_HINT: &str =
             "8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4";
-        let bytes = ir_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
+        let bytes = envelope_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
         let reg = registry(&[("users", "app_a")]);
         let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None)
             .expect("loader must accept the frozen-hex hint for this fixed IR");
@@ -582,7 +582,7 @@ mod tests {
         };
         let correct = recompute_hint_domain_checksum(&ir);
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(ops, &format!(r#", "checksum": "{}""#, correct.as_str()));
+        let bytes = envelope_json(ops, &format!(r#", "checksum": "{}""#, correct.as_str()));
         let reg = registry(&[("users", "app_a")]);
         let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap();
         // The hint is carried through (the engine recomputes; it does not strip it).
@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn load_rejects_a_wrong_checksum_hint() {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(ops, r#", "checksum": "deadbeefdeadbeef""#);
+        let bytes = envelope_json(ops, r#", "checksum": "deadbeefdeadbeef""#);
         let reg = registry(&[("users", "app_a")]);
         let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).unwrap_err();
         match err {
@@ -608,7 +608,7 @@ mod tests {
     fn load_accepts_an_absent_checksum_hint() {
         // The hint is advisory and need not be present.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(ops, "");
+        let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
         assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).is_ok());
     }
@@ -626,7 +626,7 @@ mod tests {
         // (per ir.rs doc) includes depends_on, but the recompute cannot fold it,
         // so the loader refuses rather than compare a partial domain.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(
+        let bytes = envelope_json(
             ops,
             r#", "depends_on": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn load_rejects_hint_bearing_ir_with_supersedes_fail_closed() {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(
+        let bytes = envelope_json(
             ops,
             r#", "supersedes": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
@@ -658,7 +658,7 @@ mod tests {
         // A non-default flag override (transactional:false) is outside the
         // foldable domain (neutral defaults), so a hint over it fails closed.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(
+        let bytes = envelope_json(
             ops,
             r#", "flags": {"transactional": false}, "checksum": "deadbeefdeadbeef""#,
         );
@@ -676,7 +676,7 @@ mod tests {
         // advisory hint is fine (nothing to compare), so authoring deps is not
         // blocked — only a hint OVER an uncomputable domain is.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        let bytes = ir_json(ops, r#", "depends_on": ["m_0001"]"#);
+        let bytes = envelope_json(ops, r#", "depends_on": ["m_0001"]"#);
         let reg = registry(&[("users", "app_a")]);
         assert!(
             load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, None).is_ok(),

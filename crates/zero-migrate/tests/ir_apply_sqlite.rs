@@ -46,7 +46,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
-fn resolved_ir_json(raw: &str) -> String {
+fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
         resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
@@ -56,11 +56,11 @@ fn resolved_ir_json(raw: &str) -> String {
 // Happy path: a valid IR envelope createTable is gated (SQLite dialect), lowered,
 // and APPLIED on a real SQLite backend — the table exists + journals.
 #[compio::test]
-async fn ir_json_lowers_and_applies_on_sqlite() {
+async fn ir_envelope_lowers_and_applies_on_sqlite() {
     let p = paths("ir_apply");
     let be = backend(&p);
 
-    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_notes","ops":[
+    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_notes","ops":[
         {"op":"createTable","name":"notes","columns":[
             {"name":"title","type":"text","nullable":false},
             {"name":"body","type":"text"}
@@ -97,11 +97,11 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
 // L7/M15: `date` is an honest portable column type. The SQLite leg stores it as
 // TEXT affinity and must accept/apply it through the real IR load gate.
 #[compio::test]
-async fn ir_json_date_column_lowers_and_applies_on_sqlite() {
+async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     let p = paths("ir_date_apply");
     let be = backend(&p);
 
-    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_events","ops":[
+    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_events","ops":[
         {"op":"createTable","name":"events","columns":[
             {"name":"happened_on","type":"date","nullable":false}
         ]}
@@ -145,12 +145,12 @@ async fn ir_json_date_column_lowers_and_applies_on_sqlite() {
 // the embedded `;\n`. Driven through `apply_plan` (the shared orchestrator) over
 // the guarded artifact's plan steps — the real deploy shape.
 #[compio::test]
-async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlite() {
+async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_sqlite() {
     let p = paths("ir_semicolon_default");
     let be = backend(&p);
 
     // The JSON `\n` escape yields the literal three-byte run `a ; \n b ; c`.
-    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_docs","ops":[
+    let ir = resolved_envelope_json(r#"{"ir_version":1,"name":"create_docs","ops":[
         {"op":"createTable","name":"docs","columns":[
             {"name":"note","type":"text","nullable":false,
              "default":{"literal":{"value":"a;\nb;c"}}}
@@ -234,7 +234,7 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
 // any apply. `splitPart` is PG-expressible but out-of-envelope on SQLite, so
 // the dialect-parameterized validate refuses it fail-closed.
 #[compio::test]
-async fn ir_json_out_of_envelope_splitpart_refused_on_sqlite() {
+async fn out_of_envelope_splitpart_refused_on_sqlite() {
     // An update whose SET applies a MULTI-CHAR-delim splitPart — in-envelope on PG,
     // out-of-envelope on SQLite. The gate is dialect-parameterized, so the SAME
     // artifact loads on PG and is REFUSED on SQLite (the gate runs BEFORE lower, so
