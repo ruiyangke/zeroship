@@ -207,6 +207,13 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # still link the V8 host. The migrate CLI bins build via the package's own
 # `default = ["js-cli"]`, which is unaffected by this workspace-edge default.
 zeroship-migrate = { path = "crates/zeroship-migrate", default-features = false }
+# Phase F: the monorepo's native-PG producer (`CompioPgSession`) for the published
+# `zero-migrate` engine's driver-neutral `SqlSession` seam.
+zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
+# The published, standalone `zero-migrate` engine (path dep may point outside the
+# workspace). The `zeroship-migrated` service consumes it (via the adapter) instead
+# of the in-tree `zeroship-migrate`.
+zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

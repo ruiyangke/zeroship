@@ -1,15 +1,18 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_migrate::{
-    apply_sealed, connect, discover_ir_files, migrator_role_name, postgres_ir_apply_state,
-    provision_migrator, Approval, ConnectError, DeclarativeApplyError, EngineError,
-    ExecutorConfig, GuardConfig, IrAuthor, MigrationEngine, PlanStep, PostgresBackend,
-    PostgresIrApplyError, RoleError, SealedApplyError, SqlDialect,
+use zero_migrate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
+use zero_migrate::apply::journal::DeployRecoveryScope;
+use zero_migrate::{
+    migrator_role_name, resolve_create_table_policy, snapshot_schema, Approval, ApprovalScope,
+    DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode,
+    MigrationEngine, MigrationIr, PlanStep, PolicyProfile, PostgresBackend, SealError, SealVerifier,
+    SealedProfile, SqlDialect,
 };
+use zeroship_migrate_adapter::CompioPgSession;
 
 use crate::migration_store::{
     sealed_profile_audit_json, AuditAction, AuditInput, MigrationStore, MigrationStoreError,
@@ -19,6 +22,7 @@ use crate::policy::{
     CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig, ManagedPolicyError,
 };
 use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
+use crate::provisioning::{provision_migrator, ProvisionRoleError};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
@@ -52,6 +56,55 @@ pub struct ApplyMigrationsResponse {
     pub applied: Vec<String>,
     pub skipped: Vec<String>,
     pub pending_contract: Vec<String>,
+}
+
+/// A failure loading/lowering/applying a `.ir.json` bundle through the published
+/// `zero-migrate` engine over the [`CompioPgSession`] seam.
+///
+/// This replaces the in-tree `zeroship_migrate::PostgresIrApplyError` (which the
+/// engine no longer exports): the service owns the file-read + lower + apply loop
+/// now, so it owns the error taxonomy for it too. The variants preserve the same
+/// HTTP-status mapping the previous surface had.
+#[derive(Debug, thiserror::Error)]
+pub enum IrApplyError {
+    /// Reading a `.ir.json` file failed.
+    #[error("read IR file ({file}): {message}")]
+    Read { file: String, message: String },
+    /// Introspecting the live schema failed.
+    #[error("read Postgres catalog for live facts: {0}")]
+    Snapshot(#[source] zero_migrate::DriftError),
+    /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
+    #[error("IR load/guarded-lower ({file}): {source}")]
+    Ir {
+        file: String,
+        #[source]
+        source: zero_migrate::LoadAndLowerGuardedError,
+    },
+    /// The engine refused or failed the apply.
+    #[error("apply: {0}")]
+    Apply(#[from] DeclarativeApplyError),
+}
+
+impl From<zero_migrate::LoadAndLowerError> for IrApplyError {
+    fn from(_: zero_migrate::LoadAndLowerError) -> Self {
+        // The service always lowers via the guarded path; the unguarded error is
+        // unreachable here, but keep the conversion total.
+        Self::Read {
+            file: "<unknown>".to_string(),
+            message: "unguarded lower error (unreachable on the service path)".to_string(),
+        }
+    }
+}
+
+/// A failure on the sealed shared-infra apply path.
+#[derive(Debug, thiserror::Error)]
+pub enum SealedApplyError {
+    /// The sealed profile did not authenticate or was stale.
+    #[error("sealed migration policy profile refused: {0}")]
+    Seal(#[from] SealError),
+    /// The guarded IR apply path failed after seal verification.
+    #[error(transparent)]
+    Apply(#[from] IrApplyError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -108,15 +161,15 @@ pub enum ApplyRequestError {
     #[error("stored migration policy has invalid ceiling version {0}")]
     StoredPolicyCeilingVersion(i64),
     #[error("migration database connect: {0}")]
-    Connect(#[from] ConnectError),
+    Connect(compio_postgres::Error),
     #[error("migration schema provision: {0}")]
     ProvisionSchema(compio_postgres::Error),
     #[error("migration role provision: {0}")]
-    ProvisionRole(#[from] RoleError),
+    ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
     ProvisionRuntimeRole(compio_postgres::Error),
     #[error("migration preflight: {0}")]
-    Preflight(#[from] PostgresIrApplyError),
+    Preflight(#[from] IrApplyError),
     #[error("sealed migration apply: {0}")]
     Apply(#[from] SealedApplyError),
 }
@@ -286,22 +339,32 @@ async fn apply_ir_documents_with_policy(
     let request_body = serde_json::to_value(request)
         .map_err(|err| ApplyRequestError::EncodeRequest(err.to_string()))?;
     let schema = app_id.to_string();
-    let conn = connect(provision_dsn).await?;
-    conn.batch_execute(&format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_ident(&schema)
-    ))
-    .await
-    .map_err(ApplyRequestError::ProvisionSchema)?;
-    let role = migrator_role_name(&schema)?;
+
+    // (a) DRIVER: open a native compio session, wrap it in the adapter's
+    // `CompioPgSession`, and drive the published engine over it. Provisioning
+    // (schema + role) runs over the SAME raw compio `Client`, borrowed back via
+    // `session.client()`.
+    let session = CompioPgSession::connect(provision_dsn)
+        .await
+        .map_err(ApplyRequestError::Connect)?;
+    session
+        .client()
+        .batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {}",
+            quote_ident(&schema)
+        ))
+        .await
+        .map_err(ApplyRequestError::ProvisionSchema)?;
+    let role = migrator_role_name(&schema)
+        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
     let exec_cfg =
         ExecutorConfig::new(schema.clone(), schema.clone()).with_migrator_role(role.clone());
-    provision_migrator(&conn, &exec_cfg).await?;
-    let backend = PostgresBackend::new(&conn);
+    provision_migrator(session.client(), &exec_cfg).await?;
+    let backend = PostgresBackend::new_generic(&session);
 
     let preflight = match authorization {
         ApplyAuthorization::Routine => {
-            let report = preflight_ir_documents(&backend, &exec_cfg, &schema, dir.path(), &policy)
+            let report = preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy)
                 .await?;
             let gated_versions = gated_versions_for_policy(&policy, &report);
             let requires_approval = !gated_versions.is_empty();
@@ -388,7 +451,7 @@ async fn apply_ir_documents_with_policy(
         }
         ApplyAuthorization::OperatorApproved { stored } => {
             let report =
-                match preflight_ir_documents(&backend, &exec_cfg, &schema, dir.path(), &policy)
+                match preflight_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy)
                     .await
                 {
                     Ok(report) => report,
@@ -475,6 +538,12 @@ async fn apply_ir_documents_with_policy(
         ApplyAuthorization::Routine => policy.clone(),
         ApplyAuthorization::OperatorApproved { .. } => policy.project_for_approved_apply(),
     };
+    // (d) POLICY: seal the effective profile with zero-migrate's SealVerifier so
+    // the apply carries an authenticated, ceiling-stamped integrity token (the
+    // audit records its posture/nonce/issued-at). Pre-launch: stored seals don't
+    // matter — this seal is minted+verified in-process for tamper-detection, and
+    // the guard/policy that DRIVE the apply come from the same effective profile
+    // it seals.
     let sealed_policy = policy_config.seal_effective_for_app(app_id, apply_policy.clone())?;
     let sealed_audit = sealed_profile_audit_json(
         sealed_policy.sealed.posture(),
@@ -500,23 +569,25 @@ async fn apply_ir_documents_with_policy(
             format!("migrated-approved:{principal_id}")
         }
     };
-    provision_runtime_app_role(&conn, &schema, &role)
+    provision_runtime_app_role(session.client(), &schema, &role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
     let outcome = apply_sealed(
+        &session,
         &backend,
         sealed_policy.sealed,
         &sealed_policy.verifier,
         &schema,
         dir.path(),
         &exec_cfg,
+        &apply_policy.profile,
         approval,
         &applied_by,
     )
     .await;
     let outcome = match outcome {
         Ok(outcome) => {
-            provision_runtime_app_role(&conn, &schema, &role)
+            provision_runtime_app_role(session.client(), &schema, &role)
                 .await
                 .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
             migration_store.mark_applied(*app_id, migration_id).await?;
@@ -584,6 +655,300 @@ async fn apply_ir_documents_with_policy(
     })
 }
 
+/// What a sealed apply produced (the subset of the engine's per-file outcomes the
+/// service surfaces + audits).
+#[derive(Debug, Clone, Default)]
+struct SealedApplyOutcome {
+    applied: Vec<String>,
+    skipped: Vec<String>,
+    pending_contract: Vec<String>,
+}
+
+/// Apply a `.ir.json` bundle to Postgres through a sealed shared-infra policy
+/// profile, over the [`CompioPgSession`] seam.
+///
+/// Verifies the in-process MAC + ceiling version (tamper/staleness fail-closed),
+/// then drives the published engine's guarded lower + `apply_plan` per file using
+/// the effective [`PolicyProfile`] (the same profile the seal covers). This is the
+/// service-owned reimplementation of the in-tree `apply_sealed` +
+/// `apply_bundle_ir_postgres`, since the published engine exports neither.
+#[allow(clippy::too_many_arguments)]
+async fn apply_sealed(
+    session: &CompioPgSession,
+    backend: &PostgresBackend<'_, CompioPgSession>,
+    sealed: SealedProfile,
+    verifier: &SealVerifier,
+    owner_app: &str,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    policy_profile: &PolicyProfile,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<SealedApplyOutcome, SealedApplyError> {
+    sealed.verify(verifier)?;
+    let guard_cfg = guard_config_for_profile(&exec_cfg.project_schema, policy_profile);
+    apply_bundle_ir_postgres(
+        session,
+        backend,
+        &exec_cfg.project_schema,
+        owner_app,
+        migrations_dir,
+        exec_cfg,
+        &guard_cfg,
+        policy_profile,
+        approval,
+        applied_by,
+    )
+    .await
+    .map_err(SealedApplyError::Apply)
+}
+
+/// Discover `*.ir.json` files in a directory, deterministically ordered by path
+/// (the service-owned replacement for the engine's removed `discover_ir_files`).
+fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrApplyError> {
+    let mut ir_files: Vec<PathBuf> = Vec::new();
+    let read = std::fs::read_dir(migrations_dir).map_err(|e| IrApplyError::Read {
+        file: migrations_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| IrApplyError::Read {
+            file: migrations_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".ir.json"))
+        {
+            ir_files.push(path);
+        }
+    }
+    ir_files.sort();
+    Ok(ir_files)
+}
+
+/// Deserialize a `.ir.json` envelope, fold the effective table-shape profile into
+/// its `createTable` ops (via the engine's `resolve_create_table_policy`), and
+/// re-serialize. The result is the self-contained managed table shape the
+/// fail-closed load gate accepts under a `forbid` `author_primary_key` profile.
+///
+/// A malformed envelope surfaces as an `IrApplyError::Read` for the file (the
+/// fail-closed load gate would report the same shape); a policy that cannot
+/// resolve the createTable surfaces as an `Ir`-class failure via `Read` text.
+fn resolve_shape_bytes(
+    raw_bytes: &str,
+    profile: &PolicyProfile,
+    file: &str,
+) -> Result<String, IrApplyError> {
+    let ir: MigrationIr = serde_json::from_str(raw_bytes).map_err(|e| IrApplyError::Read {
+        file: file.to_string(),
+        message: format!("deserialize IR envelope: {e}"),
+    })?;
+    let resolved = resolve_create_table_policy(&ir, profile).map_err(|e| IrApplyError::Read {
+        file: file.to_string(),
+        message: format!("resolve table-shape policy: {e}"),
+    })?;
+    serde_json::to_string(&resolved).map_err(|e| IrApplyError::Read {
+        file: file.to_string(),
+        message: format!("re-serialize resolved IR envelope: {e}"),
+    })
+}
+
+/// Live facts the PG `.ir.json` apply loop advances between files (the
+/// service-owned analogue of the engine's removed `PostgresIrApplyState`).
+struct PostgresIrApplyState {
+    registry: BTreeMap<String, String>,
+    live_schema: LiveSchema,
+}
+
+/// Seed the PG IR apply state from the live project schema (the service-owned
+/// analogue of the engine's removed `postgres_ir_apply_state`). Introspects the
+/// catalog over the [`SqlSession`] seam via the engine's `snapshot_schema` free fn
+/// (the session is the same one the backend borrows).
+async fn postgres_ir_apply_state(
+    session: &CompioPgSession,
+    exec_cfg: &ExecutorConfig,
+    owner_app: &str,
+) -> Result<PostgresIrApplyState, zero_migrate::DriftError> {
+    let live = snapshot_schema(session, &exec_cfg.project_schema).await?;
+    let registry: BTreeMap<String, String> = live
+        .tables
+        .keys()
+        .map(|t| (t.clone(), owner_app.to_string()))
+        .collect();
+    let live_schema = LiveSchema {
+        tables: live.tables.keys().cloned().collect(),
+        unique_indexes: live
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect(),
+        table_snapshots: live.tables.clone(),
+        partitions: live.partitions.clone(),
+        table_ownership: live
+            .tables
+            .keys()
+            .map(|t| (t.clone(), owner_app.to_string()))
+            .collect(),
+        sqlite_schemas: BTreeMap::new(),
+    };
+    Ok(PostgresIrApplyState {
+        registry,
+        live_schema,
+    })
+}
+
+/// Apply all `*.ir.json` files in a directory to Postgres over the seam,
+/// holding the project advisory lock once across the whole set (via
+/// `LockMode::Acquire` on the first file, `AlreadyHeld` on the rest). The
+/// service-owned reimplementation of the engine's removed
+/// `apply_bundle_ir_postgres`.
+#[allow(clippy::too_many_arguments)]
+async fn apply_bundle_ir_postgres(
+    session: &CompioPgSession,
+    backend: &PostgresBackend<'_, CompioPgSession>,
+    project_schema: &str,
+    owner_app: &str,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<SealedApplyOutcome, IrApplyError> {
+    let ir_files = discover_ir_files(migrations_dir)?;
+    if ir_files.is_empty() {
+        return Ok(SealedApplyOutcome::default());
+    }
+    let mut state = postgres_ir_apply_state(session, exec_cfg, owner_app)
+        .await
+        .map_err(IrApplyError::Snapshot)?;
+
+    let mut outcome = SealedApplyOutcome::default();
+    for (index, path) in ir_files.iter().enumerate() {
+        // The engine's `apply_plan` acquires the project advisory lock in
+        // `LockMode::Acquire`; hold it across the whole file set by acquiring on
+        // the first file and reusing it (`AlreadyHeld`) for the rest.
+        let lock_mode = if index == 0 {
+            LockMode::Acquire
+        } else {
+            LockMode::AlreadyHeld
+        };
+        let file_outcome = apply_one_ir_file_postgres(
+            backend,
+            project_schema,
+            owner_app,
+            path,
+            &mut state,
+            exec_cfg,
+            guard_cfg,
+            policy_profile,
+            approval,
+            applied_by,
+            lock_mode,
+        )
+        .await?;
+        outcome.applied.extend(file_outcome.applied);
+        outcome.skipped.extend(file_outcome.skipped);
+        outcome.pending_contract.extend(file_outcome.pending_contract);
+    }
+    Ok(outcome)
+}
+
+/// Apply one PG `.ir.json` file: read → fail-closed load + guarded lower
+/// (`IrAuthor::load_and_lower_guarded`, Postgres dialect) → engine
+/// `apply_plan_with_touched_and_depends_scoped`. Advances `state` with the
+/// created tables so a later file in the set sees them.
+#[allow(clippy::too_many_arguments)]
+async fn apply_one_ir_file_postgres(
+    backend: &PostgresBackend<'_, CompioPgSession>,
+    project_schema: &str,
+    owner_app: &str,
+    path: &Path,
+    state: &mut PostgresIrApplyState,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
+    approval: Approval,
+    applied_by: &str,
+    lock_mode: LockMode,
+) -> Result<SealedApplyOutcome, IrApplyError> {
+    let file = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    let raw_bytes = std::fs::read_to_string(path).map_err(|e| IrApplyError::Read {
+        file: file.clone(),
+        message: e.to_string(),
+    })?;
+    // Fold the effective table-shape profile into every `createTable` op (system
+    // columns/indexes + resolved primary key) BEFORE the fail-closed load gate,
+    // which — under a `forbid` `author_primary_key` profile — REFUSES an
+    // unresolved createTable. This is the managed-service analogue of the creator
+    // build tool's shape fold, and the same normalisation the Phase-F smoke test
+    // proves green. Non-`createTable` ops pass through untouched.
+    let bytes = resolve_shape_bytes(&raw_bytes, policy_profile, &file)?;
+
+    let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres);
+    if let Some(scope) = guard_cfg.schema_scope() {
+        author = author.with_schema_scope(scope);
+    }
+    let lowered = author
+        .load_and_lower_guarded(
+            &bytes,
+            owner_app,
+            &state.registry,
+            &state.live_schema,
+            guard_cfg,
+            Some(policy_profile),
+        )
+        .map_err(|source| IrApplyError::Ir {
+            file: file.clone(),
+            source,
+        })?;
+
+    let created_tables = lowered.created_tables.clone();
+    let recovery_scope: Option<&DeployRecoveryScope<'_>> = None;
+    let outcome = MigrationEngine::new()
+        .apply_plan_with_touched_and_depends_scoped(
+            &lowered.plan.steps,
+            &lowered.touched_tables,
+            &lowered.depends_on,
+            approval,
+            &ApprovalScope::All,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+            recovery_scope,
+        )
+        .await?;
+
+    for t in created_tables {
+        state
+            .registry
+            .entry(t.clone())
+            .or_insert_with(|| owner_app.to_string());
+        state.live_schema.tables.insert(t);
+    }
+
+    Ok(SealedApplyOutcome {
+        applied: outcome.applied.applied,
+        skipped: outcome.applied.skipped,
+        pending_contract: outcome
+            .pending_contract
+            .iter()
+            .map(|m| m.version.as_str().to_string())
+            .collect(),
+    })
+}
+
 async fn resolve_apply_policy(
     app_id: &Uuid,
     request: &ApplyMigrationsRequest,
@@ -624,18 +989,18 @@ struct PreflightReport {
 }
 
 async fn preflight_ir_documents(
-    backend: &PostgresBackend<'_>,
+    session: &CompioPgSession,
     exec_cfg: &ExecutorConfig,
     schema: &str,
     migrations_dir: &Path,
     policy: &EffectivePolicy,
 ) -> Result<PreflightReport, ApplyRequestError> {
-    let files = discover_ir_files(migrations_dir).map_err(PostgresIrApplyError::from)?;
+    let files = discover_ir_files(migrations_dir)?;
     let projected = policy.project_for_preflight();
     let guard_cfg = guard_config_for_profile(schema, &projected.profile);
-    let mut state = postgres_ir_apply_state(backend, exec_cfg, schema)
+    let mut state = postgres_ir_apply_state(session, exec_cfg, schema)
         .await
-        .map_err(PostgresIrApplyError::Snapshot)?;
+        .map_err(IrApplyError::Snapshot)?;
     let mut report = PreflightReport::default();
     let engine = MigrationEngine::new();
 
@@ -645,10 +1010,14 @@ async fn preflight_ir_documents(
             .and_then(|name| name.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let bytes = std::fs::read_to_string(&path).map_err(|err| PostgresIrApplyError::Read {
+        let raw_bytes = std::fs::read_to_string(&path).map_err(|err| IrApplyError::Read {
             file: file.clone(),
             message: err.to_string(),
         })?;
+        // Fold the effective table-shape profile the same way the apply path does,
+        // so preflight lowers the SAME resolved artifact it will apply (identical
+        // version-ids + destructive/approval classification).
+        let bytes = resolve_shape_bytes(&raw_bytes, &policy.profile, &file)?;
         let mut author = IrAuthor::new(schema, schema, SqlDialect::Postgres);
         if let Some(scope) = guard_cfg.schema_scope() {
             author = author.with_schema_scope(scope);
@@ -662,7 +1031,7 @@ async fn preflight_ir_documents(
                 &guard_cfg,
                 Some(&policy.profile),
             )
-            .map_err(|source| PostgresIrApplyError::Ir {
+            .map_err(|source| IrApplyError::Ir {
                 file: file.clone(),
                 source,
             })?;
@@ -673,16 +1042,17 @@ async fn preflight_ir_documents(
             .extend(migrations.iter().map(|migration| migration.version.as_str().to_string()));
         let plan = engine.plan(&migrations, &guard_cfg);
         if !plan.denied.is_empty() {
-            return Err(PostgresIrApplyError::Apply(DeclarativeApplyError::Plain(
+            return Err(IrApplyError::Apply(DeclarativeApplyError::Plain(
                 EngineError::Denied(plan.denied),
             ))
             .into());
         }
         for item in plan.items {
-            let has_unknown_data_security = item.report.advisories.iter().any(|advisory| {
-                advisory.rule
-                    == zeroship_migrate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
-            });
+            let has_unknown_data_security = item
+                .report
+                .advisories
+                .iter()
+                .any(|advisory| advisory.rule == DATA_SECURITY_UNCLASSIFIED_OPS_WARN);
             if item.report.destructive
                 || item.migration.flags.requires_approval
                 || has_unknown_data_security
@@ -715,7 +1085,7 @@ async fn preflight_ir_documents(
     Ok(report)
 }
 
-fn guard_config_for_profile(schema: &str, profile: &zeroship_migrate::PolicyProfile) -> GuardConfig {
+fn guard_config_for_profile(schema: &str, profile: &PolicyProfile) -> GuardConfig {
     GuardConfig::confined(schema.to_string())
         .with_extension_allowlist(profile.capabilities.extensions.clone())
         .with_data_security(
@@ -873,7 +1243,7 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
             ntex::http::StatusCode::NOT_FOUND,
             "pending_migration_not_found",
         ),
-        ApplyRequestError::Preflight(source) => postgres_ir_apply_error_kind(source),
+        ApplyRequestError::Preflight(source) => ir_apply_error_kind(source),
         ApplyRequestError::Apply(source) => sealed_apply_error_kind(source),
         ApplyRequestError::TempDir(_)
         | ApplyRequestError::Write { .. }
@@ -899,23 +1269,17 @@ fn sealed_apply_error_kind(err: &SealedApplyError) -> (ntex::http::StatusCode, &
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_policy_seal",
         ),
-        SealedApplyError::Apply(source) => postgres_ir_apply_error_kind(source),
+        SealedApplyError::Apply(source) => ir_apply_error_kind(source),
     }
 }
 
-fn postgres_ir_apply_error_kind(
-    err: &PostgresIrApplyError,
-) -> (ntex::http::StatusCode, &'static str) {
+fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static str) {
     match err {
-        PostgresIrApplyError::Ir { .. }
-        | PostgresIrApplyError::Apply(_)
-        | PostgresIrApplyError::DuplicateTsVersion { .. } => (
+        IrApplyError::Ir { .. } | IrApplyError::Apply(_) => (
             ntex::http::StatusCode::UNPROCESSABLE_ENTITY,
             "migration_failed",
         ),
-        PostgresIrApplyError::Read { .. }
-        | PostgresIrApplyError::Snapshot(_)
-        | PostgresIrApplyError::Record { .. } => (
+        IrApplyError::Read { .. } | IrApplyError::Snapshot(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),

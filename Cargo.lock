@@ -7065,10 +7065,11 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zero-migrate",
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-migrate",
+ "zeroship-migrate-adapter",
 ]
 
 [[package]]
