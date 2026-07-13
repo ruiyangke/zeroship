@@ -3,7 +3,6 @@
 //!
 //! This module is a **surfacing / formatting layer over the SQL the engine ALREADY
 //! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
-//! [`loader::load_dir`](crate::plan::loader::load_dir) for a `.sql` artifact, or from
 //! [`IrAuthor::lower_plan`](crate::render::lower::IrAuthor::lower_plan) for an
 //! IR envelope), it walks the steps and prints the SQL strings already held in each
 //! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It NEVER renders SQL

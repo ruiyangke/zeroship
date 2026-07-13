@@ -963,7 +963,7 @@ fn rename_sdk_schema_field(
 /// the source column? Returns the facet name (for the fail-closed error) or `None` for
 /// a plain column.
 ///
-/// The catalog-sourced rename path (`apply_bundle_ir_sqlite_catalog`, branch 2) renders
+/// The catalog-sourced SQLite rename rebuild renders
 /// the rebuilt table's CREATE from the descriptor's POST-rename `to` def but copies the
 /// live `from` bytes UN-TRANSFORMED. A facet whose shape depends on the column's VALUE
 /// (encryption changes the on-disk bytes; `mask` adds a sibling masked column; `default`
@@ -2918,7 +2918,7 @@ pub enum DeclarativeError {
         /// The desired `to` column's data type.
         to_type: String,
     },
-    /// a SQLite catalog-sourced (`apply_bundle_ir_sqlite_catalog`)
+    /// a SQLite catalog-sourced
     /// renameColumn whose POST-rename descriptor `to` field declares a
     /// **data-transforming facet** (encryption / mask / `default` / `enum` / `check`
     /// range) the rebuild cannot certify was already present on the live `from`
@@ -4745,8 +4745,8 @@ impl DeclarativeAuthor {
         // TWO faithful sources for the SDK `Value`, distinguished by which field key it
         // carries (the live `from` or the post-rename `to`):
         //
-        //  (1) **PRE-rename Value** (the field is keyed `from`) — the descriptor-set
-        //      path (`apply_bundle_ir_sqlite`) supplies the PRE-rename SDK `Value`. We
+        //  (1) **PRE-rename Value** (the field is keyed `from`) — a descriptor-set
+        //      source supplies the PRE-rename SDK `Value`. We
         //      rename the field KEY `from`→`to` (facets preserved verbatim) to get the
         //      post-rename shape — byte-identical to a `t.*`-diff rename.
         //

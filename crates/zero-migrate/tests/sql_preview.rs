@@ -331,53 +331,6 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     );
 }
 
-/// A `.sql` (Flyway/dbmate) directory loads + renders WITHOUT a DB via `load_dir` +
-/// `render_set_sql`. Proves the `.sql` leg is offline and the verbatim body is shown.
-#[test]
-fn sql_dir_renders_offline() {
-    let dir = tempdir_with(&[
-        ("V0001__widgets.sql", "CREATE TABLE widgets (id text primary key);\n"),
-    ]);
-    let plans = zero_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
-    let out = render_set_sql(&plans, SqlDialect::Postgres, &opts());
-    assert!(out.contains("CREATE TABLE widgets (id text primary key)"), "{out}");
-    assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// HONESTY ON THE RAW `.sql` LEG. Operator-authored raw `.sql` is rendered
-/// VERBATIM, never dialect-transformed. A PG-only `.sql` (`SERIAL`) rendered under
-/// `--dialect sqlite` must therefore NOT be captioned with a bare `(dialect: sqlite)`
-/// claim — that would mislead an operator reviewing a SQLite go-live into thinking
-/// the PG SQL had been lowered for SQLite. The header must carry the verbatim/NOT-
-/// transformed disclaimer instead, while the body stays byte-verbatim.
-#[test]
-fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
-    let dir = tempdir_with(&[(
-        "V0001__legacy.sql",
-        "CREATE TABLE legacy (id SERIAL PRIMARY KEY, name text);\n",
-    )]);
-    let plans = zero_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
-    // Render the PG-only raw SQL under the SQLITE dialect request.
-    let out = render_set_sql(&plans, SqlDialect::Sqlite, &opts());
-
-    // The PG SQL is shown VERBATIM (the SERIAL never became INTEGER / AUTOINCREMENT).
-    assert!(out.contains("id SERIAL PRIMARY KEY"), "raw SQL must be verbatim:\n{out}");
-
-    // CRITICAL: no bare `(dialect: sqlite)` claim anywhere — neither the doc header
-    // nor the per-plan header may assert the SQL was lowered for SQLite.
-    assert!(
-        !out.contains("(dialect: sqlite)"),
-        "raw .sql must NOT be captioned with a transformed-dialect claim:\n{out}"
-    );
-    // It DOES surface the honest verbatim/NOT-transformed disclaimer.
-    assert!(
-        out.contains("NOT dialect-transformed"),
-        "raw .sql header must disclose it is verbatim / not transformed:\n{out}"
-    );
-    std::fs::remove_dir_all(&dir).ok();
-}
-
 /// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
 /// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
 /// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect
@@ -458,13 +411,23 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
         .expect("expand-contract author lowers the rename");
     let rename = RenameStep::PgExpandContract(ec);
 
-    // Borrow a real, fully-formed AppliedPlan via the offline `.sql` loader, then swap
-    // its single DDL step for the OnlineRename step (the only piece under test).
-    let dir = tempdir_with(&[("V0001__seed.sql", "CREATE TABLE codes (id text primary key);\n")]);
-    let mut plan = zero_migrate::plan::loader::load_dir(&dir)
-        .expect("loads .sql offline")
-        .pop()
-        .expect("one plan");
+    // Build a real, fully-formed AppliedPlan in-memory (lower a trivial createTable IR
+    // via the same author the engine uses), then swap its single DDL step for the
+    // OnlineRename step (the only piece under test).
+    let seed_json = r#"{
+      "ir_version": 1,
+      "name": "seed",
+      "ops": [
+        {"op":"createTable","name":"codes","columns":[
+          {"name":"id","type":"text","nullable":false,"unique":true}
+        ]}
+      ]
+    }"#;
+    let seed: MigrationIr = serde_json::from_str(seed_json).unwrap();
+    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let mut plan = author
+        .lower_plan(&seed, &LiveSchema::default())
+        .expect("DB-independent IR lowers offline");
     plan.steps = vec![PlanStep::OnlineRename(rename)];
 
     let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
@@ -499,7 +462,6 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
             );
         }
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A malformed IR envelope is a hard error (the CLI maps this to a non-zero exit).
@@ -517,16 +479,27 @@ fn malformed_ir_is_error() {
 // no-fabrication, `render_succeeds_without_a_dsn`). The command-line entry point is
 // now the `zero-migrate-engine` TS CLI (`sdks/engine/src/cli.ts`).
 
-/// Create a unique temp dir seeded with `(filename, contents)` files; caller removes.
-fn tempdir_with(files: &[(&str, &str)]) -> std::path::PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "zsm_preview_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    std::fs::create_dir_all(&base).unwrap();
-    for (name, body) in files {
-        std::fs::write(base.join(name), body).unwrap();
-    }
-    base
+/// `render_set_sql` — the multi-plan renderer. Lower a DB-independent IR to an
+/// `AppliedPlan` in-memory and render it as a one-element set, asserting the summary
+/// line + the lowered DDL surface. Symmetric with the `render_plan_sql` test above.
+#[test]
+fn render_set_sql_surfaces_lowered_ddl_offline() {
+    let envelope_json = r#"{
+      "ir_version": 1,
+      "name": "widgets",
+      "ops": [
+        {"op":"createTable","name":"widgets","columns":[
+          {"name":"id","type":"text","nullable":false,"unique":true}
+        ]}
+      ]
+    }"#;
+    let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
+    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let plan = author
+        .lower_plan(&ir, &LiveSchema::default())
+        .expect("DB-independent IR lowers offline");
+
+    let out = render_set_sql(&[plan], SqlDialect::Postgres, &opts());
+    assert!(out.contains("CREATE TABLE"), "the lowered DDL should surface:\n{out}");
+    assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
 }

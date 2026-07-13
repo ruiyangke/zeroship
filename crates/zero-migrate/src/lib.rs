@@ -223,10 +223,6 @@ pub use plan::pending::{
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
     CODE_TABLE_HAS_PENDING_CONTRACT,
 };
-pub use plan::loader::{
-    load_dir, load_dir_migrations, new_dbmate_migration, repeatable_id_for_name, LoaderError,
-    PLATFORM_OWNER_APP,
-};
 pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
     BlockedPlan, MigrationStatus, PendingContractStatus, StatusError,
@@ -271,16 +267,6 @@ pub use model::load::{
     enforce_ir_ownership, hint_domain_uncomputable_field, load_ir_document,
     recompute_hint_domain_checksum, IrLoadError,
 };
-// Online-rename go-live (SQLite leg): the deploy/dev entry point that applies a
-// bundle's IR envelope set against a SQLite backend, building the SQLite-dialect
-// LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
-// via `rebuild_one` end-to-end.
-pub use apply::ir_apply::{
-    apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, discover_ir_files,
-    IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
-    SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
-};
-// The PG IR envelope apply entry points take `&PostgresBackend<'_>` — PG-only.
 // The IR-path DDL Lower phase: compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.

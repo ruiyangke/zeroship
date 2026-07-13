@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// migration build front-end uses it as a shared build-artifact record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationFileEntry {
-    /// Logical migration filename, e.g. `20240617123000_create_users.ir.json`.
+    /// Logical migration name, e.g. `20240617123000_create_users`.
     pub name: String,
     /// sha256 hash (lowercase, 64 hex chars) of the migration file body.
     pub hash: String,

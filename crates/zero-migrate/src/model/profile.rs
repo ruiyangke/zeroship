@@ -1167,7 +1167,7 @@ impl SealedProfile {
 
     /// Crate-private mint seam for the server path that has a distinct operator
     /// ceiling and submitted draft. The composed effective profile is sealed and
-    /// later lowered to the guard used by [`crate::apply::ir_apply::apply_sealed`].
+    /// later lowered to the guard used by the sealed apply path.
     #[allow(dead_code)]
     pub(crate) fn mint_composed(
         _cap: &SealApplier,

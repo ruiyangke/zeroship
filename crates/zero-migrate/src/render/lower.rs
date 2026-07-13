@@ -275,8 +275,7 @@ impl LiveSchema {
     /// shape (the `from` column present), which a `registerModel`-derived (POST-deploy
     /// desired) set does NOT have — so a rename driven from a `registerModel` set fails
     /// CLOSED (no data loss) and is un-runnable. The SQLite rename path is therefore
-    /// engine/test-only today (see `ir_apply::apply_bundle_ir_sqlite`'s PRODUCTION-
-    /// WIRING TODO); it is NOT the production peer of the PG deploy path's live
+    /// engine/test-only today; it is NOT the production peer of the PG deploy path's live
     /// introspection for renames. The SQLite `renameColumn` rebuild needs the SDK schema `Value`
     /// to render the post-rename `CREATE TABLE`, and that `Value` is NOT recoverable
     /// from a raw SQLite-catalog introspection (masks/encryption/ref facets are not
@@ -361,8 +360,7 @@ impl LiveSchema {
     /// carry the rename's `from` column (a post-rename live DB, or an intermediate
     /// state an earlier same-deploy file produced that this single pre-deploy read has
     /// not yet seen), the rebuild author refuses (`SqliteRenameNeedsLiveTable` /
-    /// `RenameNeedsLiveColumn`) rather than emit a wrong rebuild — exactly the cases
-    /// the existing `apply_bundle_ir_sqlite` fail-closed tests pin.
+    /// `RenameNeedsLiveColumn`) rather than emit a wrong rebuild.
     ///
     /// `unique_indexes` / `table_ownership` are derived from the SAME catalog read
     /// (the live unique-index names drive the `dropIndex` gate; every live table in the
@@ -1242,8 +1240,7 @@ impl IrAuthor {
     /// (deserialize → `ir_version` → `validate_ir` → server-stamped ownership →
     /// advisory checksum-hint compare) and then LOWER the validated, owned IR to
     /// migrations. This is the single creator-facing entry the IR envelope deploy
-    /// path calls — the peer of the platform `.sql` Flyway loader
-    /// ([`crate::plan::loader::load_dir`]), which never routes IR.
+    /// path calls.
     ///
     /// `registry` is the project's table→owner map (drives the ownership
     /// check); `live` the introspected [`LiveSchema`] facts — the tables already
