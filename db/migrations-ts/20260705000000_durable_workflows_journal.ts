@@ -66,7 +66,6 @@ export function up() {
       blob_bytes: t.bigInt().notNull().default(0),
       wake_at: t.timestamp(),
       claimed_by: t.text(),
-      claim_epoch: t.int().notNull().default(0),
       lease_expires: t.timestamp(),
       dispatch_nonce: t.text(),
       last_dispatch_at: t.timestamp(),
