@@ -14,41 +14,29 @@
 //!    over `PostgresBackend::new_generic(&CompioPgSession)`, recording to the
 //!    platform journal (`<project_schema>_migrations`).
 //!
-//! # STAGE 4a ENGINE GAP — Platform apply needs a public `ExecutorConfig::platform`
+//! # The two operator-side Platform seams (LOWER + APPLY)
 //!
-//! The AUTHOR + LOWER half runs entirely on the published engine's PUBLIC API and
-//! is PROVEN GREEN for all 11 platform migrations (`author_and_lower_all`; the
-//! `tests/platform_migrate.rs` DB-free test): every op the platform schema uses —
-//! `schema` / `extension` / `role` / `domain` / `sequence` / `createFunction` /
-//! `raw` / `table().trigger()` / `table().comment()` / `column().comment()` /
-//! `setRls` / `policy()` / `currentSetting` / `grant` / `revoke` / `dropFunction` /
-//! `table().drop()` — authors on the standalone v1 recorder and lowers under the
-//! reachable `GuardConfig::platform` (mintable via `OperatorCapability::new()`).
-//! So the DSL/op support is COMPLETE — there is NO missing op type.
+//! Both halves run on the published engine's PUBLIC, token-gated Platform API:
 //!
-//! The APPLY half is BLOCKED by a genuine engine gap. `MigrationEngine`'s executor
-//! runs its own first-pass guard from `exec_cfg.guard_config()`, which is
-//! `Platform` ONLY when the `ExecutorConfig` was built through the token-gated
-//! `ExecutorConfig::platform` ctor. In the published `zero-migrate`, that ctor is
-//! `#[cfg(test)] pub(crate)` (its doc: *"the operator-side CLI was retired into the
-//! `zero-migrate-engine` TS CLI, and production Platform applies flow through the
-//! napi host path"*). There is NO `pub` production seam to build a Platform-trust
-//! `ExecutorConfig` — the only reachable `ExecutorConfig::new` yields a CONFINED
-//! executor guard, which denies the first platform-DDL op:
+//! - LOWER — `GuardConfig::platform(&cap, schemas, extensions)` (already public):
+//!   every op the platform schema uses — `schema` / `extension` / `role` /
+//!   `domain` / `sequence` / `createFunction` / `raw` / `table().trigger()` /
+//!   `table().comment()` / `column().comment()` / `setRls` / `policy()` /
+//!   `currentSetting` / `grant` / `revoke` / `dropFunction` / `table().drop()` —
+//!   authors on the standalone v1 recorder and lowers under the Platform guard.
+//!   The DSL/op support is COMPLETE — there is NO missing op type.
+//! - APPLY — `ExecutorConfig::platform(&cap, project_id, project_schema, schemas,
+//!   extensions)`: the operator-side production seam for a Platform-trust executor
+//!   (the APPLY-half peer of `GuardConfig::platform`). `MigrationEngine`'s executor
+//!   derives its first-pass guard from `exec_cfg.guard_config()`, which honours
+//!   `Platform` because the config was built through this token-gated ctor, so it
+//!   admits the platform DDL (CREATE SCHEMA / roles / grants / cross-schema
+//!   `public` / functions) the confined creator posture denies.
 //!
-//! ```text
-//!   apply 20260702000100_schema_roles_extensions.ts: migration … denied by guard:
-//!   denied by rule 'unrecognized_dangerous_construct': CREATE SCHEMA IF NOT EXISTS "zeroship"
-//! ```
-//!
-//! (empirically pinned by `apply_blocked_by_confined_executor_seam`).
-//!
-//! To close it, the published engine must expose an operator-side, token-gated
-//! PUBLIC seam for a Platform-trust `ExecutorConfig` (the monorepo bin is the
-//! operator-side production caller — the `napi` host is not the only legitimate
-//! Platform-apply producer). That is a change to the PUBLISHED ENGINE, not the
-//! monorepo, so it is surfaced here as a finding rather than worked around (no
-//! guard bypass, no raw-SQL side channel, no engine edit from this stage).
+//! Both require an `OperatorCapability` token, minted through the engine's named
+//! production seam `OperatorCapability::new()`. This monorepo bin is the
+//! operator-side production caller — the napi host is not the only legitimate
+//! Platform-apply producer.
 
 use std::path::{Path, PathBuf};
 
@@ -384,17 +372,25 @@ pub async fn run_platform_migrations(
     let ctx = LowerCtx::new(&cfg.project_schema);
     let owner_app = ctx.owner_app;
 
-    // ── the Platform executor posture — the Stage 4a ENGINE GAP ──
+    // ── the Platform executor posture (operator-side production seam) ──
     // The engine's executor first-pass guard is derived from
     // `exec_cfg.guard_config()`, which honours Platform ONLY when the config was
-    // built via the token-gated `ExecutorConfig::platform`. That ctor is
-    // `#[cfg(test)] pub(crate)` in the published engine — UNREACHABLE from this
-    // monorepo bin — so the only reachable `ExecutorConfig::new` yields a CONFINED
-    // executor guard that denies platform DDL (CREATE SCHEMA / roles / grants /
-    // cross-schema public / functions) at apply. See the module-level ENGINE-GAP
-    // report. Wiring the reachable ctor here makes the apply REACH — and surface —
-    // that exact blocker on the first file rather than hiding it.
-    let exec_cfg = ExecutorConfig::new(cfg.project_id.clone(), cfg.project_schema.clone());
+    // built via the token-gated `ExecutorConfig::platform`. That ctor is the
+    // PUBLIC operator-side Platform seam (the APPLY-half peer of the already-public
+    // `GuardConfig::platform` LOWER-half seam); it requires an `OperatorCapability`
+    // token, minted here through the engine's named production seam
+    // `OperatorCapability::new()`. This monorepo bin is the operator-side
+    // production caller — it applies the platform's own trusted infra schema
+    // (CREATE SCHEMA / roles / grants / cross-schema public / functions) over the
+    // native compio `SqlSession`, so the executor guard admits platform DDL.
+    let exec_cap = OperatorCapability::new();
+    let exec_cfg = ExecutorConfig::platform(
+        &exec_cap,
+        cfg.project_id.clone(),
+        cfg.project_schema.clone(),
+        platform_schemas(&cfg.project_schema),
+        platform_extensions(),
+    );
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
@@ -429,7 +425,13 @@ pub async fn run_platform_migrations(
                 &lowered.plan.steps,
                 &lowered.touched_tables,
                 &lowered.depends_on,
-                Approval::None,
+                // Operator-side unattended platform apply: the committed platform
+                // schema is trusted, and a destructive migration (e.g.
+                // `drop_metering_exports` DROP TABLE … CASCADE) is a deliberate,
+                // reviewed part of that committed set. This is the docker-compose
+                // one-shot posture — auto-approved, scope = all — matching the
+                // retired in-tree CLI's platform-apply behaviour.
+                Approval::Approved,
                 &ApprovalScope::All,
                 &backend,
                 &exec_cfg,
