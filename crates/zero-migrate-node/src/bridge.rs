@@ -141,6 +141,12 @@ pub struct TsfnDispatch {
     tsfn: HostTsfn,
 }
 
+impl std::fmt::Debug for TsfnDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TsfnDispatch").finish_non_exhaustive()
+    }
+}
+
 impl VerbDispatch for TsfnDispatch {
     async fn dispatch(&self, req: JsRequest) -> VerbReply {
         let (tx, rx) = futures::channel::oneshot::channel::<VerbReply>();

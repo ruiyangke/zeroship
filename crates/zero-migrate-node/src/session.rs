@@ -62,6 +62,14 @@ pub struct NapiHostSession<D: VerbDispatch> {
     in_flight: AtomicBool,
 }
 
+impl<D: VerbDispatch> std::fmt::Debug for NapiHostSession<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NapiHostSession")
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<D: VerbDispatch> NapiHostSession<D> {
     /// Wrap a transport into a `SqlSession`.
     pub fn new(dispatch: D) -> Self {
