@@ -1,5 +1,4 @@
-//! The creator-**DML assembler** + the closed-AST **expression renderer** (design
-//! §PR6a / §2.3 / §3.3.1.1 / §9).
+//! The creator-**DML assembler** + the closed-AST **expression renderer**.
 //!
 //! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/…) into the
 //! same [`Migration`](crate::model::migration::Migration) shape the declarative differ
@@ -18,7 +17,7 @@
 //!    placeholder (`$n` on Postgres, `?n` on SQLite) carried on a
 //!    [`PlanStep::Dml`](crate::render::step::PlanStep::Dml) `binds` vector, NEVER
 //!    string-interpolated. So a value containing a quote / semicolon / comment
-//!    cannot change the *shape* of the statement on either backend (§2.3.2 the
+//!    cannot change the *shape* of the statement on either backend (the
 //!    bind-safety property). The expression renderer ([`render_expr_bound`]) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
@@ -44,28 +43,28 @@
 //! cannot reach the database. On **Postgres** the table is qualified to the project
 //! schema (`"schema"."table"`) so the resolved relation is always the project's
 //! own; on **SQLite** the table lives in the connection's `main` database (the app
-//! file, §2.5.1) and is referenced UNqualified, matching the engine's SQLite DDL.
+//! file) and is referenced UNqualified, matching the engine's SQLite DDL.
 //!
-//! # Portability boundary (§9)
+//! # Portability boundary
 //!
 //! - `insert { onConflict }` renders natively on **Postgres**; on **SQLite** it is
 //!   a hard authoring error ([`DmlError::OnConflictNotPortable`], surfaced as
 //!   `dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is NO raw
 //!   route (property A) and we never silently drop the conflict clause.
 //! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
-//!   BOTH backends since PR6b: PG via the
+//!   BOTH backends: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
-//!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`, §2.3.1). The inline
-//!   `set`/`filter` differ per dialect (the §9 `c.fn.splitPart` lowering,
+//!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`). The inline
+//!   `set`/`filter` differ per dialect (the `c.fn.splitPart` lowering,
 //!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
 //!
 //! # The shared SQLite-DML module seam
 //!
 //! The SQLite numbered `?n` placeholder emission lives in [`sqlite_placeholder`]
 //! (called through [`placeholder`]), the SINGLE place the one-shot DML assembler
-//! (here, PR6a) and the PR6b batched-backfill SQLite executor both emit positional
-//! placeholders — so the two PRs never fork a divergent copy of the `?n`-binding
-//! logic (§PR6a "ONE SQLite-DML-assembly module"). The transport-safe bind mirror
+//! and the batched-backfill SQLite executor both emit positional
+//! placeholders — so the two paths never fork a divergent copy of the `?n`-binding
+//! logic (ONE SQLite-DML-assembly module). The transport-safe bind mirror
 //! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is likewise the single
 //! value-binding path the SQLite executor uses.
 
@@ -124,7 +123,7 @@ pub enum DmlError {
     /// `insert { onConflict }` on a **SQLite** target. PG `ON CONFLICT … DO UPDATE`
     /// and SQLite upsert clauses are incompatible and there is no raw route
     /// (property A), so `onConflict` is PG-only — a hard authoring error on SQLite
-    /// (`dialect_scope = PgOnly`), not a silently-dropped conflict clause (§9).
+    /// (`dialect_scope = PgOnly`), not a silently-dropped conflict clause.
     #[error(
         "insert into {table:?} carries `onConflict`, which is PostgreSQL-only — SQLite \
          has no portable upsert and there is no raw route; restructure as separate \
@@ -139,7 +138,7 @@ pub enum DmlError {
     /// `Bind` message length is a `u16`). Reject at assemble time with a bounded
     /// error rather than emitting a statement the driver fails mid-flight. Splitting
     /// the insert into chunks touches the executor / atomicity boundary and is
-    /// deliberately out of scope here (SA-19).
+    /// deliberately out of scope here.
     #[error(
         "insert into {table:?} assembles {count} bind parameters, over the {max} \
          protocol limit; split the rows into smaller batches"
@@ -283,7 +282,7 @@ pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -
 ///   (never author-supplied) and the migrator's `search_path` is pinned to it, but
 ///   we qualify explicitly so the resolved relation is unambiguously the project's.
 /// - **SQLite**: the table lives in the connection's `main` database (the app
-///   file is `main`, §2.5.1) — there is NO schema namespace, and a
+///   file is `main`) — there is NO schema namespace, and a
 ///   `"schema"."table"` reference would resolve to a non-existent attached DB. So
 ///   the SQLite form is the BARE quoted table, matching the engine's UNqualified
 ///   SQLite DDL emission (the same property the createTable lowering relies on).
@@ -308,7 +307,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
         IrScalar::Decimal(d) => BindValue::Decimal(d.clone()),
         IrScalar::Str(s) => BindValue::Text(s.clone()),
         // Carry bytes as canonical base64 text; the column type coerces. (The IR
-        // already round-trips Bytes through canonical base64, §2.5.)
+        // already round-trips Bytes through canonical base64.)
         IrScalar::Bytes(b) => {
             use base64::Engine as _;
             BindValue::Text(base64::engine::general_purpose::STANDARD.encode(b))
@@ -319,8 +318,8 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
 /// The dialect-specific positional placeholder for the `n`-th (1-based) bind.
 /// Postgres uses `$n`; SQLite uses `?n` (the numbered form, so the binds stay
 /// positional and reusable). This is the SINGLE placeholder-emission point the
-/// one-shot assembler and the PR6b batched-backfill SQLite executor both call —
-/// the shared SQLite-DML seam (§PR6a). Postgres routes through the same fn for one
+/// one-shot assembler and the batched-backfill SQLite executor both call —
+/// the shared SQLite-DML seam. Postgres routes through the same fn for one
 /// consistent counter.
 #[must_use]
 pub fn placeholder(dialect: SqlDialect, n: usize) -> String {
@@ -332,8 +331,8 @@ pub fn placeholder(dialect: SqlDialect, n: usize) -> String {
 }
 
 /// The SQLite numbered placeholder (`?n`) — factored out as the shared-module
-/// entry the PR6b batched-backfill SQLite executor reuses for per-batch statement
-/// assembly, so the two PRs bind values through ONE path (§PR6a).
+/// entry the batched-backfill SQLite executor reuses for per-batch statement
+/// assembly, so the two paths bind values through ONE path.
 #[must_use]
 pub fn sqlite_placeholder(n: usize) -> String {
     format!("?{n}")
@@ -616,7 +615,7 @@ fn render_pg_interval_literal(duration: &Duration, dialect: SqlDialect) -> Resul
     Ok(format!("INTERVAL {}", sql_string_literal(&parts.join(" "))))
 }
 
-/// The SQL spelling of a binary operator (§3.3.1 method↔node table). `Concat` is
+/// The SQL spelling of a binary operator (the method↔node table). `Concat` is
 /// `||` — the one place PG/SQLite NULL semantics agree.
 fn binary_op_sql(op: BinaryOp) -> &'static str {
     match op {
@@ -662,7 +661,7 @@ fn render_distinct_from(l: &str, r: &str, dialect: SqlDialect) -> String {
     }
 }
 
-/// The SQL spelling of an allow-listed named scalar function (§3.3.1.1(a)). These
+/// The SQL spelling of an allow-listed named scalar function. These
 /// are the provably-identical cross-dialect scalars (same name + semantics on PG
 /// and SQLite), so the spelling is dialect-neutral.
 fn scalar_fn_sql(f: ScalarFn) -> &'static str {
@@ -674,7 +673,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Trim => "trim",
         ScalarFn::Length => "length",
         ScalarFn::Abs => "abs",
-        // Portable scalar fns — identical spelling on PG/SQLite/MySQL (§3.4).
+        // Portable scalar fns — identical spelling on PG/SQLite/MySQL.
         // `Mod` renders as the `%` OPERATOR, special-cased in `render_scalar_fn_call`
         // (SQLite has no `mod()` fn); this fallback name is never reached for it.
         ScalarFn::Mod => "mod",
@@ -683,7 +682,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Ceil => "ceil",
         ScalarFn::Substr => "substr",
         ScalarFn::Replace => "replace",
-        // VENDOR scalars (vendor spec §2.10). `current_user` is a reserved keyword
+        // VENDOR scalars. `current_user` is a reserved keyword
         // rendered WITHOUT parens — the FnCall render arms special-case it; this
         // spelling is the fallback name.
         ScalarFn::CurrentSetting => "current_setting",
@@ -728,8 +727,8 @@ fn agg_fn_sql(f: AggFunc) -> &'static str {
     }
 }
 
-/// Render an aggregate application from already-rendered argument fragments
-/// (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
+/// Render an aggregate application from already-rendered argument fragments.
+/// `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
 /// required delimiter as the second argument.
 fn render_agg(
     f: AggFunc,
@@ -765,13 +764,13 @@ fn render_agg(
     }
 }
 
-/// The portable cast-target SQL type per dialect (§3.3.1). `bytes` is `BYTEA` on
+/// The portable cast-target SQL type per dialect. `bytes` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(target: crate::model::expr::CastTarget, dialect: SqlDialect) -> &'static str {
     crate::render::renderer::renderer(dialect).cast_target(target)
 }
 
-/// Render a `c.fn.concatWs(delim, a, b, …)` per dialect (§9): PG `concat_ws`;
+/// Render a `c.fn.concatWs(delim, a, b, …)` per dialect: PG `concat_ws`;
 /// SQLite has no `concat_ws`, so it lowers to a NULL-skipping fold over `||` using
 /// the pinned, portable shape. The args are already rendered fragments.
 fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
@@ -779,18 +778,18 @@ fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
 }
 
 /// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
-/// bound (§9, `~17 KB` at `n=8`). MUST equal
+/// bound (`~17 KB` at `n=8`). MUST equal
 /// [`crate::model::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
 /// this renderer assumes it; a fixture pins their equality.
 pub(crate) const SPLIT_PART_MAX_N: i64 = crate::model::validate::SPLIT_PART_MAX_N;
 
-/// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect (§9), given the
+/// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect, given the
 /// already-rendered `col_sql` fragment and the raw delimiter + `n` IR args. The
 /// renderer is **dialect-aware** because the portability ENVELOPE is dialect-gated
 /// (mirroring `validate::check_split_part`, which returns early on a Postgres
 /// target): PG's native `split_part` is multi-char-delimiter-capable and takes any
 /// positive `n`, so on a Postgres target a `dialect_scope=PgOnly` out-of-envelope
-/// splitPart (§2.4.1/§9) is a first-class, renderable node — NOT a hard error.
+/// splitPart is a first-class, renderable node — NOT a hard error.
 ///
 /// On BOTH dialects the GRAMMAR is enforced (the renderer's fail-closed backstop):
 /// the delimiter must be a non-empty string literal and `n` a positive integer
@@ -806,7 +805,7 @@ pub(crate) const SPLIT_PART_MAX_N: i64 = crate::model::validate::SPLIT_PART_MAX_
 ///   unroll, byte-identical to PG `split_part` against SQLite 3.51.2. The delimiter
 ///   is required to be a single ASCII byte precisely because UTF-8 never embeds an
 ///   ASCII byte inside a multibyte sequence, so the byte-wise `instr` scan finds
-///   exactly the boundaries PG's character-wise `split_part` does (§9 byte-identity
+///   exactly the boundaries PG's character-wise `split_part` does (the byte-identity
 ///   proof). Append a sentinel delimiter (`cur₀ = col || 'd'`) so every token is
 ///   delimiter-terminated, then walk the boundary to literal depth `n`:
 ///   `curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1)` for `i = 1 … n−1`, and the
@@ -814,7 +813,7 @@ pub(crate) const SPLIT_PART_MAX_N: i64 = crate::model::validate::SPLIT_PART_MAX_
 ///   references `curᵢ₋₁` twice per level, so it grows O(2ⁿ) (~17 KB at `n=8`) — the
 ///   reason `n` is capped at 8. The delimiter is emitted as a single-quoted SQL
 ///   literal (`''`-escaped), NOT a bind: it is an engine-pinned constant of the
-///   pinned expression, and the authorizer (with `instr` allow-listed, §9) vets the
+///   pinned expression, and the authorizer (with `instr` allow-listed) vets the
 ///   whole statement.
 fn render_split_part(
     col_sql: &str,
@@ -855,7 +854,7 @@ fn render_split_part(
     crate::render::renderer::renderer(dialect).render_split_part(col_sql, delim, n)
 }
 
-/// Select the [`Expr::Dialectal`] leg to render for `dialect` (design §3.4): the
+/// Select the [`Expr::Dialectal`] leg to render for `dialect`: the
 /// target dialect's OWN leg if present, else the `default` leg. Returns a borrow
 /// of the chosen leg. This is the one leg-selection rule shared by both the bound
 /// and inline render paths.
@@ -913,7 +912,7 @@ impl BindCtx {
 fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
     Ok(match expr {
         Expr::ColRef { name, table } => match table {
-            // Qualified ref (`c("orders", "id")`, §3.4): `<quoted table>.<quoted col>`,
+            // Qualified ref (`c("orders", "id")`): `<quoted table>.<quoted col>`,
             // both halves through the same per-dialect identifier quoting.
             Some(t) => format!(
                 "{}.{}",
@@ -1018,9 +1017,8 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
     })
 }
 
-/// Render a `FnSynth` in the parameterized path. `concatWs` lowers per dialect;
-/// `splitPart` lowering is the PR6b portable-helper wave (§9) — until then a
-/// `splitPart` in a one-shot DML position is a fail-closed unrenderable. `now` /
+/// Render a `FnSynth` in the parameterized path. `concatWs` and `splitPart` lower
+/// per dialect via the portable-helper renderers; `now` /
 /// `genRandomUuid` render to the apply-time DB scalar.
 fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<String, DmlError> {
     match f {
@@ -1036,7 +1034,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
             // in-AST sub-expression — render it (binding any nested Literals), then
-            // extract the pinned single-ASCII delim + literal n envelope (§9). The
+            // extract the pinned single-ASCII delim + literal n envelope. The
             // delim/n are engine-pinned constants of the lowering, NOT binds.
             if args.len() != 3 {
                 return Err(DmlError::UnrenderableExpr(format!(
@@ -1101,7 +1099,7 @@ where
 {
     Ok(match expr {
         Expr::ColRef { name, table } => match table {
-            // Qualified ref (§3.4): quote the table via the per-dialect identifier
+            // Qualified ref: quote the table via the per-dialect identifier
             // quoter; delegate the column to the caller-supplied `col_ref` closure.
             Some(t) => format!(
                 "{}.{}",
@@ -1147,9 +1145,9 @@ where
         Expr::FnSynth { r#fn, args } => match r#fn {
             SynthFn::SplitPart => {
                 // The column arg renders inline; the delim/n are engine-pinned
-                // constants of the §9 lowering, extracted raw (NOT inline-rendered
+                // constants of the lowering, extracted raw (NOT inline-rendered
                 // as generic literals). The backfill (inline) path is exactly where
-                // the §3.1 hero split lands.
+                // the hero split lands.
                 if args.len() != 3 {
                     return Err(DmlError::UnrenderableExpr(format!(
                         "c.fn.splitPart takes exactly (column, delim, n); got {} args",
@@ -1237,7 +1235,7 @@ where
 
 /// **VENDOR** — render a CLOSED [`Expr`] predicate to an inline Postgres SQL
 /// fragment for the vendor `CREATE POLICY` `USING`/`WITH CHECK` and `CREATE
-/// TRIGGER` `WHEN` clauses (vendor spec §4.4). These DDL positions carry NO binds
+/// TRIGGER` `WHEN` clauses. These DDL positions carry NO binds
 /// (a policy/trigger predicate is part of the catalog definition, not a
 /// parameterized statement), so the inline renderer is the right seam — a
 /// `ColRef` is its quoted identifier, a `Literal` an inline SQL literal, and the
@@ -1258,7 +1256,7 @@ pub(crate) fn render_predicate_sqlite(expr: &Expr) -> Result<String, DmlError> {
     render_expr_inline(expr, SqlDialect::Sqlite)
 }
 
-/// The `onConflict` facet of an `insert` (§3.4 / §9). PG-only.
+/// The `onConflict` facet of an `insert`. PG-only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
@@ -1277,7 +1275,7 @@ pub struct AssembledDml {
     pub binds: Vec<BindValue>,
 }
 
-/// Assemble an `insert` op into a parameterized one-shot statement (§2.3.2). Every
+/// Assemble an `insert` op into a parameterized one-shot statement. Every
 /// value is a native bind; `onConflict` renders on PG and is a hard error on
 /// SQLite ([`DmlError::OnConflictNotPortable`]).
 ///
@@ -1478,7 +1476,7 @@ pub struct BackfillClauses {
 
 /// Assemble a `backfill` op's `set` / `filter` into the inline SQL strings the
 /// [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor consumes. Renders for
-/// EITHER dialect (PR6b): the inline transform is dialect-rendered (the §9
+/// EITHER dialect: the inline transform is dialect-rendered (the
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
 /// or SQLite (`apply::backend::sqlite::backfill_sql`) executor consumes the result.
 ///
@@ -1515,11 +1513,11 @@ mod tests {
 
     const SCHEMA: &str = "app_proj";
 
-    // ---- #150: the ONE shared engine identifier seam --------------------------
+    // ---- the ONE shared engine identifier seam --------------------------------
 
-    /// **#150** — `quote_ident_checked` fails CLOSED on the two bytes `"`-doubling
-    /// cannot neutralise: an empty string and a NUL byte. RED before #150: the peer
-    /// seams (`author`/`backfill`/`role`/`journal`) had NO such guard — they would
+    /// `quote_ident_checked` fails CLOSED on the two bytes `"`-doubling
+    /// cannot neutralise: an empty string and a NUL byte. Without the guard, the
+    /// peer seams (`author`/`backfill`/`role`/`journal`) would
     /// have ACCEPTED a NUL and emitted `"a\0b"`.
     #[test]
     fn quote_ident_checked_fails_closed_on_empty_and_nul() {
@@ -1529,7 +1527,7 @@ mod tests {
         assert_eq!(quote_ident_checked("a\0b").unwrap_err().reason, "contains NUL");
     }
 
-    /// **#150** — for any non-empty / non-NUL identifier the output is
+    /// For any non-empty / non-NUL identifier the output is
     /// byte-identical to the bare `format!("\"{}\"", x.replace('"', "\"\""))` the
     /// peers used, including a quote-bearing schema (the dml goldens stay green).
     #[test]
@@ -1545,7 +1543,7 @@ mod tests {
         assert_eq!(quote_ident_checked("a\"b").unwrap(), "\"a\"\"b\"");
     }
 
-    /// **#150** — the four engine peer seams (`author`/`backfill`/`role`/`journal`)
+    /// The four engine peer seams (`author`/`backfill`/`role`/`journal`)
     /// now all route through `quote_ident_checked`, so they emit BYTE-IDENTICAL
     /// output for the same quote-bearing schema (the "uniform render seam"
     /// requirement). The peers wrap the shared helper, so comparing each to the
@@ -1564,7 +1562,7 @@ mod tests {
         assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());
     }
 
-    /// **#150 (PR12 fix)** — STRUCTURAL enforcement of the "no remaining bare
+    /// STRUCTURAL enforcement of the "no remaining bare
     /// `format!`/`replace` escape seam" claim. The raw `"` → `""` escape logic
     /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home —
     /// [`escape_quote_ident`] in this module — and nowhere else in the crate
@@ -1572,12 +1570,11 @@ mod tests {
     /// author-validated helpers, or via [`quote_ident_checked`] for the fail-closed
     /// engine-identifier surfaces).
     ///
-    /// RED before this fix: 15+ render sites across `executor` / `precondition` /
-    /// `baseline` / `expand_contract` / `shadow` /
-    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` carried their own
-    /// inline `replace('"', "\"\"")`, so this scan would have found bare seams
-    /// outside `dml.rs` and FAILED. After the fix only `dml.rs` (the helper + this
-    /// test's own needle strings) contains the pattern.
+    /// The `"` → `""` escape logic must NOT recur inline across sites such as
+    /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
+    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` — only
+    /// `dml.rs` (the helper + this test's own needle strings) may contain the
+    /// pattern.
     #[test]
     fn no_bare_escape_seam_outside_dml() {
         use std::path::Path;
@@ -1604,14 +1601,13 @@ mod tests {
                 if path.file_name().and_then(|n| n.to_str()) == Some("dml.rs") {
                     continue;
                 }
-                // The `schema/` module tree (dissolved in from the former
-                // `zero-migrate-schema` crate, redesign step 3c) is the
+                // The `schema/` module tree is the
                 // schema-authority DDL layer with its OWN identifier-quoting
-                // primitive (`schema::query::quote_ident`). That escape lives one
-                // crate-boundary removed from this engine's render seam — the
+                // primitive (`schema::query::quote_ident`). That escape is a
+                // distinct module layer from this engine's render seam — the
                 // structural invariant this test enforces is about the RENDER
                 // layer (`render::*` / `apply::*` / `command::*`), not the
-                // relocated schema kernel — so the `schema/` subtree is exempt.
+                // schema kernel — so the `schema/` subtree is exempt.
                 if path.components().any(|c| c.as_os_str() == "schema") {
                     continue;
                 }
@@ -1628,7 +1624,7 @@ mod tests {
         );
     }
 
-    /// **PR13 (#150 LOW1)** — STRUCTURAL proof that the "every engine-supplied
+    /// STRUCTURAL proof that the "every engine-supplied
     /// identifier render seam fail-closes" contract is TRUE, not just true for the
     /// five seams (`dml`/`role`/`author`/`backfill`/`journal`) that first adopted
     /// the wrapper. The infallible primitive [`escape_quote_ident`] must NEVER be
@@ -1640,11 +1636,11 @@ mod tests {
     /// `escape_quote_ident(&exec_cfg.pg.meta_schema)`) — every such site is an
     /// engine-identifier seam that must NOT use the infallible escaper.
     ///
-    /// RED before PR13: `precondition.rs` (project_schema + role), `executor.rs`
-    /// (role + meta_schema ×4 + project_schema + recovery index),
+    /// Engine-identifier sites such as `precondition.rs` (project_schema + role),
+    /// `executor.rs` (role + meta_schema ×4 + project_schema + recovery index),
     /// `baseline.rs` (meta_schema), and
-    /// `db.rs::search_path_clause` (project/platform/extension schemas) all fed an
-    /// engine identifier to `escape_quote_ident`, so this scan would have FAILED.
+    /// `db.rs::search_path_clause` (project/platform/extension schemas) must NOT
+    /// feed an engine identifier to `escape_quote_ident`.
     ///
     /// **SCOPE — this is a PER-SITE regression pin, NOT a general invariant.** It
     /// only catches the exact call-site *spellings* in `needles` above (the give-away
@@ -1778,7 +1774,7 @@ mod tests {
         }
     }
 
-    // ── Qualified column refs (§3.4, the join-ON fix) ────────────────────────
+    // ── Qualified column refs (the join-ON fix) ──────────────────────────────
 
     /// A qualified `ColRef { table, name }` renders `<table>.<col>` with the SAME
     /// per-dialect identifier quoting as an unqualified ref: PG/SQLite double-quote
@@ -1843,7 +1839,7 @@ mod tests {
         );
     }
 
-    /// Portable scalar fns (§3.4): `round`/`floor`/`ceil`/`substr`/`replace` all
+    /// Portable scalar fns: `round`/`floor`/`ceil`/`substr`/`replace` all
     /// spell IDENTICALLY on PG, SQLite, and MySQL, so they render byte-identically
     /// on every dialect via the neutral `<name>(<args>)` path.
     #[test]
@@ -2062,7 +2058,7 @@ mod tests {
         }
     }
 
-    // ── portable predicate nodes: between / like / distinctFrom (§3.4) ───────
+    // ── portable predicate nodes: between / like / distinctFrom ──────────────
 
     #[test]
     fn between_renders_identically_on_all_three_dialects() {
@@ -2301,7 +2297,7 @@ mod tests {
         );
     }
 
-    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+    // ── the Layer-2 dialect() per-dialect value escape ───────────────────────
 
     #[test]
     fn dialectal_renders_the_target_dialects_own_leg() {
@@ -2384,7 +2380,7 @@ mod tests {
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "no SQLite leg → fail-closed: {err:?}");
     }
 
-    // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT (§3.4) ──
+    // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT ──────
 
     #[test]
     fn agg_renders_identically_on_all_three_dialects() {
@@ -2502,7 +2498,7 @@ mod tests {
         assert!(matches!(err, DmlError::InvalidIdentifier { what: "table", .. }), "{err:?}");
     }
 
-    /// L1 self-defense (PR10b): the PG `qualify_table` arm must not blindly trust
+    /// L1 self-defense: the PG `qualify_table` arm must not blindly trust
     /// the engine-supplied `project_schema`. A NUL byte — the one char that
     /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) — is
     /// refused fail-closed with `DmlError::InvalidIdentifier { what: "schema" }`,
@@ -2736,7 +2732,7 @@ mod tests {
 
     #[test]
     fn insert_over_the_bind_param_ceiling_is_rejected() {
-        // SA-19: one column × (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
+        // One column × (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
         // overflowing the protocol parameter ceiling. Reject with a bounded error.
         let rows: Vec<Vec<IrValue>> =
             (0..=MAX_BIND_PARAMS as i64).map(|i| vec![val(IrScalar::Int(i))]).collect();
@@ -2983,7 +2979,7 @@ mod tests {
         assert!(matches!(err, DmlError::EmptySet { op: "backfill", .. }), "{err:?}");
     }
 
-    // ── splitPart lowering (§9 pinned helper) ────────────────────────────────
+    // ── splitPart lowering (pinned helper) ───────────────────────────────────
 
     fn split(col: &str, delim: &str, n: i64) -> Expr {
         Expr::FnSynth {
@@ -3005,7 +3001,7 @@ mod tests {
     }
 
     /// SQLite lowers splitPart to the pinned instr/substr unroll. n=1 is the base
-    /// case (no inner walk). The exact string is pinned to the §9 exhibit.
+    /// case (no inner walk). The exact string is pinned to the reference exhibit.
     #[test]
     fn split_part_sqlite_n1_unroll() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
@@ -3016,7 +3012,7 @@ mod tests {
         );
     }
 
-    /// SQLite n=2 unrolls one boundary walk — pinned to the §9 exhibit.
+    /// SQLite n=2 unrolls one boundary walk — pinned to the reference exhibit.
     #[test]
     fn split_part_sqlite_n2_unroll() {
         let set = BTreeMap::from([("last".to_string(), dml_expr(split("name", " ", 2)))]);
@@ -3064,8 +3060,8 @@ mod tests {
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
-    /// HIGH (PR6b code-critic): the documented `dialect_scope=PgOnly` escape for an
-    /// out-of-envelope `c.fn.splitPart` (§2.4.1/§9). The validator ADMITS a
+    /// The documented `dialect_scope=PgOnly` escape for an
+    /// out-of-envelope `c.fn.splitPart`. The validator ADMITS a
     /// multi-char delimiter and `n > 8` on a Postgres target; the renderer MUST
     /// therefore lower it to native `split_part(col, 'delim', n)` on PG, not
     /// hard-error. This is the missing companion to the load-only grammar test

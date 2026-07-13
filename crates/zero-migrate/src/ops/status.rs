@@ -1,4 +1,4 @@
-//! Status + history read API (design §2.2, scenarios 45/46) — **read-only**.
+//! Status + history read API — **read-only**.
 //!
 //! [`status`] answers "where is this project's schema?" — what's applied, what's
 //! pending (in the exact order apply will run it), the current version, and what
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 // `status`/`history`/`read_status_snapshot` are generic over the `SqlSession` seam
 // (`&D`), so a host (napi) driver can drive the "show me pending migrations" flow.
-// They compile on the whole PG seam (`native-pg` OR `host-pg`).
+// They compile on the whole PG seam (`host-pg`).
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
@@ -46,14 +46,14 @@ pub struct MigrationStatus {
     /// Versions whose latest event is a rollback (net rolled-back), with the
     /// rollback event's detail.
     pub rolled_back: Vec<RolledBackEntry>,
-    /// **Cross-deploy online-rename pending contracts (§2.0.3).** Each outstanding
+    /// **Cross-deploy online-rename pending contracts.** Each outstanding
     /// obligation (EXPAND applied, contract C1/C2 not yet applied), flagged
     /// `orphaned` when the supplied migration set no longer carries the rename
     /// whose contract is pending. A distinct surfaced state — the operator must
     /// `resolve-pending` (or re-add the rename op for an orphan). Always empty on
     /// SQLite (no pending partition).
     pub pending_contracts: Vec<PendingContractStatus>,
-    /// **Plans blocked on a pending-contract dependency (§2.0.4).** A plan B with
+    /// **Plans blocked on a pending-contract dependency.** A plan B with
     /// `depends_on: [A]` where A is an online rename whose contract is still
     /// pending is NOT applied yet but is a DISTINCT, retained
     /// `blocked-awaiting-approval` state (NOT failed); it unblocks once A's
@@ -62,7 +62,7 @@ pub struct MigrationStatus {
 }
 
 /// One cross-deploy online-rename pending-contract obligation surfaced by
-/// [`status`] (§2.0.3). `orphaned` is computed against the supplied migration set:
+/// [`status`]. `orphaned` is computed against the supplied migration set:
 /// an obligation whose `pending_version` is NOT among the supplied set's versions
 /// is orphaned (the rename was removed after its EXPAND applied) and emits the
 /// [`OrphanedPendingContract`](crate::plan::pending::OrphanedPendingContract) payload.
@@ -72,12 +72,12 @@ pub struct PendingContractStatus {
     pub table: String,
     /// The obligation key — the E2 trigger version of the pending rename.
     pub pending_version: String,
-    /// `true` ⇒ the supplied set no longer carries this rename (orphaned, §2.0.3
-    /// item 3); `false` ⇒ a routine outstanding obligation awaiting its contract.
+    /// `true` ⇒ the supplied set no longer carries this rename (orphaned);
+    /// `false` ⇒ a routine outstanding obligation awaiting its contract.
     pub orphaned: bool,
 }
 
-/// One plan blocked on a pending-contract dependency (§2.0.4) surfaced by
+/// One plan blocked on a pending-contract dependency surfaced by
 /// [`status`] — a retained `blocked-awaiting-approval` state, not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedPlan {
@@ -202,7 +202,7 @@ pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
         order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
-    // §2.0.3 / §2.0.4 — outstanding pending contracts + blocked plans, read
+    // Outstanding pending contracts + blocked plans, read
     // through the neutral capability. If the backend has no pending-contract
     // capability, this is structurally empty and can never false-gate a deploy.
     let outstanding = if let Some(pending_contracts) = backend.pending_contracts() {
@@ -254,7 +254,7 @@ async fn read_status_snapshot<D: SqlSession>(
     // as pending, and net state already excludes it).
     let completed: HashMap<&str, &AppliedEntry> =
         applied.iter().map(|e| (e.version.as_str(), e)).collect();
-    // Supersession (Plan 9 squash): a version superseded by a net-applied squash OR
+    // Supersession (squash): a version superseded by a net-applied squash OR
     // by an in-set squash is NOT pending — status must agree with apply. Reuses the
     // executor's `compute_superseded` so the two views never diverge.
     let journal_superseded = journal::superseded_versions(conn, cfg).await?;
@@ -268,7 +268,7 @@ async fn read_status_snapshot<D: SqlSession>(
 
     let rolled_back = journal::net_rolled_back(conn, cfg).await?;
 
-    // §2.0.3 / §2.0.4 — surface the outstanding cross-deploy pending contracts
+    // Surface the outstanding cross-deploy pending contracts
     // (with orphan detection) + the plans blocked on a pending-contract
     // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
     // obligation view is consistent with the applied/rolled-back buckets.
@@ -286,28 +286,28 @@ async fn read_status_snapshot<D: SqlSession>(
 }
 
 /// Derive the [`MigrationStatus::pending_contracts`] + [`MigrationStatus::blocked`]
-/// fields from the OUTSTANDING obligation set and the supplied migration set
-/// (§2.0.3 item 3 / §2.0.4). Pure — shared by the PG snapshot path and any
+/// fields from the OUTSTANDING obligation set and the supplied migration set.
+/// Pure — shared by the PG snapshot path and any
 /// backend path that can read the obligation set.
 ///
-/// - **Orphan (§2.0.3 item 3):** an obligation whose **`plan_version`** is NOT
+/// - **Orphan:** an obligation whose **`plan_version`** is NOT
 ///   among the supplied set's versions is orphaned (the rename op was removed
 ///   after its EXPAND applied). Fail-closed: it is surfaced as a distinct state,
 ///   never silently dropped.
-/// - **Blocked (§2.0.4):** a supplied migration B whose `depends_on` references an
+/// - **Blocked:** a supplied migration B whose `depends_on` references an
 ///   outstanding obligation's **`plan_version`** (the dependency A's plan-group
 ///   version) is blocked until A's contract applies — a retained
 ///   `blocked-awaiting-approval` state.
 ///
-/// **Why `plan_version`, not `pending_version` (PR9a HIGH).** The obligation key
+/// **Why `plan_version`, not `pending_version`.** The obligation key
 /// `pending_version` is the E2 trigger SUB-step id — a deep id that no plan-level
-/// migration set ever exposes (`load_dir_flat` produces ONE `Migration` per file,
+/// migration set ever exposes (a plan is ONE `Migration` per file,
 /// keyed on the file/plan version, never on a rename's interior sub-step). Keying
 /// orphan on `pending_version` made EVERY outstanding obligation falsely
 /// `orphaned`, and keying `blocked` on it made the blocked state NEVER fire (an
 /// author declares `depends_on` on plan A's PLAN version, not A's E2 sub-version).
-/// `plan_version` is the rename's plan-group version (E1-anchored, deterministic
-/// per §2.0.1), which a re-lowered IR's `lower_plan().version` reproduces and a
+/// `plan_version` is the rename's plan-group version (E1-anchored, deterministic),
+/// which a re-lowered IR's `lower_plan().version` reproduces and a
 /// `depends_on: [A]` references — so both checks key on the identity the supplied
 /// set actually carries.
 fn derive_pending_contract_status(
@@ -323,7 +323,7 @@ fn derive_pending_contract_status(
             table: pc.table.clone(),
             pending_version: pc.pending_version.clone(),
             // Orphaned when the supplied set no longer carries this rename's
-            // PLAN version (§2.0.3 item 3) — the stable identity the loaded set
+            // PLAN version — the stable identity the loaded set
             // exposes, NOT the interior E2 sub-version.
             orphaned: !supplied.contains(pc.plan_version.as_str()),
         })
@@ -352,7 +352,7 @@ fn derive_pending_contract_status(
 }
 
 /// Read the FULL append-only event log (every apply + rollback event) in
-/// `event_seq` order — the audit trail (design §2.2, scenario 46).
+/// `event_seq` order — the audit trail.
 ///
 /// **Read-only.** Unlike [`status`], this does NOT collapse to net state: a
 /// version applied → rolled back → re-applied shows all three events. Bootstraps

@@ -4,7 +4,7 @@
 //! operations the [`PostgresBackend`](super::PostgresBackend)
 //! [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl drives. They
 //! were relocated here **verbatim** from the generic `apply::executor` so the
-//! generic executor issues NO dialect-specific SQL (C1 structural fix): the
+//! generic executor issues NO dialect-specific SQL: the
 //! `pg_advisory_lock`/`pg_advisory_unlock` project lock, the GUC
 //! snapshot/restore + unconditional `RESET ROLE` session hygiene, the
 //! `SET LOCAL search_path`/`statement_timeout`/`lock_timeout` + `SET [LOCAL] ROLE`
@@ -37,10 +37,10 @@ use crate::driver::SqlSession;
 /// (`hashtext` is the canonical PG text hash; deterministic per cluster).
 ///
 /// Holding it for the whole apply serializes concurrent deploys for the same
-/// project (design §2.3 step 1); a second apply waits, then sees the first's
+/// project; a second apply waits, then sees the first's
 /// committed journal and no-ops.
 ///
-/// M2 (known limitation): `hashtext` yields a 32-bit hash, so two *unrelated*
+/// Known limitation: `hashtext` yields a 32-bit hash, so two *unrelated*
 /// project ids can collide onto the same advisory-lock key. The consequence is
 /// liveness-only — two unrelated projects would serialize against each other
 /// (one waits for the other's apply) — never a correctness/cross-tenant defect,
@@ -105,10 +105,10 @@ pub(crate) async fn restore_session<D: SqlSession>(
     snap: &PgSessionSnapshot,
 ) -> Result<(), ApplyError> {
     // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
-    // `RESET ROLE` (L1). The non-txn path's `SET ROLE` mutates the session, so
+    // `RESET ROLE`. The non-txn path's `SET ROLE` mutates the session, so
     // drop back to the admin role before anything else, ensuring the executor's
     // least-privilege confinement never leaks onto the pooled/long-lived
-    // connection after `apply` returns (H2). Harmless no-op when no SET ROLE ran
+    // connection after `apply` returns. Harmless no-op when no SET ROLE ran
     // (txn-only applies use SET LOCAL ROLE, auto-reverted at COMMIT).
     conn.batch("RESET ROLE").await?;
     conn.exec(
@@ -126,7 +126,7 @@ pub(crate) async fn restore_session<D: SqlSession>(
 }
 
 /// The effective `statement_timeout` for a migration: its per-migration
-/// override ([`crate::model::migration::MigrationFlags::timeout_ms`], H3) if set, else
+/// override ([`crate::model::migration::MigrationFlags::timeout_ms`]) if set, else
 /// the executor-wide default.
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
     m.flags.timeout_ms.unwrap_or_else(|| cfg.statement_timeout_ms())
@@ -145,17 +145,17 @@ fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 }
 
 /// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
-/// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session (H2). Pins the
+/// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session. Pins the
 /// project `search_path` (project schema **only** — the meta schema is
 /// deliberately OFF the migration-time path so an unqualified name in the `up`
-/// can never resolve to the journal, C1 defense-in-depth) and the mandatory
-/// timeouts (§1.5), with the per-migration timeout override applied (H3).
+/// can never resolve to the journal, defense-in-depth) and the mandatory
+/// timeouts, with the per-migration timeout override applied.
 ///
 /// This intentionally does **not** switch role: the role scoping is done
 /// explicitly in [`apply_transactional`] so that `SET LOCAL ROLE migrator`
 /// brackets ONLY the `<up>` and is `RESET` (back to admin) before the journal
-/// INSERT — the migrator can no longer write the journal (its grant is revoked;
-/// C1 fix), so the journal write must run as the admin, atomically in the SAME
+/// INSERT — the migrator can no longer write the journal (its grant is revoked),
+/// so the journal write must run as the admin, atomically in the SAME
 /// transaction as the `up`.
 fn set_local_session_sql(
     cfg: &ExecutorConfig,
@@ -173,7 +173,7 @@ fn set_local_session_sql(
 
 /// `SET LOCAL ROLE "<migrator>"` for the txn path, or empty when no migrator role
 /// is configured (tests / single-tenant dev). Brackets ONLY the `<up>`; the
-/// caller `RESET ROLE`s before the journal write (C1).
+/// caller `RESET ROLE`s before the journal write.
 ///
 /// The migrator role is an engine-supplied identifier, so it is quoted through
 /// the ONE shared engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed
@@ -191,13 +191,13 @@ fn set_local_role_sql(
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
 /// These DO mutate the session, but [`apply`] restores the original GUCs on exit
-/// via [`restore_session`] so they never leak (H2). Per-migration timeout
-/// override applied (H3).
+/// via [`restore_session`] so they never leak. Per-migration timeout
+/// override applied.
 ///
 /// Runs as the **admin** role (no `SET ROLE` here): the non-txn journal I/O
 /// (`record_started` / `record_completed` / `clear_inflight`) runs as admin, and
 /// only the `<up>` is bracketed by an explicit `SET ROLE migrator` / `RESET ROLE`
-/// in [`apply_non_transactional`] (C1 fix). `search_path` is the project schema
+/// in [`apply_non_transactional`]. `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
 #[cfg(pg_seam)]
@@ -216,7 +216,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     Ok(())
 }
 
-/// Validate that a non-transactional migration's `up` is **idempotent** (C1/C2).
+/// Validate that a non-transactional migration's `up` is **idempotent**.
 ///
 /// The two-phase non-txn recovery path re-runs `<up>` verbatim after a crash, so
 /// every statement that cannot run in a transaction must tolerate already having
@@ -312,13 +312,13 @@ const fn dml_keyword(node: &NodeEnum) -> &'static str {
     }
 }
 
-/// Transactional apply (design §2.3): `BEGIN; <up>; INSERT journal; COMMIT`.
+/// Transactional apply: `BEGIN; <up>; INSERT journal; COMMIT`.
 /// DDL + journal are atomic — a failure rolls back leaving no partial DDL and
 /// no journal row.
 ///
 /// `kind` is the journaled `kind` to stamp on the `completed` event: `'apply'` for
 /// an ordinary once-only migration, `'squash'` for a fresh-path squash (non-empty
-/// `supersedes`), or `'repeatable'` for a re-applied repeatable (v3 Plan E). The
+/// `supersedes`), or `'repeatable'` for a re-applied repeatable. The
 /// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
@@ -332,7 +332,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     kind: &str,
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
-    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`.
+    // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`.
     // These are pure functions of `cfg`/`m` with no dependency on the open txn, so
     // computing them up front means a fail-closed `IdentQuoteError` returns before
     // any transaction is opened — no dangling txn left behind on the `?` path. The
@@ -350,7 +350,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
 
     // Pin search_path + the mandatory timeouts (per-migration override applied)
     // with SET LOCAL so they are scoped to THIS transaction and vanish at
-    // COMMIT/ROLLBACK — nothing leaks onto the session (H2 / H3). This runs as
+    // COMMIT/ROLLBACK — nothing leaks onto the session. This runs as
     // the admin (always permitted); the role switch is applied separately around
     // the `<up>` only.
     if let Err(e) = conn.batch(&session_sql).await {
@@ -358,7 +358,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         return Err(ApplyError::Db(e.into()));
     }
 
-    // **PR10 Part B — existence-guard catalog probe (no TOCTOU).** If this migration
+    // **Existence-guard catalog probe (no TOCTOU).** If this migration
     // carries an existence-guard probe, read the LIVE catalog as the ADMIN
     // (`snapshot_schema` is a privileged catalog read; the migrator role is assumed
     // only AFTER the decision) inside THIS already-open transaction, under the
@@ -401,7 +401,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
             }
             crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
                 if let Err(rb) = conn.batch("ROLLBACK").await {
-                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift (M4)");
+                    tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift");
                 }
                 return Err(ApplyError::ExistenceGuardDrift {
                     version: m.version.as_str().to_string(),
@@ -414,12 +414,12 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         }
     }
 
-    // C1: drop to the least-privilege migrator role for the duration of the
+    // Drop to the least-privilege migrator role for the duration of the
     // `<up>` ONLY. `SET LOCAL ROLE` is transaction-scoped, so the role switch is
     // confined to this txn; we explicitly `RESET ROLE` (below) before the journal
     // INSERT so the journal write runs as the admin — the migrator's journal
     // grant is revoked (role.rs), so it could not write the journal even if it
-    // tried. The up's DDL is thereby confined to line-2 privileges (design §1.3)
+    // tried. The up's DDL is thereby confined to the migrator's least privileges
     // while the journal stays unforgeable by the migration.
     // On a `SatisfiedNoop` verdict (`skip_up`) the role switch + `<up>` + RESET ROLE
     // are all skipped — the object already has the declared shape (ifNotExists) or is
@@ -437,7 +437,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         if let Err(e) = conn.batch(&m.up).await {
             // Roll back; report the failure. No journal row was written.
             if let Err(rb) = conn.batch("ROLLBACK").await {
-                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error (M4)");
+                tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a migration error");
             }
             return Err(ApplyError::MigrationFailed {
                 version: m.version.as_str().to_string(),
@@ -445,7 +445,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
             });
         }
 
-        // C1: RESET ROLE back to the admin — still INSIDE the transaction — so the
+        // RESET ROLE back to the admin — still INSIDE the transaction — so the
         // journal INSERT below runs as the admin (the migrator cannot write the
         // journal). `RESET ROLE` mid-transaction is supported and does not end the
         // txn, so atomicity of `<up>` + journal is preserved.
@@ -463,8 +463,8 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // is passed by the caller (the journaled kind is the tamper anchor — never
     // inferred from the supplied set): `'apply'` for an ordinary migration,
     // `'squash'` for a fresh-path squash (non-empty `supersedes`, so its
-    // supersession edges are honored by `journal::superseded_versions` — #4 filters
-    // on `kind='squash'`), `'repeatable'` for a re-applied repeatable (v3 Plan E).
+    // supersession edges are honored by `journal::superseded_versions`, which filters
+    // on `kind='squash'`), `'repeatable'` for a re-applied repeatable.
     debug_assert_eq!(
         kind == "squash",
         !supersedes.is_empty(),
@@ -491,18 +491,18 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         .await
     {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error (M4)");
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a journal-insert error");
         }
         return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
 
-    // #2 fix: write the fresh-DB squash supersession edges in the SAME transaction
+    // Write the fresh-DB squash supersession edges in the SAME transaction
     // as the `completed` row above (admin). Edges-last-but-same-txn — so `S`'s
     // net-applied state and its full edge set commit atomically. A failure here
     // rolls back the entire apply (no `completed` row, no edges).
     if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error (M4)");
+            tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after a supersedes-edge error");
         }
         return Err(ApplyError::Journal(e));
     }
@@ -511,7 +511,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     Ok(())
 }
 
-/// Transactional apply of a single **parameterized DML** step (`op.*` DSL §2.3.2)
+/// Transactional apply of a single **parameterized DML** step (`op.*` DSL)
 /// — the PG executor behind
 /// [`MigrationBackend::run_dml_step`](crate::apply::backend::MigrationBackend::run_dml_step).
 ///
@@ -540,12 +540,12 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
     // Materialize each typed bind to its **text representation** for NULL-aware,
-    // text-format binding (§2.3.2). Every value is sent in PG text format with a
+    // text-format binding. Every value is sent in PG text format with a
     // server-INFERRED parameter type (no fixed OID), so it implicit-casts to the
     // target COLUMN type exactly as a quoted literal would — `'2026-01-01'` →
     // `timestamptz`, `'1.5'` → `numeric`, `'t'`/`'f'`/`'true'` → `boolean`, a uuid
     // string → `uuid`. This is the schema-blind coercion model the op.* assembler
-    // (names-are-strings, §3.3) needs: a concrete-typed binary bind (`text`/`int8`/
+    // (names-are-strings) needs: a concrete-typed binary bind (`text`/`int8`/
     // `bool` OID) would make PG REFUSE a value against a different column type
     // ("cannot bind text → timestamptz"). The value is STILL a native bind — never
     // interpolated into the SQL — so the bind-safety property holds (a metacharacter
@@ -561,12 +561,12 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         })
         .collect();
 
-    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
     // (no dangling txn). Both are pure functions of `cfg` — no dependency on the
     // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
     // `set_local` is built from cfg directly (a DML step has no per-migration
-    // timeout override slot in PR0).
+    // timeout override slot).
     let set_local = format!(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
@@ -584,7 +584,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         let _ = conn.batch("ROLLBACK").await;
         return Err(ApplyError::Db(e.into()));
     }
-    // Drop to the migrator role for the DML ONLY (line-2 confinement); RESET
+    // Drop to the migrator role for the DML ONLY (least-privilege confinement); RESET
     // before the journal write so the journal stays unforgeable by the step.
     if let Some(set_role) = &role_sql {
         if let Err(e) = conn.batch(set_role.as_str()).await {
@@ -594,7 +594,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     }
     if let Err(e) = conn.exec_text(template, &params).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error (op.* §2.3.2)");
+            tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error");
         }
         return Err(ApplyError::MigrationFailed {
             version: version.to_string(),
@@ -616,12 +616,12 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     // The journal checksum is over the PARAMETERIZED template (binds fold into the
-    // plan checksum, not the journal row — §2.3.2). Use the migration checksum
+    // plan checksum, not the journal row). Use the migration checksum
     // discipline over (template, None).
-    // The journal checksum binds the DECLARING app's identity (§2.0.1): two DML
+    // The journal checksum binds the DECLARING app's identity: two DML
     // steps with an identical `(template, binds)` authored by different
     // `owner_app`s hash to DIFFERENT checksums, so the journal row's owner
-    // attribution is correct for multi-tenant DML (PR6a's creator-DML assembler).
+    // attribution is correct for multi-tenant DML (the creator-DML assembler).
     let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
         up: template,
         down: None,
@@ -667,9 +667,9 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 }
 
 /// Insert the `S → v_i` supersession edges for a squash whose `up` RAN this batch
-/// (Plan 9 B fresh path). Each `conn.execute` participates in whatever transaction
+/// (fresh path). Each `conn.execute` participates in whatever transaction
 /// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
-/// so the edges are atomic with `S`'s `completed` row (#2). No-op for a non-squash
+/// so the edges are atomic with `S`'s `completed` row. No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
 #[cfg(pg_seam)]
 async fn insert_supersedes_edges<D: SqlSession>(
@@ -694,7 +694,7 @@ async fn insert_supersedes_edges<D: SqlSession>(
     Ok(())
 }
 
-/// Non-transactional apply (design §2.3 / §2.4): two-phase with a `started`
+/// Non-transactional apply: two-phase with a `started`
 /// marker, plus the idempotent recovery path.
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
@@ -790,7 +790,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         }
     }
 
-    // Journal / inflight I/O runs as the ADMIN (C1): the migrator's grant on the
+    // Journal / inflight I/O runs as the ADMIN: the migrator's grant on the
     // meta schema is revoked, so `record_started` / `recover_non_transactional`
     // (which clears the marker) / `record_completed` must NOT run under
     // `SET ROLE migrator`. Only the `<up>` (and the recovery `DROP INDEX`, which
@@ -806,7 +806,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         // `record_started` below then RE-ARMS it before the `<up>` re-runs.
         recover_non_transactional(conn, cfg, m).await?;
     }
-    // Write (fresh path) or RE-WRITE (post-recovery, M2) the `started` marker
+    // Write (fresh path) or RE-WRITE (post-recovery) the `started` marker
     // BEFORE the `<up>` runs. The re-arm matters on the recovery path:
     // `recover_non_transactional` cleared the marker, but the re-run below can
     // itself crash before `record_completed`. Without a fresh `started` marker a
@@ -820,11 +820,11 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by).await?;
 
     let started = Instant::now();
-    // C1: bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
-    // runs under line-2 confinement, but the journal writes above/below run as
+    // Bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
+    // runs under least-privilege confinement, but the journal writes above/below run as
     // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
     // the role never leaks onto the session even if the `<up>` fails — and
-    // `apply`'s `restore_session` is an unconditional backstop (L1).
+    // `apply`'s `restore_session` is an unconditional backstop.
     if let Some(role) = &cfg.pg.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
         conn.batch(&format!("SET ROLE {role_q}"))
@@ -836,7 +836,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         // run as admin and no role leaks onto the session.
         if let Err(e) = conn.batch("RESET ROLE").await {
             // If RESET ROLE itself fails, surface it (apply's restore_session is
-            // the L1 backstop). Prefer surfacing the up's error if it failed.
+            // the unconditional backstop). Prefer surfacing the up's error if it failed.
             if up_result.is_ok() {
                 return Err(ApplyError::Db(e.into()));
             }
@@ -848,7 +848,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Phase 2: immutable completed row + clear the marker (as admin). #2 fix: for a
+    // Phase 2: immutable completed row + clear the marker (as admin). For a
     // fresh-DB squash, the supersession edges must commit ATOMICALLY with the
     // `completed` row, else a crash between leaves `S` net-applied with edges missing
     // → `v1..vN` re-enter pending and re-run on top of `S` (double-apply). The non-txn
@@ -874,7 +874,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         conn.batch("BEGIN").await?;
         let finalize = async {
             // A fresh-path squash is stamped `kind='squash'` so its edges are honored
-            // by `superseded_versions` (#4 filters on `kind='squash'`).
+            // by `superseded_versions` (which filters on `kind='squash'`).
             journal::record_completed(
                 conn,
                 cfg,
@@ -903,8 +903,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     Ok(had_inflight)
 }
 
-/// Idempotent recovery for a crashed non-transactional migration (design §2.4,
-/// C1/C2).
+/// Idempotent recovery for a crashed non-transactional migration.
 ///
 /// A `started` marker with no `completed` row means the prior attempt may have
 /// (a) failed mid-DDL, or (b) **succeeded then crashed** before recording
@@ -922,7 +921,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
 /// then clears the marker. The caller then **re-runs the idempotent `<up>`**,
 /// which is safe in both case (a) and case (b).
 ///
-/// Runs as the **admin** (C1): it is called BEFORE the `<up>`'s `SET ROLE` and
+/// Runs as the **admin**: it is called BEFORE the `<up>`'s `SET ROLE` and
 /// clears the inflight marker (`clear_inflight`), which is meta-schema I/O the
 /// migrator has no grant for. The admin owns the meta schema and is privileged
 /// over the project schema, so the project-schema `DROP INDEX` succeeds as admin
@@ -934,7 +933,7 @@ async fn recover_non_transactional<D: SqlSession>(
     m: &Migration,
 ) -> Result<(), ApplyError> {
     // Drop the INVALID residue of an interrupted CONCURRENTLY build — but ONLY
-    // the index(es) this migration's `up` names (v1.x scope fix). An INVALID
+    // the index(es) this migration's `up` names (scoped by design). An INVALID
     // index satisfies `IF NOT EXISTS`, so the caller's re-run of `<up>` would
     // never rebuild it; we must drop it first. We parse the `CREATE INDEX … name`
     // out of the `up` and drop *that* name (if it is currently invalid), rather
@@ -1009,7 +1008,7 @@ fn index_names_in_up(up: &str) -> Vec<String> {
 /// Atomic: the `down` + its `rolled_back` journal append commit together, so a
 /// crash leaves either both (rolled back + recorded) or neither. The `down` runs
 /// under the migrator role; the journal append runs as admin (the migrator has no
-/// meta grant — C1), exactly mirroring [`apply_transactional`].
+/// meta grant), exactly mirroring [`apply_transactional`].
 #[cfg(pg_seam)]
 pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     conn: &D,
@@ -1022,7 +1021,7 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
         .as_deref()
         .expect("rollback_one_transactional is only called for RollbackStep::Down (down is Some)");
     let started = Instant::now();
-    // Render the fail-closed engine-identifier quote seams (PR13) BEFORE `BEGIN`,
+    // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
     // (no dangling txn). Both are pure functions of `cfg`/`m` — no dependency on
     // the open txn. The rendered SQL still EXECUTES inside the txn below, as before.
@@ -1036,7 +1035,7 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
         let _ = conn.batch("ROLLBACK").await;
         return Err(RollbackError::Db(e.into()));
     }
-    // Drop to the migrator role for the `<down>` ONLY (line-2 confinement). RESET
+    // Drop to the migrator role for the `<down>` ONLY (least-privilege confinement). RESET
     // ROLE before the journal append so the admin writes the rolled_back event.
     if let Some(set_role) = &role_sql {
         if let Err(e) = conn.batch(set_role.as_str()).await {
@@ -1096,7 +1095,7 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
 
 #[cfg(test)]
 mod pg_confinement_shape_tests {
-    //! Pins the M2 confinement refactor: the **PG** apply leaf still emits its
+    //! Pins the confinement shape: the **PG** apply leaf still emits its
     //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
     //! and `SET LOCAL lock_timeout` bracket from the
     //! [`PgConfinement`](crate::conn::PgConfinement) block (now grouped under
@@ -1133,8 +1132,8 @@ mod pg_confinement_shape_tests {
         }
     }
 
-    /// PG confinement bracket is emitted from the grouped `cfg.pg` block,
-    /// byte-identically to the pre-M2 flat shape: search_path = project schema
+    /// PG confinement bracket is emitted from the grouped `cfg.pg` block:
+    /// search_path = project schema
     /// (+ extension schema), and the mandatory timeouts in ms.
     ///
     /// This also pins the **lock-safety envelope** default: the DEFAULT
@@ -1217,7 +1216,7 @@ mod pg_confinement_shape_tests {
     /// A default-constructed config (the SHAPE the SQLite engine builds via
     /// `ExecutorConfig::new(app_id, app_id)`) carries NO migrator role — its
     /// PG confinement is inert; SQLite confines via its runtime authorizer
-    /// mode-flip, never these PG params (M2).
+    /// mode-flip, never these PG params.
     #[test]
     fn sqlite_shaped_config_carries_no_pg_role_confinement() {
         // Exactly what crates/plugin-db sqlite_engine.rs constructs.

@@ -9,24 +9,24 @@
 //! statement is rendered in MySQL dialect:
 //!
 //! - **native total order** — `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY`
-//!   (MySQL's monotonic surrogate) replaces Postgres' `BIGINT GENERATED ALWAYS AS
-//!   IDENTITY`;
+//! (MySQL's monotonic surrogate) replaces Postgres' `BIGINT GENERATED ALWAYS AS
+//! IDENTITY`;
 //! - **timestamps** — `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` replaces
-//!   `TIMESTAMPTZ DEFAULT now()`;
+//! `TIMESTAMPTZ DEFAULT now`;
 //! - **keyed text columns** — `VARCHAR(255)` (MySQL cannot index a bare `TEXT`
-//!   without a prefix length) replaces `TEXT` for `version`/`checksum`/etc.;
+//! without a prefix length) replaces `TEXT` for `version`/`checksum`/etc.;
 //! - **immutability** — `BEFORE UPDATE`/`BEFORE DELETE` triggers that
-//!   `SIGNAL SQLSTATE '45000'` replace the plpgsql `RAISE EXCEPTION` trigger
-//!   function (MySQL has no per-statement `TRUNCATE` trigger, but `TRUNCATE`
-//!   requires the `DROP` privilege the least-privilege migrator role lacks, and
-//!   the meta database is admin-owned — defense-in-depth still holds through the
-//!   UPDATE/DELETE triggers + privilege model);
+//! `SIGNAL SQLSTATE '45000'` replace the plpgsql `RAISE EXCEPTION` trigger
+//! function (MySQL has no per-statement `TRUNCATE` trigger, but `TRUNCATE`
+//! requires the `DROP` privilege the least-privilege migrator role lacks, and
+//! the meta database is admin-owned — defense-in-depth still holds through the
+//! UPDATE/DELETE triggers + privilege model);
 //! - **placeholders** — every bind is the anonymous positional `?`
-//!   ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
-//!   never Postgres' `$N`;
-//! - **net state** — a MySQL-8 window-function (`ROW_NUMBER() OVER (PARTITION BY
-//!   version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
-//!   `COLLATE utf8mb4_bin` replaces `COLLATE "C"` for a byte-ordered version sort;
+//! ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
+//! never Postgres' `$N`;
+//! - **net state** — a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
+//! version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
+//! `COLLATE utf8mb4_bin` replaces `COLLATE "C"` for a byte-ordered version sort;
 //! - **upsert** — `INSERT IGNORE` replaces `ON CONFLICT (version) DO NOTHING`.
 //!
 //! The meta schema (a MySQL *database*) is admin-owned and off the migrator's
@@ -88,13 +88,13 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
         .await?;
 
     // 2. The append-only journal of record — the SINGLE consolidated events table.
-    //    `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY` is the native total order
-    //    (MySQL assigns it on INSERT; never supplied). `version` is a VARCHAR(255)
-    //    (indexable; MySQL cannot key a bare TEXT), NOT unique — rollback↔re-apply
-    //    appends multiple rows. The applied-only columns (kind/phase/outcome) are
-    //    NULL on a `rolled_back` row; a CHECK documents the per-event_kind shape
-    //    (MySQL 8.0.16+ enforces CHECK). InnoDB for transactional DDL+journal
-    //    atomicity on the txn apply path.
+    // `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY` is the native total order
+    // (MySQL assigns it on INSERT; never supplied). `version` is a VARCHAR(255)
+    // (indexable; MySQL cannot key a bare TEXT), NOT unique — rollback↔re-apply
+    // appends multiple rows. The applied-only columns (kind/phase/outcome) are
+    // NULL on a `rolled_back` row; a CHECK documents the per-event_kind shape
+    // (MySQL 8.0.16+ enforces CHECK). InnoDB for transactional DDL+journal
+    // atomicity on the txn apply path.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -126,7 +126,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     .await?;
 
     // 2a. The append-only SUPERSESSION edge log (squash). One row per
-    //     (squash_version → superseded_version) edge; its own AUTO_INCREMENT PK.
+    // (squash_version → superseded_version) edge; its own AUTO_INCREMENT PK.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
             id                 BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -138,10 +138,10 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     .await?;
 
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
-    //     guarded by the immutability triggers — the marker is deleted on
-    //     completion / recovery. (MySQL DDL is auto-committing, so the non-txn
-    //     two-phase path is the norm for every MySQL migration; see the backend's
-    //     `ddl_is_transactional`.)
+    // guarded by the immutability triggers — the marker is deleted on
+    // completion / recovery. (MySQL DDL is auto-committing, so the non-txn
+    // two-phase path is the norm for every MySQL migration; see the backend's
+    // `ddl_is_transactional`.)
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_inflight (
             version     VARCHAR(255) NOT NULL PRIMARY KEY,
@@ -154,14 +154,14 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     .await?;
 
     // 3. Immutability triggers on BOTH append-only tables (the events table +
-    //    _supersedes). MySQL has no `CREATE TRIGGER IF NOT EXISTS` before 8.0.29
-    //    and no per-statement TRUNCATE trigger, so each BEFORE UPDATE / BEFORE
-    //    DELETE trigger is created only when `information_schema.triggers` shows it
-    //    absent, and it `SIGNAL`s SQLSTATE '45000' to abort the row mutation. (A
-    //    `TRUNCATE TABLE` bypasses row triggers, but it needs the DROP privilege
-    //    the least-privilege migrator role lacks, and the meta database is
-    //    admin-owned — the append-only guarantee rests on triggers + privilege
-    //    model, matching the PG side's defense-in-depth posture.)
+    // _supersedes). MySQL has no `CREATE TRIGGER IF NOT EXISTS` before 8.0.29
+    // and no per-statement TRUNCATE trigger, so each BEFORE UPDATE / BEFORE
+    // DELETE trigger is created only when `information_schema.triggers` shows it
+    // absent, and it `SIGNAL`s SQLSTATE '45000' to abort the row mutation. (A
+    // `TRUNCATE TABLE` bypasses row triggers, but it needs the DROP privilege
+    // the least-privilege migrator role lacks, and the meta database is
+    // admin-owned — the append-only guarantee rests on triggers + privilege
+    // model, matching the PG side's defense-in-depth posture.)
     for (ord, tbl) in ["schema_migrations", "schema_migrations_supersedes"]
         .into_iter()
         .enumerate()
@@ -208,7 +208,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
 /// `event_seq` order) kept only where that latest event is `applied`, UNIONed with
 /// the lone `started` inflight markers for versions that are not net-applied.
 ///
-/// MySQL 8 window functions (`ROW_NUMBER() OVER (PARTITION BY version ORDER BY
+/// MySQL 8 window functions (`ROW_NUMBER OVER (PARTITION BY version ORDER BY
 /// event_seq DESC)`) stand in for Postgres' `DISTINCT ON`; `COLLATE utf8mb4_bin`
 /// gives the byte-ordered version sort Postgres gets from `COLLATE "C"`.
 ///

@@ -1,4 +1,4 @@
-//! Wave A — checksum byte-stability + `Checksum::of_ir` determinism/sensitivity.
+//! Checksum byte-stability + `Checksum::of_ir` determinism/sensitivity.
 //!
 //! Two front doors fold into the SAME `fold_common` tail (flags + owner_app +
 //! depends_on + supersedes + preconditions). `Checksum::of` folds `up`/`down`
@@ -338,7 +338,7 @@ fn checksum_of_ir_includes_table_check_expr() {
 
 /// Changing a typed `IrScalar` inside an `Insert` row changes `of_ir` (the JCS
 /// of the op folds its binds), and changing an embedded expression-AST `Literal`
-/// param (the §2.3.2 / §2.4-point-3 obligation) is also drift.
+/// param is also drift.
 #[test]
 fn checksum_of_ir_folds_scalars_and_ast_literals() {
     use std::collections::BTreeMap;
@@ -372,7 +372,7 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
     // Two `update` ops differing ONLY in an in-AST `Literal` threshold value
     // (`col("total").gt(0)` vs `col("total").gt(5)`) must have different of_ir —
     // the "changing a threshold value is drift" guarantee for AST-embedded
-    // params (§2.3.2).
+    // params.
     let mk_update = |threshold: i64| {
         let mut set = BTreeMap::new();
         set.insert(
@@ -476,8 +476,7 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
 /// differently). When `IrAuthor::lower` lands, the positive arm MUST be replaced
 /// by driving the actual lowering for BOTH dialects through one `IrAuthor` and
 /// asserting the `of_ir` it computes is identical — i.e. assert the producing
-/// code feeds neutral flags, not merely that `neutral == neutral`. See the
-/// code-critic LOW finding on this test.
+/// code feeds neutral flags, not merely that `neutral == neutral`.
 #[test]
 fn checksum_of_ir_is_identical_across_dialect_renders() {
     // A `createIndex { concurrently: true }` is the canonical case where the
@@ -536,17 +535,18 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     );
 }
 
-/// **C1 — FK referential-action checksum neutrality + sensitivity.** The new
+/// **FK referential-action checksum neutrality + sensitivity.** The
 /// `IrConstraintKind::Fk { on_delete, on_update }` fields are additive-optional
 /// (`skip_serializing_if = "Option::is_none"`), so:
 ///  - an FK that sets NO action serializes WITHOUT the `onDelete`/`onUpdate` keys
-///    — byte-identical to the pre-C1 wire image (the JCS canonical bytes, and thus
-///    `of_ir`, are unchanged). This is what keeps the action-free FK goldens'
-///    checksums stable across the C1 field addition (no `ir_version` bump needed).
+///    — byte-identical to the wire image before the fields were added (the JCS
+///    canonical bytes, and thus `of_ir`, are unchanged). This is what keeps the
+///    action-free FK goldens' checksums stable across the field addition (no
+///    `ir_version` bump needed).
 ///  - an FK that DOES set an action (`onDelete: cascade`) produces a brand-new
 ///    shape with the key present — a different (new) checksum. There is no
-///    persisted checksum for an FK-with-actions to preserve (it was unbuildable
-///    pre-C1), so the new bytes are correct.
+///    persisted checksum for an FK-with-actions to preserve (it was previously
+///    unbuildable), so the new bytes are correct.
 #[test]
 fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
     use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, RefAction};
@@ -578,7 +578,7 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
 
     // Neutrality: the action-free FK serializes WITHOUT the onDelete/onUpdate keys
     // (the `skip_serializing_if` omitted-key image), so its canonical bytes are
-    // the pre-C1 image.
+    // the pre-field-addition image.
     let none_ops = mk_fk(None, None);
     let json = serde_json::to_string(&none_ops[0]).expect("op serializes");
     assert!(

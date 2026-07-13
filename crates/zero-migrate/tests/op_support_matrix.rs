@@ -78,7 +78,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn schema_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("op-ir.schema.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
 }
 
 fn fixture_ops() -> Vec<Op> {
@@ -114,9 +114,9 @@ fn op_tag(op: &Op) -> String {
 
 fn schema_op_tags() -> BTreeSet<String> {
     let schema: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(schema_path()).expect("read op-ir.schema.json"),
+        &std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"),
     )
-    .expect("parse op-ir.schema.json");
+    .expect("parse ir-envelope.schema.json");
     schema
         .get("$defs")
         .and_then(|d| d.get("Op"))
@@ -248,7 +248,7 @@ fn support_declarations_cover_every_op_and_dialect() {
     assert_eq!(
         schema_op_tags(),
         expected,
-        "support matrix expected set must stay in sync with op-ir.schema.json"
+        "support matrix expected set must stay in sync with ir-envelope.schema.json"
     );
 
     let ops = fixture_ops();

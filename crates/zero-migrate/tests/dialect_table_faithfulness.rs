@@ -1,11 +1,11 @@
-//! The dialect-table CORPUS + SIDECAR-DRIFT anchor (repurposed in S0.2).
+//! The dialect-table CORPUS + SIDECAR-DRIFT anchor.
 //!
-//! S0.1 introduced the generated single-source dialect table
+//! The generated single-source dialect table
 //! (`src/model/dialect_table.rs`, emitted from `dialect-support.toml` by
-//! `sdks/migrate/scripts/gen-dialect-table.mjs`) and proved it mirrored the
-//! engine's then-live `Op::support()` decisions. S0.2 made `Op::support` READ the
-//! table (via [`Op::op_variant`]), so that agreement is now tautological. This
-//! file is repurposed to the invariants that stay meaningful after the switch —
+//! `sdks/migrate/scripts/gen-dialect-table.mjs`) is the single source of the
+//! per-op dialect-support decisions, and `Op::support` READS the
+//! table (via [`Op::op_variant`]). This file pins the invariants that stay
+//! meaningful once the table is authoritative —
 //! see the comment above the test for the full "what guards what".
 //!
 //! DESIGN — how it enumerates Op × dialect exhaustively:
@@ -25,7 +25,7 @@
 //!     `dialect-table-drift` test byte-checks; here checked Rust-side, node-free).
 //!
 //! The disposition vocabulary is portable / vendor (both supported cells),
-//! transparentDegradable (reserved for explicit P12-style collapses), and
+//! transparentDegradable (reserved for explicit opt-in collapses), and
 //! unsupported.
 
 use std::collections::BTreeSet;
@@ -117,14 +117,14 @@ fn disposition_token(disposition: Disposition) -> &'static str {
 }
 
 fn schema_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("op-ir.schema.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
 }
 
 /// The `Op` discriminant tokens the schema declares (the 54-op wire contract).
 fn schema_op_tags() -> BTreeSet<String> {
     let schema: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(schema_path()).expect("read op-ir.schema.json"))
-            .expect("parse op-ir.schema.json");
+        serde_json::from_str(&std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"))
+            .expect("parse ir-envelope.schema.json");
     schema
         .get("$defs")
         .and_then(|d| d.get("Op"))
@@ -1083,14 +1083,13 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c
 }
 
-// POST-S0.2 — what now guards what.
+// What now guards what.
 //
-// In S0.1 this file proved `generated DIALECT_TABLE == decision_to_disposition(
-// Op::support())` for every op × dialect. S0.2 made `Op::support` READ the table
-// (looking the disposition up by `Op::op_variant`), so that agreement is now
-// TAUTOLOGICAL and has been retired. The load-bearing behavioural gate moved to
-// `op_support_matrix` (`decision()` == the live validate/lower behaviour). This
-// file is repurposed to the TWO invariants that remain meaningful once the table
+// `Op::support` READS the dialect table (looking the disposition up by
+// `Op::op_variant`), so a direct `generated DIALECT_TABLE == decision_to_disposition(
+// Op::support())` check would be TAUTOLOGICAL. The load-bearing behavioural gate
+// lives in `op_support_matrix` (`decision()` == the live validate/lower behaviour).
+// This file pins the TWO invariants that remain meaningful once the table
 // is the consumer's source of truth:
 //
 //   * SHARED VARIANT DERIVATION — every representative corpus op's

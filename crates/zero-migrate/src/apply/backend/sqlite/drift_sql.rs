@@ -1,4 +1,4 @@
-//! SQLite live-schema introspection for drift (SQLite-parity design §2.7 / §2.5.1).
+//! SQLite live-schema introspection for drift.
 //!
 //! Produces the SAME dialect-agnostic [`SchemaSnapshot`](crate::model::snapshot::SchemaSnapshot)
 //! the Postgres path returns, so [`check_checksum_drift`](crate::apply::drift::check_checksum_drift)
@@ -7,12 +7,12 @@
 //! `sqlite_master` + `PRAGMA table_info` / `PRAGMA index_list` / `PRAGMA index_info`
 //! / `PRAGMA foreign_key_list` of the connection's `main` database (the app file).
 //!
-//! # Confinement (§2.5.1)
+//! # Confinement
 //!
 //! Every read here runs under **`EngineJournal`** mode: the engine's OWN
 //! introspection touches `sqlite_master` and issues `PRAGMA table_info(...)` etc.,
 //! both of which the **CreatorUp** authorizer denies a creator from doing (PRAGMA
-//! is denied outright in CreatorUp; §2.5.1). The introspection is read-only — it
+//! is denied outright in CreatorUp;). The introspection is read-only — it
 //! emits no DDL and mutates nothing — but it MUST run in engine mode for the PRAGMA
 //! reads to compile. A creator can never reach this code path (it is engine-private,
 //! behind the `SqliteBackend`), so allowing these reads under engine mode does not
@@ -22,10 +22,10 @@
 //!
 //! - SQLite internal tables (`sqlite_*`, incl. `sqlite_sequence` / `sqlite_stat*`).
 //! - The `_mig` journal objects — they live in the ATTACHed `_mig` database, not
-//!   `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
-//!   additionally scope every PRAGMA to `main`.
+//! `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
+//! additionally scope every PRAGMA to `main`.
 //!
-//! # Sentinel recovery (§2.7)
+//! # Sentinel recovery
 //!
 //! The SQLite emitter bakes the `/* zero-migrate:mask:… */` (and `/* zero-migrate:enc:… */`) sentinels
 //! INLINE in the `CREATE` text, which `sqlite_master.sql` preserves verbatim (SQLite
@@ -120,7 +120,7 @@ fn is_fts5_shadow_table(name: &str, raw_names: &[String]) -> bool {
 /// Introspect the LIVE structure of the connection's `main` database (the tenant
 /// app file) into a [`SchemaSnapshot`], the same shape the PG path returns.
 ///
-/// Read-only; runs under engine mode (the PRAGMA reads require it, §2.5.1). The
+/// Read-only; runs under engine mode (the PRAGMA reads require it). The
 /// result map is a `BTreeMap` and every child vector is name-sorted, so the
 /// snapshot is byte-stable regardless of catalog scan order — matching the PG
 /// snapshot's determinism contract.
@@ -140,7 +140,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
     // `name NOT LIKE 'sqlite_%'` and the `is_internal` guard exclude SQLite
     // internals. `main.sqlite_master` scopes the read to the app file — never `_mig`.
     // NOTE: we deliberately do NOT use `NOT LIKE 'sqlite_%'` here — the hardened
-    // authorizer's function allowlist (§2.5.1) does not include `LIKE`, so the
+    // authorizer's function allowlist does not include `LIKE`, so the
     // engine's own introspection must avoid it. The `is_internal` Rust-side guard
     // below filters `sqlite_*` instead (same effect, no LIKE function call).
     let table_rows = actor
@@ -223,7 +223,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                 runtime_options: Default::default(),
                 partition_by: None,
                 comment: None,
-                // H1 — carry the verbatim CREATE text so the DROP-COLUMN rebuild
+                // carry the verbatim CREATE text so the DROP-COLUMN rebuild
                 // router can detect CHECK / generated / partial-index references the
                 // structured PRAGMA buckets do not surface.
                 stored_create_sql: stored_sql_opt,
@@ -348,7 +348,7 @@ async fn introspect_columns(
             data_type: raw_type.trim().to_ascii_lowercase(),
             nullable,
             // Emission-only on the PG path; the same here. We DO recover the inline
-            // mask/encryption sentinel into `comment_sentinel` (§2.7) so an encrypted
+            // mask/encryption sentinel into `comment_sentinel` so an encrypted
             // / masked column round-trips faithfully rather than dropping silently.
             default: None,
             generated: None,
@@ -384,12 +384,12 @@ async fn introspect_columns(
 /// `index_list` columns: seq, name, unique, origin, partial. `origin` is `c`
 /// (CREATE INDEX), `u` (a UNIQUE constraint's auto-index), or `pk` (the PRIMARY KEY
 /// index). We:
-///   - record every index as an [`IndexSnapshot`] (its key columns from
-///     index_info), EXCLUDING SQLite auto-indexes named `sqlite_autoindex_*` from
-///     the *index* bucket (they are constraint artifacts, surfaced as constraints);
-///   - synthesise a `UNIQUE` / `PRIMARY KEY` [`ConstraintSnapshot`] for `origin`
-///     `u` / `pk` so a unique/PK constraint round-trips against a PG snapshot's
-///     constraint bucket.
+/// - record every index as an [`IndexSnapshot`] (its key columns from
+/// index_info), EXCLUDING SQLite auto-indexes named `sqlite_autoindex_*` from
+/// the *index* bucket (they are constraint artifacts, surfaced as constraints);
+/// - synthesise a `UNIQUE` / `PRIMARY KEY` [`ConstraintSnapshot`] for `origin`
+/// `u` / `pk` so a unique/PK constraint round-trips against a PG snapshot's
+/// constraint bucket.
 async fn introspect_indexes_and_unique(
     actor: &MigrationActor,
     table: &str,
@@ -767,7 +767,7 @@ async fn introspect_foreign_keys(
 }
 
 /// Recover an inline `zero-migrate:mask:…` or `zero-migrate:enc:…` sentinel for `column` from the
-/// stored CREATE text (§2.7). The emitter writes the sentinel as an inline
+/// stored CREATE text. The emitter writes the sentinel as an inline
 /// `/* zero-migrate:mask:… */` comment immediately after the relevant column's type;
 /// `sqlite_master.sql` preserves it verbatim. We find the column's clause and, if a
 /// `/* … */` comment on that clause carries a `zero-migrate:mask:` / `zero-migrate:enc:` body, return

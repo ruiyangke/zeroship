@@ -1,10 +1,9 @@
-//! Leaf-crate error types for the schema layer.
+//! Error types for the schema layer.
 //!
-//! `zero-migrate-schema` is a leaf crate (deps: `serde_json` + `sha2`, plus
-//! `compio-postgres` behind the `introspect` feature). It therefore CANNOT
-//! depend on a data plane's `DbError`, which is
-//! built on a runtime `OpError` (and would drag v8/runtime
-//! into the leaf). Instead the two fallible surfaces this crate exposes —
+//! The schema layer keeps a minimal dependency surface (`serde_json` + `sha2`,
+//! plus `compio-postgres` behind the `introspect` feature). It therefore
+//! does NOT depend on a data plane's `DbError`, which is
+//! built on a runtime `OpError`. Instead the two fallible surfaces this layer exposes —
 //! live introspection and the mask-sentinel codec — return small,
 //! self-contained error types. A data-plane consumer maps them back into its
 //! own error at the call boundary via `From` impls, so the wire shape and

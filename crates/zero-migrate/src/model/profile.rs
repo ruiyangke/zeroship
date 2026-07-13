@@ -1,8 +1,8 @@
 //! Declarative migration policy profiles and sealed shared-infra apply profiles.
 //!
-//! Stage M2 keeps today's guard implementation intact. The profile config is
-//! loaded strictly and resolved fail-closed, while [`SealedProfile`] is the new
-//! structural carrier the future control-plane path will pass to the engine.
+//! The profile config is loaded strictly and resolved fail-closed, while
+//! [`SealedProfile`] is the structural carrier the control-plane path passes
+//! to the engine.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,8 +14,8 @@ use sha2::Sha256;
 
 use crate::model::capability::{SealApplier, VendorCapabilities};
 // The sealed-profile → executor/guard plumbing is currently exercised only by the
-// in-crate test suite (its production caller was the removed native-pg apply
-// path), so these imports ride behind `cfg(test)`.
+// in-crate test suite (its production caller was removed), so these imports ride
+// behind `cfg(test)`.
 #[cfg(test)]
 use std::time::Duration;
 #[cfg(test)]
@@ -42,7 +42,7 @@ pub const PLATFORM_PROFILE_TOML: &str = include_str!("../../policy-profiles/plat
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyProfile {
-    /// Optional single-parent profile name. Stage 1 records the authoring shape;
+    /// Optional single-parent profile name. Records the authoring shape;
     /// composition is a later server task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
@@ -347,7 +347,7 @@ pub struct PolicyCapabilities {
     /// `CREATE/DROP SCHEMA`.
     #[serde(default)]
     pub schema: bool,
-    /// Role operations plus the stage-1 role-attribute allowlist placeholder.
+    /// Role operations plus the role-attribute allowlist placeholder.
     #[serde(default)]
     pub role: RoleCapabilityConfig,
     /// `GRANT`/`REVOKE`.
@@ -538,7 +538,7 @@ pub enum RoleAttribute {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationalConfig {
-    /// Index creation posture. Stage 1 records it; the non-transactional
+    /// Index creation posture. Recorded here; the non-transactional
     /// concurrent executor is a later task.
     #[serde(default)]
     pub index_creation: IndexCreation,
@@ -554,7 +554,7 @@ pub struct OperationalConfig {
         deserialize_with = "deserialize_statement_timeout_ms"
     )]
     pub statement_timeout_ms: u64,
-    /// Table rewrite posture. Stage 1 records it; guard enforcement is later.
+    /// Table rewrite posture. Recorded here; guard enforcement is later.
     #[serde(default)]
     pub table_rewrite: TableRewrite,
 }
@@ -1128,7 +1128,7 @@ impl From<SealedPosture> for SealPayloadPosture {
 /// let _: zero_migrate::SealedProfile = serde_json::from_str("{}").unwrap();
 /// ```
 ///
-/// The symmetric MAC is an in-process contract for stage 1; if the sealer and
+/// The symmetric MAC is an in-process contract for now; if the sealer and
 /// runner split out-of-process, this should become an asymmetric signature with
 /// key rotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1167,7 +1167,7 @@ impl SealedProfile {
 
     /// Crate-private mint seam for the server path that has a distinct operator
     /// ceiling and submitted draft. The composed effective profile is sealed and
-    /// later lowered to the guard used by [`crate::apply::ir_apply::apply_sealed`].
+    /// later lowered to the guard used by the sealed apply path.
     #[allow(dead_code)]
     pub(crate) fn mint_composed(
         _cap: &SealApplier,
@@ -1551,7 +1551,7 @@ pub enum SealError {
         /// Dot-path knob that exceeded the ceiling.
         knob: &'static str,
     },
-    /// A profile knob would claim a policy the stage-1 engine cannot enforce.
+    /// A profile knob would claim a policy the engine cannot yet enforce.
     #[error("migration policy profile knob `{knob}` is not yet supported by this engine; refusing to seal unenforced authority")]
     UnsupportedProfileKnob {
         /// Dot-path knob or knob family.

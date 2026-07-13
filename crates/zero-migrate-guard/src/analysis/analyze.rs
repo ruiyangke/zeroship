@@ -195,7 +195,7 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
 /// TABLE … ADD CONSTRAINT PRIMARY KEY/UNIQUE`, or an `ALTER TABLE … ADD INDEX`
 /// subcommand.
 ///
-/// This is the **plan-aware** seam (review finding #8): the per-statement
+/// This is the **plan-aware** seam: the per-statement
 /// [`analyze`] only sees one statement and so suppresses `FK_WITHOUT_INDEX` only
 /// for an index in the SAME statement. A the engine `DeclarativePlan`
 /// aggregates this across *every* migration (plus the desired snapshot) so an FK

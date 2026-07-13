@@ -1,8 +1,8 @@
 //! The deploy-bundle migration-file record + content-addressed hash.
 //!
-//! Vendored byte-identically from the upstream bundle layer (extraction Phase B) so the
+//! Vendored byte-identically from the upstream bundle layer so the
 //! migrate engine's build front-end can emit bundle migration entries over
-//! committed `.ir.json` bytes without a normal-graph dependency on
+//! committed IR envelope bytes without a normal-graph dependency on
 //! the upstream bundle layer:
 //!
 //! - [`MigrationFileEntry`] — the manifest entry type, copied from the upstream
@@ -11,7 +11,7 @@
 //!   upstream bundle layer's `sha256_hex`.
 //!
 //! The serde shape and the hash bytes must stay identical to the originals: the
-//! committed migration `.ir.json` hash is content-addressed, so any drift would
+//! committed migration IR envelope hash is content-addressed, so any drift would
 //! change the recorded entry hash.
 
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// migration build front-end uses it as a shared build-artifact record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationFileEntry {
-    /// Logical migration filename, e.g. `20240617123000_create_users.ir.json`.
+    /// Logical migration name, e.g. `20240617123000_create_users`.
     pub name: String,
     /// sha256 hash (lowercase, 64 hex chars) of the migration file body.
     pub hash: String,

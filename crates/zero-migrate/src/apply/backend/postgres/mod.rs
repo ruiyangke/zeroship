@@ -9,7 +9,7 @@ use crate::driver::SqlSession;
 
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
-/// dialect-specific SQL lives in the shared executor (C1).
+/// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
 
 use super::{
@@ -29,7 +29,7 @@ use crate::schema::query::SqlDialect;
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
-/// Generic over the [`SqlSession`] driver seam. It carries no compio-concrete
+/// Generic over the [`SqlSession`] driver seam. It carries no concrete
 /// `PgOnline`/`PgShadow` harness, so `online()` / `shadow()` always report `None`
 /// — the honest v1 gap (`DryRunError::ShadowUnsupported` on the host path). The
 /// write/DDL/journal apply path never touches them.
@@ -42,7 +42,7 @@ pub struct PostgresBackend<'a, D: SqlSession> {
 #[cfg(pg_seam)]
 impl<'a, D: SqlSession> PostgresBackend<'a, D> {
     /// Wrap any [`SqlSession`] driver as the Postgres backend (host-pg build — no
-    /// compio-concrete online/shadow harness exists to attach).
+    /// online/shadow harness exists to attach).
     #[must_use]
     pub fn new_generic(conn: &'a D) -> Self {
         Self { conn }
@@ -204,11 +204,10 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
 
-    // Host-pg build: the online/backfill harness (`backfill::run_backfill`) is a
-    // compio-concrete `native-pg`-only module, and the host addon's v1 facade does
-    // not surface expand/online. A backfill step routed to the host PG backend is a
-    // routing bug (the differ never emits one on the plain apply path), so refuse
-    // it explicitly rather than pull the compio backfill runner into the addon.
+    // Host-pg build: the host addon's v1 facade does not surface expand/online, so
+    // there is no online/backfill harness. A backfill step routed to the host PG
+    // backend is a routing bug (the differ never emits one on the plain apply path),
+    // so refuse it explicitly.
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
@@ -272,13 +271,13 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
 
-    // Host-pg build: no compio-concrete online harness → always `None`.
+    // Host-pg build: no online harness → always `None`.
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         None
     }
 
 
-    // Host-pg build: no compio-concrete shadow harness → always `None`, so
+    // Host-pg build: no shadow harness → always `None`, so
     // `dry_run`/`dry_run_declarative` return `DryRunError::ShadowUnsupported`
     // (the honest v1 gap — host-side shadow is sequenced later).
     fn shadow(&self) -> Option<&dyn ShadowDryRun> {
@@ -376,10 +375,10 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
     }
 }
 
-/// Genericity proof (design §6d + §A): the apply path monomorphizes over a
+/// Genericity proof: the apply path monomorphizes over a
 /// **non-compio** [`SqlSession`] driver. An in-crate recording driver records the
 /// SQL of every WRITE verb, and — now that the read side is widened to the
-/// driver-neutral [`Row`]/[`DbError`] (§A) — RETURNS canned `Row`s from
+/// driver-neutral [`Row`]/[`DbError`] — RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
 /// that a host driver can build return values without a `compio_postgres::Row`,
 /// closing the old `unreachable!("read verbs…")` gap.
@@ -390,7 +389,7 @@ mod recording_session_genericity {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// The host-shaped one-in-flight guard (§B.6), mechanically enforced in the
+    /// The host-shaped one-in-flight guard, mechanically enforced in the
     /// driver rather than trusted by analogy. Every verb `compare_exchange(false,
     /// true)`s on entry and clears via [`InFlightGuard`]'s `Drop` on the way out
     /// (so error paths clear too). A second verb entered while the first's future
@@ -413,7 +412,7 @@ mod recording_session_genericity {
             {
                 panic!(
                     "SqlSession verb issued while another is in flight — the engine \
-                     must be strictly one-verb-at-a-time (§B.6)"
+                     must be strictly one-verb-at-a-time"
                 );
             }
             Self(flag)
@@ -431,14 +430,14 @@ mod recording_session_genericity {
     /// A non-compio, host-SHAPED [`SqlSession`] that (a) records the SQL + binds of
     /// every verb, (b) returns canned neutral rows for the read verbs, routed by a
     /// substring match on the SQL so a full apply/introspection sweep decodes, and
-    /// (c) enforces the one-in-flight guard (§B.6) on every verb. This is NOT a
-    /// napi bridge (that is Phase C) — it is the in-crate host-shaped producer that
+    /// (c) enforces the one-in-flight guard on every verb. This is NOT a
+    /// napi bridge — it is the in-crate host-shaped producer that
     /// proves the generic PG apply path is genuinely driver-neutral, and converts
     /// the one-in-flight invariant from by-analogy to mechanically-checked.
     struct RecordingSession {
         log: RefCell<Vec<String>>,
         binds: RefCell<Vec<Vec<Bind>>>,
-        /// The mechanically-enforced one-verb-at-a-time guard (§B.6).
+        /// The mechanically-enforced one-verb-at-a-time guard.
         in_flight: AtomicBool,
         /// Canned rows the `net_applied` journal read returns (SQL-routed).
         canned_journal: RefCell<Vec<Row>>,
@@ -576,7 +575,7 @@ mod recording_session_genericity {
         );
 
         // The advisory-lock verbs bound the project id through the neutral
-        // Bind path (§A.1) — the param widening ran, not just the return one.
+        // Bind path — the param widening ran, not just the return one.
         let binds = rec.binds.borrow();
         assert!(
             binds
@@ -589,7 +588,7 @@ mod recording_session_genericity {
     /// The read side is now RUN, not merely compiled: the generic journal read
     /// (`applied`) is driven against canned neutral `Row`s and its decode
     /// (`Row → AppliedEntry`) runs end-to-end over a non-compio driver — the
-    /// §A closure of the old `unreachable!("read verbs…")` gap.
+    /// closure of the old `unreachable!("read verbs…")` gap.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
         let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
@@ -611,8 +610,8 @@ mod recording_session_genericity {
         );
     }
 
-    /// §B.6 → mechanically-proven: drive a FULL sweep over the whole DDL + journal-
-    /// write + journal-read + drift-read + status/history surface against the host-
+    /// One-in-flight, mechanically-proven: drive a FULL sweep over the whole DDL +
+    /// journal-write + journal-read + drift-read + status/history surface against the host-
     /// shaped recording driver **with the `in_flight` guard armed**, and assert it
     /// **never trips** (the test would panic inside the driver if any verb were
     /// issued while another's future is still alive). This converts the one-in-flight
@@ -623,7 +622,7 @@ mod recording_session_genericity {
     /// expected SQL sequence (schema/journal DDL + a journal INSERT with neutral
     /// Bind params), the READ path returns driver::Rows the engine decodes
     /// (`applied` → `AppliedEntry`), and `status()`/`history()` run over the same
-    /// driver — their decoded shapes matching what `native-pg` produces.
+    /// driver — their decoded shapes matching what a live host driver produces.
     #[compio::test]
     async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
         let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
@@ -637,7 +636,7 @@ mod recording_session_genericity {
         backend.ensure_journal(&cfg).await.expect("ensure_journal DDL");
 
         // 2. WRITE — a journal INSERT (`record_started`) through `exec` with
-        //    neutral Bind params. Drives the param-side seam (§A.1) on a write.
+        //    neutral Bind params. Drives the param-side seam on a write.
         crate::apply::journal::record_started(
             &rec, &cfg, "mig_0001", "create_users", "cafef00d", "tester",
         )
@@ -660,8 +659,8 @@ mod recording_session_genericity {
             "empty canned catalog → empty snapshot (decode chain ran clean)"
         );
 
-        // 5. READ — the status()/history() free fns over the SAME driver (§C.5
-        //    holdout 3: generalized to `<D: SqlSession>`).
+        // 5. READ — the status()/history() free fns over the SAME driver
+        //    (generalized to `<D: SqlSession>`).
         let st = crate::ops::status::status(&rec, &cfg, &[])
             .await
             .expect("status over host driver");
@@ -711,7 +710,7 @@ mod recording_session_genericity {
 
     /// The guard is a real guard: a deliberately re-entrant driver (a verb that
     /// issues a second verb before its own future completes) **panics**. This pins
-    /// the §B.6 panic behavior so a future refactor that holds a verb across a
+    /// the one-in-flight panic behavior so a future refactor that holds a verb across a
     /// suspension point fails loudly rather than deadlocking in production.
     #[compio::test]
     #[should_panic(expected = "one-verb-at-a-time")]

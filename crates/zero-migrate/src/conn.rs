@@ -1,26 +1,25 @@
-//! Connection + executor configuration (design §2, §8).
+//! Connection + executor configuration.
 //!
 //! The executor runs **out-of-band at deploy** (not the request hot path) over
-//! the bespoke **compio-postgres** driver — ZERO tokio, per the platform
-//! invariant. This module owns the connection helper and the per-run
-//! [`ExecutorConfig`] (which project, which schema, which meta schema, and the
-//! mandatory `statement_timeout` / `lock_timeout` budgets from §1.5).
+//! the injected `SqlSession` driver seam. This module owns the connection helper
+//! and the per-run [`ExecutorConfig`] (which project, which schema, which meta
+//! schema, and the mandatory `statement_timeout` / `lock_timeout` budgets).
 
 use std::time::Duration;
 
 
 /// Error opening a migrator connection.
 ///
-/// The single variant names the compio-postgres driver, so it is `native-pg`-
-/// gated; a `native-pg`-off build compiles this as an (uninhabited) enum — no
-/// connect path exists to construct it.
+/// Compiles as an (uninhabited) enum — the connection is now supplied by the
+/// host through the `SqlSession` seam, so no in-crate connect path exists to
+/// construct it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
 }
 
 /// The **Postgres confinement parameters** — the per-engine apply-confinement
 /// strategy inputs that are PG-shaped and meaningless to a non-PG engine
-/// (multi-engine abstraction M2, design §2.3 / §1.5).
+/// (part of the multi-engine abstraction).
 ///
 /// These are NOT engine-agnostic. The PG apply leaf (`crate::apply::executor::pg`)
 /// reads them to emit its confinement bracket — `SET LOCAL search_path` (built
@@ -33,20 +32,20 @@ pub enum ConnectError {
 ///
 /// Grouping these into one named struct keeps the neutral [`ExecutorConfig`]
 /// from being PG-shaped at the type level: a non-PG backend never reads `pg`,
-/// and the M2 confinement STRATEGY stays where it already lives — in each
+/// and the confinement STRATEGY stays where it already lives — in each
 /// backend's apply leaf (PG's `SET ROLE`/search_path/timeout bracket; SQLite's
 /// mode-flip), NOT in the neutral core.
 #[derive(Debug, Clone)]
 pub struct PgConfinement {
     /// The per-project **meta schema** that holds the append-only
-    /// `schema_migrations` journal (design §2.2). Separate from the project
+    /// `schema_migrations` journal. Separate from the project
     /// schema so a creator migration can't touch its own history.
     pub meta_schema: String,
-    /// Mandatory per-statement timeout (§1.5). Maps to `SET statement_timeout`.
+    /// Mandatory per-statement timeout. Maps to `SET statement_timeout`.
     /// Bounds how long a statement may **run**; a runaway DDL/DML is cancelled
     /// after this. This is the long-running-statement budget (default 60s).
     pub statement_timeout: Duration,
-    /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (§1.5; the
+    /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (the
     /// safe-migration lock-safety envelope — strong_migrations / Atlas PG101 &
     /// PG103). Maps to `SET lock_timeout`. This is NOT folded into
     /// [`statement_timeout`](Self::statement_timeout): the two bound different
@@ -79,8 +78,8 @@ pub struct PgConfinement {
     /// every other migration in the same deploy.
     pub lock_timeout: Duration,
     /// The least-privilege `migrator` role the apply flow runs each migration's
-    /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (design §1.3,
-    /// the **line-2** DB-privilege defense). `None` runs as the connecting
+    /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the
+    /// DB-privilege defense layer). `None` runs as the connecting
     /// (admin) role — used only by tests / single-tenant dev where the role
     /// model is not provisioned. In the platform this is always `Some`,
     /// matching a role created by [`crate::apply::role::provision_migrator`].
@@ -108,7 +107,7 @@ pub struct PgConfinement {
 impl PgConfinement {
     /// The default PG confinement for a project whose journal lives in
     /// `meta_schema` (the `<project_schema>_migrations` namespace by default):
-    /// conservative non-zero timeouts (§1.5: no indefinite locks), no `SET ROLE`
+    /// conservative non-zero timeouts (no indefinite locks), no `SET ROLE`
     /// (the platform sets it via [`ExecutorConfig::with_migrator_role`]), and
     /// `public` as the extension-type resolution schema.
     #[must_use]
@@ -136,16 +135,16 @@ impl PgConfinement {
     }
 }
 
-/// Per-run executor configuration (design §2.3 / §1.5).
+/// Per-run executor configuration.
 ///
 /// The engine-agnostic fields (project identity + trust posture) live directly
 /// on this struct; the **PG-specific confinement parameters** are grouped under
 /// [`pg`](Self::pg) (a [`PgConfinement`]) so the neutral core is not PG-shaped
 /// at the type level. A non-PG backend (SQLite, which confines via a runtime
-/// mode-flip) never reads `pg` (multi-engine abstraction M2).
+/// mode-flip) never reads `pg` (part of the multi-engine abstraction).
 ///
 /// The PG `statement_timeout` + `lock_timeout` under [`pg`](Self::pg) are
-/// **mandatory** (§1.5: no indefinite locks / `DoS`). They are applied per
+/// **mandatory** (no indefinite locks / `DoS`). They are applied per
 /// migration before its SQL runs.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
@@ -160,10 +159,10 @@ pub struct ExecutorConfig {
     /// timeouts, extension-resolution schemas). PG-shaped by construction; read
     /// ONLY by the PG apply leaf. A SQLite-backed [`ExecutorConfig`] carries the
     /// inert [`PgConfinement::new`] default and never consults this — its
-    /// confinement is the runtime authorizer mode-flip (M2).
+    /// confinement is the runtime authorizer mode-flip.
     pub pg: PgConfinement,
     /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
-    /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
+    /// derives from. `Confined` for the creator path (set by
     /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
     /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] when the standalone CLI
     /// feature is enabled (both require an
@@ -207,7 +206,7 @@ impl ExecutorConfig {
             // extension-resolution schemas). Inert for a SQLite-backed config.
             pg: PgConfinement::new(meta_schema),
             // Confined by default — the creator path. `Platform` is reachable
-            // ONLY via `ExecutorConfig::platform` (token-gated, §4.1).
+            // ONLY via `ExecutorConfig::platform` (token-gated).
             trust: crate::model::policy::TrustProfile::Confined,
             platform_schemas: Vec::new(),
             platform_exts: Vec::new(),
@@ -217,7 +216,7 @@ impl ExecutorConfig {
 
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
     /// guard site uses (the two static first-passes + rollback + the
-    /// precondition evaluator — design §4.1, §6.4 sites 7 & 8).
+    /// precondition evaluator).
     ///
     /// `Confined` ⇒ `GuardConfig::confined(self.project_schema)` (byte-identical
     /// to the old hardcoded `GuardConfig { project_schema, ext: [] }`).
@@ -247,7 +246,7 @@ impl ExecutorConfig {
         }
     }
 
-    /// Build a **Platform** executor config (design §4.1 / §5). REQUIRES a
+    /// Build a **Platform** executor config. REQUIRES a
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, mintable
     /// only through named in-crate seams, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
@@ -256,7 +255,7 @@ impl ExecutorConfig {
     /// the `CREATE EXTENSION` allowlist.
     ///
     /// This ctor is `#[cfg(test)]`-only: the operator-side CLI was retired into
-    /// the `zero-migrate-engine` TS CLI (redesign step 5c), and production Platform
+    /// the `zero-migrate-engine` TS CLI, and production Platform
     /// applies flow through the napi host path. The token stays the in-crate
     /// enforcement primitive.
     #[must_use]
@@ -276,8 +275,8 @@ impl ExecutorConfig {
         cfg
     }
 
-    /// Build a **Trusted** executor config — the public dbmate-like posture
-    /// (Track A). REQUIRES an
+    /// Build a **Trusted** executor config — the public dbmate-like posture.
+    /// REQUIRES an
     /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, EXACTLY
     /// like [`ExecutorConfig::platform`], mintable only through named in-crate
     /// seams. So neither the control plane (external; cannot
@@ -293,8 +292,8 @@ impl ExecutorConfig {
     /// gate still applies.
     ///
     /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
-    /// sole Trusted producer was retired into the `zero-migrate-engine` TS CLI
-    /// (redesign step 5c). The token stays the in-crate enforcement primitive.
+    /// sole Trusted producer was retired into the `zero-migrate-engine` TS CLI.
+    /// The token stays the in-crate enforcement primitive.
     #[must_use]
     #[cfg(test)]
     pub(crate) fn trusted(
@@ -325,7 +324,7 @@ impl ExecutorConfig {
     ///
     /// - **Confined** ⇒ the project schema **only** (byte-identical to the old
     ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
-    ///   unqualified `up` name can never resolve to the journal — C1).
+    ///   unqualified `up` name can never resolve to the journal).
     /// - **Platform** ⇒ the full configured schema allowlist (e.g.
     ///   `"zero_migrate", "public"`). A multi-schema changelog relies on
     ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and

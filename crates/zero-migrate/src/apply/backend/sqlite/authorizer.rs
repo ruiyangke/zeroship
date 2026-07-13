@@ -1,4 +1,4 @@
-//! The two-mode hardened authorizer (SQLite-parity design §2.2.2 + §2.5.1).
+//! The two-mode hardened authorizer.
 //!
 //! This is the **line-2 confinement** for SQLite migrations: the runtime analog
 //! of the Postgres least-privilege `migrator` role. SQLite has no roles / GRANT /
@@ -6,7 +6,7 @@
 //! that fires at **`prepare` time** for every statement compiled on the migration
 //! connection, and a fail-closed deny matrix.
 //!
-//! # Two modes, one installed closure (§2.2.2)
+//! # Two modes, one installed closure
 //!
 //! `Connection::authorizer(Some(F))` requires `F: FnMut(AuthContext) ->
 //! Authorization + Send + 'static`. The mode is therefore an [`Arc<AtomicU8>`]
@@ -17,21 +17,21 @@
 //! `Rc<Cell<_>>` would NOT compile: `Rc`/`Cell` are not `Send`.
 //!
 //! - **`CreatorUp`** — the creator/AI `up` runs under this mode. The journal
-//!   schema `_mig` is immutable: all writes/DDL to `_mig` are denied; ATTACH /
-//!   DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied; functions
-//!   are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
-//!   bodies that target `_mig` are denied at CREATE-prepare time (closing the
-//!   defer-into-engine-mode hole, §2.2.1 item 6).
+//! schema `_mig` is immutable: all writes/DDL to `_mig` are denied; ATTACH /
+//! DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied; functions
+//! are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
+//! bodies that target `_mig` are denied at CREATE-prepare time (closing the
+//! defer-into-engine-mode hole item 6).
 //! - **`EngineJournal`** — only the engine's own journal writes run here. `_mig`
-//!   writes are allowed (the journal tables only); ATTACH/DETACH/load_extension
-//!   stay denied for life; a single `PRAGMA foreign_keys` toggle is allowed (the
-//!   12-step rebuild, §2.4).
+//! writes are allowed (the journal tables only); ATTACH/DETACH/load_extension
+//! stay denied for life; a single `PRAGMA foreign_keys` toggle is allowed (the
+//! 12-step rebuild).
 //!
-//! # Matching `_mig` — the OUTER context field (CRITICAL precision, §2.2.1)
+//! # Matching `_mig` — the OUTER context field (CRITICAL precision)
 //!
 //! The attach alias is carried on the OUTER [`AuthContext::database_name`] (the
 //! 5th `xAuth` `zDb` argument SQLite passes), NOT on a per-action field:
-//! `AuthAction::DropTable { table_name }` / `DropTrigger { .. }` carry no database
+//! `AuthAction::DropTable { table_name }` / `DropTrigger {.. }` carry no database
 //! field. So the deny keys on `ctx.database_name == Some(MIG_ALIAS)`, never a
 //! pattern-matched `DropTable.database`.
 
@@ -40,12 +40,12 @@ use std::sync::Arc;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-/// The fixed attach alias of the journal database (§2.2 / L2). A fixed ASCII
+/// The fixed attach alias of the journal database. A fixed ASCII
 /// literal — never the (hyphenated-UUID) app id — so it is quote-safe and the
 /// authorizer match is a trivial string compare.
 pub(crate) const MIG_ALIAS: &str = "_mig";
 
-/// The connection's MAIN database name — the tenant app file (§2.5.2). The app
+/// The connection's MAIN database name — the tenant app file. The app
 /// file is opened as `main` (NOT attached under a separate alias), so the
 /// creator-writable target SQLite names is the literal `"main"`. The app id
 /// appears only in the file path, never as a SQL identifier. SQLite also passes
@@ -57,7 +57,7 @@ pub(crate) const MAIN_DB: &str = "main";
 const MODE_CREATOR_UP: u8 = 0;
 const MODE_ENGINE_JOURNAL: u8 = 1;
 
-/// The two authorizer phases (§2.2.2). Stored as a `u8` in an [`AtomicU8`] so the
+/// The two authorizer phases. Stored as a `u8` in an [`AtomicU8`] so the
 /// flag is `Send + 'static` and can be captured by-move into the single installed
 /// authorizer closure and flipped with a plain atomic store (no closure
 /// re-install, no `.await` across the flip).
@@ -87,7 +87,7 @@ impl Mode {
     }
 }
 
-/// The shared, `Send + 'static` mode flag (§2.2.2). Cloned: one handle is moved
+/// The shared, `Send + 'static` mode flag. Cloned: one handle is moved
 /// into the authorizer closure, the other stays with the actor so it can flip the
 /// mode between the creator `up` and the journal write.
 #[derive(Clone, Debug)]
@@ -115,7 +115,7 @@ impl AuthMode {
     }
 }
 
-/// The fail-closed `SQLITE_FUNCTION` allowlist (C2, §2.5.1).
+/// The fail-closed `SQLITE_FUNCTION` allowlist.
 ///
 /// A blanket allow on `SQLITE_FUNCTION` cannot distinguish a benign built-in from
 /// `load_extension` / `fts3_tokenizer` / a `vec_*` extension function, and vtable
@@ -123,7 +123,7 @@ impl AuthMode {
 /// everything else (`load_extension`, all `vec_*` in creator mode, unknown ⇒
 /// Deny). The set is the deterministic built-ins the descriptor-generated DDL can
 /// legitimately reference in defaults / CHECK expressions. Kept small and
-/// auditable; MUST be kept in lockstep with the emitter's function set (§4 closing
+/// auditable; MUST be kept in lockstep with the emitter's function set (closing
 /// note — fail-closed: a new emitter function the allowlist lacks is DENIED).
 ///
 /// `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_TIME` are SQL keywords, but SQLite
@@ -147,8 +147,8 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "ltrim",
     "rtrim",
     "substr",
-    // `instr` — added in PR6b for the ENGINE's pinned `c.fn.splitPart` SQLite
-    // lowering (§9). `split_part` cannot be expressed with `substr` alone:
+    // `instr` — added for the ENGINE's pinned `c.fn.splitPart` SQLite
+    // lowering. `split_part` cannot be expressed with `substr` alone:
     // locating the k-th delimiter is a POSITION search, which `substr` (numeric
     // start/len) cannot do — so the engine-synthesized split unrolls
     // `substr(cur, instr(cur, d) + 1)` to literal depth n (proven byte-identical
@@ -163,7 +163,7 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     // engine's pinned lowering emits it. Kept in lockstep with the emitter's
     // `FnSynth(splitPart)` SQLite render (`dml.rs`) per this list's standing
     // "MUST be kept in lockstep" rule. `replace` is deliberately NOT added — the
-    // allow-list grows by exactly one deterministic scalar (§9).
+    // allow-list grows by exactly one deterministic scalar.
     "instr",
     "typeof",
     "hex",
@@ -178,8 +178,8 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     // on 3.51 — the authorizer fires `SQLITE_FUNCTION("printf")` for that internal
     // call, so denying it breaks a LEGITIMATE additive creator migration. They are
     // deterministic, sandboxed string-formatting builtins (no extension load, no
-    // tenant escape), safe to allow in both modes. (Exposed by P5's first real
-    // ADD COLUMN exercise; the P2 allowlist predated any ADD COLUMN test.)
+    // tenant escape), safe to allow in both modes. (Exposed by the first real
+    // ADD COLUMN exercise; the allowlist predated any ADD COLUMN test.)
     "printf",
     "format",
     // `like` is invoked INTERNALLY by SQLite during `ALTER TABLE … DROP COLUMN`
@@ -187,8 +187,8 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     // to the altered object — so denying it breaks a LEGITIMATE additive DROP
     // COLUMN rollback. It is a deterministic, sandboxed pattern builtin (no
     // extension load, no tenant escape). `glob` is its sibling pattern builtin,
-    // allowed for the same reason. (Both exposed by P5's DROP COLUMN rollback;
-    // the P2 allowlist predated any ALTER-rewrite test.)
+    // allowed for the same reason. (Both exposed by the DROP COLUMN rollback;
+    // the allowlist predated any ALTER-rewrite test.)
     "like",
     "glob",
     "unlikely",
@@ -205,18 +205,18 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "exists",
 ];
 
-/// The PRAGMAs the engine may issue in `EngineJournal` mode (§2.4 + §2.7).
+/// The PRAGMAs the engine may issue in `EngineJournal` mode.
 /// `foreign_keys` is the rebuild toggle and `foreign_key_check` is the rebuild's
-/// orphan-row integrity gate (both §2.4, P3b); the rest are READ-ONLY schema
+/// orphan-row integrity gate; the rest are READ-ONLY schema
 /// introspection the drift snapshot needs (they emit rows, mutate nothing).
 /// Fail-closed: anything not listed (incl. `writable_schema`, `journal_mode`) is
 /// denied even in engine mode.
 fn is_engine_allowed_pragma(name: &str) -> bool {
     const ENGINE_PRAGMAS: &[&str] = &[
         "foreign_keys",
-        // P3b — the 12-step rebuild's integrity check. `PRAGMA foreign_key_check`
+        // the 12-step rebuild's integrity check. `PRAGMA foreign_key_check`
         // works INSIDE a transaction (unlike `foreign_keys`, a no-op in a txn) and
-        // reports orphaned rows; a non-empty result aborts the rebuild (§2.4). It is
+        // reports orphaned rows; a non-empty result aborts the rebuild. It is
         // read-only (emits violation rows, mutates nothing). Engine-only — a creator
         // never reaches it (PRAGMA is denied outright in CreatorUp).
         "foreign_key_check",
@@ -271,9 +271,9 @@ fn function_allowed(name: &str) -> bool {
 ///
 /// The returned closure captures the [`AuthMode`] handle by-move and reads it on
 /// every `prepare`-time invocation, branching the deny matrix on the current mode
-/// (§2.5.1). It is the load-bearing line-2: the deny is at prepare, BEFORE
+/// It is the load-bearing line-2: the deny is at prepare, BEFORE
 /// execution, for EVERY statement compiled on the connection — including
-/// runtime-constructed SQL and the AI/raw path (§2.5.3).
+/// runtime-constructed SQL and the AI/raw path.
 pub(crate) fn make_authorizer(
     mode: AuthMode,
 ) -> impl for<'r> FnMut(AuthContext<'r>) -> Authorization + Send + 'static {
@@ -286,7 +286,7 @@ pub(crate) fn make_authorizer(
 ///
 /// `database_name` is the OUTER `AuthContext.database_name` — the attach alias
 /// SQLite passes as the `xAuth` `zDb` argument. We match on it, never on a
-/// per-action `database` field (which several variants lack, §2.2.1).
+/// per-action `database` field (which several variants lack).
 fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
     let current = mode.load();
     let db = ctx.database_name;
@@ -300,20 +300,20 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
 
     match &ctx.action {
         // -- Capabilities denied in BOTH modes, for the connection's whole life --
-        // ATTACH/DETACH closed by construction (§2.5.2): the engine attaches the
+        // ATTACH/DETACH closed by construction: the engine attaches the
         // one app + the journal BEFORE installing this authorizer; after install,
         // no new alias can be bound and none can be dropped — ever.
         AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
 
         // PRAGMA: denied in CreatorUp (closes the `writable_schema=ON` forge,
-        // §2.2.1 item 3). In EngineJournal, a SMALL allowlist is permitted:
-        //   - `foreign_keys` — the engine's toggle around the 12-step rebuild (§2.4);
-        //   - the READ-ONLY schema-introspection pragmas the drift snapshot issues
-        //     (`table_info`/`index_list`/`index_info`/`foreign_key_list`, §2.7).
-        //     These return rows and mutate nothing; they are the SQLite analog of
-        //     the PG drift path's `information_schema`/`pg_catalog` reads. They run
-        //     ONLY under engine mode (engine-private introspection); a creator can
-        //     never reach them (PRAGMA stays denied outright in CreatorUp).
+        // item 3). In EngineJournal, a SMALL allowlist is permitted:
+        // - `foreign_keys` — the engine's toggle around the 12-step rebuild;
+        // - the READ-ONLY schema-introspection pragmas the drift snapshot issues
+        // (`table_info`/`index_list`/`index_info`/`foreign_key_list`).
+        // These return rows and mutate nothing; they are the SQLite analog of
+        // the PG drift path's `information_schema`/`pg_catalog` reads. They run
+        // ONLY under engine mode (engine-private introspection); a creator can
+        // never reach them (PRAGMA stays denied outright in CreatorUp).
         // Everything else (writable_schema, journal_mode, …) stays denied in BOTH
         // modes (fail-closed).
         AuthAction::Pragma { pragma_name, .. } => match current {
@@ -322,10 +322,10 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         },
 
         // load_extension and any new vtable module: denied in both modes. (Belt
-        // and suspenders alongside `load_extension_disable()` at open, §2.1.1.)
+        // and suspenders alongside `load_extension_disable` at open)
         AuthAction::CreateVtable { module_name, .. } => match current {
             // Engine-emitted goodie DDL may create an fts5/vec0 vtable, ONLY in
-            // engine mode (§2.6). Creator mode can never make a vtable.
+            // engine mode. Creator mode can never make a vtable.
             Mode::EngineJournal
                 if module_name.eq_ignore_ascii_case("fts5")
                     || module_name.eq_ignore_ascii_case("vec0") =>
@@ -335,7 +335,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             _ => Authorization::Deny,
         },
 
-        // SQLITE_FUNCTION allowlist (C2). Fail-closed: unknown ⇒ Deny. `load_extension`
+        // SQLITE_FUNCTION allowlist. Fail-closed: unknown ⇒ Deny. `load_extension`
         // and all `vec_*` are simply absent from the allowlist ⇒ denied in creator
         // mode. In engine mode the engine's vector DDL may additionally call `vec_*`.
         AuthAction::Function { function_name } => {
@@ -352,15 +352,15 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             }
         }
 
-        // Transaction control (§2.2.2 phase sequence + §2.5.1 row).
+        // Transaction control.
         //
         // The engine owns BEGIN IMMEDIATE / COMMIT / ROLLBACK and issues them under
-        // EngineJournal mode (the §2.2.2 phase sequence requires it: step 1 BEGIN,
+        // EngineJournal mode (the phase sequence requires it: step 1 BEGIN,
         // step 6 COMMIT are engine operations). The **creator** `up` (CreatorUp
         // mode) may NOT open or close a transaction — that would break the single
         // atomic transaction wrapping the DDL + journal write. So:
-        //   - CreatorUp: DENY (creator cannot touch transaction boundaries)
-        //   - EngineJournal: ALLOW (the engine's own BEGIN/COMMIT/ROLLBACK)
+        // - CreatorUp: DENY (creator cannot touch transaction boundaries)
+        // - EngineJournal: ALLOW (the engine's own BEGIN/COMMIT/ROLLBACK)
         // SAVEPOINT is denied in both modes (the engine uses plain BEGIN/COMMIT,
         // never savepoints; a creator savepoint is never legitimate).
         AuthAction::Transaction { .. } => match current {
@@ -370,7 +370,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         AuthAction::Savepoint { .. } => Authorization::Deny,
 
         // -- ALTER TABLE — key on the ACTION'S OWN database_name, NOT the outer one --
-        // CRITICAL (P5): `SQLITE_ALTER_TABLE` carries its target database in the
+        // CRITICAL: `SQLITE_ALTER_TABLE` carries its target database in the
         // action's own `database_name` field; the OUTER `AuthContext.database_name`
         // (the `zDb` arg) is NOT the database for this action. For an
         // `ALTER TABLE … DROP COLUMN` SQLite passes the dropped COLUMN name in the
@@ -381,10 +381,10 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // generic foreign-alias deny would then wrongly reject a legitimate
         // `ALTER TABLE main.<t>`. So we branch on the inner `database_name` here,
         // ahead of every generic write arm:
-        //   - `_mig`  ⇒ journal immutability: engine-only (CreatorUp denied);
-        //   - `main`  ⇒ a creator/engine table alter: allowed (additive ADD/DROP/
-        //              RENAME COLUMN — the additive rollback + apply path);
-        //   - other   ⇒ foreign alias (impossible post-ATTACH-deny) ⇒ deny.
+        // - `_mig` ⇒ journal immutability: engine-only (CreatorUp denied);
+        // - `main` ⇒ a creator/engine table alter: allowed (additive ADD/DROP/
+        // RENAME COLUMN — the additive rollback + apply path);
+        // - other ⇒ foreign alias (impossible post-ATTACH-deny) ⇒ deny.
         AuthAction::AlterTable { database_name, .. } => {
             let inner_mig = *database_name == MIG_ALIAS;
             let inner_main = *database_name == MAIN_DB;
@@ -432,7 +432,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Allow
         }
 
-        // -- Journal immutability on `_mig` (§2.2.1 item 4) --
+        // -- Journal immutability on `_mig` --
         // Direct writes / DDL to `_mig` are denied in CreatorUp and allowed only in
         // EngineJournal (and only the journal tables exist there). Match the OUTER
         // database_name — DropTable/DropTrigger carry no per-action database field.
@@ -465,7 +465,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             }
         }
 
-        // -- Creator-authored TRIGGER/VIEW bodies that WRITE `_mig` (§2.2.1 item 6) --
+        // -- Creator-authored TRIGGER/VIEW bodies that WRITE `_mig` --
         // The trigger/view target table is `app` (so the outer match above does not
         // fire on the CREATE itself), but each body statement is authorized at the
         // trigger/view's own CREATE-prepare time with `accessor` naming the inner
@@ -482,7 +482,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Deny
         }
 
-        // -- Temp objects denied in CreatorUp (M1) --
+        // -- Temp objects denied in CreatorUp --
         // A creator `up` has no business creating temp tables/triggers/views/indexes
         // (they can hold cross-statement state, fire on app writes, or shadow journal
         // names). These were only INCIDENTALLY blocked before via the temp-master
@@ -493,7 +493,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         | AuthAction::CreateTempView { .. }
         | AuthAction::CreateTempIndex { .. } => Authorization::Deny,
 
-        // -- Analyze denied in CreatorUp (M3) --
+        // -- Analyze denied in CreatorUp --
         // ANALYZE writes `sqlite_stat*` tables into the app db — net-new tables that
         // confound later drift detection (the snapshot would see them as out-of-band
         // objects). A migration's declared DDL has no business running ANALYZE; deny
@@ -501,7 +501,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // scoped to CreatorUp so a future engine maintenance op is not foreclosed.)
         AuthAction::Analyze { .. } if matches!(current, Mode::CreatorUp) => Authorization::Deny,
 
-        // -- Reindex on `main`/`temp` ALLOWED in CreatorUp (PHASE 4) --
+        // -- Reindex on `main`/`temp` ALLOWED in CreatorUp --
         // `SQLITE_REINDEX` fires NOT ONLY for a standalone `REINDEX` statement but
         // also INTRINSICALLY as part of a legitimate `CREATE INDEX` (SQLite reindexes
         // the freshly-created index to populate it). The engine emits the three
@@ -522,7 +522,7 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
         // post-ATTACH-deny, but failed closed here regardless.
         AuthAction::Reindex { .. } => Authorization::Deny,
 
-        // -- Cross-tenant belt-and-suspenders (§2.5.2) --
+        // -- Cross-tenant belt-and-suspenders --
         // Any WRITE whose database_name is neither `main` (the app file) nor `_mig`
         // is denied. New aliases can only appear via ATTACH (already denied), so in
         // practice this only ever sees `main`/`_mig`/None; the rule is here so a
@@ -543,11 +543,11 @@ fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Deny
         }
 
-        // -- Total `_mig` confinement in CreatorUp (M1) — the catch-all backstop --
+        // -- Total `_mig` confinement in CreatorUp — the catch-all backstop --
         // A creator has NO business touching `_mig` in ANY way, including a plain
         // `SELECT … FROM "_mig".schema_migrations` (an `AuthAction::Read` with
         // `accessor: None`, which the trigger/view-body arm above does NOT cover
-        // because that arm requires `accessor.is_some()`). Without this arm such a
+        // because that arm requires `accessor.is_some`). Without this arm such a
         // Read falls through to the `_ => Allow` catch-all and the creator can read
         // the immutable journal. Deny ANY action whose OUTER database_name is `_mig`
         // in CreatorUp (Read included), ahead of the catch-all. EngineJournal is
@@ -598,9 +598,9 @@ mod tests {
         }
     }
 
-    /// PR6b — `instr` is allow-listed (the engine's pinned `c.fn.splitPart` SQLite
+    /// `instr` is allow-listed (the engine's pinned `c.fn.splitPart` SQLite
     /// lowering uses it) in BOTH modes; `replace` is deliberately NOT added (the
-    /// allow-list grows by exactly one deterministic scalar, §9). `load_extension`
+    /// allow-list grows by exactly one deterministic scalar). `load_extension`
     /// stays denied (fail-closed).
     #[test]
     fn instr_allow_listed_replace_still_denied() {
@@ -610,12 +610,12 @@ mod tests {
             assert_eq!(
                 authorize(&m, &ctx(AuthAction::Function { function_name: "instr" }, None, None)),
                 Authorization::Allow,
-                "instr must be allow-listed in {mode:?} (PR6b splitPart lowering)"
+                "instr must be allow-listed in {mode:?} (splitPart lowering)"
             );
             assert_eq!(
                 authorize(&m, &ctx(AuthAction::Function { function_name: "replace" }, None, None)),
                 Authorization::Deny,
-                "replace must NOT be allow-listed in {mode:?} (only +1 scalar, §9)"
+                "replace must NOT be allow-listed in {mode:?} (only +1 scalar)"
             );
             assert_eq!(
                 authorize(
@@ -675,7 +675,7 @@ mod tests {
         );
     }
 
-    // P3b (§2.4): `foreign_key_check` — the rebuild's orphan-row integrity gate — is
+    // `foreign_key_check` — the rebuild's orphan-row integrity gate — is
     // allowed in EngineJournal, denied in CreatorUp (a creator can never run the
     // rebuild integrity check; PRAGMA is denied outright in creator mode).
     #[test]
@@ -709,7 +709,7 @@ mod tests {
         );
     }
 
-    // §2.7: the read-only introspection PRAGMAs the drift snapshot uses are allowed
+    // The read-only introspection PRAGMAs the drift snapshot uses are allowed
     // in EngineJournal, denied in CreatorUp; writable_schema stays denied in both.
     #[test]
     fn introspection_pragmas_engine_only() {
@@ -739,7 +739,7 @@ mod tests {
                     )
                 ),
                 Authorization::Allow,
-                "{pragma} must be allowed in engine mode (drift introspection, §2.7)"
+                "{pragma} must be allowed in engine mode (drift introspection)"
             );
         }
         // writable_schema is NOT an introspection pragma — denied even in engine mode.
@@ -778,7 +778,7 @@ mod tests {
         );
     }
 
-    // P5: ALTER TABLE keys on the action's OWN database_name, not the outer one.
+    // ALTER TABLE keys on the action's OWN database_name, not the outer one.
     // `ALTER TABLE main.<t>` (additive ADD/DROP/RENAME COLUMN) is allowed even when
     // the OUTER database_name carries the column name (SQLite's quirk); `_mig` is
     // engine-only.
@@ -911,7 +911,7 @@ mod tests {
         }
     }
 
-    // M1: temp objects are denied BY THE AUTHORIZER (not incidentally), in both modes.
+    // temp objects are denied BY THE AUTHORIZER (not incidentally), in both modes.
     #[test]
     fn temp_objects_denied_by_authorizer() {
         let m = AuthMode::new();
@@ -932,7 +932,7 @@ mod tests {
         }
     }
 
-    // M2: DROP VIEW "_mig".x is denied (added DropView to the immutability arm).
+    // DROP VIEW "_mig".x is denied (added DropView to the immutability arm).
     #[test]
     fn drop_view_on_mig_denied_in_creator() {
         let m = AuthMode::new();
@@ -940,11 +940,11 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::DropView { view_name: "some_view" }, Some(MIG_ALIAS), None)),
             Authorization::Deny,
-            "DROP VIEW on _mig must be denied (M2)"
+            "DROP VIEW on _mig must be denied"
         );
     }
 
-    // M3: ANALYZE is denied in CreatorUp (it writes net-new sqlite_stat* tables that
+    // ANALYZE is denied in CreatorUp (it writes net-new sqlite_stat* tables that
     // confound drift detection).
     #[test]
     fn analyze_denied_in_creator() {
@@ -953,11 +953,11 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Analyze { table_name: "users" }, Some(MAIN_DB), None)),
             Authorization::Deny,
-            "ANALYZE must be denied in creator mode (M3)"
+            "ANALYZE must be denied in creator mode"
         );
     }
 
-    // PHASE 4: REINDEX on `main`/`temp` is ALLOWED in CreatorUp — it fires
+    // REINDEX on `main`/`temp` is ALLOWED in CreatorUp — it fires
     // intrinsically as part of a legitimate `CREATE INDEX` (which the engine emits
     // for the platform system-field indexes inside the creator `up`). It rebuilds an
     // existing index B-tree: no new table, no schema-structure change, never `_mig`.
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(
             authorize(&m, &ctx(AuthAction::Reindex { index_name: "ix_users" }, Some(MAIN_DB), None)),
             Authorization::Allow,
-            "REINDEX on main must be allowed (intrinsic to CREATE INDEX, PHASE 4)"
+            "REINDEX on main must be allowed (intrinsic to CREATE INDEX)"
         );
         // None database (main/temp namespace) is also the app file.
         assert_eq!(
@@ -978,9 +978,9 @@ mod tests {
         );
     }
 
-    // M1: a creator `up` doing a plain `SELECT … FROM "_mig".schema_migrations` is a
+    // a creator `up` doing a plain `SELECT … FROM "_mig".schema_migrations` is a
     // `Read { accessor: None }` on `_mig`. Pre-fix it fell through to the `_ => Allow`
-    // catch-all (the trigger/view-body arm requires `accessor.is_some()`), letting the
+    // catch-all (the trigger/view-body arm requires `accessor.is_some`), letting the
     // creator read the immutable journal. It must now be DENIED in CreatorUp — while
     // the engine's own journal reads (EngineJournal mode) stay allowed.
     #[test]
@@ -1001,7 +1001,7 @@ mod tests {
                 )
             ),
             Authorization::Deny,
-            "creator SELECT FROM \"_mig\".schema_migrations must be denied (M1)"
+            "creator SELECT FROM \"_mig\".schema_migrations must be denied"
         );
         // The engine's own journal reads (EngineJournal mode) stay allowed.
         m.store(Mode::EngineJournal);
@@ -1024,7 +1024,7 @@ mod tests {
 
     // A REINDEX targeting the journal alias `_mig` stays denied. NOTE: the
     // journal-immutability arm does NOT list `Reindex`, so it is NOT denied there —
-    // the deny comes from the catch-all `AuthAction::Reindex { .. } => Deny` (the
+    // the deny comes from the catch-all `AuthAction::Reindex {.. } => Deny` (the
     // load-bearing line after the main/temp allow), which the `_mig` case falls
     // through to because it is neither `main` nor `temp`.
     #[test]

@@ -1,8 +1,7 @@
-//! The STRUCTURAL expression-AST validator + the structured-error envelope
-//! (design §3.3.1.1 / §8.8).
+//! The STRUCTURAL expression-AST validator + the structured-error envelope.
 //!
 //! The closed expression AST ([`crate::model::expr::Expr`]) is **constructed in JS and
-//! serialized to IR — never parsed from text** (§3.3.1.1). So validation is a
+//! serialized to IR — never parsed from text**. So validation is a
 //! purely STRUCTURAL allow-list walk over the deserialized tree:
 //!
 //! - **(a)** every node is in the allow-listed set — the serde deserializer
@@ -16,33 +15,33 @@
 //!   in-AST sub-expression.
 //! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table —
 //!   an apply/render-time check scoped to the single target table of the
-//!   enclosing op (§3.3.1.1(c)). A cross-table reference is impossible by
-//!   construction (`c` is single-table-scoped — §3.3.1), and any reference to a
+//!   enclosing op (an apply-time check). A cross-table reference is impossible by
+//!   construction (`c` is single-table-scoped), and any reference to a
 //!   column not on the target table is a hard error (injection defense + the
 //!   capability boundary).
 //! - **(d)** a `Cast` target is a portable type — guaranteed by the closed
 //!   [`crate::model::expr::CastTarget`] enum, so this is structurally total.
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
-//! differential fuzzer** — HIGH-1 is dissolved, not mitigated (§3.3.1.1). The
+//! differential fuzzer** — the injection risk is dissolved, not mitigated. The
 //! Rust validator here is the authoritative STRUCTURAL gate (checks (a), (b),
 //! (d) — node allow-list, `FnSynth` arity/envelope, portable cast target); the
 //! JS side runs an optional best-effort structural hint over the SAME schemars
 //! schema. Rule (c) — `ColRef` resolution against the live target table — runs
-//! at the apply/render seam (§3.3.1.1(c) is an apply-time check): at IR load the
+//! at the apply/render seam (an apply-time check): at IR load the
 //! live column set is generally unknown for the DML ops, `setColumnType`,
 //! `addConstraint` and `createIndex`, so those positions validate
 //! [`TargetScope::structural_only`] here and the seam re-runs the walk with a
 //! resolved column set. A self-contained `createTable` DOES resolve (c) against
 //! its own declared columns at load.
 //!
-//! LAYERING EXCEPTION (A3): raw view-body validation calls the guard's read-only
+//! LAYERING EXCEPTION: raw view-body validation calls the guard's read-only
 //! body scanner after the structural `SELECT` checks. That scanner is real
 //! deny-list security logic, so moving it down into `model` would put guard policy
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 //!
-//! # Structural vs. policy split (redesign step 3a)
+//! # Structural vs. policy split
 //!
 //! The STRUCTURAL, policy-free validator — the closed-`Expr` allow-list walk, the
 //! structured-error envelope ([`AuthoringError`]), the `Dialect`/`UnsupportedKind`
@@ -65,7 +64,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 pub use zero_migrate_ir::validate::*;
 
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
-/// embedded expression-AST node against `target_dialect` — the §3.3.1.1 "the
+/// embedded expression-AST node against `target_dialect` — the "the
 /// Rust validator is the authoritative STRUCTURAL gate" obligation made
 /// operative. Checks (a)/(b)/(d) run at load for every Expr slot; check (c)
 /// (`ColRef` resolution) runs here only for a self-contained `createTable`, and
@@ -92,14 +91,14 @@ pub use zero_migrate_ir::validate::*;
 /// `Ok(())`. For the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
 /// the live-schema column set is generally not known at IR-load time, so the
 /// scope is [`TargetScope::structural_only`] — the structural checks (a),(b),(d)
-/// still run; the apply/render seam (a later wave) re-runs the walk with a
+/// still run; the apply/render seam re-runs the walk with a
 /// resolved column set to enforce (c). A `createTable` is self-contained, so its
 /// embedded predicates ARE resolved against the table's own columns here.
 ///
 /// Returns the FIRST [`AuthoringError`] encountered, or `Ok(())`.
 ///
 /// `ts_locations`, when supplied, maps a 0-based op index to its `.ts` source
-/// location for the §8.8 payload; a missing entry yields `None`.
+/// location for the structured-error payload; a missing entry yields `None`.
 ///
 /// # Errors
 /// Returns the first [`AuthoringError`] any embedded expression produces.
@@ -117,8 +116,8 @@ pub fn validate_ir(
     )
 }
 
-/// **PR10** — [`validate_ir`] threaded with the active schema confinement scope
-/// (§2.7). `schema_scope`:
+/// [`validate_ir`] threaded with the active schema confinement scope.
+/// `schema_scope`:
 /// - `None` ⇒ omitted/default public capability: no project schema is known, so
 ///   cross-schema checks are not applied, but vendor capabilities stay confined.
 /// - `Some(SchemaScope::Single(project_schema))` ⇒ the **Confined** creator
@@ -955,8 +954,8 @@ fn validate_dialectal_op(
     Ok(())
 }
 
-/// **PR10** — [`validate_op`] threaded with the active
-/// [`SchemaScope`](crate::model::policy::SchemaScope) (§2.7). Runs the schema/guard gate
+/// [`validate_op`] threaded with the active
+/// [`SchemaScope`](crate::model::policy::SchemaScope). Runs the schema/guard gate
 /// FIRST, then the per-op expression-slot checks.
 ///
 /// # Errors
@@ -987,14 +986,14 @@ pub fn validate_op_scoped(
         );
     }
 
-    // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
+    // schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
     validate_op_schema_and_guard(op, target_dialect, op_index, ts_location, schema_scope)?;
 
-    // **VENDOR (`zero-migrate`)** — the capability-composition gate (vendor
-    // spec §3.2 gate 1), BEFORE any expression walk. A privileged vendor op is
+    // **VENDOR (`zero-migrate`)** — the capability-composition gate,
+    // BEFORE any expression walk. A privileged vendor op is
     // refused fail-closed when (a) the target is SQLite (every vendor op is
-    // `PgOnly`, §4.3), or (b) the active capability set — derived from the threaded
+    // `PgOnly`), or (b) the active capability set — derived from the threaded
     // [`SchemaScope`] — does not GRANT the op's required capability. The Confined
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
     // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
@@ -1095,9 +1094,9 @@ pub fn validate_op_scoped(
                 check_constraint(&c.kind, &scope)?;
             }
             let pk_cols = primary_key.as_deref();
-            // **Migration-first P2a (§4)** — the per-column declared-only facets
+            // The per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
-            // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
+            // threat model is a hand-crafted IR envelope, so a malformed/reserved
             // prefix or a misplaced metric is refused fail-closed BEFORE lower /
             // checksum, never deferred to a render surprise.
             for col in columns {
@@ -1250,12 +1249,12 @@ pub fn validate_op_scoped(
             Ok(())
         }
         Op::DropIndex { name, table, .. } => {
-            // §8.6 fail-closed (HIGH): a DropIndex carries an index `name` and an
+            // fail-closed: a DropIndex carries an index `name` and an
             // OPTIONAL owning-table hint. The ownership gate
             // ([`crate::model::load::enforce_ir_ownership`]) checks the op's TARGET
             // TABLE — but a bare-name DropIndex (`table: None`) has no
             // ownership-checkable target, so the gate would SKIP it, letting a
-            // hostile `.ir.json` `{op:"dropIndex", name:"<other_app_index>"}` drop
+            // hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}` drop
             // ANOTHER app's index cross-tenant. Until a name→owning-table registry
             // resolver exists, we refuse a bare-name DropIndex fail-closed: the
             // author must carry the owning-table hint, which makes the drop
@@ -1271,7 +1270,7 @@ pub fn validate_op_scoped(
                     ts_location: ts_location.map(str::to_string),
                     dialect: target_dialect,
                     reason: format!(
-                        "dropIndex of {name:?} omits its owning table, so the §8.6 \
+                        "dropIndex of {name:?} omits its owning table, so the \
                          ownership check cannot resolve the index's owner — a \
                          bare-name index drop is refused fail-closed (it would let a \
                          migration drop another app's index by name)"
@@ -1284,7 +1283,7 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        // **#173** — AddColumn carries the same per-column declared facets
+        // AddColumn carries the same per-column declared facets
         // (`vector_metric` / standalone `mask`) `createTable` columns do, so it gets the
         // SAME fail-closed facet validation: a `vector_metric` on a non-vector added
         // column is refused [`CODE_VECTOR_METRIC_MISPLACED`] BEFORE lower (mask/kind are
@@ -1347,7 +1346,7 @@ pub fn validate_op_scoped(
             )
         }
         // VENDOR — a `createPolicy`'s `USING`/`WITH CHECK` predicates are CLOSED
-        // `(c) => Expr` ASTs (vendor spec §2.4): validate them STRUCTURALLY (the
+        // `(c) => Expr` ASTs: validate them STRUCTURALLY (the
         // (a)/(b)/(d) checks) against the policy's target table. The live column set
         // is unknown at load (the table pre-exists), so structural-only here.
         Op::CreatePolicy { table, using, with_check, .. } => {
@@ -1452,8 +1451,8 @@ pub fn validate_op_scoped(
         // gate in `validate_op_schema_and_guard` above is the whole check, and the
         // render-time `quote_ident` is the injection-safe identifier seam.) The
         // remaining VENDOR ops carry no embedded Expr — their privileged payload is
-        // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the §3-gated raw
-        // `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
+        // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the capability-gated
+        // raw `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
         Op::RenameColumn { ty, .. } => validate_col_type_position(
             ty,
             "renameColumn.type",
@@ -2081,11 +2080,11 @@ fn validate_op_support(
     Ok(())
 }
 
-/// **VENDOR (`zero-migrate`)** — the capability-composition gate (vendor
-/// spec §3.2 gate 1). For every VENDOR [`Op`](crate::model::ir::Op) variant:
+/// **VENDOR (`zero-migrate`)** — the capability-composition gate.
+/// For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
 /// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
-///    analogue, §4.3); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
+///    analogue); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
 ///    at load, never silently skipped.
 /// 2. **Capability gate** — the active
 ///    [`VendorCapabilities`](crate::model::capability::VendorCapabilities), derived from the
@@ -2168,7 +2167,7 @@ fn validate_vendor_op(
                     "vendor PG primitive (op capability {:?}) requires the {} capability, which \
                      the active (Confined creator) capability set does not grant — the privileged \
                      zero-migrate primitives are unreachable from a confined migration by \
-                     construction (vendor spec §3.2)",
+                     construction",
                     cap.as_token(),
                     cap.flag_name(),
                 ),
@@ -2413,8 +2412,8 @@ fn validate_select_ast(
     Ok(())
 }
 
-/// **PR10** — validate an op's `schema` qualifier + existence-guard direction
-/// (§2.7), BEFORE the per-op expression-slot checks. Three fail-closed checks:
+/// Validate an op's `schema` qualifier + existence-guard direction,
+/// BEFORE the per-op expression-slot checks. Three fail-closed checks:
 ///
 /// 1. **Schema identifier safety** — if a `schema` is present it MUST be a safe bare
 ///    identifier ([`is_safe_schema_ident`], mirroring `dml.rs`'s `quote_ident`
@@ -2499,7 +2498,7 @@ fn validate_op_schema_and_guard(
         check_schema(schema, "op")?;
     }
 
-    // Review #5 LOW-6: GRANT/REVOKE table targets carry an inner schema that is
+    // GRANT/REVOKE table targets carry an inner schema that is
     // not `Op::schema()`. Surface it to the same validate-time allowlist gate so
     // an out-of-scope table grant is refused before lower/render.
     match op {
@@ -2849,7 +2848,7 @@ fn validate_trigger_stmt(
     }
 }
 
-/// **PR10** — a safe bare SQL identifier for a schema qualifier (§2.7): non-empty,
+/// A safe bare SQL identifier for a schema qualifier: non-empty,
 /// alpha/`_`-leading, all chars `[A-Za-z0-9_]`. Mirrors `dml.rs`'s `quote_ident`
 /// shape so the validate-time gate and the emitter's double-quoting agree.
 #[must_use]
@@ -3090,10 +3089,10 @@ fn validate_default_expr(
     walk(expr, target_dialect, op_index, ts_location)
 }
 
-/// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::model::ir::IrColumn)'s
+/// Validate one [`IrColumn`](crate::model::ir::IrColumn)'s
 /// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
 ///
-/// Two fail-closed checks, with the IR's hand-crafted-`.ir.json` threat model in
+/// Two fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
 /// mind (the closed-enum + `deny_unknown_fields` design):
 ///
 /// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
@@ -3373,7 +3372,7 @@ fn validate_identity_placement(
     )))
 }
 
-/// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
+/// **Apply/render-seam ColRef resolution (rule (c)).** Re-run the
 /// expression-AST walk for the ops whose live-schema column set was NOT known at
 /// IR-load time — the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
 /// — now that the render/apply seam HAS the live columns. For each such op whose
@@ -3388,12 +3387,9 @@ fn validate_identity_placement(
 /// Non-DML / non-`setColumnType` ops are revalidated structurally (a),(b),(d)
 /// — harmless and keeps the walk total.
 ///
-/// This is the seam the design (`validate_ir` doc, "the apply/render seam re-runs
-/// the walk with a resolved column set to enforce (c)") names. In PR1 the DML /
-/// `setColumnType` LOWER is still deferred (`IrAuthor::lower` returns
-/// `UnsupportedOp`), so this resolution is exercised as a stand-alone seam +
-/// regression; once DML lowering lands (PR6a) the apply path calls this BEFORE
-/// rendering the DML statement.
+/// This is the seam the `validate_ir` doc ("the apply/render seam re-runs
+/// the walk with a resolved column set to enforce (c)") names. The apply path
+/// calls this BEFORE rendering the DML statement.
 ///
 /// # Errors
 /// The first [`AuthoringError`] any embedded expression produces — incl. a rule
@@ -3412,7 +3408,7 @@ pub fn validate_ir_resolved(
     Ok(())
 }
 
-/// **Single-op apply/render-seam ColRef resolution (rule (c), MED).** The per-op
+/// **Single-op apply/render-seam ColRef resolution (rule (c)).** The per-op
 /// peer of [`validate_ir_resolved`]: re-run the expression-AST walk for ONE op with
 /// a RESOLVING [`TargetScope`] when its target table's live column set is known.
 ///
@@ -3423,8 +3419,8 @@ pub fn validate_ir_resolved(
 /// assembled. A `ColRef` to a column NOT on the enclosing target table (or a
 /// synthesized cross-table reference) is rejected with the structured
 /// [`AuthoringError`] (`UNSUPPORTED { kind: "expr" }`, rule (c)) at apply — NOT as
-/// an opaque raw DB `column does not exist` error mid-statement (§3.3.1.1(c) "at
-/// apply/render time").
+/// an opaque raw DB `column does not exist` error mid-statement (the (c) check
+/// runs "at apply/render time").
 ///
 /// `live_columns` maps a target table → its live column names (system fields
 /// included). An op whose table is ABSENT from the map keeps the structural-only
@@ -3553,7 +3549,7 @@ mod tests {
         TargetScope::new(table, cols)
     }
 
-    // ── DoS guard: explicit walk depth bound (code-critic LOW) ──────────────
+    // ── DoS guard: explicit walk depth bound ────────────────────────────────
     // The validator OWNS the recursion bound (MAX_EXPR_DEPTH), not an
     // implicit serde_json::recursion_limit. Build the AST in Rust (bypassing
     // serde entirely, exactly as a future streaming/custom deserializer or a
@@ -3713,7 +3709,7 @@ mod tests {
 
     #[test]
     fn portable_predicate_and_extract_nodes_validate_on_all_three_dialects() {
-        // between / like / distinctFrom / inList / extract are PORTABLE (§3.4):
+        // between / like / distinctFrom / inList / extract are PORTABLE:
         // they render on all three dialects (the engine owns each per-dialect
         // lowering), so the walk accepts them with NO dialect gate — including on
         // SQLite/MySQL, exactly where the PG-only nodes are refused.
@@ -3874,8 +3870,8 @@ mod tests {
 
     #[test]
     fn portable_scalar_fns_validate_on_all_three_dialects() {
-        // mod / round / floor / ceil / substr / replace are PORTABLE ScalarFns
-        // (§3.4): identical spelling on PG/SQLite/MySQL (mod renders as the `%`
+        // mod / round / floor / ceil / substr / replace are PORTABLE ScalarFns:
+        // identical spelling on PG/SQLite/MySQL (mod renders as the `%`
         // operator), so the walk accepts them with NO dialect gate — unlike the
         // PG-only currentSetting/currentUser vendor scalars.
         let c = cols();
@@ -4045,10 +4041,10 @@ mod tests {
         assert_eq!(obj["code"], CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── MED-1: the splitPart envelope verdict is DIALECT-GATED ──────────────
+    // ── the splitPart envelope verdict is DIALECT-GATED ─────────────────────
     // An OUT-OF-ENVELOPE-but-PG-renderable c.fn.splitPart (multi-char delim,
     // n>8, …) is renderable on Postgres (`split_part` accepts it) and only a
-    // hard reject on the SQLite leg (§2.4.1/§9). The SAME node must therefore
+    // hard reject on the SQLite leg. The SAME node must therefore
     // validate OK on a Postgres target and be EXPR_NOT_PORTABLE on a SQLite
     // target. RED before check_split_part branches on target_dialect.
 
@@ -4056,7 +4052,7 @@ mod tests {
     fn out_of_envelope_split_part_loads_on_pg_rejected_on_sqlite() {
         let c = cols();
         let sc = scope("users", &c);
-        // The §2.4.1 loads-on-PG / rejected-on-SQLite fixture: multi-char delim.
+        // The loads-on-PG / rejected-on-SQLite fixture: multi-char delim.
         let node = split(", ", 1);
         assert!(
             validate_expr(&node, Dialect::Postgres, &sc, 0, None).is_ok(),
@@ -4082,11 +4078,11 @@ mod tests {
         }
     }
 
-    // ── LOW (PR6b code-critic): the GRAMMAR is dialect-NEUTRAL ──────────────
+    // ── the GRAMMAR is dialect-NEUTRAL ──────────────────────────────────────
     // A grammar-broken splitPart — a NON-literal / non-string delim, or a
     // non-literal / non-positive-int n — is not renderable on EITHER dialect (the
     // renderer enforces the same grammar fail-closed on PG and SQLite). The
-    // validator (the AI loop's primary structured-feedback signal, §3.3.1.1) must
+    // validator (the AI loop's primary structured-feedback signal) must
     // therefore reject it on a Postgres target too, BEFORE the dialect early-return —
     // not defer the only rejection to render time. RED before check_split_part lifts
     // the grammar checks above the `if Postgres { return Ok(()) }`.
@@ -4210,7 +4206,7 @@ mod tests {
 
     #[test]
     fn now_with_args_is_rejected() {
-        // MED-1: now(arg) is a genuinely-MALFORMED synth — `now()` is nullary on
+        // now(arg) is a genuinely-MALFORMED synth — `now()` is nullary on
         // BOTH dialects — so it is an unconditional CODE_UNSUPPORTED, on PG AND
         // SQLite (not a dialect-gated portability reject).
         let sc = TargetScope::structural_only("t");
@@ -4227,7 +4223,7 @@ mod tests {
 
     #[test]
     fn gen_random_uuid_with_args_is_rejected() {
-        // MED-1: genRandomUuid(args) is genuinely malformed → unconditional
+        // genRandomUuid(args) is genuinely malformed → unconditional
         // CODE_UNSUPPORTED on both dialects.
         let sc = TargetScope::structural_only("t");
         let e = synth(SynthFn::GenRandomUuid, vec![Expr::col("x"), Expr::col("y")]);
@@ -4243,7 +4239,7 @@ mod tests {
 
     #[test]
     fn concat_ws_arity_is_enforced() {
-        // MED-1: concatWs with <2 args is genuinely malformed (no valid join on
+        // concatWs with <2 args is genuinely malformed (no valid join on
         // EITHER dialect) → unconditional CODE_UNSUPPORTED on PG and SQLite.
         let c = cols();
         let sc = scope("users", &c);
@@ -4265,7 +4261,7 @@ mod tests {
 
     #[test]
     fn concat_ws_non_literal_delim_rejected_on_sqlite_loads_on_pg() {
-        // LOW — the SQLite render's NULL-skip head-trim (`substr(fold,
+        // the SQLite render's NULL-skip head-trim (`substr(fold,
         // length(delim)+1)`) is only correct for a FIXED literal delimiter. A
         // non-literal delimiter (here a ColRef to an existing column, so rule (c)
         // is satisfied and the ONLY objection is the literal-delim gate) must be a
@@ -4304,7 +4300,7 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+    // ── the Layer-2 dialect() per-dialect value escape ──────────────────────
 
     fn dialectal(
         default: Option<Expr>,
@@ -4641,9 +4637,8 @@ mod tests {
 
     // ── validate_ir / validate_op — the SOLE-gate walker over a whole IR ────
     //
-    // These pin the §3.3.1.1 obligation that the validator is actually INVOKED
-    // over every embedded Expr slot of every Op (the walker did not exist
-    // before the code-critic MED fix).
+    // These pin the obligation that the validator is actually INVOKED
+    // over every embedded Expr slot of every Op.
 
     use crate::model::ir::{
         ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
@@ -5142,10 +5137,10 @@ mod tests {
         assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
     }
 
-    // ── PR10: schema confinement + guard direction + schema-ident safety ────────
+    // ── schema confinement + guard direction + schema-ident safety ──────────────
 
     /// CONFINED — an explicit `schema != project_schema` is REFUSED fail-closed at
-    /// validate-time with the structured `CROSS_SCHEMA` code (§2.7). RED before the
+    /// validate-time with the structured `CROSS_SCHEMA` code. RED before the
     /// gate (the op would have lowered cross-schema). An op whose schema EQUALS the
     /// project schema, or omits it, passes.
     #[test]
@@ -5203,7 +5198,7 @@ mod tests {
 
     /// Defaulted public validation (`None` scope) has no project schema available,
     /// so it honors any schema for non-vendor ops; PLATFORM (`Allowlist`) refuses a
-    /// schema outside its allow-list (§2.7).
+    /// schema outside its allow-list.
     #[test]
     fn trusted_honors_any_schema_platform_gates_to_allowlist() {
         use crate::model::policy::SchemaScope;
@@ -5251,7 +5246,7 @@ mod tests {
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
-    /// REFUSED with `INVALID_SCHEMA_IDENT` — REGARDLESS of profile (§2.7). RED before
+    /// REFUSED with `INVALID_SCHEMA_IDENT` — REGARDLESS of profile. RED before
     /// `is_safe_schema_ident` guards the author-controlled identifier position.
     #[test]
     fn injection_shaped_schema_ident_is_refused() {
@@ -5277,7 +5272,7 @@ mod tests {
 
     /// A guard whose DIRECTION is illegal for the op variant is an authoring error
     /// (`GUARD_DIRECTION`): `ifExists` on a create*/add* op, `ifNotExists` on a
-    /// drop*/rename op (§2.7). RED before the legal-direction check.
+    /// drop*/rename op. RED before the legal-direction check.
     #[test]
     fn wrong_direction_existence_guard_is_an_authoring_error() {
         // ifExists on createTable — illegal.
@@ -5455,7 +5450,7 @@ mod tests {
         .expect("resolved confined system shape remains valid");
     }
 
-    // (E) MED — ColRef resolution at the apply/render seam. At LOAD the DML scope
+    // ColRef resolution at the apply/render seam. At LOAD the DML scope
     // is structural-only (the live column set is unknown), so an unresolved ColRef
     // PASSES the load walk. At APPLY, `validate_ir_resolved` re-runs the walk with
     // the resolved live columns and REJECTS a ColRef that does not resolve — with
@@ -5853,7 +5848,7 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_aggregate_count_in_index_predicate() {
-        // J2b regression: moving aggregates to ExprChain methods makes aggregate
+        // Regression: moving aggregates to ExprChain methods makes aggregate
         // nodes type-reachable in immutable/scalar slots. The Rust validator is
         // the authoritative backstop; before this check, this createIndex.where
         // node passed validate cleanly.
@@ -5898,7 +5893,7 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_volatile_now_in_index_predicate() {
-        // J3 regression: moving now()/genRandomUuid() to top-level imports makes
+        // Regression: moving now()/genRandomUuid() to top-level imports makes
         // volatile nodes type-reachable in immutable slots. The Rust validator is
         // the authoritative backstop; before this check, this createIndex.where
         // node passed validate cleanly.
@@ -5971,9 +5966,9 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── PR5 — the names-stay-strings BINDING corollary (§3.3) ───────────────
+    // ── the names-stay-strings BINDING corollary ───────────────────────────
     //
-    // This is the apply-time HALF of the PR5 guarantee. The OTHER half lives in
+    // This is the apply-time HALF of the guarantee. The OTHER half lives in
     // the JS type-level suite (`sdks/migrate/tests/types/type-tests.ts`): a
     // migration whose table/column NAMES are plain strings type-checks cleanly
     // EVEN WHEN those names are not in the current generated db schema (the
@@ -6024,7 +6019,7 @@ mod tests {
             .expect_err("a non-existent column name must FAIL at the resolved apply seam");
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
-            "the apply-time name reject is structured (the §8.8 envelope), not a raw DB error"
+            "the apply-time name reject is structured (the error envelope), not a raw DB error"
         );
         assert_eq!(
             err.kind,
@@ -6034,8 +6029,8 @@ mod tests {
         assert_eq!(err.op_index, 0, "the structured error attributes the failing op");
     }
 
-    // ── Migration-first P2a — column-facet validate-time bounds (§4) ─────────
-    // RED before the `validate_column_facets` wiring: a hand-crafted `.ir.json`
+    // ── column-facet validate-time bounds ───────────────────────────────────
+    // RED before the `validate_column_facets` wiring: a hand-crafted IR envelope
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
 

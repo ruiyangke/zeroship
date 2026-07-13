@@ -1,8 +1,7 @@
-// op.* migration fixture — Migration-first P2a: the DECLARED-ONLY column facets
-// the recorder now captures on the wire `IrColumn` (design
-// 2026-06-25-p2-gen-types-type-source.md §2b). Proves `t.id({ prefix })` records
-// `idPrefix` (was dropped pre-P2a — migrate_ops.js:252) and
-// `t.vector({ dimensions, metric })` records `vectorMetric` (was dropped — migrate_ops.js:270), and
+// op.* migration fixture — the DECLARED-ONLY column facets
+// the recorder captures on the wire `IrColumn`. Proves `t.id({ prefix })` records
+// `idPrefix` (previously dropped) and
+// `t.vector({ dimensions, metric })` records `vectorMetric` (previously dropped), and
 // that the JS↔Rust value-checksum round-trip agrees on the new optional fields.
 //
 // A plain column (no facet) is unchanged on the wire — the fixture mixes facet

@@ -9,7 +9,7 @@
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
 //   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
-//   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
+//   alias removed), t.int() (t.integer deleted), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
 import { table, t, decimal, now } from "zero-migrate";
@@ -31,7 +31,7 @@ export default {
         owner: t.ref("users"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
-        label: t.text(), // was t.string() — the alias is removed (§7)
+        label: t.text(), // was t.string() — the alias is removed
         hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),
         ratio: t.double(),

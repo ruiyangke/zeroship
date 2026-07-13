@@ -108,7 +108,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
-fn resolved_ir_json(raw: &str) -> String {
+fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
         resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
@@ -119,7 +119,7 @@ fn resolved_ir_json(raw: &str) -> String {
 async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
     let p = paths("sqlite_skip");
     let be = backend(&p);
-    let ir = resolved_ir_json(
+    let ir = resolved_envelope_json(
         r#"{"ir_version":1,"name":"sqlite_skip_pg_leg","ops":[
           {"op":"createTable","name":"docs","columns":[{"name":"title","type":"text"}]},
           {"op":"dialectal","pg":[

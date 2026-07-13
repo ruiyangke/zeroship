@@ -1,4 +1,4 @@
-//! The `MigrationAuthor` seam — where SQL *enters* the pipeline (design §3).
+//! The `MigrationAuthor` seam — where SQL *enters* the pipeline.
 //!
 //! A migration's `up`/`down` SQL is produced by a pluggable **author**, then
 //! handed to the engine for the SAME `plan` (lint) → `gate` (approval) →
@@ -9,13 +9,13 @@
 //!   ([`AuthorRequest`]: create table, add column, create index). Pure
 //!   pattern-matching, no AI, project-schema-qualified output, always safe
 //!   (non-destructive). It deliberately does **not** attempt renames, drops, or
-//!   type changes — those are the AI author's job (design §3, scenarios 9/10).
+//!   type changes — those are the AI author's job.
 //! - [`RawSqlAuthor`] — the **AI-author hook**. The AI/builder generates the
 //!   `up`/`down` SQL *externally* (the engine never calls an LLM); this author
 //!   wraps that pre-generated SQL as a [`Migration`], deriving the destructive /
 //!   approval flags from a guard pass so the complex/expand-contract output
 //!   enters the pipeline with the right gating. This is how every non-trivial
-//!   migration (scenarios 4/6/9/10/13–16) reaches the executor.
+//!   migration (renames, drops, type changes, expand-contract) reaches the executor.
 //!
 //! Both produce a fully-formed [`Migration`] (`UUIDv7` version, checksum, flags);
 //! neither bypasses the guard — [`DeterministicAuthor`] emits provably-safe SQL,
@@ -25,7 +25,7 @@
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 
-/// A pluggable source of versioned migrations (design §3).
+/// A pluggable source of versioned migrations.
 ///
 /// The executor is fixed; the *author* is the seam. `DeterministicAuthor`
 /// handles the trivial additive set; `RawSqlAuthor` is the hook through which an
@@ -69,8 +69,7 @@ pub struct Column {
 }
 
 /// A structured request for the [`DeterministicAuthor`] — the BOUNDED set of
-/// trivial **additive** operations it can emit without AI (design §3, scenarios
-/// 1/2/5).
+/// trivial **additive** operations it can emit without AI.
 ///
 /// Every variant is non-destructive by construction; there is deliberately no
 /// `DropTable` / `RenameColumn` / `ChangeType` variant — those are destructive
@@ -187,7 +186,7 @@ fn index_name(table: &str, columns: &[String]) -> String {
     cap_ident_name(&format!("idx_{}_{}", table, columns.join("_")))
 }
 
-/// The deterministic, no-AI author for trivial additive ops (design §3).
+/// The deterministic, no-AI author for trivial additive ops.
 ///
 /// Emits provably-safe, project-schema-qualified SQL with correct
 /// [`MigrationFlags`]. Pattern-based only — it never attempts renames, drops, or
@@ -197,7 +196,7 @@ pub struct DeterministicAuthor {
     /// The project schema every emitted statement is qualified into.
     project_schema: String,
     /// The declaring app (`app_…`) recorded on the migration (per-table
-    /// ownership, design §4).
+    /// ownership).
     owner_app: String,
 }
 
@@ -339,7 +338,7 @@ impl MigrationAuthor for DeterministicAuthor {
 }
 
 /// The AI-author hook — wrap externally-generated `up`/`down` SQL as a
-/// [`Migration`] (design §3, the "AI builder" author).
+/// [`Migration`] (the "AI builder" author).
 ///
 /// The AI/builder produces the SQL for non-trivial migrations (renames, type
 /// changes, backfills, expand-contract sequences); the engine does **not** call
@@ -646,7 +645,7 @@ mod tests {
                 None,
             )
             .expect("wrap");
-        // A DROP is destructive ⇒ requires approval (flags_for §1.6).
+        // A DROP is destructive ⇒ requires approval (flags_for).
         assert!(m.flags.destructive, "DROP TABLE must be flagged destructive");
         assert!(m.flags.requires_approval);
     }

@@ -1,11 +1,10 @@
-//! **Migration-first P1 — the offline ops→schema fold (the keystone).**
+//! The offline ops→schema fold.
 //!
 //! [`fold_ops`] replays an ordered [`Op`] list into a [`SchemaSnapshot`] — PURE,
 //! offline, NO database I/O. It is the offline companion of the live
 //! [`snapshot_schema`](crate::apply::drift::snapshot_schema): the SAME `SchemaSnapshot`
 //! output, sourced from the migration set instead of `pg_catalog`. The
-//! migration-first design (`docs/proposals/2026-06-25-migration-first-schema.md`
-//! §2.1) makes the `op.*` migrations the SOLE source of truth, and "the current
+//! migration-first design makes the `op.*` migrations the SOLE source of truth, and "the current
 //! schema" is the fold of that set; later phases (`gen-types`) emit the `env.db`
 //! types + the runtime descriptor from this snapshot.
 //!
@@ -29,7 +28,7 @@
 //!
 //! An incoherent op stream (add-column-to-missing-table, drop-absent-column,
 //! duplicate-create-table, rename-to-existing, …) is a structured [`FoldError`] —
-//! never a silently-wrong snapshot (P1 deliverable 2). A real `.ir.json` set the
+//! never a silently-wrong snapshot. A real IR envelope set the
 //! engine already applied is internally consistent, so the fold agrees with apply.
 //!
 //! # DML is a schema no-op
@@ -79,10 +78,10 @@ use crate::schema::query::SqlDialect;
 /// drift-irrelevant — it never enters `SchemaSnapshot` equality (the snapshot only
 /// carries columns/indexes/constraints, none of which embed it), so a fold-internal
 /// constant is correct. (Ownership is a deploy-time concern handled elsewhere; the
-/// project-union phase P7 re-derives ownership from the migrations directly.)
+/// project-union phase re-derives ownership from the migrations directly.)
 const FOLD_OWNER_APP: &str = "__fold__";
 
-/// A structured, fail-closed fold error (P1 deliverable 2). Every incoherent op
+/// A structured, fail-closed fold error. Every incoherent op
 /// stream maps to a typed variant — never a silently-wrong snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoldError {
@@ -340,7 +339,7 @@ fn apply_alter_sequence_snapshot(
 /// Rewrite every INCOMING FK `definition` in OTHER tables to follow a table
 /// rename — the offline mirror of what live PG does on `ALTER TABLE … RENAME TO`.
 ///
-/// **Why this is required (review HIGH).** A FK `definition` embeds the referenced
+/// **Why this is required.** A FK `definition` embeds the referenced
 /// table by name (`FOREIGN KEY (col) REFERENCES <schema>.<target>(id) …`, built by
 /// [`crate::render::declarative::ir_fk_constraint_snapshot_for_columns`]). Live PG renders that body
 /// via `pg_get_constraintdef(oid)`, which resolves the referenced relation by OID,
@@ -745,7 +744,7 @@ pub fn fold_ops(
                 // Live PG/SQLite re-target every INCOMING FK to the renamed table by
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
                 // name. Mirror that, or the renamed table phantom-drifts for every
-                // table that referenced it (review HIGH).
+                // table that referenced it.
                 rewrite_incoming_fk_targets(&mut tables, project_schema, table, to);
             }
             Op::AddColumn {
@@ -768,7 +767,7 @@ pub fn fold_ops(
                         column: column.clone(),
                     });
                 }
-                // **#173 / #174** — thread the carried facets so the SNAPSHOT for a vector
+                // Thread the carried facets so the SNAPSHOT for a vector
                 // / masked added column renders the metric opclass / `zero-migrate:mask` sentinel
                 // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
                 // the `<col>_masked` sibling for a masked column so the offline fold matches
@@ -831,7 +830,7 @@ pub fn fold_ops(
                 // it is dropped whole, identically). Live introspection therefore
                 // shows none of them after the drop, so the fold MUST mirror the
                 // cascade — otherwise a phantom index/constraint survives in the
-                // fold and `fold_ops != snapshot_schema(live)`, corrupting P2
+                // fold and `fold_ops != snapshot_schema(live)`, corrupting
                 // gen-types and producing permanent phantom drift.
                 //
                 // (1) Drop every index covering the column. `IndexSnapshot::columns`
@@ -883,7 +882,7 @@ pub fn fold_ops(
                 // `lower_rename` takes: "the live column is the single authoritative
                 // type source"). So we do NOT re-derive from `ty`.
                 //
-                // P2 gen-types BOUNDARY (review LOW finding — tracked, no P1 change):
+                // gen-types BOUNDARY:
                 // the IR rename lowers to an online expand-contract whose CONTRACT
                 // (drop the `from` column) is a SEPARATE later deploy. Between expand
                 // and contract, live PG carries BOTH the `from` and `to` columns while
@@ -893,8 +892,8 @@ pub fn fold_ops(
                 // exists post-expand), but in the migration-first model the fold is the
                 // SOLE source of truth for gen-types — so generated types over a
                 // mid-expand migration set reflect the POST-EXPAND logical shape (final
-                // `to` name). P2 must add an e2e running gen-types against a live
-                // mid-expand DB to confirm reads/writes resolve. No action here.
+                // `to` name). A live mid-expand DB should be exercised e2e to
+                // confirm gen-types reads/writes resolve. No action here.
                 if snap.columns.iter().any(|c| &c.name == to) {
                     return Err(FoldError::RenameCollision {
                         table: table.clone(),
@@ -927,13 +926,13 @@ pub fn fold_ops(
                 // FAIL-CLOSED on an encryption-contract change. A plain↔encrypted
                 // (or masked) type change rewrites the column's emission contract:
                 // its `encryption_sentinel` / `comment_sentinel` — the EXACT fields
-                // P2 gen-types reads to drive the AEAD encrypt/decrypt pass. The
+                // gen-types reads to drive the AEAD encrypt/decrypt pass. The
                 // apply path (`render_alter_column_type`) emits ONLY `ALTER COLUMN
                 // … TYPE bytea`, never the `COMMENT ON COLUMN … zero-migrate:enc` an encrypted
                 // column needs, so the LIVE DB also lacks the metadata after such an
                 // alter. Folding only `data_type` here would carry the OLD (now
-                // wrong / stale) sentinel — a silently-wrong snapshot, which P1
-                // deliverable 2 forbids. Until the apply path can faithfully
+                // wrong / stale) sentinel — a silently-wrong snapshot, which the
+                // fail-closed contract forbids. Until the apply path can faithfully
                 // re-stamp the sentinel, refuse the change (parity with the lower's
                 // `using` / SQLite alter refusals). Detection is symmetric:
                 //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
@@ -1419,7 +1418,7 @@ fn create_table_descriptor(
 /// column out, so the default / encryption / comment sentinel is built by the shared
 /// kernel, never re-spelled. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
 ///
-/// **#174** — returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
+/// Returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
 /// shared builder injects for a masked column, so the OFFLINE fold snapshot grows the
 /// SAME sibling the live apply path does (otherwise `fold_ops` would phantom-drift
 /// against the introspected live table for a masked added column). A non-masked column
@@ -1449,7 +1448,7 @@ fn add_column_snapshot(
         ty: ty.clone(),
         nullable,
         default: default.cloned(),
-        // **#173** — `id_prefix` stays `None` (an added column is never the system PK);
+        // `id_prefix` stays `None` (an added column is never the system PK);
         // the vector metric + standalone mask ARE threaded so the snapshot renders them.
         unique: None,
         id_prefix: None,
@@ -1863,7 +1862,7 @@ fn fold_create_table_specs(
         let access = ix.using.map_or("btree", index_method_access);
         if !dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
-                "createTable non-btree index `using` on SQLite (later wave)",
+                "createTable non-btree index `using` on SQLite (not yet supported)",
             ));
         }
         let mut snap_idx = create_index_snapshot(
@@ -2072,21 +2071,21 @@ fn add_constraint_snapshot(
 }
 
 // ===========================================================================
-// Migration-first P2a — fold-and-RECOVER (§2a + §5): the seam P2b/gen-types
+// Fold-and-RECOVER: the seam the gen-types layer
 // consumes. `fold_ops` produces the drift SchemaSnapshot (and correctly DEFERS a
 // CHECK there — it cannot render the SQL `definition` offline); this seam
 // reconstructs, per column, the FieldDescriptor / wire-`FieldDef` the SDK type
 // inference consumes, by RECOVERING facets from the applied migration shape:
 //   - type / vector dims / encrypted (default mode) / ref target / id_prefix /
 //     vector_metric — already on the descriptor `ir_column_to_field` builds from
-//     the op `IrColumn` (the §2b carried fields + the §2a structural ones);
+//     the op `IrColumn` (the carried fields + the structural ones);
 //   - enum / min / max — LIFTED from the canonical closed-AST CHECK shapes
 //     (`recover_check_facet`), bounded to recognized shapes (an unrecognized CHECK
 //     is left unprojected — the column types as its base scalar; NEVER a panic).
 // This is the offline analogue of `crud/introspect_schema.rs`'s runtime derive.
 // ===========================================================================
 
-/// A facet recovered by LIFTING a canonical closed-AST CHECK (P2a §5.3). Bounded
+/// A facet recovered by LIFTING a canonical closed-AST CHECK. Bounded
 /// to the SDK-emitted shapes over a SINGLE column; an unrecognized CHECK yields
 /// `None` from [`recover_check_facet`] and is left unprojected.
 #[derive(Debug, Clone, PartialEq)]
@@ -2103,7 +2102,7 @@ pub enum RecoveredCheck {
     /// `col = v` or a left-folded OR-chain `col = v1 OR col = v2 OR …` → an enum
     /// membership over a single column. (The op.* closed AST has NO `IN` node, so
     /// the canonical enum shape is the eq/eq-OR-chain; this is the closed-AST
-    /// analogue of the declarative `IN (...)` the spec §5.3 names.)
+    /// analogue of the declarative `IN (...)` shape.)
     Enum {
         /// The constrained column.
         column: String,
@@ -2115,13 +2114,13 @@ pub enum RecoveredCheck {
 /// Convert a numeric [`IrScalar`] literal to `f64` for a `min`/`max` bound, or
 /// `None` for a non-numeric literal (which is not a recognized range bound).
 ///
-/// **Precision note (LOW-2).** A `Decimal` bound is narrowed to `f64` here. This is
+/// **Precision note.** A `Decimal` bound is narrowed to `f64` here. This is
 /// NOT a new precision loss: the reconstructed `FieldDescriptor.min`/`max` is itself
 /// an `f64` (`declarative.rs`), so the recovered facet cannot be wider than `f64`
 /// regardless; and an `Int` literal is wire-bounded to ±2^53 by `IrScalar` (the
 /// `< 2^53` JS-safe-integer guard), so the `Int` arm is lossless. A large `Decimal`
 /// CHECK bound narrows to the same `f64` the declarative path would carry — the two
-/// sides stay byte-identical (the keystone parity), they just share the `f64` model.
+/// sides stay byte-identical (the round-trip parity), they just share the `f64` model.
 /// A future reader should NOT assume a lossless decimal bound here.
 fn ir_scalar_as_f64(s: &crate::model::ir::IrScalar) -> Option<f64> {
     use crate::model::ir::IrScalar;
@@ -2176,9 +2175,9 @@ fn match_col_op_lit(
     None
 }
 
-/// **P2a §5.3** — lift a canonical closed-AST CHECK `Expr` back to a
+/// Lift a canonical closed-AST CHECK `Expr` back to a
 /// [`RecoveredCheck`] facet, or `None` for an unrecognized shape (which stays
-/// unprojected — the column types as its base scalar; NEVER a panic, §4(a)).
+/// unprojected — the column types as its base scalar; NEVER a panic).
 ///
 /// Recognized shapes (all over a SINGLE column):
 /// - `col >= n` → `Range { min }`;
@@ -2187,7 +2186,7 @@ fn match_col_op_lit(
 /// - `col = v` → `Enum { [v] }`;
 /// - `col = v1 OR col = v2 OR …` (left-folded, same column) → `Enum { [v1, v2, …] }`.
 ///
-/// The keystone caveat (§6) applies: this is a RECOGNIZED-shape inverse, not a
+/// The round-trip caveat applies: this is a RECOGNIZED-shape inverse, not a
 /// total one. A hand-written `c('age').ge(0).and(c('age').le(120))` is
 /// indistinguishable from a `min/max` facet (both reconstruct the same bound),
 /// which is acceptable; an arbitrary boolean CHECK is NOT projectable and yields
@@ -2266,8 +2265,8 @@ fn recover_enum_chain(expr: &crate::model::expr::Expr) -> Option<(String, Vec<se
 }
 
 /// FK policy recovered from a single-column `IrConstraintKind::Fk` constraint, to
-/// lift onto the matching `ref` column's descriptor (§2a "recover from the applied
-/// FK constraint"). `on_delete`/`on_update` are the camelCase SDK tokens. The
+/// lift onto the matching `ref` column's descriptor (recover from the applied
+/// FK constraint). `on_delete`/`on_update` are the camelCase SDK tokens. The
 /// `deferrable` bit is not carried on the Fk constraint; omitted means the
 /// SQL/Postgres default (`NOT DEFERRABLE`), so the folded descriptor leaves it
 /// unset.
@@ -2299,7 +2298,7 @@ fn recover_fk_policy(
     })
 }
 
-/// **Migration-first P2a (§5.1) — the FieldDef reconstruction seam.**
+/// The FieldDef reconstruction seam.
 ///
 /// Replay `ops` into the coherent folded state (fail-closed via [`fold_ops`]),
 /// then reconstruct, per table, the wire-`FieldDef` map (`{ <col>: { type, … } }`)
@@ -2308,7 +2307,7 @@ fn recover_fk_policy(
 ///
 /// - **type / vector dims / encrypted(default) / ref / id_prefix / vector_metric**
 ///   from the op `IrColumn` via [`ir_column_to_field`] (reusing the shared
-///   descriptor machinery — the §2b carried fields + §2a structural ones);
+///   descriptor machinery — the carried fields + structural ones);
 /// - **enum / min / max** LIFTED from canonical CHECKs ([`recover_check_facet`]),
 ///   bounded to recognized shapes;
 /// - the column SET (after `addColumn` / `dropColumn` / `renameColumn`) tracked so
@@ -2317,7 +2316,7 @@ fn recover_fk_policy(
 ///
 /// The returned `Value` per table is exactly what
 /// [`descriptor_to_sdk_schema`](crate::render::declarative::descriptor_to_sdk_schema)
-/// emits — the SAME shape the declarative differ consumes losslessly — so P2b's
+/// emits — the SAME shape the declarative differ consumes losslessly — so the
 /// `.d.ts` emitter maps `descriptor → t.*()` builder calls off one facet table.
 ///
 /// # Errors
@@ -2340,20 +2339,20 @@ pub fn fold_to_field_defs(
     //
     //    COLUMN ORDER is preserved with `IndexMap` so the reconstructed FieldDef map
     //    matches the createTable column order (the SAME order `descriptor_to_sdk_schema`
-    //    emits from `descriptor.fields`) — the keystone parity (§6b) compares the
+    //    emits from `descriptor.fields`) — the round-trip parity compares the
     //    serialized maps, so a sorted-vs-declared order would false-mismatch.
     let mut tables: BTreeMap<String, indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor>> =
         BTreeMap::new();
     // Per-table CHECK facets to lift onto the matching column at the end. A CHECK
     // over an unrecognized shape is left unprojected (the column types as its base
-    // scalar) — NOT an error, per §4(a).
+    // scalar) — NOT an error.
     let mut checks: BTreeMap<String, Vec<RecoveredCheck>> = BTreeMap::new();
     // Per-table recovered FK policy (`onDelete`/`onUpdate`) to lift onto the ref
     // column at the end. The op.* model carries the FK target on the `ColType::Ref`
     // column AND the FK POLICY on a separate `IrConstraintKind::Fk` constraint
     // (mirroring how the lower/differ emit both); the column-only `ir_column_to_field`
     // recovers the `ref` brand but not the policy, so we lift policy from the Fk
-    // constraint here — the §2a "recover from the applied FK constraint" path.
+    // constraint here — the "recover from the applied FK constraint" path.
     let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
@@ -2410,7 +2409,7 @@ pub fn fold_to_field_defs(
                 // INCOMING references must follow the rename for gen-types too:
                 // every OTHER table's `ref` column whose target is the renamed table
                 // points at a now-dead collection name. Re-target it to the new name
-                // so the emitted TS `ref` resolves (review HIGH — the gen-types twin
+                // so the emitted TS `ref` resolves (the gen-types twin
                 // of the `fold_ops` incoming-FK rewrite). A self-ref (a `ref` column
                 // in the renamed table pointing at itself) is re-targeted too.
                 for cols in tables.values_mut() {
@@ -2435,7 +2434,7 @@ pub fn fold_to_field_defs(
                 ..
             } => {
                 if let Some(cols) = tables.get_mut(table) {
-                    // **#173** — AddColumn carries no `id_prefix` (an added column is never
+                    // AddColumn carries no `id_prefix` (an added column is never
                     // the system PK), but it DOES carry the `vector_metric` + standalone
                     // `mask` facets, so the reconstructed descriptor for an added vector /
                     // masked column round-trips the metric opclass / `zero-migrate:mask` mask
@@ -2601,18 +2600,18 @@ fn system_column_type_token(data_type: &str) -> ColType {
 }
 
 // ===========================================================================
-// Migration-first P2b — the KEYSTONE producer: descriptor → op.* `createTable`.
+// The createTable producer: descriptor → op.* `createTable`.
 //
 // `fold_to_field_defs` (above) is the RECOVERY direction (ops → FieldDef map);
 // this is its faithful INVERSE over the authoring surface (descriptor → ops),
 // the structural inverse of `ir_column_to_field` + `recover_check_facet`. It is
-// the producer the §6(b) keystone parity test threads:
+// the producer the round-trip parity test threads:
 //
 //   author (declarative)         descriptor_to_sdk_schema(descriptor)   ─┐
 //        │                                                               ├─ MUST be byte-identical
 //   descriptors_to_create_ops  → ops → fold_to_field_defs(ops)         ─┘
 //
-// WHY a NEW producer (closing the §6(b) producer gap): the existing
+// WHY a NEW producer (closing the producer gap): the existing
 // `generate_ops` (`scaffold.rs`) derives ops from a `SchemaSnapshot`, whose
 // `ColumnSnapshot.data_type` has already FLATTENED away the declared-only facets
 // (`idPrefix`/`vectorMetric`) and the CHECK-borne facets (`enum`/`min`/`max`) — it
@@ -2684,7 +2683,7 @@ impl std::error::Error for ProduceError {}
 /// structural inverse of [`col_type_to_token`](crate::render::lower). The token-set is the
 /// SDK `FieldDef` spelling the descriptor carries (`ir_column_to_field` produces it).
 ///
-/// Canonicalisation note (keystone fidelity): the forward map is many-to-one
+/// Canonicalisation note (round-trip fidelity): the forward map is many-to-one
 /// (`Int`/`BigInt`→`"int"`, `String`/`Text`/`Uuid`→`"string"`, `Float`/`Decimal`→
 /// `"number"`). This inverse picks the canonical `ColType` whose forward token is the
 /// SAME token, so a descriptor authored with token `t` round-trips to token `t`
@@ -2858,13 +2857,13 @@ fn facet_check_constraints(
     Ok(out)
 }
 
-/// **Migration-first P2b (§6b) — the KEYSTONE producer.** Build the op.*
+/// The op.* `createTable` producer. Build the op.*
 /// `createTable` ops a `Vec<CollectionDescriptor>` (the declarative authoring shape)
 /// generates, threading EVERY facet the SDK type inference consumes:
 ///
 /// - **type / ref / vector dims / encrypted** — onto the [`IrColumn`]'s [`ColType`]
 ///   (the inverse of [`col_type_to_token`](crate::render::lower));
-/// - **idPrefix / vectorMetric** — onto the §2b carried [`IrColumn`] fields;
+/// - **idPrefix / vectorMetric** — onto the carried [`IrColumn`] fields;
 /// - **required / unique** — onto `nullable` / `unique`;
 /// - **default** — onto `default` (a typed literal);
 /// - **enum / min / max** — as CHECK constraints in the closed-AST shapes
@@ -2904,8 +2903,8 @@ pub fn descriptors_to_create_ops(
                 .vector_metric
                 .as_deref()
                 .and_then(parse_vector_metric_token);
-            // **#174** — carry a STANDALONE mask onto the produced IrColumn so the
-            // keystone round-trip (descriptors → ops → fold) keeps it. The encrypted
+            // Carry a STANDALONE mask onto the produced IrColumn so the
+            // round-trip (descriptors → ops → fold) keeps it. The encrypted
             // auto-mask `{ full, pii }` is NOT carried — it is re-implied by the
             // `ColType::Encrypted` carrier in `ir_column_to_field` (carrying it would
             // double-emit). A descriptor whose mask IS the encrypted auto-mask on an
@@ -3017,17 +3016,17 @@ fn parse_vector_metric_token(token: &str) -> Option<crate::model::ir::VectorMetr
     }
 }
 
-/// **#174** — extract a STANDALONE [`crate::model::ir::IrMask`] from a descriptor's
+/// Extract a STANDALONE [`crate::model::ir::IrMask`] from a descriptor's
 /// `mask` JSON (`{ kind, classification }`), to carry on the produced [`IrColumn`].
 ///
 /// Returns `None` when the field carries no mask, OR when the mask is exactly the
 /// ENCRYPTED auto-mask (`{ full, pii }`) ON AN ENCRYPTED column — that mask is RE-IMPLIED
 /// by the `ColType::Encrypted` carrier in [`crate::render::lower::ir_column_to_field`], so
-/// carrying it here would double-source it and perturb the keystone (the encrypted
+/// carrying it here would double-source it and perturb the round-trip (the encrypted
 /// auto-mask must come from the carrier, not the mask facet). A standalone mask on a
 /// plaintext column, or a NON-default mask on an encrypted column (an explicit override),
 /// IS carried. An unparseable kind/classification token yields `None` (fail-soft — the
-/// closed-enum producer never panics; the keystone's own gate catches a genuine drop).
+/// closed-enum producer never panics; the round-trip's own gate catches a genuine drop).
 fn standalone_mask_facet(f: &crate::render::declarative::FieldDescriptor) -> Option<crate::model::ir::IrMask> {
     let mask = f.mask.as_ref()?;
     let kind = mask.get("kind").and_then(serde_json::Value::as_str)?;
@@ -3080,7 +3079,7 @@ fn parse_classification_token(token: &str) -> Option<crate::model::ir::IrClassif
 /// Map a descriptor `default` JSON value to a closed-AST [`crate::model::ir::IrScalar`] for an
 /// `IrDefault::Literal`. The inverse of `ir_default_to_value`; a non-scalar default
 /// (array/object/null) maps to `IrScalar::Null` (the SDK never authors those as a
-/// column default, and the keystone fixtures use scalar defaults).
+/// column default, and the round-trip fixtures use scalar defaults).
 fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::model::ir::IrScalar {
     json_to_ir_scalar(v).unwrap_or(crate::model::ir::IrScalar::Null)
 }
@@ -3650,7 +3649,7 @@ mod tests {
 
     #[test]
     fn rename_table_rewrites_incoming_fk_definition() {
-        // REGRESSION (review HIGH): a table rename must re-target every INCOMING FK
+        // REGRESSION: a table rename must re-target every INCOMING FK
         // `definition` in OTHER tables to the new name — the offline mirror of live
         // PG re-rendering the FK by OID after `RENAME TO`. Pre-fix the rename re-keyed
         // only the renamed table's own entry, so `orders`'s FK kept the dead `accounts`
@@ -3784,7 +3783,7 @@ mod tests {
 
     #[test]
     fn rename_table_rewrites_incoming_ref_target_for_gen_types() {
-        // REGRESSION (review HIGH, gen-types twin): `fold_to_field_defs` must re-target
+        // REGRESSION (gen-types twin): `fold_to_field_defs` must re-target
         // the INCOMING `ref` column in OTHER tables to the renamed table's new name, or
         // gen-types emits a TS `ref` to a non-existent collection. Pre-fix the arm
         // re-keyed only the renamed table's own column map, leaving `orders.account_id`
@@ -4346,8 +4345,8 @@ mod tests {
     }
 
     /// PURITY: `fold_ops` is a plain synchronous `fn` — it takes NO DSN / `Client`,
-    /// runs OUTSIDE any compio runtime, and opens no connection. This test is a
-    /// non-async `#[test]` (no `#[compio::test]`): it executes a representative fold
+    /// runs OUTSIDE any async runtime, and opens no connection. This test is a
+    /// non-async `#[test]`: it executes a representative fold
     /// with no DB infrastructure in scope at all, which would be impossible if
     /// `fold_ops` performed I/O (it would need an async runtime + a connection). The
     /// signature itself is the structural proof; this exercises it to be sure.
@@ -4364,7 +4363,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Finding #1 (MED) — setColumnType to/from an encrypted column must NOT
+    // setColumnType to/from an encrypted column must NOT
     // silently lose / carry a stale encryption sentinel. The fold fails closed
     // (the apply path cannot re-stamp the zero-migrate:enc sentinel today).
     // -----------------------------------------------------------------------
@@ -4385,7 +4384,7 @@ mod tests {
     }
 
     /// A FRESH `t.encrypted(text)` column folds WITH an encryption sentinel (the
-    /// shared builder stamps the `zero-migrate:enc:` contract P2 gen-types reads). This is the
+    /// shared builder stamps the `zero-migrate:enc:` contract gen-types reads). This is the
     /// baseline the alter path must preserve — assert the sentinel is present so the
     /// "alter loses it" regression below is meaningful.
     #[test]
@@ -4394,11 +4393,11 @@ mod tests {
         let c = snap.tables["v"].columns.iter().find(|c| c.name == "secret").unwrap();
         assert!(
             c.encryption_sentinel.is_some() || c.comment_sentinel.is_some(),
-            "a fresh encrypted column carries the zero-migrate:enc sentinel (the P2 contract)"
+            "a fresh encrypted column carries the zero-migrate:enc sentinel (the gen-types contract)"
         );
     }
 
-    /// REGRESSION (Finding #1): plain→encrypted via `setColumnType` is FAIL-CLOSED.
+    /// REGRESSION: plain→encrypted via `setColumnType` is FAIL-CLOSED.
     /// Pre-fix the fold transplanted ONLY `data_type` (bytea), keeping the OLD
     /// `encryption_sentinel=None` — so the folded encrypted column carried NO
     /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
@@ -4417,7 +4416,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION (Finding #1, symmetric): encrypted→plain via `setColumnType` is
+    /// REGRESSION (symmetric): encrypted→plain via `setColumnType` is
     /// also FAIL-CLOSED. The SOURCE column carries the sentinel; transplanting only
     /// `data_type` would leave the now-stale `zero-migrate:enc` sentinel on a plaintext column.
     #[test]
@@ -4449,7 +4448,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Finding #2 (MED) — the fold must mirror the lower's SQLite refusals so it
+    // The fold must mirror the lower's SQLite refusals so it
     // never emits types for a schema that can never deploy on SQLite (fail-OPEN).
     // -----------------------------------------------------------------------
 
@@ -4469,7 +4468,7 @@ mod tests {
         }
     }
 
-    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL FOREIGN KEY is refused at
+    /// REGRESSION: a createTable TABLE-LEVEL FOREIGN KEY is refused at
     /// validate-time on SQLite.
     #[test]
     fn create_table_level_fk_unsupported_on_sqlite() {
@@ -4521,7 +4520,7 @@ mod tests {
         assert!(fold(&[parents, kids]).is_ok(), "table-level FK folds on Postgres");
     }
 
-    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL UNIQUE is refused at
+    /// REGRESSION: a createTable TABLE-LEVEL UNIQUE is refused at
     /// validate-time on SQLite.
     #[test]
     fn create_table_level_unique_unsupported_on_sqlite() {
@@ -4537,7 +4536,7 @@ mod tests {
         assert!(err.reason.contains("unique"));
     }
 
-    /// REGRESSION (Finding #2): a createTable non-btree index `using` is refused at
+    /// REGRESSION: a createTable non-btree index `using` is refused at
     /// validate-time on SQLite.
     #[test]
     fn create_table_non_btree_index_using_unsupported_on_sqlite() {
@@ -4569,11 +4568,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Finding #3 (LOW) — the round-trip oracle's ColumnSnapshot Eq excludes
+    // The round-trip oracle's ColumnSnapshot Eq excludes
     // default / encryption_sentinel / comment_sentinel, so it structurally CANNOT
     // validate the fold's emission metadata. These NO-DB goldens assert the fold's
     // emitted default / sentinels match build_table_snapshot DIRECTLY (not via the
-    // Eq-blind oracle) — the fields P2 gen-types depends on.
+    // Eq-blind oracle) — the fields gen-types depends on.
     // -----------------------------------------------------------------------
 
     /// The `ColumnSnapshot` build_table_snapshot produces for ONE field — the ground
@@ -4613,7 +4612,7 @@ mod tests {
             .unwrap()
     }
 
-    /// GOLDEN (Finding #3): the fold's emitted default + sentinels for a createTable
+    /// GOLDEN: the fold's emitted default + sentinels for a createTable
     /// encrypted column + a defaulted column match build_table_snapshot's directly.
     /// The headline round-trip oracle CANNOT see these fields (excluded from Eq).
     #[test]
@@ -4641,7 +4640,7 @@ mod tests {
                     identity: None,
                 },
                 // An `int` column with a literal default — the snapshot's
-                // emission-only `default` IS what P2 gen-types reads, so it MUST
+                // emission-only `default` IS what gen-types reads, so it MUST
                 // render (regression: int defaults were silently dropped — the
                 // shared `field_default_expr` had no `int` arm).
                 IrColumn {
@@ -4713,7 +4712,7 @@ mod tests {
         assert!(want_meta.default.is_some(), "the json default golden is non-trivial ('{{}}'::jsonb)");
     }
 
-    /// GOLDEN (Finding #3, addColumn): the fold's emitted default + sentinels for an
+    /// GOLDEN (addColumn): the fold's emitted default + sentinels for an
     /// addColumn path match build_table_snapshot's directly too.
     #[test]
     fn fold_add_column_emission_metadata_matches_builder_golden() {
@@ -4746,12 +4745,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Finding #4 (LOW) — the fold and the lower must agree on the UNIQUE
+    // The fold and the lower must agree on the UNIQUE
     // constraint `definition` body spelling (shared `constraintdef_cols`), so the
     // two copies of the createTable-spec folding cannot drift.
     // -----------------------------------------------------------------------
 
-    /// REGRESSION (Finding #4): the fold and the lower spell the UNIQUE `definition`
+    /// REGRESSION: the fold and the lower spell the UNIQUE `definition`
     /// IDENTICALLY (both via the shared `constraintdef_cols`). Pre-fix the lower used
     /// `quote_cols` → `UNIQUE ("handle")` while the fold used the conditional-quote
     /// helper → `UNIQUE (handle)`; the catalog's `pg_get_constraintdef` spells it
@@ -4778,12 +4777,9 @@ mod tests {
     }
 
     // ===================================================================
-    // Migration-first P2a — fold-and-RECOVER (`fold_to_field_defs` + the
-    // CHECK-lift recognizer). Each test is RED pre-change: the recovery seam +
-    // the recognizer + the new IR facets did not exist before P2a, so a build
-    // that lacked them could not even reference these symbols, and the facet
-    // assertions (id_prefix, vector_metric, enum/min/max lift) all depend on the
-    // P2a carry + lift logic.
+    // Fold-and-RECOVER (`fold_to_field_defs` + the CHECK-lift recognizer).
+    // The facet assertions (id_prefix, vector_metric, enum/min/max lift) all
+    // depend on the carry + lift logic.
     // ===================================================================
 
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
@@ -4803,7 +4799,7 @@ mod tests {
 
     #[test]
     fn recover_id_prefix_facet() {
-        // §2b: id_prefix is a DECLARED-ONLY facet the carry + reconstruction must
+        // id_prefix is a DECLARED-ONLY facet the carry + reconstruction must
         // surface as `idPrefix` on the rebuilt FieldDef.
         let id = IrColumn {
             name: "id".into(),
@@ -4826,7 +4822,7 @@ mod tests {
 
     #[test]
     fn recover_vector_metric_facet() {
-        // §2b: vector_metric is the other DECLARED-ONLY facet; recovered as the
+        // vector_metric is the other DECLARED-ONLY facet; recovered as the
         // camelCase `vectorMetric` token + the dims.
         let embedding = IrColumn {
             name: "embedding".into(),
@@ -4849,10 +4845,9 @@ mod tests {
             "the vector dims ride alongside the metric: {def}");
     }
 
-    /// **#174** — a STANDALONE `.mask()` on a PLAINTEXT createTable column is now CARRIED
+    /// A STANDALONE `.mask()` on a PLAINTEXT createTable column is CARRIED
     /// on `IrColumn.mask`, lowered to `FieldDescriptor.mask`, and RECOVERED onto the
-    /// FieldDef. RED pre-#174: `IrColumn` had no `mask` field, so the offline fold dropped
-    /// it (the documented gap).
+    /// FieldDef.
     #[test]
     fn recover_standalone_mask_facet() {
         let ssn = IrColumn {
@@ -4878,10 +4873,10 @@ mod tests {
         assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("spi"));
     }
 
-    /// **#174 precedence** — an EXPLICIT `.mask()` on an ENCRYPTED column OVERRIDES the
-    /// fail-safe auto-mask `{ full, pii }` the `ColType::Encrypted` carrier implies. RED
-    /// pre-#174: `ir_column_to_field` hard-coded `mask: encrypted_mask`, so an encrypted
-    /// column ALWAYS recovered `{ full, pii }` and an explicit override was impossible.
+    /// Precedence — an EXPLICIT `.mask()` on an ENCRYPTED column OVERRIDES the
+    /// fail-safe auto-mask `{ full, pii }` the `ColType::Encrypted` carrier implies.
+    /// Without the override arm, an encrypted column would ALWAYS recover
+    /// `{ full, pii }` and an explicit override would be impossible.
     #[test]
     fn explicit_mask_overrides_encrypted_auto_mask() {
         let secret = IrColumn {
@@ -4911,9 +4906,8 @@ mod tests {
         assert_eq!(mask.get("classification").and_then(|v| v.as_str()), Some("pci"));
     }
 
-    /// **#173** — a `mask` facet carried on `Op::AddColumn` is recovered onto the added
-    /// column's FieldDef (the addColumn fold arm now threads the facet). RED pre-#173:
-    /// `Op::AddColumn` had no `mask` slot and the fold arm hard-coded `mask: None`.
+    /// A `mask` facet carried on `Op::AddColumn` is recovered onto the added
+    /// column's FieldDef (the addColumn fold arm threads the facet).
     #[test]
     fn recover_mask_on_added_column() {
         let ops = vec![
@@ -4945,7 +4939,7 @@ mod tests {
 
     #[test]
     fn recover_ref_target_facet() {
-        // §2a: the FK target → the `ref` brand, recovered from the Ref ColType.
+        // The FK target → the `ref` brand, recovered from the Ref ColType.
         let owner = IrColumn {
             name: "owner".into(),
             ty: ColType::Ref { references: "orgs".into() },
@@ -4968,7 +4962,7 @@ mod tests {
 
     #[test]
     fn recover_encrypted_default_mode_facet() {
-        // §2a: an encrypted column is recovered structurally (default mode) — the
+        // An encrypted column is recovered structurally (default mode) — the
         // ONLY encrypted shape op.* can author (see the encrypted-mode finding test).
         let secret = col("secret", encrypted_text(), true);
         let m = defs(&[create("vaults", vec![secret])]);
@@ -4979,7 +4973,7 @@ mod tests {
 
     #[test]
     fn recover_min_max_range_from_check() {
-        // §5.3: `age >= 0 AND age <= 120` lifts to min:0, max:120 on a numeric column.
+        // `age >= 0 AND age <= 120` lifts to min:0, max:120 on a numeric column.
         use crate::model::expr::{BinaryOp, Expr};
         let range = Expr::BinOp {
             op: BinaryOp::And,
@@ -5001,7 +4995,7 @@ mod tests {
                 min: Some(0.0),
                 max: Some(120.0),
             }),
-            "the min/max recognizer must stay ready for the P1 CHECK renderer"
+            "the min/max recognizer must stay ready for the CHECK renderer"
         );
     }
 
@@ -5026,7 +5020,7 @@ mod tests {
 
     #[test]
     fn recover_enum_from_eq_or_chain_check() {
-        // §5.3: the op.* closed AST has no IN node; the canonical enum shape is the
+        // The op.* closed AST has no IN node; the canonical enum shape is the
         // left-folded `role = 'admin' OR role = 'user'` chain → ["admin","user"].
         use crate::model::expr::{BinaryOp, Expr};
         let eq = |v: &str| Expr::BinOp {
@@ -5054,7 +5048,7 @@ mod tests {
 
     #[test]
     fn unrecognized_check_is_left_unprojected_not_a_panic() {
-        // §4(a): an arbitrary boolean CHECK (here `length(name) > 3`) is NOT one of
+        // An arbitrary boolean CHECK (here `length(name) > 3`) is NOT one of
         // the recognized shapes, so it is left unprojected — the column types as its
         // base scalar, and the recovery does NOT panic / error.
         use crate::model::expr::{BinaryOp, Expr, ScalarFn};
@@ -5088,17 +5082,17 @@ mod tests {
         assert!(t.get("gone").is_none(), "a dropped column is absent from the reconstruction");
     }
 
-    // ── The encrypted-mode finding (§4 DDL note / task item 5) ───────────────
+    // ── The encrypted-mode finding ───────────────────────────────────────────
     // op.* can author ONLY a DEFAULT-mode encrypted column: `ColType::Encrypted`
     // carries the inner type ONLY, and the recorder `t.encrypted({ of })` exposes
     // no mode/keyId/wraps surface. So a non-default-encrypted column is
     // UNREPRESENTABLE in the IR — fail-closed BY CONSTRUCTION, NOT a silently
     // wrong-mode sentinel.
     //
-    // **P2b HIGH-1/MED-1 fix:** recovery now restores the KERNEL DEFAULTS the SDK's
+    // Recovery restores the KERNEL DEFAULTS the SDK's
     // `t.encrypted()` stamps (`mode:randomised, keyId:default, wraps:<inner>`) PLUS the
     // fail-safe auto-mask (`full/pii`), so the author→generate→fold chain is byte-
-    // lossless over a default `t.encrypted()` (the keystone). The fail-closed property
+    // lossless over a default `t.encrypted()` (the round-trip). The fail-closed property
     // is UNCHANGED: that recovered triple is the ONLY shape op.* can produce — there is
     // no IR surface for a non-default mode/keyId.
 
@@ -5138,9 +5132,9 @@ mod tests {
     }
 
     // ===================================================================
-    // Migration-first P2b — the KEYSTONE producer (`descriptors_to_create_ops`).
-    // RED pre-P2b: the producer did not exist; the FK-constraint + closed-AST CHECK
-    // emission it threads is what makes the author→generate→fold chain lossless.
+    // The createTable producer (`descriptors_to_create_ops`).
+    // The FK-constraint + closed-AST CHECK emission it threads is what makes the
+    // author→generate→fold chain lossless.
     // ===================================================================
 
     use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
@@ -5212,7 +5206,7 @@ mod tests {
             panic!("createTable")
         };
         // Each emitted CHECK must round-trip through `recover_check_facet` to the
-        // facet that authored it (the keystone bound, asserted at the unit level).
+        // facet that authored it (the round-trip bound, asserted at the unit level).
         let mut recovered_range = false;
         let mut recovered_enum = false;
         for c in constraints {
@@ -5237,7 +5231,7 @@ mod tests {
     #[test]
     fn producer_preserves_column_order_through_fold() {
         // The reconstructed FieldDef map must preserve the descriptor's declared
-        // column order (the keystone compares serialized maps).
+        // column order (the round-trip compares serialized maps).
         let d = descriptor(
             "t",
             vec![

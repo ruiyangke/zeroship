@@ -1,12 +1,12 @@
 //! Shared raw-TCP allowlist validation.
 //!
-//! Vendored byte-identically from the upstream net-policy module (extraction Phase B)
+//! Vendored byte-identically from the upstream net-policy module
 //! so the migrate engine can be embedded as a lean, self-contained library without
 //! a normal-graph dependency on the upstream core. The reviewed host/port checks are
 //! security-relevant: the recorder-sandbox / MySQL JS-driver isolate's outbound
 //! `NetPolicy` names these types, so their parse/validate behaviour must match the
-//! original exactly. The adapter crate (`zero-migrate-runtime`) reconstructs a
-//! the host runtime NetPolicy (whose entries are the the upstream core copy) from
+//! original exactly. The adapter crate (`zero-migrate-runtime`) reconstructs the
+//! host runtime NetPolicy (whose entries are the upstream-core copy) from
 //! these vendored entries at the injection edge.
 
 #[derive(Debug, Clone, PartialEq, Eq)]

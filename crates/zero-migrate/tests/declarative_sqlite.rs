@@ -1,4 +1,4 @@
-//! PHASE 4 — descriptor → engine-generated SQLite `up` → applied through the
+//! Descriptor → engine-generated SQLite `up` → applied through the
 //! hardened `SqliteBackend` → drift round-trip. Real temp-file SQLite throughout
 //! (the faithful path: the actual `DeclarativeAuthor` emitter routes through the
 //! shared `zero_migrate::schema` emitter, and the real backend authorizer applies the
@@ -151,7 +151,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
     }
 
     // --- Drift snapshot recovers the mask + encryption sentinels from
-    //     sqlite_master.sql (P5 round-trip). ---
+    //     sqlite_master.sql (round-trip). ---
     let snap = be.snapshot_schema_sqlite().await.expect("snapshot_schema");
     let t = snap
         .tables
@@ -159,7 +159,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
         .expect("accounts in drift snapshot");
 
     // The encrypted column's `zero-migrate:enc:` sentinel round-trips. The SQLite drift path
-    // (P5, §2.7) recovers BOTH inline `zero-migrate:mask:` and `zero-migrate:enc:` sentinels from
+    // recovers BOTH inline `zero-migrate:mask:` and `zero-migrate:enc:` sentinels from
     // `sqlite_master.sql` into the single `comment_sentinel` slot (PG splits them
     // across `encryption_sentinel`/`comment_sentinel`; SQLite uses one recovery
     // slot). What matters is that the sentinel body survives emit→apply→snapshot.
@@ -867,7 +867,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
             && plan.rebuilds[0].migration.flags.requires_approval,
         "a rebuild is destructive + approval-gated"
     );
-    // And — H1 — a SQLite declarative plan never carries a PG-shaped online rename:
+    // And — a SQLite declarative plan never carries a PG-shaped online rename:
     // renames are routed to rebuilds on the SQLite leg.
     assert!(
         plan.renames.is_empty(),
@@ -876,18 +876,17 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 }
 
 // ===========================================================================
-// GOLDEN DDL — exact-byte assertions on the SQLite emitter (Phase 0).
+// GOLDEN DDL — exact-byte assertions on the SQLite emitter.
 //
 // These pin the FULL `up`/`down` strings the SQLite render paths emit today, for
 // the create-table / add-column / create-index / drop-{table,column,index} paths
 // over a representative schema (PK, plain column, mask column, encrypted column,
-// FK, index). They are the explicit byte bar for the P1 `DdlEmitter` extraction:
+// FK, index). They are the explicit byte bar for the `DdlEmitter` extraction:
 // it is code-motion only, so these MUST stay green and UNCHANGED across it.
 //
 // Note the create-table `up` is the SHARED `zero_migrate::schema` emitter's output
-// (routed, out of P1 scope) — pinned here so we'd notice an unrelated drift; the
-// add-column / index / drop paths are the engine's OWN render methods (the P1
-// extraction targets).
+// (routed) — pinned here so we'd notice an unrelated drift; the
+// add-column / index / drop paths are the engine's OWN render methods.
 // ===========================================================================
 
 fn golden_find<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
@@ -1124,14 +1123,14 @@ async fn golden_sqlite_drops() {
     assert_eq!(dt.down, None);
 }
 
-/// **PR10b H1 — the DIFFER half of the within-TEXT-affinity facet contract.**
+/// **The DIFFER half of the within-TEXT-affinity facet contract.**
 ///
 /// Twin of the existence-guard probe's
 /// `add_column_ifnotexists_sqlite_ref_over_live_string_is_noop`
 /// (`tests/existence_guard_sqlite.rs`): the guard SatisfiedNoop's a `ref` declared
 /// over a live `string` column because both fold to the SQLite `text` affinity. This
 /// test pins the EXACT boundary of that consistency on the FAITHFUL introspected path,
-/// so the corrected H1 report can state it honestly rather than over-claim:
+/// so the corrected report can state it honestly rather than over-claim:
 ///
 /// 1. **COLUMN TYPE/AFFINITY — consistent, a no-op in BOTH.** The differ folds the
 ///    PG-spelled desired and the SQLite-introspected live column types through the SAME

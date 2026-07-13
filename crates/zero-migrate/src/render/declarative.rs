@@ -1,12 +1,11 @@
-//! Declarative schema-as-code: desired-schema → generated migrations
-//! (v3 Plan A, phases P0–P2).
+//! Declarative schema-as-code: desired-schema → generated migrations.
 //!
 //! The authoring layer holds a creator's **declared schema** — the
 //! per-collection descriptor JSON the db SDK emits via `registerModel`
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
-//! ([`desired_snapshot`], P0) and then **diffs** it against the live snapshot to
-//! generate migrations ([`DeclarativeAuthor::diff`], P1 additive + P2
+//! ([`desired_snapshot`]) and then **diffs** it against the live snapshot to
+//! generate migrations ([`DeclarativeAuthor::diff`], additive +
 //! destructive-gated).
 //!
 //! The differ is a new **author**, not a new executor: every [`Migration`] it
@@ -77,7 +76,7 @@ fn quote_ident(ident: &str) -> String {
 /// "safe" bare identifier OR it collides with one of THESE keywords (an unreserved
 /// keyword is rendered bare). Sourced from `pg_get_keywords() WHERE catcode<>'U'`
 /// on PG 17. Used by [`quote_ident_if_needed`] so the FK referenced-table body we
-/// build matches the live catalog byte-for-byte (§review LOW): a table/schema named
+/// build matches the live catalog byte-for-byte: a table/schema named
 /// `order`/`user`/`select` (each passes `validate_collection`/`is_safe_schema_ident`
 /// but is reserved) renders QUOTED in the catalog — and now here too — so the
 /// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
@@ -150,7 +149,7 @@ const fn is_sql_ident_byte(b: u8) -> bool {
 }
 
 /// Count whole-word, case-insensitive occurrences of `needle` in `haystack`.
-/// Used by the H1 DROP-COLUMN rebuild router to find references to a dropped
+/// Used by the DROP-COLUMN rebuild router to find references to a dropped
 /// column in the stored `CREATE TABLE` DDL (CHECK / generated / partial-index
 /// expressions). A match is whole-word so `id` does not match `idx` or `user_id`.
 /// Empty `needle` counts zero.
@@ -196,7 +195,7 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
-/// column (T12: the `__fts` tsvector). When the `default` body starts with this
+/// column (the `__fts` tsvector). When the `default` body starts with this
 /// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
 /// plain `DEFAULT <expr>` clause. The remainder after the prefix is the
 /// generation expression. Generated-column expressions are emission-only metadata
@@ -206,7 +205,7 @@ const GENERATED_PREFIX: &str = "GENERATED:";
 /// Render a column's trailing `DEFAULT <expr>` or `GENERATED ALWAYS AS (<expr>)
 /// STORED` clause from its (emission-only) `default` body. Empty string when the
 /// column has no default. A `GENERATED:`-prefixed body becomes the stored
-/// generated-column clause (T12 `__fts`); any other body is a plain default.
+/// generated-column clause (the `__fts` generated column); any other body is a plain default.
 fn default_clause(default: Option<&str>) -> String {
     match default {
         Some(d) => {
@@ -621,30 +620,30 @@ pub struct FieldDescriptor {
     /// SQL/Postgres default `NOT DEFERRABLE`, which renders as no clause.
     #[serde(default)]
     pub deferrable: Option<bool>,
-    /// For a `literal` field (#3), the single accepted value (`literalValue` on the
+    /// For a `literal` field, the single accepted value (`literalValue` on the
     /// wire `FieldDef`). Drives both the column's primitive type
     /// (text/numeric/boolean — see `literal_pg_data_type`) and a
     /// `CHECK (<col> = <value>)` constraint (mirrors plugin-db's
     /// `query.rs:2091/2185`).
     #[serde(rename = "literalValue", default)]
     pub literal_value: Option<serde_json::Value>,
-    /// Column `DEFAULT` value (#4, `default` on the wire `FieldDef`). Emitted in the
+    /// Column `DEFAULT` value (`default` on the wire `FieldDef`). Emitted in the
     /// column declaration per plugin-db's `def_to_constraints` (`query.rs:2125`).
     #[serde(default)]
     pub default: Option<serde_json::Value>,
-    /// Minimum (numeric `min`, #4) — emits a `CHECK (<col> >= <min>)` (or combined
+    /// Minimum (numeric `min`) — emits a `CHECK (<col> >= <min>)` (or combined
     /// with `max`). Mirrors plugin-db `query.rs:2167`.
     #[serde(default)]
     pub min: Option<f64>,
-    /// Maximum (numeric `max`, #4) — emits a `CHECK (<col> <= <max>)`.
+    /// Maximum (numeric `max`) — emits a `CHECK (<col> <= <max>)`.
     #[serde(default)]
     pub max: Option<f64>,
-    /// Enum membership (#4, `enum` on the wire `FieldDef`) — emits a
+    /// Enum membership (`enum` on the wire `FieldDef`) — emits a
     /// `CHECK (<col> IN (…))`. String or numeric values, mirroring plugin-db
     /// `query.rs:2200`.
     #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
-    /// For a `{ type: "id", idPrefix }` field (#5), the declared typed-id prefix
+    /// For a `{ type: "id", idPrefix }` field, the declared typed-id prefix
     /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK
     /// — it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
     /// and the prefix is validated (mirrors plugin-db `query.rs:648-653` +
@@ -653,8 +652,8 @@ pub struct FieldDescriptor {
     pub id_prefix: Option<String>,
 
     // -----------------------------------------------------------------------
-    // Schema-authority P2 — the FULL-capability facets, reached by adopting the
-    // shared `crate::schema` DDL/type kernel. Before P2 the engine's v1-subset
+    // Schema-authority — the FULL-capability facets, reached by adopting the
+    // shared `crate::schema` DDL/type kernel. An earlier subset
     // differ REJECTED these as `UnsupportedType`; now the column TYPE + DDL
     // (vector index, encrypted BYTEA + sentinel, mask sibling, geoPoint geography
     // + GiST) are resolved through `crate::schema::query`. Each facet mirrors
@@ -689,7 +688,7 @@ pub struct FieldDescriptor {
     #[serde(default)]
     pub mask: Option<serde_json::Value>,
     /// `t.string().fts(language?)` — `true` ⇒ this text column participates in the
-    /// collection's composite full-text index (T12). Every `.fts()`-marked column
+    /// collection's composite full-text index. Every `.fts()`-marked column
     /// folds into ONE `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN
     /// index. Mirrors `fts` on the wire `FieldDef`.
     #[serde(default)]
@@ -735,7 +734,7 @@ pub struct CollectionDescriptor {
     /// The collection (table) name.
     pub name: String,
     /// The **declaring** app (`app_…`) — the app whose schema authoring input
-    /// declared this table. Per the project-umbrella model (design §4) a project
+    /// declared this table. Per the project-umbrella model a project
     /// db schema is the UNION of all member apps' descriptors, and the declaring
     /// app **owns** that table's migrations: only the owner may CREATE/ALTER/DROP
     /// it (enforced in [`DeclarativeAuthor::diff`] via the deploying-app context);
@@ -745,7 +744,7 @@ pub struct CollectionDescriptor {
     /// itself in its OWN descriptor set, and a conflicting claim (two apps
     /// declaring the same table with DIFFERENT shapes) is a hard
     /// [`DeclarativeError::ConflictingDeclaration`]. An IDENTICAL re-declaration is
-    /// idempotent (design §4) and, to keep the union order-independent, the
+    /// idempotent and, to keep the union order-independent, the
     /// retained owner is the lexicographically-smallest declaring app among the
     /// identical declarers (see [`desired_snapshot`]).
     pub owner_app: String,
@@ -763,7 +762,7 @@ pub struct CollectionDescriptor {
 }
 
 // ---------------------------------------------------------------------------
-// P3 — rename hints (the OPT-IN, never-heuristic rename surface).
+// rename hints (the OPT-IN, never-heuristic rename surface).
 // ---------------------------------------------------------------------------
 
 /// An **explicit** column-rename hint.
@@ -813,18 +812,18 @@ struct ResolvedRename {
 // ---------------------------------------------------------------------------
 // DSL-type → information_schema.data_type mapping.
 //
-// Schema-authority P2: the engine's own v1-SUBSET type table was DELETED and the
+// Schema-authority: the engine's own earlier-subset type table was DELETED and the
 // column-type resolution now DELEGATES to the shared `crate::schema` kernel
 // (`query::def_to_column_type_for_dialect`). That is what gives the differ FULL
 // capability — `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
-// (encrypted) / `literal`-primitive are now first-class, where the v1 subset
-// rejected them. The #2 fail-closed guarantee is preserved on top of the shared
+// (encrypted) / `literal`-primitive are now first-class, where the earlier subset
+// rejected them. The fail-closed guarantee is preserved on top of the shared
 // map (an unknown token mapping to the shared `TEXT` fallback is still rejected,
 // never silently degraded).
 // ---------------------------------------------------------------------------
 
 /// Map a bare DSL type TOKEN to the `information_schema.columns.data_type`
-/// spelling the snapshot stores, by routing through the shared kernel (P2).
+/// spelling the snapshot stores, by routing through the shared kernel.
 ///
 /// This is the token-only convenience entry (kept as the engine's public surface,
 /// and used by `desired_snapshot` for token-only fields). Fields carrying the
@@ -834,7 +833,7 @@ struct ResolvedRename {
 /// engine-only text spellings the shared SDK map does not name, folded to
 /// `string` here.
 ///
-/// The #2 fail-closed contract is preserved: a typo / out-of-scope token that the
+/// The fail-closed contract is preserved: a typo / out-of-scope token that the
 /// shared map degrades to its `TEXT` fallback is rejected with
 /// [`DeclarativeError::UnsupportedType`] rather than silently materialised as a
 /// `text` column the creator never declared.
@@ -842,8 +841,8 @@ struct ResolvedRename {
 /// # Errors
 /// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not a supported token.
 pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
-    // Schema-authority P2: delegate to the shared kernel rather than the engine's
-    // old v1-subset table. `actor`/`id` are engine-only spellings of `text` that
+    // Schema-authority: delegate to the shared kernel rather than the engine's
+    // old subset table. `actor`/`id` are engine-only spellings of `text` that
     // the shared SDK map does not name (it has no `actor`/`id` tokens), so fold
     // them here before handing off. Everything else (incl. the goodies
     // vector/geoPoint/encrypted — accepted now, no longer `UnsupportedType`)
@@ -913,7 +912,7 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     serde_json::Value::Object(def)
 }
 
-/// PHASE 4 — reconstruct the FULL SDK schema `Value` (`{ <field>: { type, … } }`)
+/// reconstruct the FULL SDK schema `Value` (`{ <field>: { type, … } }`)
 /// the shared `crate::schema::query` CREATE-TABLE emitter consumes, from a
 /// [`CollectionDescriptor`]. This is the descriptor→`Value` bridge the **Confined
 /// SQLite** path routes through: the engine keeps its typed descriptor as its
@@ -929,8 +928,8 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
 ///
 /// NOTE: this is descriptor-diff-generated DDL ONLY — there is NO untrusted raw SQL
 /// string; the descriptor field/type names were validated at the author boundary
-/// (`validate_desired`) before this runs (§2.5.3 trust model).
-/// **PR2** — produce the post-rename SDK schema `Value` for a SQLite
+/// (`validate_desired`) before this runs (the trust model).
+/// produce the post-rename SDK schema `Value` for a SQLite
 /// `renameColumn` rebuild by renaming ONE top-level field key `from`→`to`,
 /// preserving its definition object verbatim (`{ <field>: { type, … } }`). The
 /// shared SQLite CREATE emitter renders the per-column type/affinity + sentinels
@@ -959,12 +958,12 @@ fn rename_sdk_schema_field(
     Some(serde_json::Value::Object(out))
 }
 
-/// **PR9c LOW (ii)** — does this SDK field def declare a DATA-TRANSFORMING facet that
+/// does this SDK field def declare a DATA-TRANSFORMING facet that
 /// a verbatim value-copy across a SQLite rebuild cannot certify was already present on
 /// the source column? Returns the facet name (for the fail-closed error) or `None` for
 /// a plain column.
 ///
-/// The catalog-sourced rename path (`apply_bundle_ir_sqlite_catalog`, branch 2) renders
+/// The catalog-sourced SQLite rename rebuild renders
 /// the rebuilt table's CREATE from the descriptor's POST-rename `to` def but copies the
 /// live `from` bytes UN-TRANSFORMED. A facet whose shape depends on the column's VALUE
 /// (encryption changes the on-disk bytes; `mask` adds a sibling masked column; `default`
@@ -1071,7 +1070,7 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
     serde_json::Value::Object(schema)
 }
 
-/// **P4 HALF A** — build the shared [`crate::schema::diff::EncryptionMeta`] for
+/// build the shared [`crate::schema::diff::EncryptionMeta`] for
 /// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
@@ -1111,11 +1110,11 @@ fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
 
 /// Resolve a field's column data type in the `information_schema.data_type`
 /// spelling the snapshot stores, by routing through the shared kernel's
-/// [`crate::schema::query::def_to_column_type_for_dialect`] (the FULL type map,
-/// P2) and translating its DDL spelling to the `information_schema` form.
+/// [`crate::schema::query::def_to_column_type_for_dialect`] (the FULL type map)
+/// and translating its DDL spelling to the `information_schema` form.
 ///
 /// A bare/unknown token still fails closed: the shared map's plain-type fallback
-/// is `TEXT`, so to preserve the engine's #2 "never silently degrade an
+/// is `TEXT`, so to preserve the engine's "never silently degrade an
 /// unrecognised type to text" guarantee, an UNKNOWN token whose shared mapping is
 /// the `TEXT` fallback (and which is not one of the engine's own text-spelled
 /// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
@@ -1138,7 +1137,7 @@ fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
         return Ok("bytea".into());
     }
 
-    // M1 — `int`/`integer` are now handled by the shared `def_to_pg_type` (it grew
+    // `int`/`integer` are now handled by the shared `def_to_pg_type` (it grew
     // a first-class `INTEGER` arm), so they route through the shared map below like
     // every other token: `INTEGER` → `ddl_to_information_schema` → `integer`. The
     // engine no longer needs a special-case (the previous one papered over the
@@ -1150,7 +1149,7 @@ fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
     let def = field_to_sdk_def(f);
     let ddl = def_to_column_type_for_dialect(&def, SqlDialect::Postgres);
 
-    // #2 fail-closed: the shared map returns `TEXT` for any unrecognised type
+    // fail-closed: the shared map returns `TEXT` for any unrecognised type
     // token. The engine's set of types that LEGITIMATELY land on text is the
     // closed set below (incl. the `actor`/`id` already folded to `string` by the
     // caller, and a `literal` whose value is a string). Anything else mapping to
@@ -1188,7 +1187,7 @@ fn field_text_is_legitimate(f: &FieldDescriptor) -> bool {
 /// reports `USER-DEFINED` for those, so `snapshot_schema` recovers their precise
 /// spelling from `pg_catalog.format_type` and canonicalises it back to this DDL
 /// form (see [`crate::apply::drift::snapshot_schema`] / `canonical_extension_type`) —
-/// the round-trip is real when the extension is installed (T13 for geoPoint).
+/// the round-trip is real when the extension is installed.
 fn ddl_to_information_schema(ddl: &str) -> String {
     match ddl.to_ascii_uppercase().as_str() {
         "TEXT" => "text".into(),
@@ -1268,7 +1267,7 @@ fn json_scalar_sql(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// The CHECK constraint(s) a field declares (#3 literal-pin, #4 min/max + enum),
+/// The CHECK constraint(s) a field declares (literal-pin, min/max + enum),
 /// each as a [`ConstraintSnapshot`] whose `definition` is the emitted DDL CHECK
 /// clause (used by `render_create_table` to inline it).
 ///
@@ -1288,7 +1287,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
     let mut out = Vec::new();
     let col = quote_ident(&f.name);
 
-    // #4 min/max (numeric only — matches plugin-db's `type == "number"` gate).
+    // min/max (numeric only — matches plugin-db's `type == "number"` gate).
     if f.ty == "number" {
         let expr = match (f.min, f.max) {
             (Some(min), Some(max)) => Some(format!("CHECK ({col} >= {min} AND {col} <= {max})")),
@@ -1306,7 +1305,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
         }
     }
 
-    // #3 literal-pin.
+    // literal-pin.
     if f.ty == "literal" {
         if let Some(rendered) = f.literal_value.as_ref().and_then(json_scalar_sql) {
             out.push(ConstraintSnapshot {
@@ -1318,7 +1317,7 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
         }
     }
 
-    // #4 enum membership.
+    // enum membership.
     if let Some(values) = &f.enum_values {
         let rendered: Vec<String> = values.iter().filter_map(json_scalar_sql).collect();
         if !rendered.is_empty() {
@@ -1341,7 +1340,7 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_{kind}_chk"))
 }
 
-/// The `DEFAULT` clause expression a field emits at CREATE / ADD COLUMN (#4),
+/// The `DEFAULT` clause expression a field emits at CREATE / ADD COLUMN,
 /// or `None` for no default.
 ///
 /// Mirrors plugin-db's `def_to_constraints_for_dialect` default arm
@@ -1576,7 +1575,7 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
         .collect()
 }
 
-/// The columns the platform auto-indexes on every table (#6). Mirrors
+/// The columns the platform auto-indexes on every table. Mirrors
 /// plugin-db's `build_system_field_indexes` (`query.rs:900`): `deleted_at`
 /// (soft-delete filtering), `updated_at` (cursor-paged reads), `created_by`
 /// (per-actor lookups + audit). `id` is implicitly indexed by the PK; `version`
@@ -1636,11 +1635,11 @@ fn non_unique_index_name(table: &str, col: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// P4 — the UNION desired schema + per-table ownership.
+// The UNION desired schema + per-table ownership.
 // ---------------------------------------------------------------------------
 
 /// The **desired** project schema (the UNION over every member app's declared
-/// collections) PLUS the per-table ownership map (design §4).
+/// collections) PLUS the per-table ownership map.
 ///
 /// A project = one db = one project schema, and that schema is the UNION of all
 /// member apps' schema authoring declarations. [`desired_snapshot`]
@@ -1658,7 +1657,7 @@ pub struct DesiredSchema {
     pub snapshot: SchemaSnapshot,
     /// `table name → owning app`. Exactly the keys of `snapshot.tables`.
     pub ownership: BTreeMap<String, String>,
-    /// PHASE 4 — `table name → full SDK schema `Value`` (the
+    /// `table name → full SDK schema `Value`` (the
     /// [`descriptor_to_sdk_schema`] reconstruction), kept alongside the snapshot so
     /// the **Confined SQLite** path can route a new-table CREATE through the shared
     /// `crate::schema::query` emitter (which is `Value`-driven). The keys match
@@ -1670,7 +1669,7 @@ pub struct DesiredSchema {
 
 // The `sqlite_schemas` side-map is a derived emission aid (it is rebuilt from the
 // same descriptors that produce `snapshot`), so two `DesiredSchema`s are equal iff
-// their snapshot + ownership are — matching the pre-PHASE-4 equality semantics so
+// their snapshot + ownership are — matching the pre-union equality semantics so
 // existing tests/asserts that compare `DesiredSchema`s stay valid.
 impl PartialEq for DesiredSchema {
     fn eq(&self, other: &Self) -> bool {
@@ -1688,11 +1687,11 @@ impl DesiredSchema {
 }
 
 // ---------------------------------------------------------------------------
-// P0 — desired_snapshot compiler.
+// desired_snapshot compiler.
 // ---------------------------------------------------------------------------
 
 /// Compile a set of [`CollectionDescriptor`]s into a deterministic
-/// [`SchemaSnapshot`] — the **desired** schema (P0).
+/// [`SchemaSnapshot`] — the **desired** schema.
 ///
 /// For each collection it emits a [`TableSnapshot`] whose:
 /// - **columns** are the seven platform system fields (see
@@ -1705,7 +1704,7 @@ impl DesiredSchema {
 ///
 /// The snapshot is the same shape [`snapshot_schema`](crate::apply::drift::snapshot_schema)
 /// produces from the live DB, so a freshly-created table introspects to a
-/// byte-equal snapshot (zero drift) — that equality is the P0 type-fidelity
+/// byte-equal snapshot (zero drift) — that equality is the type-fidelity
 /// proof.
 ///
 /// `project_schema` is the schema every table lives in; it is needed because a
@@ -1716,7 +1715,7 @@ impl DesiredSchema {
 /// part of the snapshot.
 ///
 /// **Pure.** No I/O, no DDL. It performs the minimal author-boundary check that
-/// guards the *projection itself* — an unrecognised/out-of-scope field type (#2)
+/// guards the *projection itself* — an unrecognised/out-of-scope field type
 /// — so a degraded snapshot (the creator declared X, would have got `text`) is
 /// never produced. Full identifier re-validation still happens in
 /// [`DeclarativeAuthor::diff`] (defense in depth) and the guard is the second
@@ -1735,7 +1734,7 @@ impl DesiredSchema {
 /// guard (2b), but the caller must still pass the full union so legitimate
 /// tables are not needlessly refused.
 ///
-/// # Multi-app UNION + per-table ownership (P4, design §4)
+/// # Multi-app UNION + per-table ownership
 ///
 /// Each descriptor carries its declaring [`CollectionDescriptor::owner_app`].
 /// The result is the UNION over all apps:
@@ -1774,7 +1773,7 @@ pub fn desired_snapshot(
     desired_snapshot_for_dialect(project_schema, descriptors, SqlDialect::Postgres)
 }
 
-/// Dialect-aware [`desired_snapshot`] (P0). Identical to [`desired_snapshot`] for
+/// Dialect-aware [`desired_snapshot`]. Identical to [`desired_snapshot`] for
 /// every facet EXCEPT full-text search, whose physical shape differs by engine:
 ///
 /// - **Postgres** — a `.fts()` field folds into ONE `__fts` GENERATED `tsvector`
@@ -1799,25 +1798,25 @@ pub fn desired_snapshot_for_dialect(
     // the reported conflict does not depend on which identical twin happened to
     // hold the slot first (1b).
     let mut declarations: BTreeMap<String, Vec<(String, TableSnapshot)>> = BTreeMap::new();
-    // PHASE 4 — the per-table SDK schema `Value` (the descriptor→`Value` bridge),
+    // the per-table SDK schema `Value` (the descriptor→`Value` bridge),
     // carried so the Confined SQLite path can route the new-table CREATE through the
     // shared emitter. Keyed by table; identical re-declarations overwrite with an
     // identical value (idempotent, like the snapshot itself).
     let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
     for d in descriptors {
-        // PHASE 4 — capture the full SDK schema `Value` for this table BEFORE the
+        // capture the full SDK schema `Value` for this table BEFORE the
         // snapshot loop consumes the descriptor (the value is what the shared SQLite
         // emitter consumes; conflicting declarations are caught on the snapshot in
         // the second pass, so storing per-descriptor here is safe — identical twins
         // store identical values).
         sqlite_schemas.insert(d.name.clone(), descriptor_to_sdk_schema(d));
 
-        // §6.5 MANDATE — the per-column / per-index snapshot construction (system-
+        // MANDATE — the per-column / per-index snapshot construction (system-
         // field injection, default rendering, encryption/comment sentinels, vector/
         // geo/FTS index modelling) lives in ONE place: the shared, dialect-
         // parameterized [`build_table_snapshot`]. The differ routes through it so
-        // `IrAuthor::lower` can reuse the SAME builder and the §6.4 byte-identity
+        // `IrAuthor::lower` can reuse the SAME builder and the byte-identity
         // golden guards against accidental regression, not against two independent
         // implementations.
         let this = build_table_snapshot(project_schema, d, dialect)?;
@@ -1832,7 +1831,7 @@ pub fn desired_snapshot_for_dialect(
     desired_snapshot_second_pass(declarations, sqlite_schemas)
 }
 
-/// §6.5 MANDATE — the **shared, dialect-parameterized snapshot-builder**: build the
+/// The **shared, dialect-parameterized snapshot-builder**: build the
 /// full [`TableSnapshot`] (system-field columns + indexes, the `id` PRIMARY KEY,
 /// per-field column/constraint/index modelling, and the dialect-divergent FTS
 /// shape) for a single [`CollectionDescriptor`].
@@ -1840,7 +1839,7 @@ pub fn desired_snapshot_for_dialect(
 /// This is the single source of truth for the default / system-field / sentinel
 /// logic. BOTH the declarative differ ([`desired_snapshot_for_dialect`], unchanged
 /// behavior) and the IR path ([`crate::render::lower::IrAuthor`]) call it, so the
-/// per-column/per-index construction exists in exactly ONE place (§6.5). The
+/// per-column/per-index construction exists in exactly ONE place. The
 /// extraction is BYTE-PRESERVING: the differ produces a byte-identical snapshot
 /// before and after the lift (a refactor-safety fixture asserts this).
 ///
@@ -1957,7 +1956,7 @@ fn build_table_snapshot_impl(
 ) -> Result<TableSnapshot, DeclarativeError> {
     let folds_system_id = resolved_shape.has_column("id");
     let mut columns = resolved_shape.columns;
-    // #6: the three implicit B-tree system indexes the platform auto-creates
+    // the three implicit B-tree system indexes the platform auto-creates
     // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
     // they round-trip — see `system_field_indexes`.
     let mut indexes: Vec<IndexSnapshot> = resolved_shape.indexes;
@@ -1979,7 +1978,7 @@ fn build_table_snapshot_impl(
     }
 
     for f in &d.fields {
-        // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
+        // id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
         // system `id` PK column already injected by `system_field_columns`,
         // NOT a second column. FOLD it: validate the declared prefix (defense
         // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
@@ -1992,7 +1991,7 @@ fn build_table_snapshot_impl(
                 if let Some(prefix) = &f.id_prefix {
                     validate_id_prefix(prefix)?;
                 }
-                // **MED-1 fail-closed** — the id-fold DISCARDS this field (it is a
+                // **fail-closed** — the id-fold DISCARDS this field (it is a
                 // prefix declaration for the already-injected system PK, not a
                 // second column), so a column-level modifier carried on it is
                 // SILENTLY LOST. The op.* `ir_column_to_field` remaps ANY
@@ -2053,7 +2052,7 @@ fn build_table_snapshot_impl(
         // phantom-drifts against the live table the engine creates. It round-
         // trips as a plain nullable TEXT column.
         //
-        // **P4 HALF A** — the `zero-migrate:mask:kind=…,classification=…` sentinel that
+        // the `zero-migrate:mask:kind=…,classification=…` sentinel that
         // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
         // read-pass is now EMITTED into the generated DDL: it rides on the
         // sibling column's `mask_sentinel`, which `render_create_table` /
@@ -2080,7 +2079,7 @@ fn build_table_snapshot_impl(
                 ..Default::default()
             });
         }
-        // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
+        // CHECK constraints (literal-pin, min/max + enum). These are
         // INLINED at CREATE TABLE (like plugin-db's `def_to_constraints`); the
         // declarative differ does not re-diff CHECK bodies (only FOREIGN KEY
         // bodies), so a CHECK round-trips at the name+kind level — its
@@ -2099,7 +2098,7 @@ fn build_table_snapshot_impl(
                 vec![f.name.clone()],
             ));
         }
-        // **T12** — a vector field (`t.vector(dims, { metric })`) emits a
+        // - a vector field (`t.vector(dims, { metric })`) emits a
         // pgvector ANN index (`USING ivfflat` with the metric-appropriate
         // opclass). The live snapshot carries it as `access_method =
         // 'ivfflat'`, so the desired snapshot must model it identically or it
@@ -2110,7 +2109,7 @@ fn build_table_snapshot_impl(
                 indexes.push(spec);
             }
         }
-        // **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
+        // - a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
         // spatial index over its `geography(POINT, 4326)` column. The live
         // snapshot carries it as `access_method = 'gist'`, so the desired
         // snapshot must model it identically or the runtime-created GiST index
@@ -2124,13 +2123,13 @@ fn build_table_snapshot_impl(
         // A `ref` field declares a FOREIGN KEY constraint.
         if f.ty == "ref" {
             if let Some(target) = &f.references {
-                // #2 cross-app: a `<otherApp>.<table>` schema-qualified
+                // cross-app: a `<otherApp>.<table>` schema-qualified
                 // target is REJECTED here, fail-closed (mirrors
                 // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
                 // inside the project schema. Surfaced as a dedicated, clearer
                 // error for that shape before the generic bare-ident check.
                 reject_cross_app_ref(&d.name, target)?;
-                // #3-ref: the FK target table is interpolated into
+                // the FK target table is interpolated into
                 // `REFERENCES <schema>.<target>(id)`; validate it as a bare
                 // identifier at the author boundary (mirroring how table /
                 // column names are checked) so a malformed / injecting ref
@@ -2140,7 +2139,7 @@ fn build_table_snapshot_impl(
                 constraints.push(ConstraintSnapshot {
                     name: fk_constraint_name(&f.name),
                     kind: "FOREIGN KEY".into(),
-                    // EXACT canonical catalog spelling (#1): the target is
+                    // EXACT canonical catalog spelling: the target is
                     // schema-qualified, NO space before `(id)`, policy clauses
                     // render in catalog order (`ON UPDATE` then `ON DELETE`),
                     // and default actions are omitted per dialect. Built to
@@ -2173,12 +2172,12 @@ fn build_table_snapshot_impl(
         ));
     }
 
-    // **T12** — full-text search, DIALECT-AWARE (the only dialect-divergent
+    // - full-text search, DIALECT-AWARE (the only dialect-divergent
     // part of the snapshot):
     //
     // - **Postgres**: every `.fts()`-marked text column folds into ONE composite
     //   `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN index
-    //   (Q-P4-B, matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
+    //   (matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
     //   contract the data plane's `fts_search` reads). The generated-column form
     //   is trigger-free, so the whole FTS shape is pure DDL the engine owns.
     // - **SQLite**: `tsvector` has no SQLite spelling, so there is NO `__fts`
@@ -2219,7 +2218,7 @@ fn build_table_snapshot_impl(
     constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
     // An author-built DESIRED snapshot carries no raw CREATE text (it is
-    // introspection-only; H1). It rides as `None` and is excluded from equality.
+    // introspection-only). It rides as `None` and is excluded from equality.
     Ok(TableSnapshot {
         columns,
         indexes,
@@ -2279,7 +2278,7 @@ fn desired_snapshot_second_pass(
         tables.insert(table, shape);
     }
 
-    // PHASE 4 — keep only the SDK schemas for tables that survived conflict
+    // keep only the SDK schemas for tables that survived conflict
     // resolution (the keys of `tables`), so the side-map stays exactly aligned with
     // the snapshot.
     sqlite_schemas.retain(|table, _| tables.contains_key(table));
@@ -2315,7 +2314,7 @@ fn should_render_table_pk(table: &str, t: &TableSnapshot, constraint: &Constrain
         && !matches!(primary_key_columns(table, t), Some(cols) if cols.len() == 1)
 }
 
-/// PHASE 4 — true if `index_name` is one of the three implicit system-field
+/// true if `index_name` is one of the three implicit system-field
 /// indexes (`<table>_<col>_idx` for `deleted_at` / `updated_at` / `created_by`).
 /// On the SQLite path these are emitted inline by the shared CREATE-TABLE emitter,
 /// so the declarative differ must NOT also emit them as standalone migrations.
@@ -2399,7 +2398,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
 }
 
 // ---------------------------------------------------------------------------
-// T12 — vector-ANN + full-text search index modeling.
+// vector-ANN + full-text search index modeling.
 //
 // The differ never modeled the access-method dimension, so the live ivfflat
 // (vector) and GIN (FTS) indexes the data plane built were UNKNOWN to it and
@@ -2450,7 +2449,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
     })
 }
 
-/// **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS spatial index
+/// - a geoPoint field (`t.geoPoint()`) emits a PostGIS spatial index
 /// (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring plugin-db's
 /// runtime `SpatialIndex::ensure_spatial_index`
 /// (`crates/plugin-db/src/backend/postgres.rs`). The live snapshot carries it as
@@ -2622,9 +2621,9 @@ fn fts_index_snapshot_sqlite(
     })
 }
 
-/// Validate a creator-declared typed-id prefix (`t.id("blog")`, #5).
+/// Validate a creator-declared typed-id prefix (`t.id("blog")`).
 ///
-/// Schema-authority P2: DELEGATES to the shared kernel's
+/// Schema-authority: DELEGATES to the shared kernel's
 /// [`crate::schema::query::validate_id_prefix`] (the single source of truth for
 /// the `^[a-z][a-z0-9_]*$` rule + the `RESERVED_ID_PREFIXES` fence — the engine's
 /// own copy of both is deleted). The shared check returns its `QueryError`; this
@@ -2641,7 +2640,7 @@ fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'st
 
 /// Build a FOREIGN KEY definition body in the dialect's canonical catalog
 /// spelling, so the desired snapshot round-trips to the live introspected
-/// constraint (#1).
+/// constraint.
 ///
 /// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
 ///
@@ -2671,7 +2670,7 @@ fn fk_definition_for_dialect(
     dialect: SqlDialect,
 ) -> String {
     use std::fmt::Write as _;
-    // **PR10 review (LOW)** — quote the referenced schema + table the SAME way
+    // quote the referenced schema + table the SAME way
     // `pg_get_constraintdef` does (conditional: bare for safe lowercase names,
     // double-quoted for reserved-word/mixed-case), so the desired FK body matches
     // the live catalog byte-for-byte (over-quoting would phantom-diff a normal
@@ -2743,7 +2742,7 @@ fn fk_definition_pg(
 }
 
 /// Reject a `ref` whose target is schema-qualified with a `<otherApp>.` prefix —
-/// a cross-app FK (#2), forbidden fail-closed (mirrors
+/// a cross-app FK, forbidden fail-closed (mirrors
 /// `crates/plugin-db/src/cross_app_fk.rs`: every FK stays inside one app's
 /// namespace). A bare collection name is a same-project ref and is allowed.
 ///
@@ -2779,7 +2778,7 @@ pub enum DeclarativeError {
     /// FOREIGN KEY redefinition (a flipped `unique` flag, a changed column set, a
     /// re-pointed FK target — each a DROP+CREATE deferred to a later phase).
     /// Surfaced explicitly — never silently skipped. (Type/nullability changes are
-    /// handled in P3 as gated/ungated ALTERs; destructive DROPs are P2 gated
+    /// handled as gated/ungated ALTERs; destructive DROPs are gated
     /// migrations — neither uses this error.)
     #[error("unsupported in v1 (deferred to a later phase): {0}")]
     UnsupportedInV1(String),
@@ -2788,7 +2787,7 @@ pub enum DeclarativeError {
     /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
     /// (`bigint`, `uuid`, `int4`, `serial`, …). It is rejected at the author
     /// boundary BEFORE any SQL is emitted, rather than silently degrading to a
-    /// `text` column (#2 — the creator declared X, would have got `text`, with
+    /// `text` column (the creator declared X, would have got `text`, with
     /// permanent divergence from what plugin-db materialises).
     #[error(
         "unsupported field type '{ty}' (not mapped in v1; vector/geoPoint/encrypted \
@@ -2800,10 +2799,10 @@ pub enum DeclarativeError {
         /// The unrecognised / out-of-scope DSL type token.
         ty: String,
     },
-    /// Two or more apps declared the same table with DIFFERENT shapes (P4, design
-    /// §4). One table has exactly one owner; an identical re-declaration is
+    /// Two or more apps declared the same table with DIFFERENT shapes. One table
+    /// has exactly one owner; an identical re-declaration is
     /// idempotent (merged) but a conflicting one is a hard deploy error — never a
-    /// silent last-writer-wins merge (this refines #6's blanket `DuplicateTable`).
+    /// silent last-writer-wins merge (this refines the blanket `DuplicateTable`).
     ///
     /// `apps` carries EVERY app that declared this table (sorted, deduplicated),
     /// not just the first-detected pair. This makes the report **deterministic
@@ -2825,7 +2824,7 @@ pub enum DeclarativeError {
         apps: Vec<String>,
     },
     /// The deploying app tried to make a structural change (CREATE/ALTER/DROP) to
-    /// a table it does NOT own (P4 ownership enforcement, design §4). The
+    /// a table it does NOT own (ownership enforcement). The
     /// declaring app owns a table's migrations; a non-owner may USE the table's
     /// rows freely but may NOT migrate its structure. (An IDENTICAL re-declaration
     /// by a non-owner produces no diff op and never trips this — only an actual
@@ -2864,7 +2863,7 @@ pub enum DeclarativeError {
         table: String,
     },
     /// A `ref` field declared a cross-app FK whose **target table is not in the
-    /// union schema** (P4 cross-app FK, design §4). A cross-app FK may reference a
+    /// union schema** (cross-app FK). A cross-app FK may reference a
     /// table owned by another app, but that table must exist in the project's
     /// union (declared by SOME member app); an FK to a table no app declares is a
     /// clear error surfaced here rather than failing as bad SQL at apply.
@@ -2878,7 +2877,7 @@ pub enum DeclarativeError {
         /// The FK target table that is absent from the union.
         target: String,
     },
-    /// A [`RenameHint`] (P3) did not match an actual drop+add pair: the `from`
+    /// A [`RenameHint`] did not match an actual drop+add pair: the `from`
     /// column is not present in live as a dropped column, OR the `to` column is
     /// not present in desired as an added column, on the named table. The hint is
     /// the creator's signed statement of intent, so an un-matchable hint is a hard
@@ -2896,7 +2895,7 @@ pub enum DeclarativeError {
         /// The `to` column the hint named (expected: desired-only).
         to: String,
     },
-    /// A [`RenameHint`] (P3) matched a drop+add pair whose **types differ**: the
+    /// A [`RenameHint`] matched a drop+add pair whose **types differ**: the
     /// live `from` column and the desired `to` column do not share a `data_type`.
     /// A pure online rename (expand-contract dual-write) requires type identity —
     /// a simultaneous rename + type change is two distinct intents and is refused
@@ -2919,7 +2918,7 @@ pub enum DeclarativeError {
         /// The desired `to` column's data type.
         to_type: String,
     },
-    /// **PR9c LOW (ii)** — a SQLite catalog-sourced (`apply_bundle_ir_sqlite_catalog`)
+    /// a SQLite catalog-sourced
     /// renameColumn whose POST-rename descriptor `to` field declares a
     /// **data-transforming facet** (encryption / mask / `default` / `enum` / `check`
     /// range) the rebuild cannot certify was already present on the live `from`
@@ -2957,7 +2956,7 @@ pub enum DeclarativeError {
     /// a shared endpoint produces two colliding expand-contract sequences: a
     /// duplicated `ADD COLUMN <to>` (the second fails `already exists`), divergent
     /// dual-write triggers, or a double `DROP COLUMN <from>`. The cross-hint
-    /// validation pass rejects it before any SQL is authored (H1). `side` is
+    /// validation pass rejects it before any SQL is authored. `side` is
     /// `"from"` or `"to"` — which endpoint was duplicated.
     #[error(
         "duplicate rename hint endpoint: column {table}.{column} appears as the \
@@ -2977,7 +2976,7 @@ pub enum DeclarativeError {
     /// resolves each hint against the single live/desired snapshot pair, where the
     /// intermediate name (`b`) cannot be simultaneously a live-only drop and a
     /// desired-only add. Reject it EXPLICITLY rather than leave it to surface
-    /// incidentally as an [`DeclarativeError::RenameHintUnmatched`] (H2).
+    /// incidentally as an [`DeclarativeError::RenameHintUnmatched`].
     #[error(
         "rename hint chain on {table}: column {column} is both the target of one \
          hint and the source of another; chained renames are unsupported (resolve \
@@ -2992,7 +2991,7 @@ pub enum DeclarativeError {
     /// A [`RenameHint`] had `from == to` — a no-op rename of a column to its own
     /// name. This is rejected with a PRECISE error rather than the misleading
     /// [`DeclarativeError::RenameHintUnmatched`] it would otherwise produce (the
-    /// identical name is neither live-only nor desired-only) (M1).
+    /// identical name is neither live-only nor desired-only).
     #[error(
         "no-op rename hint on {table}: from and to are the same column ({column}); \
          a rename must change the column name"
@@ -3010,7 +3009,7 @@ pub enum DeclarativeError {
     #[error("failed to author rename expand-contract sequence: {0}")]
     Rename(#[from] ExpandContractError),
     /// A `ref` field's target was a schema-qualified `<otherApp>.<table>` — a
-    /// CROSS-APP foreign key, forbidden fail-closed (#2, mirrors
+    /// CROSS-APP foreign key, forbidden fail-closed (mirrors
     /// `crates/plugin-db/src/cross_app_fk.rs`). Every FK must stay inside the
     /// project schema; a reference to another member app's table is the BARE
     /// collection name (the union puts every app's tables in one schema), never a
@@ -3029,18 +3028,18 @@ pub enum DeclarativeError {
         /// The `<otherApp>` schema prefix that crossed the boundary.
         other_app: String,
     },
-    /// PHASE 4 — the Confined SQLite path needs an FK inlined at CREATE TABLE
+    /// the Confined SQLite path needs an FK inlined at CREATE TABLE
     /// (SQLite has no `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY`), but the FK's
     /// target table is neither already live nor created earlier in THIS batch — so
     /// it cannot be inlined and SQLite cannot add it later without a full table
-    /// rebuild (the 12-step rebuild, P3b — out of PHASE-4 scope). Surfaced as a
+    /// rebuild (the 12-step rebuild). Surfaced as a
     /// clear typed error rather than emitting an invalid `ALTER ADD CONSTRAINT`
     /// (which the SQLite authorizer/engine would reject anyway) or silently
     /// dropping the FK.
     #[error(
         "SQLite cannot defer the foreign key on table '{table}' → '{target}': SQLite \
          has no ALTER TABLE ADD CONSTRAINT, and the target is not live nor created \
-         earlier in this batch (a table rebuild is required — P3b)"
+         earlier in this batch (a table rebuild is required)"
     )]
     SqliteDeferredFkUnsupported {
         /// The table whose FK could not be inlined.
@@ -3048,8 +3047,8 @@ pub enum DeclarativeError {
         /// The FK's target table (not yet available to inline against).
         target: String,
     },
-    /// **Reserved fail-closed guard (P3b).** A Confined-SQLite existing-table change
-    /// that the 12-step rebuild genuinely cannot express. As of P3b the rebuild
+    /// **Reserved fail-closed guard.** A Confined-SQLite existing-table change
+    /// that the 12-step rebuild genuinely cannot express. The rebuild
     /// DOES handle the previously-deferred ops — a column TYPE change, a nullability
     /// change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, and an
     /// in-place FK redefinition — so those now flow through
@@ -3080,7 +3079,7 @@ pub enum DeclarativeError {
 /// renames, each kept as its full [`ExpandContractPlan`] and NOT flattened into
 /// the plain set.
 ///
-/// # Why a declarative rename must NOT be flattened (C1 — data loss)
+/// # Why a declarative rename must NOT be flattened (data loss)
 ///
 /// A column rename is an **online, multi-deploy** operation, not a single
 /// statement. Its [`ExpandContractPlan`] is more than a list of `Migration`s: it
@@ -3110,7 +3109,7 @@ pub struct DeclarativePlan {
     /// The online renames, each as a full [`ExpandContractPlan`] (expand migs +
     /// `BackfillSpec` + contract migs). NEVER flattened into `migrations`.
     pub renames: Vec<ExpandContractPlan>,
-    /// **P3b (SQLite only)** — the existing-table changes that SQLite has no native
+    /// the existing-table changes that SQLite has no native
     /// `ALTER` for (type change, nullability change, column RENAME's rebuild,
     /// ADD/DROP CONSTRAINT, in-place FK redefinition). Each is a 12-step table
     /// rebuild ([`SqliteRebuildSpec`]) paired with its journal [`Migration`]. NOT
@@ -3123,12 +3122,12 @@ pub struct DeclarativePlan {
     pub rebuilds: Vec<SqliteRebuild>,
 }
 
-/// **P3b** — one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
+/// one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
 /// plus the [`Migration`] that carries its checksum / journal identity / approval
 /// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
 /// natively.
 ///
-/// NOTE (P6a): the engine now DRIVES these rebuilds.
+/// NOTE: the engine DRIVES these rebuilds.
 /// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) CARRIES the
 /// rebuilds into the [`DeclarativeDeployPlan`](crate::engine::DeclarativeDeployPlan),
 /// and the now-generic
@@ -3173,7 +3172,7 @@ impl DeclarativePlan {
         for r in &self.renames {
             all.extend(r.all());
         }
-        // P3b — a SQLite rebuild's journal migration carries its checksum / identity
+        // a SQLite rebuild's journal migration carries its checksum / identity
         // for inspection + the gate. Its apply is structured (the spec), not a plain
         // `up`, but for preview/counting/checksum purposes it is one migration.
         for rb in &self.rebuilds {
@@ -3196,7 +3195,7 @@ impl DeclarativePlan {
     /// These are **advisory only** — they never deny or gate the plan. A
     /// migration with no advisories is omitted. Order matches
     /// [`all_migrations`](Self::all_migrations).
-    /// Plan-aware (review finding #8): a `FK_WITHOUT_INDEX` Notice is suppressed
+    /// Plan-aware: a `FK_WITHOUT_INDEX` Notice is suppressed
     /// when the **same plan** creates a covering index for the FK's referencing
     /// column(s) — even in a SEPARATE migration. The per-statement
     /// [`analyze`](crate::analyze::analyze) only sees one statement, so it
@@ -3240,11 +3239,11 @@ impl DeclarativePlan {
 }
 
 // ---------------------------------------------------------------------------
-// P1/P2 — the declarative differ.
+// the declarative differ.
 // ---------------------------------------------------------------------------
 
 /// The declarative differ — turns a desired/live snapshot pair into the
-/// migrations that reconcile them (P1 additive + P2 destructive-gated).
+/// migrations that reconcile them.
 ///
 /// A [`MigrationAuthor`](crate::plan::author::MigrationAuthor)-family author: it
 /// reuses [`crate::plan::author::DeterministicAuthor`] rendering where possible and emits
@@ -3256,16 +3255,16 @@ pub struct DeclarativeAuthor {
     project_schema: String,
     /// The **deploying** app (`app_…`) — the app whose deploy is driving this
     /// diff. It is stamped on every emitted [`Migration`] (`owner_app`) AND it is
-    /// the ownership-enforcement subject (P4, design §4): [`Self::diff`] refuses a
+    /// the ownership-enforcement subject: [`Self::diff`] refuses a
     /// structural change to any union table whose owner ≠ this app.
     owner_app: String,
-    /// The target SQL dialect the emitted `up`/`down` are spelled in (PHASE 4).
+    /// The target SQL dialect the emitted `up`/`down` are spelled in.
     ///
     /// - `Postgres` (the default via [`Self::new`]) — the historical PG-only
     ///   emitter: `self.render_create_table` etc. produce schema-qualified PG DDL.
     ///   BYTE-IDENTICAL to before this field existed.
     /// - `Sqlite` (via [`Self::new_for_dialect`]) — the Confined SQLite path
-    ///   (design §2.5.3): the new-table CREATE is ROUTED THROUGH the shared
+    ///  : the new-table CREATE is ROUTED THROUGH the shared
     ///   `crate::schema::query` emitter with [`SqliteEmitScope::MainUnqualified`],
     ///   producing UNqualified DDL that lands in `main` (= the app file) under the
     ///   `SqliteBackend`'s hardened authorizer. No second SQLite emitter is written
@@ -3277,16 +3276,16 @@ impl DeclarativeAuthor {
     /// Construct a declarative author bound to a project schema + the **deploying**
     /// app. In the multi-app model the deploying app is the ownership-enforcement
     /// subject: [`Self::diff`] refuses a structural change to a table owned by a
-    /// different app (design §4).
+    /// different app.
     ///
-    /// Defaults to the **Postgres** dialect — byte-identical to before PHASE 4.
+    /// Defaults to the **Postgres** dialect — byte-identical to before the dialect parameter.
     /// Use [`Self::new_for_dialect`] for the Confined SQLite path.
     #[must_use]
     pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
         Self::new_for_dialect(project_schema, owner_app, SqlDialect::Postgres)
     }
 
-    /// Construct a declarative author for an explicit target `dialect` (PHASE 4).
+    /// Construct a declarative author for an explicit target `dialect`.
     ///
     /// `SqlDialect::Sqlite` selects the Confined SQLite path: the new-table CREATE
     /// `up` is routed through the shared `crate::schema::query` emitter
@@ -3311,8 +3310,8 @@ impl DeclarativeAuthor {
         self.dialect
     }
 
-    /// **PR10** — a clone of this author bound to a different `project_schema`,
-    /// for rendering ONE op under its resolved schema qualifier (§2.7). The
+    /// a clone of this author bound to a different `project_schema`,
+    /// for rendering ONE op under its resolved schema qualifier. The
     /// emitter (`PgEmitter`) and `qualified()` read `project_schema`, so swapping
     /// it here re-qualifies every statement the returned author renders.
     /// `owner_app` and `dialect` are preserved. For the common no-override case the
@@ -3334,7 +3333,7 @@ impl DeclarativeAuthor {
         &self.owner_app
     }
 
-    /// Select the per-dialect DDL emission seam (P1). The dialect choice is made
+    /// Select the per-dialect DDL emission seam. The dialect choice is made
     /// ONCE here; the render methods are thin callers of the returned emitter. A
     /// closed `SqlDialect` enum ⇒ an exhaustive match (a new engine would not
     /// compile until it has an emitter).
@@ -3391,7 +3390,7 @@ impl DeclarativeAuthor {
     /// Diff the **desired** snapshot against the **live** snapshot and generate
     /// the migrations that reconcile them.
     ///
-    /// P1 (additive) handles:
+    /// The additive pass handles:
     /// - **CREATE TABLE** — a table in desired, absent in live (with its
     ///   columns, PK, unique indexes, and own-table FKs inlined; FKs to a
     ///   not-yet-created table are deferred to a follow-on `ALTER TABLE ADD
@@ -3399,17 +3398,17 @@ impl DeclarativeAuthor {
     /// - **ADD COLUMN** — a column in desired, absent in a live table;
     /// - **CREATE INDEX** — an index in desired, absent in a live table.
     ///
-    /// P2 (destructive, gated) handles a live-only object (absent in desired):
+    /// The destructive, gated pass handles a live-only object (absent in desired):
     /// - **DROP TABLE / DROP COLUMN** — DATA LOSS: the classifier/guard marks
     ///   these destructive, so the existing engine gate refuses them without
     ///   [`Approval::Approved`](crate::Approval). NEVER auto-applied.
     /// - **DROP INDEX** — a PLAIN index DROP is NOT data loss (reversible by
     ///   recreating the index), so it flows through ungated, the same as an
     ///   additive op. A **UNIQUE** index DROP, however, silently removes a
-    ///   data-integrity guarantee (#4), so it is classified `destructive +
+    ///   data-integrity guarantee, so it is classified `destructive +
     ///   requires_approval` (gated, like DROP COLUMN) — see `render_drop_index`.
     ///
-    /// P3 (rename, opt-in) routes a **hinted** drop+add pair through the
+    /// The rename pass (opt-in) routes a **hinted** drop+add pair through the
     /// zero-downtime expand-contract sequence
     /// ([`ExpandContractAuthor::RenameColumn`](crate::render::expand_contract)) instead of
     /// emitting an independent drop + add. A rename is emitted ONLY when a
@@ -3418,8 +3417,8 @@ impl DeclarativeAuthor {
     /// Without a matching hint, a drop+add stays two independent ops — the differ
     /// NEVER infers a rename heuristically (that risks silent data loss).
     ///
-    /// P3 (type / nullability) handles a same-name column whose attributes
-    /// changed (these were `UnsupportedInV1` before P3):
+    /// The type / nullability pass handles a same-name column whose attributes
+    /// changed (these were `UnsupportedInV1` before it existed):
     /// - **type change** → a GATED `ALTER COLUMN … TYPE …` (`destructive` +
     ///   `requires_approval`; no auto type-change in v1);
     /// - **`DROP NOT NULL`** (required true→false) → an ungated additive
@@ -3453,12 +3452,12 @@ impl DeclarativeAuthor {
     ///   author-boundary validation (nothing generated).
     /// - [`DeclarativeError::NotTableOwner`] — a structural change to a union
     ///   table whose owner ≠ the deploying app, OR a `DROP TABLE` of a live table
-    ///   owned by another app (P4 ownership enforcement).
+    ///   owned by another app (ownership enforcement).
     /// - [`DeclarativeError::DropOfUnownedTable`] — a `DROP TABLE` of a live table
     ///   whose ownership the caller did not supply in `live_ownership` (fail-closed
     ///   — defends against a partial-union deploy, 2b).
     /// - [`DeclarativeError::CrossAppFkTargetMissing`] — an FK whose target table
-    ///   is declared by no member app and is not live (P4 cross-app FK).
+    ///   is declared by no member app and is not live (cross-app FK).
     /// - [`DeclarativeError::RenameHintUnmatched`] — a hint named a pair that is
     ///   not an actual drop+add.
     /// - [`DeclarativeError::RenameHintTypeMismatch`] — a hint matched a pair
@@ -3482,9 +3481,9 @@ impl DeclarativeAuthor {
         // The ownership map travels alongside the union; the diff itself operates
         // on the union SNAPSHOT, so bind it locally and keep the rest of the pass
         // unchanged. Ownership is consulted (a) for cross-app FK target validation
-        // and (b) for the post-pass ownership-enforcement check (P4).
+        // and (b) for the post-pass ownership-enforcement check.
         let ownership = &desired.ownership;
-        // PHASE 4 — keep the full `DesiredSchema` reachable for the SQLite leg (it
+        // keep the full `DesiredSchema` reachable for the SQLite leg (it
         // needs `desired.sqlite_schemas` to route a new-table CREATE through the
         // shared emitter); the rest of the pass operates on the snapshot as before.
         let desired_full = desired;
@@ -3494,7 +3493,7 @@ impl DeclarativeAuthor {
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
 
-        // P4 cross-app FK: every FK target must exist in the UNION (it may be a
+        // Cross-app FK: every FK target must exist in the UNION (it may be a
         // table owned by another app, but it must be declared by SOME member app)
         // or already live. A dangling target is a clear error, not bad SQL at
         // apply. Checked before any SQL is rendered.
@@ -3514,7 +3513,7 @@ impl DeclarativeAuthor {
         // Flattening would discard the BackfillSpec, so the pre-existing-row
         // mirror never runs and the contract DROP COLUMN <from> destroys data.
         let mut renames: Vec<ExpandContractPlan> = Vec::new();
-        // P3b — the SQLite existing-table changes that have no native ALTER (type /
+        // the SQLite existing-table changes that have no native ALTER (type /
         // nullability change, column rename rebuild, ADD/DROP CONSTRAINT, FK
         // redefinition). Each is a structured 12-step rebuild, NOT a plain `up` — so
         // it is carried separately, like `renames`, never flattened into `out`.
@@ -3576,7 +3575,7 @@ impl DeclarativeAuthor {
                 }
             }
 
-            // PHASE 4 — the Confined SQLite path ROUTES the new-table CREATE through
+            // the Confined SQLite path ROUTES the new-table CREATE through
             // the shared `crate::schema::query` emitter (unqualified, `main` = the
             // app file); the PG path keeps its snapshot-rendered DDL. No second
             // SQLite emitter exists in this crate.
@@ -3615,7 +3614,7 @@ impl DeclarativeAuthor {
                 if is_pk_index(table, &idx.name) {
                     continue;
                 }
-                // PHASE 4 — on SQLite the shared CREATE-TABLE emitter ALREADY emits
+                // on SQLite the shared CREATE-TABLE emitter ALREADY emits
                 // the three implicit system-field indexes (`<table>_<col>_idx` for
                 // deleted_at/updated_at/created_by) inline in the table-create
                 // payload. Skip re-emitting them here to avoid a redundant (though
@@ -3656,7 +3655,7 @@ impl DeclarativeAuthor {
             let desired_cols: BTreeMap<&str, &ColumnSnapshot> =
                 dt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
-            // P3 rename (opt-in): the resolved renames for THIS table. A hinted
+            // Rename (opt-in): the resolved renames for THIS table. A hinted
             // `from`→`to` is routed through the expand-contract sequence below and
             // its `from`/`to` columns are EXCLUDED from the plain drop/add diff so
             // they are not double-handled (drop the renamed-away column / add the
@@ -3668,11 +3667,11 @@ impl DeclarativeAuthor {
             let renamed_to: std::collections::BTreeSet<&str> =
                 table_renames.iter().map(|r| r.to.as_str()).collect();
 
-            // PHASE 3b — on the Confined SQLite path, the existing-table changes that
+            // on the Confined SQLite path, the existing-table changes that
             // SQLite has NO native ALTER for — a column TYPE change, a nullability
             // change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, or
             // an in-place FK redefinition — are reconciled by the 12-step table
-            // REBUILD (§2.4). A rebuild reconciles the WHOLE table at once (every
+            // REBUILD. A rebuild reconciles the WHOLE table at once (every
             // changed column + the new constraint/FK set), so we detect it up front,
             // emit ONE structured `SqliteRebuild`, and `continue` past the PG-shaped
             // per-op emission below (which has no SQLite form for these). The
@@ -3732,13 +3731,13 @@ impl DeclarativeAuthor {
                 match live_cols.get(c.name.as_str()) {
                     None => out.push(self.render_add_column(table, c)),
                     Some(lc) => {
-                        // Same-name column whose attributes changed (P3):
+                        // Same-name column whose attributes changed:
                         // - type change → GATED ALTER COLUMN TYPE (no auto change);
                         // - SET NOT NULL (false→true) → GATED (lock-heavy, can
                         //   fail on existing NULLs);
                         // - DROP NOT NULL (true→false) → ungated additive.
                         //
-                        // PHASE 3b — SQLite has NO `ALTER COLUMN` at all (its ALTER
+                        // SQLite has NO `ALTER COLUMN` at all (its ALTER
                         // TABLE only does RENAME / ADD COLUMN / DROP COLUMN / RENAME
                         // COLUMN). A type change or ANY nullability change is now
                         // reconciled by the 12-step table REBUILD detected up front —
@@ -3759,8 +3758,8 @@ impl DeclarativeAuthor {
                             {
                                 return Err(DeclarativeError::Invalid(format!(
                                     "internal: SQLite column {table}.{} has a type/nullability \
-                                     change that the rebuild detector should have caught (P3b \
-                                     invariant violated)",
+                                     change that the rebuild detector should have caught \
+                                     (rebuild invariant violated)",
                                     c.name
                                 )));
                             }
@@ -3780,7 +3779,7 @@ impl DeclarativeAuthor {
                 }
             }
 
-            // DROP COLUMN (P2): in live, not in desired → destructive, gated
+            // DROP COLUMN: in live, not in desired → destructive, gated
             // (skip a rename's `from` column — it is dropped by the rename's gated
             // contract C2, not a plain drop).
             for c in &lt.columns {
@@ -3862,7 +3861,7 @@ impl DeclarativeAuthor {
             }
         }
 
-        // --- DROP TABLE (P2): in live, not in desired → destructive, gated. ---
+        // --- DROP TABLE: in live, not in desired → destructive, gated. ---
         // In the UNION model `desired` is the FULL project schema (every member
         // app's tables), so a live table that is absent from the union is one NO
         // app declares — a DROP TABLE candidate. (A table still owned by a member
@@ -3903,7 +3902,7 @@ impl DeclarativeAuthor {
             }
         }
 
-        // P4 ownership enforcement (design §4): a structural change to a table
+        // Ownership enforcement: a structural change to a table
         // whose owner ≠ the deploying app is REFUSED. The diff is computed over
         // the FULL union, so a non-owner's deploy that merely USES a table emits
         // NO op for it (the table's union shape == live ⇒ no structural delta) and
@@ -3926,7 +3925,7 @@ impl DeclarativeAuthor {
         })
     }
 
-    /// P4 ownership enforcement (design §4): refuse a structural change to any
+    /// Ownership enforcement: refuse a structural change to any
     /// union table the deploying app (`deploying_app`) does not own.
     ///
     /// A table is **structurally changed** by this diff iff:
@@ -3974,7 +3973,7 @@ impl DeclarativeAuthor {
         Ok(())
     }
 
-    /// Validate every FK target across the UNION (P4 cross-app FK, design §4): the
+    /// Validate every FK target across the UNION (cross-app FK): the
     /// target table must be declared by SOME member app (present in `desired`, the
     /// union) OR already exist live. A target no app declares is a clear
     /// [`DeclarativeError::CrossAppFkTargetMissing`] — surfaced before any SQL is
@@ -4047,7 +4046,7 @@ impl DeclarativeAuthor {
         live: &SchemaSnapshot,
         hints: &[RenameHint],
     ) -> Result<Vec<ResolvedRename>, DeclarativeError> {
-        // --- Cross-hint validation (H1/H2). ---------------------------------
+        // --- Cross-hint validation. ---------------------------------
         //
         // The per-hint resolution below validates each hint INDEPENDENTLY
         // (`from` live-only, `to` desired-only, type identity). That misses
@@ -4064,7 +4063,7 @@ impl DeclarativeAuthor {
             let mut froms: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
             let mut tos: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
             for h in hints {
-                // H1: the multiset of `from`s per table must be duplicate-free.
+                // the multiset of `from`s per table must be duplicate-free.
                 if !froms.entry(h.table.as_str()).or_default().insert(h.from.as_str()) {
                     return Err(DeclarativeError::DuplicateRenameHint {
                         table: h.table.clone(),
@@ -4072,7 +4071,7 @@ impl DeclarativeAuthor {
                         side: "from",
                     });
                 }
-                // H1: …and so must the multiset of `to`s.
+                // …and so must the multiset of `to`s.
                 if !tos.entry(h.table.as_str()).or_default().insert(h.to.as_str()) {
                     return Err(DeclarativeError::DuplicateRenameHint {
                         table: h.table.clone(),
@@ -4081,10 +4080,10 @@ impl DeclarativeAuthor {
                     });
                 }
             }
-            // H2: no chain — a `to` on a table must not equal any OTHER hint's
+            // no chain — a `to` on a table must not equal any OTHER hint's
             // `from` on the same table (e.g. `[a→b, b→c]`: `b` is both a target
             // and a source). A `from == to` hint trivially "matches" its own
-            // `from`; that is a no-op handled by M1 below, not a chain, so skip it
+            // `from`; that is a no-op handled by the no-op-rename check below, not a chain, so skip it
             // here.
             for h in hints {
                 if h.from == h.to {
@@ -4103,7 +4102,7 @@ impl DeclarativeAuthor {
 
         let mut resolved = Vec::with_capacity(hints.len());
         for h in hints {
-            // M1: a `from == to` hint is a no-op rename. Reject it with a PRECISE
+            // a `from == to` hint is a no-op rename. Reject it with a PRECISE
             // error rather than the misleading `RenameHintUnmatched` it would
             // otherwise produce (an identical name is neither live-only nor
             // desired-only).
@@ -4168,7 +4167,7 @@ impl DeclarativeAuthor {
         Ok(resolved)
     }
 
-    /// PHASE 4 — render the SQLite `CREATE TABLE` `up` for a NEW table by ROUTING
+    /// render the SQLite `CREATE TABLE` `up` for a NEW table by ROUTING
     /// THROUGH the shared `crate::schema::query` emitter with
     /// [`SqliteEmitScope::MainUnqualified`]. No second SQLite DDL emitter lives in
     /// this crate: the engine reconstructs the SDK schema `Value`
@@ -4217,12 +4216,12 @@ impl DeclarativeAuthor {
     }
 
     /// The SQLite `CREATE TABLE` emission, parameterized by the SDK schema `Value`
-    /// directly (§6.4/§6.5). The differ's [`render_create_table_sqlite`] pulls the
+    /// directly. The differ's [`render_create_table_sqlite`] pulls the
     /// `Value` from the precomputed `desired.sqlite_schemas` side-map; `IrAuthor`'s
     /// `lower_create_table` builds the SAME `Value` from the op's descriptor via
     /// [`descriptor_to_sdk_schema`] (the same call `desired_snapshot_for_dialect`
     /// makes) and routes here — so BOTH paths render through the identical shared
-    /// `crate::schema::query` emitter and the §6.4 byte-identity holds on SQLite.
+    /// `crate::schema::query` emitter and the byte-identity holds on SQLite.
     pub(crate) fn render_create_table_sqlite_value(
         &self,
         table: &str,
@@ -4255,12 +4254,12 @@ impl DeclarativeAuthor {
         .map_err(|e| DeclarativeError::Invalid(format!("sqlite emit for '{table}': {e}")))
     }
 
-    /// **P3b** — does this existing SQLite table need the 12-step table REBUILD to
+    /// does this existing SQLite table need the 12-step table REBUILD to
     /// reconcile `live` → `desired`? Returns `Some(reason)` for a change SQLite has
     /// NO native `ALTER` for, `None` if every difference is natively expressible
     /// (ADD COLUMN / DROP COLUMN / ADD INDEX / DROP INDEX).
     ///
-    /// The rebuild triggers (design §2.4): a same-name column TYPE change, a
+    /// The rebuild triggers: a same-name column TYPE change, a
     /// nullability change (either direction), a hinted column RENAME, a same-name
     /// index in-place redefinition (uniqueness or column-set change), a same-name FK
     /// redefinition, and an ADD/DROP of an FK constraint (SQLite has no
@@ -4374,7 +4373,7 @@ impl DeclarativeAuthor {
             }
         }
 
-        // (6) A DROP COLUMN of a CONSTRAINED column (H1). SQLite's native
+        // (6) A DROP COLUMN of a CONSTRAINED column. SQLite's native
         //     `ALTER TABLE … DROP COLUMN` ERRORS at apply when the dropped column
         //     participates in ANY index, CHECK, foreign key, generated-column
         //     expression, or partial-index predicate — so the per-op
@@ -4404,7 +4403,7 @@ impl DeclarativeAuthor {
         None
     }
 
-    /// **H1 helper** — is the live column `lc` (being dropped) referenced by any
+    /// Is the live column `lc` (being dropped) referenced by any
     /// index, constraint, or raw-DDL dependent of the live table `lt`, such that a
     /// native `SQLite` `DROP COLUMN` would ERROR? Returns `Some(reason)` to route the
     /// drop to the 12-step rebuild, `None` if the column drops cleanly per-op.
@@ -4471,7 +4470,7 @@ impl DeclarativeAuthor {
         None
     }
 
-    /// **P3b** — build the [`SqliteRebuild`] (spec + journal migration) that
+    /// build the [`SqliteRebuild`] (spec + journal migration) that
     /// reconciles `live` → `desired` for one existing table via the 12-step rebuild.
     ///
     /// The new-table CREATE comes from the shared Sqlite/MainUnqualified emitter
@@ -4558,7 +4557,7 @@ impl DeclarativeAuthor {
         // remains on the spec as an explicit escape hatch for direct-spec callers.
         let recreate_objects: Vec<String> = Vec::new();
 
-        // H1 — the columns this rebuild DROPS: live columns absent from the new
+        // the columns this rebuild DROPS: live columns absent from the new
         // (desired) shape, excluding a rename's `from` (a rename CARRIES the column
         // under a new name, it is not a drop). The executor uses this to SKIP
         // replaying any captured dependent (index / trigger) that references a
@@ -4603,17 +4602,17 @@ impl DeclarativeAuthor {
         Ok(SqliteRebuild { migration, spec })
     }
 
-    /// **PR2 — the cross-subsystem `renameColumn` bridge (§2.6 / §2.6.1 / §2.6.2).**
+    /// The cross-subsystem `renameColumn` bridge.
     /// Lower ONE IR `renameColumn` op into its dialect-chosen
     /// [`RenameStep`](crate::render::step::RenameStep), REUSING the existing destination
     /// authors verbatim so the IR path inherits their version-stable ids:
     ///
     /// - **Postgres** ⇒ build the [`OnlineIntent::RenameColumn`] with the PG type
     ///   string `pg_ty` (the IR's dialect-neutral column type, already mapped to its
-    ///   PG `data_type` and `ddl_type`-spelled by the caller, §2.6) and run it
+    ///   PG `data_type` and `ddl_type`-spelled by the caller) and run it
     ///   through [`ExpandContractAuthor::author`] — the SAME author the declarative
     ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
-    ///   identically (§2.6.1). The returned [`ExpandContractPlan`] is wrapped
+    ///   identically. The returned [`ExpandContractPlan`] is wrapped
     ///   verbatim into [`crate::render::step::RenameStep::PgExpandContract`].
     ///
     /// - **SQLite** ⇒ synthesize the DESIRED post-rename inputs the differ's
@@ -4655,7 +4654,7 @@ impl DeclarativeAuthor {
     ) -> Result<crate::render::step::RenameStep, DeclarativeError> {
         match self.dialect {
             SqlDialect::Postgres => {
-                // The PG expand-contract author IS the id authority (§2.6.1): the
+                // The PG expand-contract author IS the id authority: the
                 // declarative path calls the SAME `ExpandContractAuthor::author` with
                 // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
                 // intra-chain `depends_on` match by construction.
@@ -4691,7 +4690,7 @@ impl DeclarativeAuthor {
         }
     }
 
-    /// **PR2** — the SQLite arm of [`Self::lower_ir_rename`]: synthesize the desired
+    /// the SQLite arm of [`Self::lower_ir_rename`]: synthesize the desired
     /// post-rename snapshot + SDK schema + [`RenameHint`] from the live table facts
     /// and route them through [`Self::diff`], returning the SINGLE [`SqliteRebuild`]
     /// it produces. Factored out so the dialect router stays readable.
@@ -4703,7 +4702,7 @@ impl DeclarativeAuthor {
     /// `RenameHint` lets the differ resolve the drop+add pair as a rename rather than
     /// a destructive column swap.
     ///
-    /// **Ownership (MED).** Both the desired `ownership` and the `live_ownership`
+    /// **Ownership.** Both the desired `ownership` and the `live_ownership`
     /// maps are stamped from the caller-supplied `live_owner` — the REAL introspected
     /// owner of the table, NOT the deploying app. This keeps the differ's cross-app
     /// guards honest: if `live_owner != self.owner_app`, the rename is a structural
@@ -4746,12 +4745,12 @@ impl DeclarativeAuthor {
         // TWO faithful sources for the SDK `Value`, distinguished by which field key it
         // carries (the live `from` or the post-rename `to`):
         //
-        //  (1) **PRE-rename Value** (the field is keyed `from`) — the descriptor-set
-        //      path (`apply_bundle_ir_sqlite`) supplies the PRE-rename SDK `Value`. We
+        //  (1) **PRE-rename Value** (the field is keyed `from`) — a descriptor-set
+        //      source supplies the PRE-rename SDK `Value`. We
         //      rename the field KEY `from`→`to` (facets preserved verbatim) to get the
         //      post-rename shape — byte-identical to a `t.*`-diff rename.
         //
-        //  (2) **POST-rename Value** (the field is already keyed `to`) — **PR9b** the
+        //  (2) **POST-rename Value** (the field is already keyed `to`) — the
         //      production catalog-sourced path (`LiveSchema::from_sqlite_catalog`)
         //      supplies the POST-deploy DESIRED descriptor `Value` (the field is already
         //      `to`, with its FULL facets — encryption/mask/FK/enum/default/… — none
@@ -4774,7 +4773,7 @@ impl DeclarativeAuthor {
         {
             // (2) post-rename desired Value (already keyed `to`) → use as-is, BUT
             // ONLY after asserting its column AFFINITY equals the live `from` column's
-            // (PR9b LOW fix). The new-table CREATE renders from THIS descriptor-sourced
+            // The new-table CREATE renders from THIS descriptor-sourced
             // `to` def, while the value-copy carries the old `from` bytes across
             // un-transformed; a `rename` preserves facets by contract, so a descriptor
             // whose `to` field diverges in affinity from the live `from` (e.g. a rename
@@ -4803,7 +4802,7 @@ impl DeclarativeAuthor {
                     to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
                 });
             }
-            // PR9c LOW (ii) — TIGHTEN past affinity to the FULL data-transforming facet
+            // TIGHTEN past affinity to the FULL data-transforming facet
             // set. Affinity equality alone is too weak: a same-affinity facet change on
             // the renamed column (e.g. add `encrypted`/`mask`/`default`/`enum`/`check`,
             // all of which a `string`/`number` column keeps its TEXT/NUMERIC affinity
@@ -4836,7 +4835,7 @@ impl DeclarativeAuthor {
         };
 
         // ---- assemble the one-table DesiredSchema + live snapshot ----
-        // **Cross-app guard correctness (MED).** The diff's `enforce_ownership`
+        // **Cross-app guard correctness.** The diff's `enforce_ownership`
         // (desired side) + drop-ownership (live side) guards are only sound if they
         // see the REAL introspected owner of the table — NOT the deploying app. So
         // stamp BOTH ownership maps from the caller-supplied `live_owner`. If the
@@ -4914,11 +4913,11 @@ impl DeclarativeAuthor {
             let null = null_clause(c, SqlDialect::Postgres, inline_pk);
             let identity = pg_identity_clause(c);
             let generated = generated_clause(c.generated.as_ref());
-            // #4: emit the DEFAULT clause (emission-only metadata), including the
-            // legacy T12 `__fts` generated-column sentinel path.
+            // emit the DEFAULT clause (emission-only metadata), including the
+            // legacy `__fts` generated-column sentinel path.
             let default = default_clause(c.default.as_deref());
             let checks = inline_checks_clause(c);
-            // **P4 HALF A** — the inline `/* zero-migrate:enc:… */` sentinel rides between
+            // the inline `/* zero-migrate:enc:… */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
             // column is byte-identical to a `registerModel`-created one.
@@ -4943,11 +4942,11 @@ impl DeclarativeAuthor {
         for fk in inline_fks {
             parts.push(self.fk_clause(fk));
         }
-        // #3/#4: inline CHECK constraints (literal-pin, min/max, enum) as
+        // inline CHECK constraints (literal-pin, min/max, enum) as
         // table-level `CONSTRAINT <name> CHECK (...)` clauses. The definition is
         // the emitted DDL clause built by `field_check_constraints`.
         //
-        // **PR15 (HIGH fix)** — a `createTable({ uniques })` table-level UNIQUE
+        // a `createTable({ uniques })` table-level UNIQUE
         // (folded into the snapshot as a `UNIQUE` `ConstraintSnapshot` by
         // `render::lower::create_table_descriptor`'s spec-fold) is inlined here as a
         // `CONSTRAINT <name> <definition>` clause, the SAME shape a stand-alone
@@ -4975,7 +4974,7 @@ impl DeclarativeAuthor {
             partition,
         );
         let mut statements: Vec<String> = vec![create];
-        // **P4 HALF A** — append `COMMENT ON COLUMN … '<sentinel>'` for every
+        // append `COMMENT ON COLUMN … '<sentinel>'` for every
         // column carrying a comment sentinel (`zero-migrate:mask:…` on a masked sibling,
         // `zero-migrate:enc:…` on an encrypted column), so the runtime sentinel is part of
         // the same migration as the table create (an interrupted apply never
@@ -5119,7 +5118,7 @@ impl DeclarativeAuthor {
         )]
     }
 
-    /// **P4 HALF A** — render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
+    /// render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
     /// '<sentinel>'` statement for a column carrying a `comment_sentinel`
     /// (`zero-migrate:mask:…` for a masked sibling or `zero-migrate:enc:…` for an encrypted column),
     /// or `None` for a column without one. The sentinel BODY is built by the
@@ -5147,7 +5146,7 @@ impl DeclarativeAuthor {
     /// constraint `definition` (built by [`fk_definition_for_dialect`] in the
     /// dialect canonical spelling). The tail is appended verbatim — the applied
     /// constraint then introspects back to the identical definition, and the FK
-    /// round-trips clean (#1). A bare FK (no policy tail) emits nothing extra.
+    /// round-trips clean. A bare FK (no policy tail) emits nothing extra.
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
         if matches!(self.dialect, SqlDialect::Mysql) {
             return self.mysql_fk_clause(fk);
@@ -5218,7 +5217,7 @@ impl DeclarativeAuthor {
 
     /// Render an `ALTER TABLE … ADD COLUMN …` (additive).
     ///
-    /// #4 volatile-default trap: a column DEFAULT is emitted here. The engine only
+    /// volatile-default trap: a column DEFAULT is emitted here. The engine only
     /// ever emits IMMUTABLE literal defaults (string/number/boolean literals,
     /// `'{}'::jsonb`, `'[]'::jsonb` — never `NOW()` / `gen_random_uuid()`), so
     /// `ADD COLUMN … DEFAULT <literal>` takes Postgres' metadata-only fast path
@@ -5239,7 +5238,7 @@ impl DeclarativeAuthor {
         table: &str,
         c: &ColumnSnapshot,
     ) -> (Migration, Vec<String>) {
-        // P1 — emission delegated to the per-dialect `DdlEmitter` (the mask /
+        // emission delegated to the per-dialect `DdlEmitter` (the mask /
         // encrypted sentinel spelling + qualification differ by dialect). This
         // method owns only the migration identity / flags.
         let (statements, down) = self.emitter().add_column(table, c);
@@ -5254,7 +5253,7 @@ impl DeclarativeAuthor {
         (mig, statements)
     }
 
-    /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (P3 type change).
+    /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (type change).
     ///
     /// A type change is `destructive` + `requires_approval` in v1 — there is NO
     /// auto type-change. It can rewrite the whole table under `ACCESS EXCLUSIVE`
@@ -5288,8 +5287,8 @@ impl DeclarativeAuthor {
         )
     }
 
-    /// Render an `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT NULL` (P3
-    /// nullability change).
+    /// Render an `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT NULL`
+    /// (nullability change).
     ///
     /// - **`DROP NOT NULL`** (`nullable` true — relaxing required true→false) is
     ///   SAFE: it only removes a constraint, never rewrites data, so it is ungated
@@ -5389,7 +5388,7 @@ impl DeclarativeAuthor {
         idx: &IndexSnapshot,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        // P1 — emission delegated to the per-dialect `DdlEmitter`: PG spells the
+        // emission delegated to the per-dialect `DdlEmitter`: PG spells the
         // access-method (`USING …`), the per-column opclass, the `WITH (lists=…)`
         // storage param and qualifies; SQLite emits a plain unqualified B-tree
         // index. (The snapshot carries covered columns VERBATIM — 1a — so the
@@ -5420,13 +5419,13 @@ impl DeclarativeAuthor {
     /// requires_approval = true` so the gate refuses it without approval.
     /// Render a destructive (gated) `DROP TABLE`.
     ///
-    /// PHASE 4 / H1 — like `render_drop_column`, the confined SQLite path runs in
+    /// like `render_drop_column`, the confined SQLite path runs in
     /// the app file's `main` schema (the per-app file is opened directly, not
     /// ATTACHed under a `"<app>"` namespace as in PG), so the table is referenced
     /// UNqualified. A schema-qualified `"default"."c2"` resolves to no table on
     /// SQLite ("no such table: default.c2"). The PG path keeps `self.qualified`.
     fn render_drop_table(&self, table: &str) -> Migration {
-        // P1 — qualification delegated to the per-dialect `DdlEmitter`.
+        // qualification delegated to the per-dialect `DdlEmitter`.
         let up = self.emitter().drop_table_up(table);
         self.make(
             &format!("drop_table_{table}"),
@@ -5525,7 +5524,7 @@ impl DeclarativeAuthor {
     /// online column expand-contract). It is NOT data-loss `destructive` (the
     /// inverse rename in `down` fully reverses it), but it IS backward-incompatible
     /// — it silently breaks every reader of the OLD table name — so it carries
-    /// `requires_approval` (never auto-applied), matching the `flags_for` MED-1 gate
+    /// `requires_approval` (never auto-applied), matching the `flags_for` gate
     /// that classifies a literal `RENAME TABLE` in a submitted `up`.
     fn render_rename_table(&self, table: &str, to: &str) -> Migration {
         let (up, down) = self.emitter().rename_table(table, to);
@@ -5540,11 +5539,11 @@ impl DeclarativeAuthor {
 
     /// Render a destructive (gated) `DROP COLUMN`.
     ///
-    /// PHASE 4 — SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
+    /// SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
     /// UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
     /// resolve to no table. The PG path keeps `self.qualified`.
     fn render_drop_column(&self, table: &str, col: &str) -> Migration {
-        // P1 — qualification delegated to the per-dialect `DdlEmitter`.
+        // qualification delegated to the per-dialect `DdlEmitter`.
         let up = self.emitter().drop_column_up(table, col);
         self.make(
             &format!("drop_column_{table}_{col}"),
@@ -5562,7 +5561,7 @@ impl DeclarativeAuthor {
     /// flags and flows through the engine gate ungated, like an additive op.
     ///
     /// Dropping a **UNIQUE** index, however, silently removes a data-integrity
-    /// guarantee (#4): duplicate rows become possible afterwards and a later
+    /// guarantee: duplicate rows become possible afterwards and a later
     /// re-add fails on the now-dirty data. That is an integrity change the
     /// creator never approved, so it is classified `destructive +
     /// requires_approval` (gated, like DROP COLUMN). (The implicit PK index is
@@ -5571,7 +5570,7 @@ impl DeclarativeAuthor {
     /// `down` recreates nothing because the declarative re-diff would re-add the
     /// index from the desired snapshot.
     fn render_drop_index(&self, table: Option<&str>, idx: &IndexSnapshot) -> Migration {
-        // P1 — the index-name qualification is delegated to the per-dialect
+        // the index-name qualification is delegated to the per-dialect
         // `DdlEmitter` (PG qualifies; SQLite MUST emit unqualified or the DROP
         // silently no-ops). The unique-vs-plain GATING below is diff-logic and
         // stays here.
@@ -5591,14 +5590,14 @@ impl DeclarativeAuthor {
     }
 
     // -----------------------------------------------------------------------
-    // §6.4 / §6.5 — the IR-path render seam. `IrAuthor::lower` (below) reuses
+    // The IR-path render seam. `IrAuthor::lower` (below) reuses
     // these EXACT render methods + the shared snapshot-builder, so its emitted
-    // SQL is byte-identical to the declarative path's by CONSTRUCTION (the §6.4
-    // golden guards against accidental regression, not against two independent
+    // SQL is byte-identical to the declarative path's by CONSTRUCTION (the
+    // byte-identity golden guards against accidental regression, not against two independent
     // implementations).
     // -----------------------------------------------------------------------
 
-    /// §6.4 — render a single-table CREATE the SAME way the declarative `diff`
+    /// render a single-table CREATE the SAME way the declarative `diff`
     /// pass does (the snapshot comes from the shared [`build_table_snapshot`]).
     /// FKs are inlined iff their target table is already live (`live_tables`);
     /// on PG a non-live target is DEFERRED to an `ALTER TABLE ADD CONSTRAINT`
@@ -5669,7 +5668,7 @@ impl DeclarativeAuthor {
             MigrationFlags::default(),
             Vec::new(),
         );
-        // **PR10 Part B (C1 fix)** — a guarded `createTable ifNotExists` lowers to
+        // a guarded `createTable ifNotExists` lowers to
         // MULTIPLE units (the CREATE TABLE + one CREATE INDEX per non-PK index
         // [PG always injects the 3 system-field indexes] + deferred FKs). Each unit
         // is a SEPARATE apply_transactional txn that re-probes the live catalog. A
@@ -5766,7 +5765,7 @@ impl DeclarativeAuthor {
         Ok(out)
     }
 
-    /// §6.4 — render an `addColumn` the SAME way `diff` does, from a
+    /// render an `addColumn` the SAME way `diff` does, from a
     /// shared-builder [`ColumnSnapshot`]. Returns the migration plus its structural
     /// statement list (`ADD COLUMN` + optional `COMMENT ON COLUMN`) so the
     /// guard-per-statement lower never re-splits a `;\n`-bearing string DEFAULT.
@@ -5774,13 +5773,13 @@ impl DeclarativeAuthor {
         self.render_add_column_with_statements(table, col)
     }
 
-    /// §6.4 — render a `createIndex` the SAME way `diff` does, from an
+    /// render a `createIndex` the SAME way `diff` does, from an
     /// [`IndexSnapshot`]. A `CREATE INDEX` is a single statement.
     pub(crate) fn lower_create_index(&self, table: &str, idx: &IndexSnapshot) -> LoweredUnit {
         single_stmt(self.render_create_index(table, idx, Vec::new()))
     }
 
-    /// §6.4 — the drop ops pass an identifier through the SAME emitter methods.
+    /// the drop ops pass an identifier through the SAME emitter methods.
     /// Each is a single statement.
     pub(crate) fn lower_drop_table(&self, table: &str) -> LoweredUnit {
         single_stmt(self.render_drop_table(table))
@@ -5822,7 +5821,7 @@ impl DeclarativeAuthor {
         single_stmt(self.render_drop_index(table, idx))
     }
 
-    /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`
+    /// render a stand-alone `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`
     /// the SAME way `diff` renders a DEFERRED FK (`render_add_fk`), from a
     /// [`ConstraintSnapshot`] whose `definition` is the canonical
     /// `pg_get_constraintdef`-shaped FK body. Byte-identical to the differ's
@@ -5831,10 +5830,10 @@ impl DeclarativeAuthor {
         single_stmt(self.render_add_fk(table, fk, Vec::new()))
     }
 
-    /// §6.4 — render a stand-alone `ALTER TABLE … ADD CONSTRAINT <name> <body>`
+    /// render a stand-alone `ALTER TABLE … ADD CONSTRAINT <name> <body>`
     /// for a column-list constraint (`UNIQUE (…)` / `PRIMARY KEY (…)`). `body` is
     /// the constraint body the caller built from the IR (no embedded `Expr`, so
-    /// no Wave-C expression renderer is needed). The PG dialect is the only one
+    /// no full expression renderer is needed). The PG dialect is the only one
     /// with native `ALTER TABLE ADD CONSTRAINT`; the SQLite leg routes these
     /// through the 12-step table rebuild in `diff` (no stand-alone SQLite render).
     ///
@@ -5875,7 +5874,7 @@ impl DeclarativeAuthor {
         ))
     }
 
-    /// §6.4 — render a stand-alone `ALTER TABLE … DROP CONSTRAINT <name>`.
+    /// render a stand-alone `ALTER TABLE … DROP CONSTRAINT <name>`.
     ///
     /// Dropping a constraint silently removes a data-integrity guarantee the
     /// creator declared (a FK/UNIQUE/PK/CHECK), so it is `destructive +
@@ -5898,7 +5897,7 @@ impl DeclarativeAuthor {
         ))
     }
 
-    /// §3.2 — render a stand-alone `ALTER TABLE … VALIDATE CONSTRAINT <name>` (the
+    /// Render a stand-alone `ALTER TABLE … VALIDATE CONSTRAINT <name>` (the
     /// second half of PostgreSQL online constraint adoption: a FK/CHECK added
     /// `NOT VALID` is validated later under a weaker `SHARE UPDATE EXCLUSIVE` lock).
     /// The scan can fail on a violating row, so it is `requires_approval` (like a
@@ -5929,7 +5928,7 @@ impl DeclarativeAuthor {
     /// owner/checksum and routes it through the SAME `make` + `single_stmt` path
     /// every other lowered unit uses, so the per-fragment guard at lower
     /// ([`crate::render::lower::IrAuthor::lower_guarded`]) checks one statement per
-    /// fragment. Vendor DDL is transactional with default flags (vendor spec §4.4).
+    /// fragment. Vendor DDL is transactional with default flags.
     pub(crate) fn lower_vendor_statement(
         &self,
         name: &str,
@@ -5953,7 +5952,7 @@ impl DeclarativeAuthor {
         (self.make(name, up, down, MigrationFlags::default(), Vec::new()), statements)
     }
 
-    /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
+    /// render a stand-alone `ALTER TABLE … ALTER COLUMN … TYPE …` the SAME
     /// way `diff` does (`render_alter_column_type`), from a [`ColumnSnapshot`]
     /// carrying the desired `data_type`. Byte-identical to the differ by
     /// construction (it IS the differ's render method); gated/destructive with
@@ -5962,7 +5961,7 @@ impl DeclarativeAuthor {
         single_stmt(self.render_alter_column_type(table, col))
     }
 
-    /// §6.4 — render a stand-alone `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT
+    /// render a stand-alone `ALTER TABLE … ALTER COLUMN … {SET|DROP} NOT
     /// NULL` the SAME way `diff` does (`render_alter_column_nullability`). A
     /// `SET NOT NULL` (tightening) is gated; a `DROP NOT NULL` (relaxing) is
     /// additive. Byte-identical to the differ by construction.
@@ -5990,7 +5989,7 @@ impl DeclarativeAuthor {
 }
 
 // ===========================================================================
-// DdlEmitter — the per-dialect EMISSION seam (P1).
+// DdlEmitter — the per-dialect EMISSION seam.
 //
 // The differ's diff-COMPARISON is dialect-neutral; only the final DDL spelling
 // differs by dialect. This trait isolates exactly those emission concerns — the
@@ -6003,11 +6002,11 @@ impl DeclarativeAuthor {
 // params, `COMMENT ON COLUMN` sentinels) and `SqliteEmitter` (unqualified `main`
 // DDL: inline `/* … */` sentinels, plain B-tree indexes). Each method body is
 // the EXACT former `if is_sqlite { … } else { … }` arm, moved VERBATIM — code
-// motion, not a rewrite, so the bytes are unchanged (the Phase-0 goldens prove
+// motion, not a rewrite, so the bytes are unchanged (the goldens prove
 // it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, system-field
 // index skip, the unreachable guard) stay in `diff()` — they are diff-logic.
 //
-// NOT extracted (out of P1 scope, see the design): `render_create_table` (PG,
+// NOT extracted: `render_create_table` (PG,
 // snapshot-rendered) and `render_create_table_sqlite` (routes to the shared
 // `crate::schema` emitter) — different input shapes, no shared byte bar.
 trait DdlEmitter {
@@ -6103,7 +6102,7 @@ impl DdlEmitter for PgEmitter {
             checks,
         );
         let mut up: Vec<String> = vec![add];
-        // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
+        // (PG only) — a column added via ADD COLUMN carries its comment
         // sentinel (`zero-migrate:mask:…` for a masked sibling, `zero-migrate:enc:…` for an
         // encrypted column) in the same migration (atomic with the column), as its
         // OWN structural statement.
@@ -6120,7 +6119,7 @@ impl DdlEmitter for PgEmitter {
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
         let unique = if idx.unique { "UNIQUE " } else { "" };
-        // **T12** — `USING <method>` for a non-btree index (GIN over the `__fts`
+        // - `USING <method>` for a non-btree index (GIN over the `__fts`
         // tsvector, ivfflat/hnsw over a vector column). A btree index omits the
         // clause (PG's default), so existing btree indexes are byte-unchanged.
         let using = if idx.access_method == "btree" {
@@ -6306,21 +6305,21 @@ impl DdlEmitter for SqliteEmitter {
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
         let checks = inline_checks_clause(c);
-        // **P4 HALF A** — inline `/* zero-migrate:enc:… */` for an encrypted column added
+        // inline `/* zero-migrate:enc:… */` for an encrypted column added
         // after the table exists.
         let enc = c
             .encryption_sentinel
             .as_deref()
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
-        // PHASE 4 — on SQLite the table is `main` (the app file): emit an UNqualified
+        // on SQLite the table is `main` (the app file): emit an UNqualified
         // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
         // resolve to no table ("no such table").
         let table_ref = quote_ident(table);
-        // PHASE 4 — on SQLite the mask sentinel rides INLINE in the column clause
+        // on SQLite the mask sentinel rides INLINE in the column clause
         // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
         // preserves the inline `/* … */` comment through `ADD COLUMN` in
-        // `sqlite_master.sql` (verified), so the P5 drift recovery
+        // `sqlite_master.sql` (verified), so the drift recovery
         // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
         // exactly like a create-time sentinel.
         //
@@ -6381,7 +6380,7 @@ impl DdlEmitter for SqliteEmitter {
         }
         let unique = if idx.unique { "UNIQUE " } else { "" };
         let col_list = render_index_elements_sqlite(idx);
-        // PHASE 4 — SQLite indexes are UNqualified (`main` = the app file), and
+        // SQLite indexes are UNqualified (`main` = the app file), and
         // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
         // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
         // the additive index path emits). The schema qualifier is on neither the
@@ -6415,7 +6414,7 @@ impl DdlEmitter for SqliteEmitter {
     }
 
     fn drop_column_up(&self, table: &str, col: &str) -> String {
-        // PHASE 4 — SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
+        // SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
         // UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
         // resolve to no table.
         format!(
@@ -6426,7 +6425,7 @@ impl DdlEmitter for SqliteEmitter {
     }
 
     fn drop_index_up(&self, _table: Option<&str>, idx_name: &str) -> String {
-        // PHASE 4 — on SQLite an index lives UNqualified in `main` (the app file).
+        // on SQLite an index lives UNqualified in `main` (the app file).
         // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite — it
         // SILENTLY no-ops (the qualified name never resolves), reporting success while
         // the index survives: silent drift, the dangerous failure mode. Emit the
@@ -6552,7 +6551,7 @@ fn destructive_flags() -> MigrationFlags {
 /// `pub(crate)` so [`crate::render::lower::IrAuthor`] derives the IR `renameColumn`'s
 /// PG `OnlineIntent` column type the SAME way the declarative rename path does
 /// (live `data_type` → `ddl_type`), preserving E1's `ADD COLUMN <to> <ty>`
-/// byte-equality between the two paths (§2.6.1).
+/// byte-equality between the two paths.
 pub(crate) fn ddl_type(data_type: &str) -> &str {
     match data_type {
         "timestamp with time zone" => "timestamptz",
@@ -6819,7 +6818,7 @@ fn fk_referenced_columns(definition: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod snapshot_builder_refactor_safety_tests {
-    //! §6.5 #3 — the snapshot-builder regression-pin fixture. The per-column /
+    //! The snapshot-builder regression-pin fixture. The per-column /
     //! per-index snapshot construction was LIFTED out of
     //! `desired_snapshot_for_dialect`'s inline loop into the shared,
     //! dialect-parameterized [`super::build_table_snapshot`].
@@ -6942,7 +6941,7 @@ mod snapshot_builder_refactor_safety_tests {
     }
 
     /// One-field `id` descriptor with the given modifiers — mirrors what
-    /// `ir_column_to_field` produces for an `id`-named uuid column under the P2a
+    /// `ir_column_to_field` produces for an `id`-named uuid column under the id
     /// remap (`ty = "id"`). The op.* `t.id()` synth default maps to `default: None`,
     /// so a `Some(default)` here models the dangerous `id: t.uuid().default(<lit>)`.
     fn id_descriptor(required: bool, unique: bool, default: Option<serde_json::Value>) -> CollectionDescriptor {
@@ -6962,7 +6961,7 @@ mod snapshot_builder_refactor_safety_tests {
         }
     }
 
-    /// **MED-1** — the id-fold DISCARDS the `id` field (it is a prefix declaration
+    /// **id-fold** — the id-fold DISCARDS the `id` field (it is a prefix declaration
     /// for the already-injected system PK), so a column-level modifier on it would be
     /// SILENTLY LOST. Because `ir_column_to_field` remaps ANY `id`-named uuid column
     /// to type `"id"`, a hand-authored `id: t.uuid().unique()` reaches this fold; pin
@@ -6981,7 +6980,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
     }
 
-    /// **MED-1** — the dangerous `id: t.uuid().default(<literal>)` shape: a user
+    /// **id-fold** — the dangerous `id: t.uuid().default(<literal>)` shape: a user
     /// default on the folded id would be silently lost. Pin the hard reject.
     #[test]
     fn id_field_with_user_default_is_rejected_not_silently_folded() {
@@ -6995,7 +6994,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
     }
 
-    /// **MED-1 — nullability is NOT a discarded modifier.** The system PK is always
+    /// **nullability is NOT a discarded modifier.** The system PK is always
     /// NOT NULL irrespective of the folded field's `required` flag, and the
     /// declarative `t.id(prefix)` descriptor legitimately leaves `required` at its
     /// `false` default (the NOT NULL is injected by `system_field_columns`). So a
@@ -7012,7 +7011,7 @@ mod snapshot_builder_refactor_safety_tests {
         assert_eq!(id_cols, 1, "exactly one (system) id column — nullability is not a drop");
     }
 
-    /// **MED-1 — the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
+    /// **the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
     /// (`ty = "id"`, no user default, not column-unique — exactly what
     /// `ir_column_to_field` produces, since the synth `genRandomUuid` default maps to
     /// `None`) must fold into the single system PK with NO error and NO second column.
@@ -7208,7 +7207,7 @@ mod system_field_names_tie_tests {
     use super::system_field_columns;
     use crate::model::ir::SYSTEM_FIELD_NAMES;
 
-    // The shared-source guarantee (MED): the IR validator's createTable rule-(c)
+    // The shared-source guarantee: the IR validator's createTable rule-(c)
     // scope unions SYSTEM_FIELD_NAMES, which MUST stay byte-identical (and in the
     // same canonical order) to the names `system_field_columns` stamps types onto.
     // If a system field is ever added/renamed in one place, this fails until both
@@ -7229,7 +7228,7 @@ mod system_field_names_tie_tests {
 mod h1_word_scan_tests {
     use super::{word_count_ci, word_present_ci};
 
-    // H1 — the whole-word, case-insensitive column scan used by the DROP-COLUMN
+    // the whole-word, case-insensitive column scan used by the DROP-COLUMN
     // rebuild router. A column must NOT match as a substring of a larger identifier,
     // a quoted reference must match, and the case must be folded.
     #[test]
@@ -7327,7 +7326,7 @@ mod advisory_seam_tests {
         assert!(plan.advisories().is_empty());
     }
 
-    // ---- review finding #8: plan-aware FK_WITHOUT_INDEX suppression ----
+    // ---- plan-aware FK_WITHOUT_INDEX suppression ----
 
     #[test]
     fn fk_without_index_suppressed_when_a_separate_migration_indexes_it() {
@@ -7382,7 +7381,7 @@ mod advisory_seam_tests {
 
 #[cfg(test)]
 mod fk_referenced_table_quoting_tests {
-    //! **PR10 review (LOW)** — the PG FK referenced-table clause must quote the
+    //! the PG FK referenced-table clause must quote the
     //! referenced schema + table the SAME way `pg_get_constraintdef` does
     //! (conditional, not unconditional), so the desired FK body round-trips
     //! byte-for-byte against the live catalog AND a reserved-word/mixed-case name
@@ -7476,7 +7475,7 @@ mod fk_referenced_table_quoting_tests {
 
 #[cfg(test)]
 mod numeric_default_literal_tests {
-    //! SA-21 — lock the int / `>2^53` bigint / decimal-string column DEFAULT
+    //! Lock the int / `>2^53` bigint / decimal-string column DEFAULT
     //! literal rendering against regression. Pre-fix, the `int` arm was missing
     //! and an integer DEFAULT (and any decimal/bigint carried as a numeric string)
     //! silently dropped. The string arm is gated by `is_decimal_string` so raw text

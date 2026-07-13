@@ -1,4 +1,4 @@
-//! Migration unit + supporting value types (design §2.1).
+//! Migration unit + supporting value types.
 //!
 //! A migration is an **immutable, ordered** artifact shipped in the `.zship`
 //! bundle and recorded in the journal on apply. The version is a `UUIDv7` typed
@@ -46,18 +46,18 @@ impl MigrationId {
     }
 
     /// Mint a DETERMINISTIC, STABLE migration id from a domain `tag` + a content
-    /// `seed` (§2.0.1 sub-step versioning). The id is `SHA-256(tag || seed)` laid
-    /// out with the SAME high-48-bit `0xFF…FF` MARKER the loader's
-    /// `repeatable_id_for_name` / the IR author's `dml_id_from_seed` use — so a
+    /// `seed` (sub-step versioning). The id is `SHA-256(tag || seed)` laid
+    /// out with the SAME high-48-bit `0xFF…FF` MARKER the IR author's
+    /// derived DML/backfill ids use — so a
     /// derived sub-step id can **never** collide with a versioned migration id
     /// (whose high 48 bits hold a small numeric file version) and two distinct
     /// seeds collide only on an 80-bit SHA-256 prefix collision (negligible).
     ///
-    /// This is the deterministic-derivation discipline §2.0.1 mandates for every
+    /// This is the deterministic-derivation discipline mandated for every
     /// `PlanStep` sub-version (`step_id = uuidv7_derive(plan.version, step_index)`):
     /// the `ExpandContractAuthor`'s E1..C2 ids are derived from the rename's stable
     /// identity (`schema + owner + table + from + to + ty`) plus the step index, so
-    /// **re-lowering the identical `.ir.json` reproduces byte-identical ids** — the
+    /// **re-lowering the identical IR envelope reproduces byte-identical ids** — the
     /// property the cross-deploy obligation key, the idempotent re-run skip, the
     /// auto-discharge recognition, and the self-EXPAND exemption all depend on. A
     /// fresh `generate()` per lower (the bug this replaces) gives each deploy a
@@ -142,8 +142,8 @@ pub fn migration_id_for_version(version: u64) -> MigrationId {
         .expect("derived id is a valid mig_ typed id")
 }
 
-/// The phase of a zero-downtime **expand-contract** online migration (design
-/// §5, Plan 8). Carried only by `online` migrations (`flags.online == true`);
+/// The phase of a zero-downtime **expand-contract** online migration.
+/// Carried only by `online` migrations (`flags.online == true`);
 /// `None` for an ordinary one-shot migration.
 ///
 /// An online column RENAME (or type change) is split across **two deploys**:
@@ -154,7 +154,7 @@ pub fn migration_id_for_version(version: u64) -> MigrationId {
 /// - **`Contract`** — drop the old shape once no code uses it (drop the
 ///   trigger + function, drop the old column). Lands *after* code switches over.
 ///
-/// The engine enforces the split via a gate (design Plan 8 v1.2): a `Contract`
+/// The engine enforces the split via a gate: a `Contract`
 /// migration is refused unless every `Expand` migration it `depends_on` is
 /// **net-applied in the journal**. This makes the journal the single source of
 /// truth for the expand→contract timeline and gives cross-deploy partitioning
@@ -172,9 +172,9 @@ pub enum OnlinePhase {
     Contract,
 }
 
-/// Apply-time flags carried by a migration (design §2.1).
+/// Apply-time flags carried by a migration.
 ///
-/// These four booleans are the exact §2.1 migration-unit flag set; they are
+/// These four booleans are the exact migration-unit flag set; they are
 /// independent orthogonal facets (a migration can be e.g. non-transactional +
 /// online + requires-approval), not a state machine, so the wire shape is a
 /// flat record of bools by design. A fifth, optional `timeout_ms` lets a single
@@ -216,10 +216,10 @@ pub struct MigrationFlags {
     /// The expand/contract phase of an `online` migration ([`OnlinePhase`]).
     /// `None` for an ordinary one-shot migration; `Some(Expand)` /
     /// `Some(Contract)` for the two halves of a zero-downtime expand-contract
-    /// sequence. Read by the engine's expand/contract gate (Plan 8 v1.2). Kept
+    /// sequence. Read by the engine's expand/contract gate. Kept
     /// optional + separate from the four bools so they remain orthogonal facets.
     pub phase: Option<OnlinePhase>,
-    /// **Repeatable** (v3 Plan E — Flyway `R__` / Liquibase `runOnChange`).
+    /// **Repeatable** (Flyway `R__` / Liquibase `runOnChange`).
     /// Default `false` = an ordinary, run-once versioned migration. `true` marks
     /// a *replace-style* migration whose identity is its stable `version`/name
     /// (it is NEVER re-versioned per edit), and which **re-applies whenever its
@@ -239,7 +239,7 @@ pub struct MigrationFlags {
     ///
     /// A repeatable's `down` is always `None` (replace-style; no true reverse).
     pub repeatable: bool,
-    /// **Engine-emitted goodie DDL** (§2.6) — the `up` is descriptor-derived,
+    /// **Engine-emitted goodie DDL** — the `up` is descriptor-derived,
     /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the SQLite
     /// **EngineJournal** authorizer mode rather than the confined **CreatorUp** mode.
     ///
@@ -273,7 +273,7 @@ impl Default for MigrationFlags {
 }
 
 /// The **apply-relevant** fields of a migration, borrowed, as the input to
-/// [`Checksum::of`] (v3 Plan F C1).
+/// [`Checksum::of`].
 ///
 /// The per-migration checksum must cover the WHOLE unit the executor uses to
 /// **order / partition / supersede / gate** a migration — not just its SQL
@@ -306,7 +306,7 @@ pub struct ChecksumInput<'a> {
     pub depends_on: &'a [MigrationId],
     /// Versions this migration supersedes (squash).
     pub supersedes: &'a [MigrationId],
-    /// Preconditions (v3 Plan D).
+    /// Preconditions.
     pub preconditions: &'a [PreconditionCheck],
 }
 
@@ -328,12 +328,12 @@ impl<'a> ChecksumInput<'a> {
     }
 }
 
-/// Tamper-evident checksum over a migration's WHOLE apply-relevant unit (v3 Plan
-/// F C1): `up`, optional `down`, `preconditions`, **`flags`**, **`depends_on`**,
+/// Tamper-evident checksum over a migration's WHOLE apply-relevant unit:
+/// `up`, optional `down`, `preconditions`, **`flags`**, **`depends_on`**,
 /// **`supersedes`**, and **`owner_app`**.
 ///
 /// Hex-encoded SHA-256. A mismatch on an already-applied migration is a hard
-/// error (design §1.5 / §2.3 drift check). Every field is **length-prefixed** so
+/// error (the drift check). Every field is **length-prefixed** so
 /// `down: Some("")` and `down: None` produce *different* checksums (an empty
 /// reversible down is not the same migration as an irreversible one), and so no
 /// concatenation collision across field boundaries is possible.
@@ -347,7 +347,7 @@ impl<'a> ChecksumInput<'a> {
 /// this checksum — so the set-level integrity manifest (which folds this
 /// checksum) refuses it, and the per-migration drift check (which compares this
 /// checksum on already-applied versions) flags it. Preconditions are part of the
-/// migration's identity (v3 Plan D): two migrations with the same SQL but
+/// migration's identity: two migrations with the same SQL but
 /// different gating conditions are NOT the same migration.
 ///
 /// # Canonical serialization
@@ -357,7 +357,7 @@ impl<'a> ChecksumInput<'a> {
 /// length-prefixed. `depends_on` and `supersedes` are folded as ORDERED lists of
 /// length-prefixed version strings, IN THE GIVEN ORDER — order is semantically
 /// meaningful (a dependency list `[a, b]` is the same constraint as `[b, a]`, but
-/// the manifest's canonical-executed-order fold (M2) makes any reorder of the
+/// the manifest's canonical-executed-order fold makes any reorder of the
 /// effective execution visible regardless; we keep `depends_on`/`supersedes`
 /// order-as-given here so the per-migration checksum is a faithful byte image of
 /// the stored vectors and a SET change is always caught). `owner_app` is folded
@@ -408,7 +408,7 @@ impl Checksum {
     }
 
     /// Compute the checksum over a migration authored in the `op.*` IR — the
-    /// canonical op-list region (§2.4 point 2) in PLACE OF the `up`/`down`
+    /// canonical op-list region in PLACE OF the `up`/`down`
     /// region, then the SAME [`fold_common`] tail as [`Checksum::of`].
     ///
     /// The op-list region is [`crate::model::ir::CanonicalOpList::canonical_bytes`]: an op count,
@@ -420,7 +420,7 @@ impl Checksum {
     /// rendered-SQL migration with the same common tail get distinct checksums).
     ///
     /// Scope of JCS = the op-list region ONLY; the `fold_common` tail keeps the
-    /// existing serde discipline (§2.4 point 5), NOT JCS.
+    /// existing serde discipline, NOT JCS.
     ///
     /// # The `flags` argument MUST be dialect-NEUTRAL
     ///
@@ -428,13 +428,13 @@ impl Checksum {
     /// and hashes only the neutral op list + the derived+overridden flags +
     /// owner + deps + preconditions. A single portable migration therefore has
     /// ONE checksum across the PG and SQLite renders (the single-artifact /
-    /// single-checksum invariant, §2.5 / spec line 1267).
+    /// single-checksum invariant).
     ///
     /// A future `IrAuthor` MUST pass the **dialect-neutral derived-then-overridden**
     /// flags here — NEVER the per-dialect *lowered* flags. The lowering legitimately
     /// diverges per dialect (e.g. SQLite forces `transactional: true` and drops
-    /// `concurrently` for a concurrent index while PG keeps `transactional: false`,
-    /// §2 / spec line 257). Folding those POST-lowering per-dialect flags into the
+    /// `concurrently` for a concurrent index while PG keeps `transactional: false`).
+    /// Folding those POST-lowering per-dialect flags into the
     /// hash would make `of_ir` diverge per dialect and silently break the
     /// single-checksum invariant. The `transactional`/`concurrently` divergence is
     /// a render-time concern; it does not belong in the identity checksum.
@@ -554,7 +554,7 @@ fn fold_version_list(hasher: &mut Sha256, versions: &[MigrationId]) {
     }
 }
 
-/// An immutable, ordered migration artifact (design §2.1).
+/// An immutable, ordered migration artifact.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Migration {
     /// `UUIDv7` version (`mig_…`) — time-ordered, collision-free.
@@ -573,7 +573,7 @@ pub struct Migration {
     pub owner_app: String,
     /// Optional cross-slice ordering dependencies.
     pub depends_on: Vec<MigrationId>,
-    /// The versions this migration **supersedes** (Plan 9 squash). Empty for an
+    /// The versions this migration **supersedes** (squash). Empty for an
     /// ordinary migration; non-empty only for a **squash** migration `S` that
     /// collapses a contiguous prefix `[v1..vN]` of applied history into a single
     /// equivalent step. `S.up` is the combined DDL of `[v1..vN]` (so a fresh
@@ -588,7 +588,7 @@ pub struct Migration {
     /// the squash is recorded WITHOUT running `S.up` (see `the squash op`).
     #[serde(default)]
     pub supersedes: Vec<MigrationId>,
-    /// Optional **preconditions** (v3 Plan D): assertions evaluated against the
+    /// Optional **preconditions**: assertions evaluated against the
     /// live DB BEFORE this migration's `up` runs, gating whether it applies.
     /// Empty (the default) = unconditional apply. Each [`PreconditionCheck`]
     /// carries an assertion ([`Precondition`](crate::model::precondition::Precondition))
@@ -600,7 +600,7 @@ pub struct Migration {
     /// [`checksum`]: Migration::checksum
     #[serde(default)]
     pub preconditions: Vec<PreconditionCheck>,
-    /// **PR10 Part B** — the executor-side existence-guard probe (§2.7), stamped
+    /// The executor-side existence-guard probe, stamped
     /// onto this migration at IR-lower time when its source op carried an
     /// `existence_guard` (`ifNotExists`/`ifExists`). At apply time the executor
     /// reads the live catalog under the held project advisory lock + the open
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(base.as_str().len(), 64);
     }
 
-    /// C1 (v3 Plan F): the per-migration checksum covers the WHOLE apply-relevant
+    /// The per-migration checksum covers the WHOLE apply-relevant
     /// unit, so a tampered `flags` / `depends_on` / `supersedes` / `owner_app`
     /// changes the checksum (and therefore the integrity manifest + the drift
     /// check). RED before the `Checksum::of` widening (those fields were unhashed).

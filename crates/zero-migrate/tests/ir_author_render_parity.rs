@@ -1,4 +1,4 @@
-//! §6.4 — the cross-path byte-identity golden gate.
+//! The cross-path byte-identity golden gate.
 //!
 //! For `createTable` and each DDL op, the stand-alone `IrAuthor::lower` render
 //! MUST be byte-identical to the render the declarative path
@@ -12,7 +12,7 @@
 //!
 //! This is a PURE-RENDER gate (no DB needed): both paths build a `TableSnapshot`
 //! from the SHARED `build_table_snapshot` and render through the SAME methods, so
-//! the test proves the §6.5 single-source builder + the §6.4 seam agree. If a
+//! the test proves the single-source builder + the render seam agree. If a
 //! future change forks the two outputs, this fails.
 
 use std::collections::{BTreeSet, HashMap};
@@ -263,7 +263,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
 
 #[test]
 fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
-    // The sentinel trap (§6.5): an encrypted column. Both paths MUST carry the
+    // The sentinel trap: an encrypted column. Both paths MUST carry the
     // byte-identical BYTEA type + the `/* zero-migrate:enc:… */` inline sentinel + the
     // `COMMENT ON COLUMN … 'zero-migrate:enc:…'` side output + the encrypted default-mask
     // `<col>_masked` sibling / `zero-migrate:mask` sentinel — built by the shared kernel
@@ -521,9 +521,9 @@ fn create_index_render_is_byte_identical_pg() {
 }
 
 // ===========================================================================
-// §6.4 SQLite leg — the SAME byte-identity gate on the SQLite dialect.
+// SQLite leg — the SAME byte-identity gate on the SQLite dialect.
 //
-// The task mandates the cross-path byte-identity golden on BOTH PG and SQLite.
+// The cross-path byte-identity golden holds on BOTH PG and SQLite.
 // The SQLite createTable routes through the SHARED `zero_migrate::schema::query`
 // emitter (the same call the differ's `render_create_table_sqlite` makes), fed
 // the SDK schema `Value` IrAuthor builds from the op descriptor via the same
@@ -532,10 +532,10 @@ fn create_index_render_is_byte_identical_pg() {
 // ===========================================================================
 
 // ===========================================================================
-// §6.4 stand-alone constraint + alterColumn* render coverage (§1260/§1270).
+// Stand-alone constraint + alterColumn* render coverage.
 //
-// The spec places stand-alone constraint + `alterColumn*` render coverage in
-// PR1, with a cross-path parity golden for each. These ops are PG-native (SQLite
+// Stand-alone constraint + `alterColumn*` render coverage, with a cross-path
+// parity golden for each. These ops are PG-native (SQLite
 // reconciles them via the 12-step rebuild in the differ, which needs full live
 // structure — out of this pure-render lower's scope); the SQLite leg of the
 // stand-alone IR lower fails closed (asserted below).
@@ -735,9 +735,9 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
     assert!(ir.iter().any(|(up, _)| up.contains("FOREIGN KEY")));
 }
 
-/// **C1 — a stand-alone addConstraint(fk) with `on_delete: cascade` RENDERS
-/// `ON DELETE CASCADE` on Postgres.** The pre-C1 imperative FK silently dropped the
-/// actions; this is the regression test that would FAIL on the pre-C1 code (the
+/// **A stand-alone addConstraint(fk) with `on_delete: cascade` RENDERS
+/// `ON DELETE CASCADE` on Postgres.** The earlier imperative FK silently dropped the
+/// actions; this is the regression test that would FAIL on that earlier code (the
 /// rendered DDL carried no `ON DELETE` clause). Applies on PG (the stand-alone
 /// addConstraint path is PG-only by `require_pg_for`; the SQLite leg refuses a
 /// stand-alone FK add, unchanged).
@@ -1135,7 +1135,7 @@ fn create_table_render_is_byte_identical_sqlite() {
     );
 }
 
-// §6.4 (code-critic MED-2) — the SQLite peer of
+// The SQLite peer of
 // `create_table_with_live_fk_render_is_byte_identical_pg`. A `posts` table with a
 // ref → an ALREADY-LIVE `authors` table: both the differ and `IrAuthor::lower`
 // route through `render_create_table_sqlite_value`, so the inline FK render is

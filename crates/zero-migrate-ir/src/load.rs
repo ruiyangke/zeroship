@@ -1,6 +1,6 @@
-//! The fail-closed **`.ir.json` load gate** (design §5.2 / §5.3 / §6 / §8.6).
+//! The fail-closed **IR envelope load gate**.
 //!
-//! This is the SINGLE production seam every creator-authored `.ir.json` passes
+//! This is the SINGLE production seam every creator-authored IR envelope passes
 //! through before the engine lowers it (`IrAuthor::lower`, the per-dialect DDL
 //! compiler — a later wave) or checksums it. The gate is fail-closed and ordered
 //! so a hostile / newer-engine / cross-tenant artifact is rejected BEFORE any
@@ -8,29 +8,27 @@
 //!
 //! 1. **deserialize** the bytes into the typed [`MigrationIr`] — the closed `Op`/
 //!    `Expr` AST + the constrained [`IrScalar`](crate::ir::IrScalar) numeric
-//!    domain reject a malformed/lossy/unknown-node artifact at this step (§2.5,
-//!    §3.3.1.1).
+//!    domain reject a malformed/lossy/unknown-node artifact at this step.
 //! 2. **`ir_version` fail-closed** ([`MigrationIr::check_ir_version`]): a FUTURE
-//!    wire-format version this engine build does not understand is refused
-//!    (§5.3, design line 888).
+//!    wire-format version this engine build does not understand is refused.
 //! 3. **structural validation** (`the structural validator`): the authoritative
 //!    structural gate over EVERY embedded `Expr` slot for the deploy-target
-//!    dialect (§3.3.1.1) — out-of-envelope `splitPart`, an unresolved `ColRef` in
+//!    dialect — out-of-envelope `splitPart`, an unresolved `ColRef` in
 //!    a self-contained `createTable`, a non-portable shape.
 //! 4. **server-stamped ownership** ([`enforce_ir_ownership`]): `owner_app` is
 //!    overwritten with the deploying app's id (a spoofed value is discarded), and
 //!    every op targeting a table must resolve to the deploying app in the project
-//!    ownership registry — a table absent from the registry FAILS CLOSED (§8.6,
-//!    mirroring the declarative drop-ownership check, `declarative.rs:2820-2826`).
+//!    ownership registry — a table absent from the registry FAILS CLOSED
+//!    (mirroring the declarative drop-ownership check in `declarative.rs`).
 //!    A `createTable` establishes ownership for its NEW table (the deploying app),
 //!    exactly as the declarative union does.
-//! 5. **advisory checksum-hint compare** (§2.4 point 2): when the artifact carries
+//! 5. **advisory checksum-hint compare**: when the artifact carries
 //!    the optional `checksum` hint, the engine RECOMPUTES the hint-domain checksum
 //!    and a mismatch is a hard error (genuine drift / tamper). The engine is
 //!    authoritative; the hint is advisory and need not be present.
 //!
 //! Lowering the validated IR to an executable [`AppliedPlan`](crate::render::plan::AppliedPlan)
-//! (`IrAuthor::lower`, the §6.5 snapshot-builder + per-dialect DDL render) is the
+//! (`IrAuthor::lower`, the snapshot-builder + per-dialect DDL render) is the
 //! next wave; this module is the load + gate that MUST run first.
 
 use std::collections::BTreeMap;
@@ -39,27 +37,27 @@ use crate::ir::{IrVersionError, MigrationIr, Op};
 use crate::migration::{Checksum, MigrationFlags};
 use crate::validate::AuthoringError;
 
-/// A failure of the `.ir.json` load gate. Each variant maps to one ordered
-/// fail-closed step (§5.2).
+/// A failure of the IR envelope load gate. Each variant maps to one ordered
+/// fail-closed step.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IrLoadError {
     /// The bytes did not deserialize into a well-formed [`MigrationIr`] — a
     /// malformed JSON document, an unknown op/expr node tag, an out-of-domain
-    /// numeric scalar (§2.5), or a non-nullary synth default (§4.3). Carries the
+    /// numeric scalar, or a non-nullary synth default. Carries the
     /// serde message (which embeds the structured code, e.g.
     /// [`EXPR_INVALID_NUMERIC`](crate::ir::EXPR_INVALID_NUMERIC), for matching).
-    #[error("malformed .ir.json: {0}")]
+    #[error("malformed IR envelope: {0}")]
     Deserialize(String),
-    /// The artifact declared a FUTURE `ir_version` this engine cannot interpret
-    /// (§5.3). Fail-closed.
+    /// The artifact declared a FUTURE `ir_version` this engine cannot interpret.
+    /// Fail-closed.
     #[error(transparent)]
     Version(#[from] IrVersionError),
     /// An embedded expression-AST node failed the structural validator for the
-    /// deploy-target dialect (§3.3.1.1). Carries the §8.8 authoring envelope.
+    /// deploy-target dialect. Carries the authoring envelope.
     #[error(transparent)]
     Validate(#[from] AuthoringError),
     /// An op targets a table the deploying app does not own, OR a table absent
-    /// from the project ownership registry (unknown-owner fail-closed, §8.6).
+    /// from the project ownership registry (unknown-owner fail-closed).
     #[error(
         "ownership violation: op {op_index} targets table {table:?} owned by {owner} \
          (deploying app is {deploying_app:?}); an app may only migrate tables it owns, \
@@ -76,9 +74,9 @@ pub enum IrLoadError {
         deploying_app: String,
     },
     /// The artifact's advisory `checksum` hint did not match the engine's
-    /// recomputed hint-domain checksum — genuine drift / tamper (§2.4 point 2).
+    /// recomputed hint-domain checksum — genuine drift / tamper.
     #[error(
-        "checksum hint mismatch: the .ir.json advisory hint {hint:?} does not match the \
+        "checksum hint mismatch: the IR envelope advisory hint {hint:?} does not match the \
          engine-recomputed hint-domain checksum {recomputed:?} (the op list / flags / deps \
          changed since the hint was stamped, or the artifact was tampered with)"
     )]
@@ -91,7 +89,7 @@ pub enum IrLoadError {
     /// The artifact carried an advisory `checksum` hint AND a field whose
     /// contribution to the hint domain this engine build cannot yet compute
     /// (a non-empty `depends_on`/`supersedes`, or a non-default `flags`
-    /// override). The §2.4-point-2 hint domain is
+    /// override). The hint domain is
     /// `ops + flags + depends_on + supersedes + preconditions`, but the
     /// `IrFlagsOverride`→`MigrationFlags` + `String`→`MigrationId` merge is a
     /// later wave, so the engine refuses fail-closed rather than compare a
@@ -99,8 +97,8 @@ pub enum IrLoadError {
     /// false-accept tampering of the un-folded fields). Authoring those fields
     /// WITHOUT a hint is unaffected.
     #[error(
-        "checksum hint not yet computable: the .ir.json carries an advisory checksum hint \
-         alongside {field} ({detail}), which this engine build cannot fold into the §2.4 hint \
+        "checksum hint not yet computable: the IR envelope carries an advisory checksum hint \
+         alongside {field} ({detail}), which this engine build cannot fold into the hint \
          domain yet (the flags/deps merge is a later wave). Drop the advisory hint, or omit \
          {field}, until the merge lands — the engine refuses to validate a hint against a \
          partial domain"
@@ -154,7 +152,7 @@ fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
 /// ownership-checkable target and returns `None`.
 ///
 /// **A bare-name `DropIndex` (`table: None`) is REJECTED UPSTREAM fail-closed**
-/// by `validate_op` (§8.6: a name-only index drop is not
+/// by `validate_op` (a name-only index drop is not
 /// ownership-checkable, so it would let a migration drop another app's index by
 /// name). So by the time this function runs, every `DropIndex` reaching the
 /// ownership pass carries a `table` hint and IS ownership-checked. The `None` arm
@@ -242,8 +240,8 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
     }
 }
 
-/// IR-path per-table ownership enforcement (§8.6) — the IR mirror of the
-/// declarative path's two-part ownership check (`declarative.rs:2820-2826`).
+/// IR-path per-table ownership enforcement — the IR mirror of the
+/// declarative path's two-part ownership check (in `declarative.rs`).
 ///
 /// `registry` is the project's CURRENT table→owner map. This pass:
 /// 1. First registers every `createTable`'s NEW table as owned by `deploying_app`
@@ -307,14 +305,13 @@ pub fn enforce_ir_ownership(
     Ok(())
 }
 
-/// Recompute the §2.4-point-2 **advisory hint domain** checksum for a loaded IR.
+/// Recompute the **advisory hint domain** checksum for a loaded IR.
 ///
-/// The hint domain (design §2.4 point 2 + [`MigrationIr::checksum`] doc) is
+/// The hint domain (see the [`MigrationIr::checksum`] doc) is
 /// `ops + flags + depends_on + supersedes + preconditions`, with `owner_app = ""`
-/// (server-stamped and so unpredictable to the builder — excluded, §2.4 /
-/// line 1094).
+/// (server-stamped and so unpredictable to the builder — excluded).
 ///
-/// **PR1 only folds the SUBSET it can compute faithfully**: the op region (which
+/// This only folds the SUBSET it can compute faithfully: the op region (which
 /// fully determines the artifact's logical content) + preconditions + the
 /// dialect-neutral DEFAULT flags + EMPTY deps/supersedes. The
 /// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→[`MigrationFlags`] and
@@ -343,38 +340,38 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 }
 
 /// The **authoritative, dialect-neutral plan checksum** over a loaded
-/// [`MigrationIr`] — the drift anchor the deploy path journals (§5.3 / §2.6.1).
+/// [`MigrationIr`] — the drift anchor the deploy path journals.
 ///
-/// This is `Checksum::of_ir` over the canonical op list (§2.4 point 2) + the
+/// This is `Checksum::of_ir` over the canonical op list + the
 /// derived-then-overridden flags + the SERVER-STAMPED `owner_app`. It differs
 /// from [`recompute_hint_domain_checksum`] in exactly one way: it INCLUDES
 /// `owner_app` (the hint domain excludes it because the builder can't predict the
-/// server stamp; the authoritative journal anchor includes it, `migration.rs:330`).
+/// server stamp; the authoritative journal anchor includes it — see `migration.rs`).
 ///
-/// **Why this is the drift anchor and the rendered SQL is NOT.** §5.3 names "the
-/// checksum over the canonical op list" as the anchor and §2.6.1 says "one plan
-/// checksum over the canonical op list, not the rendered SQL." Because the op list
-/// is dialect-NEUTRAL, the SAME `.ir.json` re-deployed on PG or SQLite re-derives
+/// **Why this is the drift anchor and the rendered SQL is NOT.** The anchor is
+/// the checksum over the canonical op list — one plan checksum over the canonical
+/// op list, not the rendered SQL. Because the op list
+/// is dialect-NEUTRAL, the SAME IR envelope re-deployed on PG or SQLite re-derives
 /// the SAME anchor — so a re-deploy detects drift against the logical artifact, not
 /// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
 /// changes this checksum ⇒ the executor's net-applied drift gate aborts
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
 /// which the IR Lower stamps with THIS value — see [`crate::render::lower::IrAuthor::lower_plan`]).
 ///
-/// **PR1 flags scope.** The [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→
+/// **Flags scope.** The [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→
 /// [`MigrationFlags`] and `String`→`MigrationId` merges are a later wave, so this
 /// folds the DEFAULT flags + EMPTY deps/supersedes — IDENTICAL to the hint domain
 /// (so the hint compare and the journaled anchor never disagree on a default-flags
 /// IR). The caller MUST gate on [`hint_domain_uncomputable_field`] returning `None`
 /// (the load gate already refuses an IR whose flags/deps/supersedes are non-default
-/// AND carry a hint; a non-default IR with NO hint is out of PR1 scope and the
+/// AND carry a hint; a non-default IR with NO hint is out of scope and the
 /// deploy path does not reach this helper for one).
 #[must_use]
 pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     debug_assert!(
         hint_domain_uncomputable_field(ir).is_none(),
         "authoritative_ir_checksum called on an IR with a not-yet-foldable \
-         flags/deps/supersedes domain — PR1 folds default flags + empty deps only"
+         flags/deps/supersedes domain — this folds default flags + empty deps only"
     );
     Checksum::of_ir(
         &crate::ir::CanonicalOpList(&ir.ops),
@@ -386,12 +383,12 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     )
 }
 
-/// Return the §2.4 hint-domain field this engine build cannot yet fold for `ir`,
+/// Return the hint-domain field this engine build cannot yet fold for `ir`,
 /// or `None` when the hint domain IS fully computable (flags at default + no
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
 /// domain (the `IrFlagsOverride`/`MigrationId` merges are a later wave).
 ///
-/// Public so the build-time checksum fold (the V8 frontend's
+/// Public so the build-time checksum fold (the JS builder's
 /// `typed_checksum`/`checksum_of_committed`) can gate on the SAME domain as the
 /// engine's load gate — refusing to anchor a partial checksum over an IR carrying
 /// non-default flags/deps/supersedes rather than silently folding a partial domain

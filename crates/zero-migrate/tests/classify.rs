@@ -1,8 +1,8 @@
-//! Statement-classification correctness (Task 3).
+//! Statement-classification correctness.
 //!
 //! `classify` maps each parsed statement to a [`StatementClass`] — the DDL
 //! kind, additive/destructive facets, transactionality, and the set of
-//! schemas it references. The security guard (Task 4) is built on top of this.
+//! schemas it references. The security guard is built on top of this.
 
 use zero_migrate::classify::{classify, DataSecurityClass, DdlKind};
 

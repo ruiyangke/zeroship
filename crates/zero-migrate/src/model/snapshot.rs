@@ -61,7 +61,7 @@ pub struct ColumnSnapshot {
     /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`). `None` is the
     /// byte-identical default case-sensitive text behavior.
     pub case_sensitive: Option<bool>,
-    /// **P4 HALF A** — the inline encryption sentinel to append after this
+    /// The inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
     /// `/* zero-migrate:enc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
     /// column (its physical type is `BYTEA`); it is the schema-shape contract
@@ -73,7 +73,7 @@ pub struct ColumnSnapshot {
     /// `Eq` / `Hash`. The sentinel is built by the shared
     /// [`crate::schema::query`] kernel — never re-spelled here.
     pub encryption_sentinel: Option<String>,
-    /// **P4 HALF A** — the body of a `COMMENT ON COLUMN` sentinel to attach to
+    /// The body of a `COMMENT ON COLUMN` sentinel to attach to
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
     ///   - `zero-migrate:mask:kind=…,classification=…` on a hidden `<col>_masked` sibling
     ///     (drives the runtime mask read-pass), and

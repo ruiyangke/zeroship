@@ -1,12 +1,12 @@
-//! The least-privilege per-project `migrator` role — **line-2 DB-privilege
-//! defense** (design §1.3 / §1.7).
+//! The least-privilege per-project `migrator` role — **second-line DB-privilege
+//! defense**.
 //!
-//! The SQL guard ([`crate::guard::SqlGuard`]) is line 1: it parses every `up`
+//! The SQL guard ([`crate::guard::SqlGuard`]) is the first line: it parses every `up`
 //! and denies the dangerous surface at submission. But a parser can be evaded
 //! by **runtime-constructed SQL** — e.g. `DO $$ … EXECUTE format('… %I …', s) …`
 //! where the target schema is computed at execution and never appears as a
 //! parseable identifier the guard can confine. The guard documents these as
-//! residuals. **Line 2 backstops them:** the migration's DDL runs under a
+//! residuals. **The second line backstops them:** the migration's DDL runs under a
 //! dedicated, deliberately under-privileged Postgres role that has *no grants*
 //! on `control` / `auth` / `billing` / other projects' schemas, so the same op
 //! that slips past parse **fails with `permission denied` at execution**.
@@ -17,7 +17,7 @@
 //! as **`NOLOGIN`**. The
 //! executor connects as the privileged admin/control role and runs each
 //! migration under `SET ROLE` for that role (with `RESET ROLE` on exit, scoped
-//! exactly like the executor's H2 session-GUC restore). This is chosen
+//! exactly like the executor's session-GUC restore). This is chosen
 //! over a `LOGIN` role because:
 //!
 //! - **No per-role passwords / secrets.** A login role needs a credential to be
@@ -40,7 +40,7 @@
 //! - **owns** the project schema (so its DDL + `ALTER DEFAULT PRIVILEGES`
 //!   targets work and objects it creates are owned/usable by it), with
 //!   `CREATE, USAGE` on it.
-//! - **NO access whatsoever to the meta schema.** This is the C1 fix: the
+//! - **NO access whatsoever to the meta schema.** The
 //!   migrator must not be able to forge the journal. A migration's `up` runs as
 //!   the migrator, so if the migrator could `INSERT` into the journal it could
 //!   plant a `completed` row (silently suppressing a future legitimate
@@ -66,18 +66,18 @@
 //!   reachable on its connection path.)
 //! - **No grant whatsoever** on any other project schema — any schema outside
 //!   the migrator's own. Deny-by-absence: a role only has what it is
-//!   granted, so an unmentioned schema is unreachable. This is the line-2
+//!   granted, so an unmentioned schema is unreachable. This is the second-line
 //!   backstop.
 //!
 //! # Known residuals (tracked, no behavior change)
 //!
-//! - **M2 — `CREATE FUNCTION … SET search_path`** is denied by the guard but is
+//! - **`CREATE FUNCTION … SET search_path`** is denied by the guard but is
 //!   NOT role-backstopped. This is harmless: functions the migrator creates are
 //!   `INVOKER` by default, so they run with the *caller's* privileges (no
 //!   escalation), and `SECURITY DEFINER` (which would run as the function owner,
-//!   the migrator) is itself guard-denied. So the line-2 role gives no extra
+//!   the migrator) is itself guard-denied. So the second-line role gives no extra
 //!   confinement here, and none is needed. Tracked only.
-//! - **M1 — `pg_roles` enumeration.** The migrator can read `pg_roles` (a
+//! - **`pg_roles` enumeration.** The migrator can read `pg_roles` (a
 //!   cluster-global catalog `USAGE`-free to all roles). Accepted: role names are
 //!   not secrets and there is no privilege to enumerate. No change.
 //!
@@ -116,7 +116,7 @@ fn quote_ident(ident: &str) -> Result<String, RoleError> {
     Ok(crate::render::dml::quote_ident_checked(ident)?)
 }
 
-/// #150 test seam (see `dml::tests::all_engine_seams_render_uniformly`).
+/// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, RoleError> {
     quote_ident(ident)

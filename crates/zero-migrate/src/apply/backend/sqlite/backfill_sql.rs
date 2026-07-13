@@ -1,6 +1,6 @@
-//! The SQLite **batched / resumable backfill executor** (design §2.3.1) — the
+//! The SQLite **batched / resumable backfill executor** — the
 //! SQLite analog of the Postgres `backfill.rs` (`run_backfill`), completing the
-//! §1.1 "one script, both backends, DDL+DML" headline.
+//! "one script, both backends, DDL+DML" headline.
 //!
 //! The PG executor is structurally Postgres-only: it emits a data-modifying CTE
 //! (`WITH _bf_window AS (…), _bf_upd AS (UPDATE … RETURNING …)`) — SQLite has no
@@ -12,16 +12,15 @@
 //! # Per-batch statement (the engine-owned window)
 //!
 //! ```text
-//! BEGIN IMMEDIATE;                 -- engine mode owns the txn boundary
-//!   (CreatorUp)  UPDATE "<table>" SET <authored set>
-//!                  WHERE rowid IN (
-//!                    SELECT rowid FROM "<table>"
-//!                     WHERE <cursor_col> > ?1 [AND (<filter>)]   -- ?1 omitted on batch 1
-//!                     ORDER BY <cursor_col> ASC LIMIT ?n
-//!                  )
-//!                RETURNING <cursor_col>;                          -- touched cursors
-//!   (EngineJournal) UPDATE "_mig".schema_backfills SET last_cursor=…, rows_done+=…, … ;
-//! COMMIT;                          -- batch mutation + progress advance commit together
+//! BEGIN IMMEDIATE; -- engine mode owns the txn boundary
+//! (CreatorUp) UPDATE "<table>" SET <authored set>
+//! WHERE rowid IN (//! SELECT rowid FROM "<table>"
+//! WHERE <cursor_col> > ?1 [AND (<filter>)] -- ?1 omitted on batch 1
+//! ORDER BY <cursor_col> ASC LIMIT ?n
+//!)
+//! RETURNING <cursor_col>; -- touched cursors
+//! (EngineJournal) UPDATE "_mig".schema_backfills SET last_cursor=…, rows_done+=…, …;
+//! COMMIT; -- batch mutation + progress advance commit together
 //! ```
 //!
 //! The batch `UPDATE` runs under the confined **CreatorUp** authorizer mode (denied
@@ -37,16 +36,16 @@
 //! # Reuse of the shared SQLite-DML seam (no re-implementation)
 //!
 //! - The per-batch `UPDATE … RETURNING` is run via
-//!   [`MigrationActor::query_params`], binding the cursor + limit through the SAME
-//!   native `?n` protocol (`crate::render::dml::sqlite_placeholder` /
-//!   [`SqliteBind`](super::actor::SqliteBind)) the one-shot DML assembler uses — the
-//!   two never fork a divergent `?n`-binding copy.
+//! [`MigrationActor::query_params`], binding the cursor + limit through the SAME
+//! native `?n` protocol (`crate::render::dml::sqlite_placeholder` /
+//! [`SqliteBind`](super::actor::SqliteBind)) the one-shot DML assembler uses — the
+//! two never fork a divergent `?n`-binding copy.
 //! - The authored `set` / `filter` SQL strings come from
-//!   [`crate::render::dml::assemble_backfill_clauses`] (the SAME assembler the PG path
-//!   uses), which renders the closed-AST transform — including the §9
-//!   `c.fn.splitPart` lowering — to inline SQL, `''`-escaping every string literal.
-//!   The whole assembled statement runs under the hardened authorizer (the SQLite
-//!   analog of the PG guard), so a hostile literal cannot alter statement shape.
+//! [`crate::render::dml::assemble_backfill_clauses`] (the SAME assembler the PG path
+//! uses), which renders the closed-AST transform — including the
+//! `c.fn.splitPart` lowering — to inline SQL, `''`-escaping every string literal.
+//! The whole assembled statement runs under the hardened authorizer (the SQLite
+//! analog of the PG guard), so a hostile literal cannot alter statement shape.
 //!
 //! # Crash-safe progress
 //!
@@ -299,7 +298,7 @@ fn build_batch_sql(
 /// window the UPDATE pages>)`. This is the SQLite analog of the PG executor's
 /// `(SELECT max(_bf_key)::text FROM _bf_window)` (backfill.rs) — the resume cursor
 /// is computed in SQL under the cursor COLUMN's declared collation, exactly as the
-/// `ORDER BY <cursor> ASC` / `<cursor> > ?1` paging does. A Rust-side `cells.max()`
+/// `ORDER BY <cursor> ASC` / `<cursor> > ?1` paging does. A Rust-side `cells.max`
 /// would use BINARY (byte) ordering, which for a non-BINARY-collated TEXT cursor
 /// (e.g. `COLLATE NOCASE`) can differ from the column's collation-max of the touched
 /// window — so the next `cursor > last_cursor` (collation-compared) would re-include
@@ -328,7 +327,7 @@ fn build_window_max_sql(
 }
 
 /// Run (or resume) a SQLite batched backfill, the SQLite analog of
-/// [`crate::apply::backend::postgres::backfill::run_backfill`]. Pages `spec.table` by `spec.cursor_column` in
+/// the PG backfill runner. Pages `spec.table` by `spec.cursor_column` in
 /// `spec.batch_size` chunks, each its own committed transaction, resumable from the
 /// committed progress cursor. `max_batches` bounds the run (`None` = run to
 /// completion) — the checkpoint/crash-fuzz seam.
@@ -356,7 +355,7 @@ pub(crate) async fn run_backfill_bounded(
     ensure_backfill_progress(actor).await.map_err(sqlite_journal_err)?;
 
     // Gate 2 — resolve the cursor column: it MUST exist, be a single-column
-    // PRIMARY KEY or UNIQUE index, and be NOT NULL (the §5 exactly-once + bounded +
+    // PRIMARY KEY or UNIQUE index, and be NOT NULL (the exactly-once + bounded +
     // filter-honoring correctness rests on a UNIQUE NOT NULL cursor; a non-unique
     // cursor over-matches every row sharing a key, a NULL cursor is never paged).
     let info = resolve_cursor_info(actor, spec).await.map_err(sqlite_journal_err)?;
@@ -442,7 +441,7 @@ pub(crate) async fn run_backfill_bounded(
         // Fault seam (test-only): a simulated crash BETWEEN batches — the last
         // batch's UPDATE + cursor advance already COMMITted, but the backfill is NOT
         // marked complete, so a resume reads the committed cursor and finishes the
-        // tail (the §5 resumability invariant). Identical seam to the PG executor.
+        // tail (the resumability invariant). Identical seam to the PG executor.
         if let Err(e) = crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES) {
             return Err(BackfillError::Fault(e.to_string()));
         }
@@ -514,7 +513,7 @@ fn assert_cursor_not_mutated(set_clause: &str, cursor_column: &str) -> Result<()
                 i += 1;
             }
             b' ' | b'\t' | b'\n' | b'\r' => {
-                // whitespace does not end an assignment boundary (allows `,  "id" =`).
+                // whitespace does not end an assignment boundary (allows `, "id" =`).
                 i += 1;
             }
             b',' => {
@@ -587,7 +586,7 @@ async fn mark_complete(actor: &MigrationActor, backfill_id: &str) -> Result<(), 
 /// The batch `UPDATE … RETURNING <cursor>` runs under CreatorUp (the confined
 /// mode); the progress advance runs under EngineJournal; both commit together. On
 /// any failure the transaction is rolled back (progress NOT advanced) and the
-/// connection's autocommit state is re-asserted (H1 — a wedged connection is a
+/// connection's autocommit state is re-asserted (a wedged connection is a
 /// hard error, not a silent reuse).
 #[allow(clippy::too_many_arguments)]
 async fn run_one_batch(
@@ -628,38 +627,38 @@ async fn run_one_batch(
     binds.push(SqliteBind::Int(i64::from(batch_size)));
 
     // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows SQLITE_TRANSACTION
-    //    only in EngineJournal — the engine owns txn boundaries).
+    // only in EngineJournal — the engine owns txn boundaries).
     actor.set_mode(Mode::EngineJournal).await.map_err(batch_infra_err)?;
     actor.exec("BEGIN IMMEDIATE").await.map_err(batch_infra_err)?;
 
     let result = async {
         // 2. Compute the high-water mark IN SQL, under the cursor column's collation,
-        //    over the SAME pre-mutation window the UPDATE pages — the SQLite analog
-        //    of the PG `max(_bf_key)::text`. This MUST run BEFORE the UPDATE: the
-        //    authored transform can mutate a filter column (e.g. `done = 1` against a
-        //    `done = 0` filter), so post-UPDATE the window predicate would no longer
-        //    match the just-touched rows. The cursor column itself is never mutated
-        //    (Gate 3), and the single exclusive connection inside this BEGIN IMMEDIATE
-        //    sees a stable snapshot, so the SELECT's window == the UPDATE's window.
-        //    Computing the max in SQL (not Rust `cells.max()`) makes the resume cursor
-        //    collation-consistent with the `ORDER BY <cursor>` / `<cursor> > ?1` paging
-        //    (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
+        // over the SAME pre-mutation window the UPDATE pages — the SQLite analog
+        // of the PG `max(_bf_key)::text`. This MUST run BEFORE the UPDATE: the
+        // authored transform can mutate a filter column (e.g. `done = 1` against a
+        // `done = 0` filter), so post-UPDATE the window predicate would no longer
+        // match the just-touched rows. The cursor column itself is never mutated
+        // (Gate 3), and the single exclusive connection inside this BEGIN IMMEDIATE
+        // sees a stable snapshot, so the SELECT's window == the UPDATE's window.
+        // Computing the max in SQL (not Rust `cells.max`) makes the resume cursor
+        // collation-consistent with the `ORDER BY <cursor>` / `<cursor> > ?1` paging
+        // (a Rust BINARY max diverges for a non-BINARY-collated TEXT cursor).
         actor.set_mode(Mode::CreatorUp).await?;
         let max_rows = actor.query_params(&window_max_sql, &binds).await?;
         let max_cursor =
             max_rows.first().and_then(|r| r.first()).and_then(|c| c.clone());
 
         // 3. Run the batch UPDATE … RETURNING under the confined CreatorUp mode
-        //    (denied from `_mig`, PRAGMA, txn boundaries, vtables). The cursor +
-        //    limit are positional `?n` binds; the authored set/filter are inline.
-        //    RETURNING the cursor yields the touched-row count (the loop's non-empty /
-        //    tail signal); the resume cursor came from the SQL max above.
+        // (denied from `_mig`, PRAGMA, txn boundaries, vtables). The cursor +
+        // limit are positional `?n` binds; the authored set/filter are inline.
+        // RETURNING the cursor yields the touched-row count (the loop's non-empty /
+        // tail signal); the resume cursor came from the SQL max above.
         let returned = actor.query_params(&batch_sql, &binds).await?;
         let n = returned.len() as u64;
 
         if n > 0 {
             // 4. Advance progress IN THE SAME TRANSACTION (both-or-neither),
-            //    under EngineJournal.
+            // under EngineJournal.
             actor.set_mode(Mode::EngineJournal).await?;
             let mc_lit = match &max_cursor {
                 Some(s) => sql_lit(s),
@@ -696,7 +695,7 @@ async fn run_one_batch(
         Err(e) => {
             actor.set_mode(Mode::EngineJournal).await.map_err(batch_infra_err)?;
             let rb = actor.exec("ROLLBACK").await;
-            // H1 — confirm the connection is back in autocommit; a wedged
+            // confirm the connection is back in autocommit; a wedged
             // connection is a hard infra error, not a silent reuse.
             match actor.is_autocommit().await {
                 Ok(true) => Err(BackfillError::SqliteBatchFailed {
@@ -757,7 +756,7 @@ mod tests {
         assert!(assert_cursor_not_mutated("\"a\" = (\"id\" + 1)", "id").is_ok());
     }
 
-    /// LOW (PR6b code-critic): a SAFE backfill whose STRING LITERAL happens to embed
+    /// A SAFE backfill whose STRING LITERAL happens to embed
     /// the `, "<cursor>" =` byte sequence must NOT be a false-positive mutation
     /// reject — the literal is RHS data, not an assignment LHS. The scan now skips
     /// over single-quoted string literals, so the needle inside a literal is ignored.
@@ -785,10 +784,10 @@ mod tests {
         );
     }
 
-    /// MED (PR6b code-critic): the high-water mark is computed IN SQL —
+    /// The high-water mark is computed IN SQL —
     /// `SELECT max(<cursor>) FROM (<same window>)` — so it honors the cursor column's
     /// declared collation (mirroring the PG `max(_bf_key)::text`), NOT a Rust BINARY
-    /// `cells.max()`. This pins the statement shape (collation-correctness over real
+    /// `cells.max`. This pins the statement shape (collation-correctness over real
     /// data is proven by the e2e `sqlite_backfill_nocase_cursor_exactly_once` +
     /// `sqlite_backfill_real_cursor_*` against temp-file SQLite). The window
     /// predicate/ordering/limit MUST match `build_batch_sql` byte-for-byte so the two

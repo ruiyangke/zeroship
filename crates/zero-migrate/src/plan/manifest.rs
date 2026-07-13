@@ -1,8 +1,8 @@
-//! Migration-set **integrity manifest** (v3 Plan F — Atlas `migrate hash` /
+//! Migration-set **integrity manifest** (Atlas `migrate hash` /
 //! `atlas.sum` style).
 //!
 //! A single hash over the migration SET — folded in the **canonical executed
-//! order** (M2) — so a tampered / reordered / inserted / removed bundle is
+//! order** — so a tampered / reordered / inserted / removed bundle is
 //! rejected BEFORE any apply.
 //!
 //! # What it adds on top of the per-migration checksum
@@ -16,12 +16,12 @@
 //! - a **removal** of a migration from the set;
 //! - a **content edit** (which also changes that migration's per-migration
 //!   checksum, and therefore the manifest);
-//! - a **`depends_on` reorder** that changes the EXECUTED order (M2) — this also
-//!   changes the migration's per-migration checksum (C1, which folds `depends_on`)
+//! - a **`depends_on` reorder** that changes the EXECUTED order — this also
+//!   changes the migration's per-migration checksum (which folds `depends_on`)
 //!   and the canonical executed order the manifest folds.
 //!
 //! A pure **cosmetic SLICE reorder** of an additive set (no `depends_on`) is NOT
-//! tampering and is deliberately INVARIANT (M2): the executor re-sorts by version,
+//! tampering and is deliberately INVARIANT: the executor re-sorts by version,
 //! so both slice orders execute identically and yield the SAME manifest — the
 //! control plane stamping one slice order and the bundle arriving in another must
 //! not false-mismatch.
@@ -32,7 +32,7 @@
 //!
 //! # Canonical serialization (domain-separated, length-prefixed)
 //!
-//! [`compute_manifest`] folds, in the CANONICAL EXECUTED ORDER (M2 — the order
+//! [`compute_manifest`] folds, in the CANONICAL EXECUTED ORDER (the order
 //! the executor will actually run, a `depends_on` topological sort, `UUIDv7`
 //! version-tiebroken, NOT the cosmetic slice order), for each migration:
 //!
@@ -54,12 +54,12 @@
 //! fold is over the per-migration `checksum` (NOT the raw `up`/`down` text) so
 //! it is cheap and reuses the already-tamper-evident content hash.
 //!
-//! The result is DETERMINISTIC and folded over the CANONICAL EXECUTED order
-//! (M2): the manifest is invariant to a cosmetic SLICE reorder (the same set
+//! The result is DETERMINISTIC and folded over the CANONICAL EXECUTED order:
+//! the manifest is invariant to a cosmetic SLICE reorder (the same set
 //! executes the same way ⇒ the same hash, so the control plane stamping one slice
 //! order and the bundle arriving in another does NOT false-mismatch), and a
 //! `depends_on` change that reorders EXECUTION changes the hash (also caught by
-//! the per-migration checksum, which folds `depends_on` — C1). The set-level
+//! the per-migration checksum, which folds `depends_on`). The set-level
 //! mutations it still catches: an INSERTION, a REMOVAL, and a CONTENT edit (via
 //! the per-migration checksum).
 //!
@@ -117,7 +117,7 @@ impl ManifestHash {
 }
 
 /// Compute the integrity manifest over `migrations`, folded in the **canonical
-/// executed order** (M2 — v3 Plan F).
+/// executed order**.
 ///
 /// The manifest is over the order the executor will actually RUN, NOT the cosmetic
 /// slice order in which the migrations were supplied. Before folding, the set is
@@ -132,7 +132,7 @@ impl ManifestHash {
 ///   the SAME version order ⇒ the SAME manifest (no false mismatch when the
 ///   control plane stamps one slice order and the bundle arrives in another);
 /// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
-///   manifest (the reorder is also independently caught by C1's per-migration
+///   manifest (the reorder is also independently caught by the per-migration
 ///   checksum fold, which covers `depends_on`).
 ///
 /// Deterministic: same set ⇒ same canonical order ⇒ same hash, regardless of slice
@@ -146,7 +146,7 @@ pub fn compute_manifest(migrations: &[Migration]) -> ManifestHash {
     // per-migration fields differ, so a bundle of a different size can never
     // collide with the full one.
     hasher.update((migrations.len() as u64).to_be_bytes());
-    // Fold in CANONICAL EXECUTED ORDER (M2), not slice order, so cosmetic
+    // Fold in CANONICAL EXECUTED ORDER, not slice order, so cosmetic
     // reordering is invariant and a real (depends_on) reordering is visible.
     for m in crate::apply::executor::canonical_set_order(migrations) {
         let version = m.version.as_str();
@@ -298,7 +298,7 @@ mod tests {
     }
 
     /// Build a versioned migration with a `depends_on` edge, with a checksum that
-    /// folds it (C1).
+    /// folds it.
     fn mig_dep(name: &str, up: &str, down: Option<&str>, depends_on: Vec<MigrationId>) -> Migration {
         let flags = MigrationFlags::default();
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
@@ -337,10 +337,10 @@ mod tests {
         assert_eq!(compute_manifest(&set).as_str().len(), 64);
     }
 
-    /// M2: the manifest is folded over the CANONICAL EXECUTED order, so a pure
+    /// The manifest is folded over the CANONICAL EXECUTED order, so a pure
     /// SLICE reorder of an ADDITIVE set (no `depends_on`) is INVARIANT — the same
-    /// set executes in the same version order, so the hash is unchanged. RED before
-    /// M2 (slice-order fold made a reorder differ → a false mismatch).
+    /// set executes in the same version order, so the hash is unchanged. A
+    /// slice-order fold would make a reorder differ → a false mismatch.
     #[test]
     fn manifest_is_invariant_to_a_cosmetic_slice_reorder() {
         let a = mig("a", "CREATE TABLE a()", None);
@@ -352,15 +352,15 @@ mod tests {
         assert_eq!(
             compute_manifest(&forward),
             compute_manifest(&reversed),
-            "manifest MUST be invariant to a cosmetic slice reorder (M2)"
+            "manifest MUST be invariant to a cosmetic slice reorder"
         );
     }
 
-    /// M2: a `depends_on` change that REORDERS execution changes the manifest. We
+    /// A `depends_on` change that REORDERS execution changes the manifest. We
     /// build two additive migrations a, b (b sorts after a by version), then in a
     /// SECOND set add `a depends_on b`, which forces b BEFORE a in the canonical
     /// executed order — a different executed order ⇒ a different manifest. (Also
-    /// independently caught by C1: a's checksum folds its `depends_on`.)
+    /// independently caught by the per-migration checksum: a's checksum folds its `depends_on`.)
     #[test]
     fn manifest_changes_when_depends_on_reorders_execution() {
         // a has the lower version (minted first), b the higher.
@@ -380,7 +380,7 @@ mod tests {
         assert_ne!(
             compute_manifest(&baseline),
             compute_manifest(&reordered),
-            "a depends_on change that reorders execution MUST change the manifest (M2)"
+            "a depends_on change that reorders execution MUST change the manifest"
         );
     }
 
@@ -438,7 +438,7 @@ mod tests {
         assert!(verify_manifest(&set, &expected).is_ok());
     }
 
-    /// M2: a cosmetic SLICE reorder of an additive set VERIFIES OK (the manifest
+    /// A cosmetic SLICE reorder of an additive set VERIFIES OK (the manifest
     /// is over the canonical executed order, which is identical for both slice
     /// orders). The control plane stamping one slice order and the bundle arriving
     /// in another must NOT false-mismatch.
@@ -453,11 +453,11 @@ mod tests {
         let reordered = vec![b, a];
         assert!(
             verify_manifest(&reordered, &expected).is_ok(),
-            "a cosmetic slice reorder of an additive set must verify OK (M2)"
+            "a cosmetic slice reorder of an additive set must verify OK"
         );
     }
 
-    /// M2 + C1: a `depends_on` change that reorders EXECUTION is REJECTED with a
+    /// A `depends_on` change that reorders EXECUTION is REJECTED with a
     /// best-effort `Differs` diagnostic — the executed order (and the per-migration
     /// checksum) both changed.
     #[test]

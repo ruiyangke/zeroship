@@ -1,38 +1,37 @@
-//! Structured §8.8 machine-readable payloads for the cross-deploy
-//! pending-contract interlock (§2.0.3 / §2.0.4).
+//! Structured machine-readable payloads for the cross-deploy
+//! pending-contract interlock.
 //!
 //! The design goal is fully-automatable migrations, so every
 //! stuck state in the online-rename lifecycle emits a STRUCTURED envelope an AI
-//! orchestrator can act on — not only a prose string (§8.8). The human-readable
+//! orchestrator can act on — not only a prose string. The human-readable
 //! message is the **projection** of the structured payload (the `Display` impls
 //! here), and each payload carries enough to EXECUTE the remedy (an
 //! `apply_action` / `abort_action` naming the exact `migrate …` command).
 //!
-//! The three payloads (§2.0.3 item 5):
+//! The three payloads:
 //! - [`PendingContractRefusal`] (`TABLE_HAS_PENDING_CONTRACT`) — a new op touches
 //!   a table with an outstanding pending contract; the deploy is fail-closed
-//!   refused (§2.0.3 item 2).
+//!   refused.
 //! - [`DependencyPendingContract`] (`DEPENDENCY_PENDING_CONTRACT`) — a plan B
 //!   `depends_on`s a plan A whose online-rename contract is still pending, so A
-//!   is not fully satisfied and B is BLOCKED (§2.0.4).
+//!   is not fully satisfied and B is BLOCKED.
 //! - [`OrphanedPendingContract`] (`ORPHANED_PENDING_CONTRACT`) — a later bundle no
 //!   longer carries the rename whose contract is pending; the obligation is
-//!   orphaned, surfaced by `status` as a distinct state (§2.0.3 item 3).
+//!   orphaned, surfaced by `status` as a distinct state.
 //!
 //! The wire `code` strings are the contract; they are pinned by a unit test.
 
 use serde::{Deserialize, Serialize};
 
-/// The `code` literal for a [`PendingContractRefusal`] (§2.0.3 item 5).
+/// The `code` literal for a [`PendingContractRefusal`].
 pub const CODE_TABLE_HAS_PENDING_CONTRACT: &str = "TABLE_HAS_PENDING_CONTRACT";
-/// The `code` literal for a [`DependencyPendingContract`] (§2.0.4).
+/// The `code` literal for a [`DependencyPendingContract`].
 pub const CODE_DEPENDENCY_PENDING_CONTRACT: &str = "DEPENDENCY_PENDING_CONTRACT";
-/// The `code` literal for an [`OrphanedPendingContract`] (§2.0.3 item 5).
+/// The `code` literal for an [`OrphanedPendingContract`].
 pub const CODE_ORPHANED_PENDING_CONTRACT: &str = "ORPHANED_PENDING_CONTRACT";
 
 /// An executable remediation action — a `migrate …` command + the version it
-/// targets — so an automated orchestrator can self-resolve where policy allows
-/// (§2.0.3 item 5 / §2.0.4).
+/// targets — so an automated orchestrator can self-resolve where policy allows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionPayload {
     /// The `migrate …` command to run (e.g. `migrate resolve-pending --apply`).
@@ -41,7 +40,7 @@ pub struct ActionPayload {
     pub version: String,
 }
 
-/// `TABLE_HAS_PENDING_CONTRACT` — the fail-closed refusal payload (§2.0.3 item 2).
+/// `TABLE_HAS_PENDING_CONTRACT` — the fail-closed refusal payload.
 ///
 /// Emitted when the current deploy's op list touches a table that still has an
 /// outstanding online-rename contract from a prior deploy. The deploy applies
@@ -95,7 +94,7 @@ impl std::fmt::Display for PendingContractRefusal {
     }
 }
 
-/// `DEPENDENCY_PENDING_CONTRACT` — the blocked-`depends_on` payload (§2.0.4).
+/// `DEPENDENCY_PENDING_CONTRACT` — the blocked-`depends_on` payload.
 ///
 /// Emitted when plan `blocked` declares `depends_on: [dependency]` and the
 /// dependency is an online rename whose contract is still pending — so the
@@ -145,7 +144,7 @@ impl std::fmt::Display for DependencyPendingContract {
     }
 }
 
-/// `ORPHANED_PENDING_CONTRACT` — the orphaned-obligation payload (§2.0.3 item 3).
+/// `ORPHANED_PENDING_CONTRACT` — the orphaned-obligation payload.
 ///
 /// Emitted when a later bundle no longer carries the rename whose contract is
 /// pending: the obligation is orphaned. The engine neither silently drops it
@@ -204,7 +203,7 @@ impl std::fmt::Display for OrphanedPendingContract {
 mod tests {
     use super::*;
 
-    /// The §8.8 wire `code` strings are the contract the AI loop matches on. Pin
+    /// The wire `code` strings are the contract the AI loop matches on. Pin
     /// them byte-exact.
     #[test]
     fn payload_codes_are_exact() {
@@ -216,8 +215,8 @@ mod tests {
         assert_eq!(CODE_ORPHANED_PENDING_CONTRACT, "ORPHANED_PENDING_CONTRACT");
     }
 
-    /// The refusal payload carries an EXECUTABLE `apply_action` (§2.0.3 item 5 /
-    /// test (b)): the command + version an orchestrator runs to unblock.
+    /// The refusal payload carries an EXECUTABLE `apply_action`: the command +
+    /// version an orchestrator runs to unblock.
     #[test]
     fn refusal_carries_executable_apply_action() {
         let r = PendingContractRefusal::new("users", "mig_expandV2");

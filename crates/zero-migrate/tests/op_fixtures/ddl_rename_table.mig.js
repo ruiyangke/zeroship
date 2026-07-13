@@ -1,10 +1,10 @@
 // op.* migration fixture — table().rename({ to }). The corpus carrier for the
-// `renameTable` Op variant (the table-rename follow-up deferred from PR15), so the
-// JS↔Rust `Checksum::of_ir` parity + the §2.5 variant-exhaustiveness gate cover it.
+// `renameTable` Op variant, so the
+// JS↔Rust `Checksum::of_ir` parity + the variant-exhaustiveness gate cover it.
 //
 // A whole-table rename is a FAST `ALTER TABLE … RENAME TO …` (NOT the online column
 // expand-contract); `ifExists` guards the SOURCE table and `schema` qualifies it, so
-// this fixture also asserts the JS recorder and the Rust loader fold BOTH PR10 fields
+// this fixture also asserts the JS recorder and the Rust loader fold BOTH fields
 // on a rename identically (a bare rename and a schema+guard rename are both carried).
 import { table } from "zero-migrate";
 

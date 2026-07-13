@@ -1,10 +1,10 @@
 //! Policy value types shared by model validation and the SQL guard.
 
 /// The trust posture of a guard. Set at the OPERATOR CALL SITE, never derived
-/// from SQL content (design §4.1 / §5).
+/// from SQL content.
 ///
 /// The EXTERNAL trust boundary is closed by construction, but NOT by enum
-/// un-nameability (the design doc §4.1/§5 overclaims that — `#[non_exhaustive]`
+/// un-nameability (`#[non_exhaustive]`
 /// only forbids *exhaustive matching* and *constructing fielded variants*
 /// externally; an external crate CAN still name the fieldless `Platform` /
 /// `Trusted` as a value). The real external lock is that [`GuardConfig`]'s
@@ -16,7 +16,7 @@
 /// produced ONLY inside [`GuardConfig::platform`] / [`GuardConfig::trusted`] /
 /// [`crate::conn::ExecutorConfig::platform`] / [`crate::conn::ExecutorConfig::trusted`],
 /// each of which REQUIRES the token (below) — so in-crate code (`submit`/`engine`)
-/// cannot mint either without holding the token (§5). `#[non_exhaustive]`
+/// cannot mint either without holding the token. `#[non_exhaustive]`
 /// remains valuable: it keeps the variant set evolvable and forces external
 /// matches to carry a wildcard.
 ///
@@ -52,7 +52,7 @@ pub enum TrustProfile {
     Trusted,
 }
 
-/// The schemas a guard permits references to (design §4.1).
+/// The schemas a guard permits references to.
 ///
 /// `Single` is the **Confined** shape — the `project_schema: String` semantics
 /// (one allowed schema; everything else is a `CrossSchema` violation), matched
@@ -81,7 +81,7 @@ impl SchemaScope {
     /// - `Single(s)` ⇒ `schema.eq_ignore_ascii_case(s)`.
     /// - `Allowlist(v)` ⇒ `schema` case-folds to a member of `v`.
     ///
-    /// **Gate/render agreement (review F2).** The match is case-INsensitive, but
+    /// **Gate/render agreement.** The match is case-INsensitive, but
     /// the render seam (`quote_ident`) is byte-verbatim. So a
     /// case-VARIANT qualifier the gate accepts (`'APP1'` under project `'app1'`)
     /// MUST be canonicalized to `project_schema` before render, or the op would land

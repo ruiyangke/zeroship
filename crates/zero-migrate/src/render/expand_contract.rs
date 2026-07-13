@@ -1,5 +1,5 @@
 //! The `ExpandContractAuthor` — zero-downtime **online column RENAME** via
-//! trigger dual-write (design §5 "zero-downtime expand-contract", Plan 8 v1).
+//! trigger dual-write (the zero-downtime expand-contract pattern).
 //!
 //! A column rename cannot be done as a single `ALTER TABLE … RENAME COLUMN`
 //! without breaking every running deploy that still reads/writes the old name:
@@ -28,7 +28,7 @@
 //!   populated table rewrites the whole table under `ACCESS EXCLUSIVE`; the
 //!   online author MUST NOT emit it (and MUST NOT emit a bare `SET NOT NULL`
 //!   either — see [`ExpandContractAuthor`] for the `CHECK … NOT VALID` →
-//!   `VALIDATE` lint). v1 stops at the nullable column + dual-write + backfill;
+//!   `VALIDATE` lint). This stops at the nullable column + dual-write + backfill;
 //!   tightening to `NOT NULL` is a separate authored step.
 //! - **E2 is `SECURITY INVOKER` (the plpgsql default), NOT `SECURITY DEFINER`.**
 //!   A `DEFINER` trigger would run with the *function owner's* (the migrator's)
@@ -54,7 +54,7 @@
 //!   be lost.
 //! - **C1/C2 are gated.** Dropping the trigger and the old column is
 //!   `requires_approval` (C2 is also `destructive`). The engine's expand/contract
-//!   gate (Plan 8 v1.2) additionally refuses the contract until the matching
+//!   gate additionally refuses the contract until the matching
 //!   expand is net-applied in the journal.
 //!
 //! All emitted SQL is **project-schema-qualified** and **byte-stable** across
@@ -115,7 +115,7 @@ pub struct ExpandContractPlan {
     pub trigger_version: MigrationId,
     /// The neutral [`OnlineIntent`] this plan was authored from. Carried so the
     /// generic declarative apply path hands the **intent** (not the PG-DDL plan)
-    /// to the [`OnlineSchemaChange`](crate::apply::backend::OnlineSchemaChange) seam (H1) — the Postgres impl ignores it and
+    /// to the [`OnlineSchemaChange`](crate::apply::backend::OnlineSchemaChange) seam — the Postgres impl ignores it and
     /// runs the pre-authored [`expand`](Self::expand) steps verbatim, while a
     /// future engine lowers the intent to its own native online DDL.
     pub intent: OnlineIntent,
@@ -199,7 +199,7 @@ pub(crate) fn qualified(schema: &str, object: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(object))
 }
 
-/// §2.0.1 sub-step indices for the online-rename sequence — folded into the
+/// Sub-step indices for the online-rename sequence — folded into the
 /// rename's stable seed so each of E1..C2 derives a DISTINCT, reproducible id.
 /// These are the `step_index` half of `step_id = derive(rename_seed, step_index)`.
 const EC_STEP_E1: u8 = 1;
@@ -208,11 +208,11 @@ const EC_STEP_E3: u8 = 3;
 const EC_STEP_C1: u8 = 4;
 const EC_STEP_C2: u8 = 5;
 
-/// Build the rename's STABLE identity seed (§2.0.1): a length-prefixed image of
+/// Build the rename's STABLE identity seed: a length-prefixed image of
 /// every fact that identifies the logical rename — `schema`, `owner`, `table`,
 /// `from`, `to`, `ty`. Length-prefixing each field makes the encoding injective
 /// (so `("a","bc")` and `("ab","c")` never collide). NOTHING per-run is folded
-/// (no time, no random), so re-lowering the identical `.ir.json` reproduces the
+/// (no time, no random), so re-lowering the identical IR envelope reproduces the
 /// SAME seed → the SAME E1..C2 ids. A semantically different rename (different
 /// `to`/`ty`) produces a different seed → fresh ids.
 fn rename_id_seed(
@@ -274,18 +274,18 @@ fn capped_name(natural: &str) -> String {
 }
 
 /// The deterministic, no-AI author for the canonical online column-rename
-/// expand-contract sequence (design §5, Plan 8 v1).
+/// expand-contract sequence.
 ///
 /// Like [`crate::plan::author::DeterministicAuthor`], it emits provably-shaped,
 /// project-schema-qualified SQL with correct [`MigrationFlags`] — but for the
 /// *multi-deploy phased* online pattern, not the trivial additive set. The SQL
 /// is byte-stable across re-authoring so the `Expand` checksums are reproducible.
 ///
-/// # The `SET NOT NULL` lint (design Plan 8 decision)
+/// # The `SET NOT NULL` lint
 ///
 /// The author **never** emits a bare `ALTER TABLE … ALTER COLUMN … SET NOT NULL`
 /// on a populated table: that takes an `ACCESS EXCLUSIVE` lock and full-scans to
-/// validate, blocking writes. v1's rename leaves `<to>` nullable; a caller that
+/// validate, blocking writes. This rename leaves `<to>` nullable; a caller that
 /// wants to tighten it to `NOT NULL` online authors the
 /// `ADD CONSTRAINT … CHECK (<to> IS NOT NULL) NOT VALID` → `VALIDATE CONSTRAINT`
 /// pair (a separate intent, not part of the rename). This author's output
@@ -373,19 +373,19 @@ impl ExpandContractAuthor {
 
         // ---- E1: ADD COLUMN <to> <ty> (nullable, transactional, additive) ----
         let e1_up = format!("ALTER TABLE {tbl_q} ADD COLUMN {to_q} {ty}");
-        // Structural rollback BEFORE the backfill runs is allowed (Plan 8 v1):
+        // Structural rollback BEFORE the backfill runs is allowed:
         // dropping the just-added nullable column is a clean reverse.
         let e1_down = Some(format!("ALTER TABLE {tbl_q} DROP COLUMN {to_q}"));
-        // §2.0.1 — the rename's STABLE identity seed. Every E1..C2 sub-step id is
+        // The rename's STABLE identity seed. Every E1..C2 sub-step id is
         // `MigrationId::derive("ec", seed || step_index)`, so a re-lower of the
-        // identical `.ir.json` (the production path re-lowers on EVERY deploy,
+        // identical IR envelope (the production path re-lowers on EVERY deploy,
         // `deploy_migrate.rs`) reproduces byte-identical ids. The seed folds the
         // schema + owner + table + from + to + ty — every fact that identifies the
         // logical rename — and NOTHING per-run (no time, no random). A changed
         // rename (different to/ty) gets fresh ids; the same rename always maps to
         // the same obligation key (the E2 id), idempotent-skip key, contract ids,
         // and self-EXPAND exemption key. This is the determinism the cross-deploy
-        // interlock leans on (PR9a HIGH).
+        // interlock leans on.
         let id_seed = rename_id_seed(schema, &self.owner_app, table, from, to, ty);
         let e1 = self.make(
             &format!("expand_add_column_{table}_{to}"),
@@ -447,7 +447,7 @@ impl ExpandContractAuthor {
         // in the journal/gate timeline without the executor trying to run the
         // batched UPDATE as one statement.
         let backfill = BackfillSpec {
-            // #149: the E3 backfill targets the bound project schema (expand-contract
+            // The E3 backfill targets the bound project schema (expand-contract
             // is a Confined-profile, single-project online change).
             schema: self.project_schema.clone(),
             table: table.to_string(),
@@ -467,7 +467,7 @@ impl ExpandContractAuthor {
         let e3 = self.make(
             &format!("expand_backfill_{table}_{from}_to_{to}"),
             e3_up,
-            // The backfill is roll-FORWARD-only past this point (Plan 8 v1): once
+            // The backfill is roll-FORWARD-only past this point: once
             // data is mirrored, there is no structural down. Explicitly irreversible.
             None,
             MigrationFlags {
@@ -514,7 +514,7 @@ impl ExpandContractAuthor {
         // before the column it reads" a structural guarantee. The dual-write
         // trigger only covers rows written DURING the transition; the backfill
         // covers the rows that predate it. So the destructive drop is gated on the
-        // backfill's journaled completion (Plan 8: the backfill step records
+        // backfill's journaled completion (the backfill step records
         // completion in the journal → the gate reads one timeline).
         let c2_up = format!("ALTER TABLE {tbl_q} DROP COLUMN {from_q}");
         let c2 = self.make(
@@ -553,13 +553,13 @@ impl ExpandContractAuthor {
     /// `id_seed` is the rename's stable identity image (see [`rename_id_seed`]) and
     /// `step_index` is one of the `EC_STEP_*` constants — together they
     /// DETERMINISTICALLY derive the sub-step's `version` via [`MigrationId::derive`]
-    /// (§2.0.1). A re-lower of the identical rename reproduces the SAME id, which is
+    /// A re-lower of the identical rename reproduces the SAME id, which is
     /// what the cross-deploy obligation key + idempotent-skip + auto-discharge +
-    /// self-EXPAND exemption all depend on (PR9a HIGH). The version is NEVER
+    /// self-EXPAND exemption all depend on. The version is NEVER
     /// `MigrationId::generate()` (random per call), which would re-key the
     /// obligation on every deploy.
     // The id-derivation pair (`id_seed`, `step_index`) pushes this to 8 args; they
-    // are one logical unit (the §2.0.1 deterministic sub-version derivation) and
+    // are one logical unit (the deterministic sub-version derivation) and
     // bundling them into a struct would only relocate the same fields. Matches the
     // crate's `lower_ir_rename` / `sqlite_rename_rebuild` allow pattern.
     #[allow(clippy::too_many_arguments)]
@@ -582,7 +582,7 @@ impl ExpandContractAuthor {
             supersedes: &[],
             preconditions: &[],
         });
-        // §2.0.1 deterministic sub-version: fold the step index into the rename's
+        // Deterministic sub-version: fold the step index into the rename's
         // stable seed so E1..C2 each get a distinct, reproducible id.
         let mut seed = id_seed.to_vec();
         seed.push(step_index);
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn never_emits_bare_set_not_null() {
-        // Plan 8 decision: the online author must NOT emit a bare SET NOT NULL.
+        // The online author must NOT emit a bare SET NOT NULL.
         let plan = author().author(&rename()).expect("author");
         for m in plan.all() {
             assert!(
@@ -854,13 +854,13 @@ mod tests {
     #[test]
     fn expand_sql_is_byte_stable_across_reauthoring() {
         // Re-authoring the same intent yields identical Expand/Contract SQL AND
-        // identical sub-step ids + checksums (PR9a HIGH §2.0.1): the E1..C2
+        // identical sub-step ids + checksums: the E1..C2
         // versions are now DETERMINISTICALLY derived from the rename's stable seed
         // (schema+owner+table+from+to+ty) plus the step index, not minted fresh
         // per run. Because the checksum folds `depends_on` and `depends_on` now
         // holds deterministic sibling ids, the FULL checksum is stable too — the
         // pre-fix "dependency-free only" carve-out is gone. This is the property a
-        // re-lower of the identical `.ir.json` on every deploy relies on.
+        // re-lower of the identical IR envelope on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
         assert_eq!(p1.trigger_version, p2.trigger_version, "E2 obligation key is deterministic");
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn substep_ids_are_deterministic_and_distinct() {
-        // §2.0.1 (PR9a HIGH): every E1..C2 id is derived (not random), so two
+        // Every E1..C2 id is derived (not random), so two
         // authorings of the SAME rename produce byte-identical ids; and the five
         // sub-steps are mutually DISTINCT (the step-index fold keeps E1..C2 apart).
         let p1 = author().author(&rename()).expect("author 1");
@@ -1046,7 +1046,7 @@ mod tests {
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));
     }
 
-    // PR9c LOW (i) REGRESSION — the executor-layer scope gate in `run_expand_pg` is now
+    // REGRESSION — the executor-layer scope gate in `run_expand_pg` is now
     // UNCONDITIONAL. A direct seam caller with an EMPTY `expand` vec under
     // `ApprovalScope::Versions({})` MUST be refused with `ApprovalNotScoped` (keyed on
     // the E2 `trigger_version`, the resolved scope-version when the expand chain is

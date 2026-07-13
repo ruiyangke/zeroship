@@ -1,4 +1,4 @@
-//! **Migration-first P1 — the ROUND-TRIP ORACLE for `fold_ops` on real SQLite.**
+//! **The ROUND-TRIP ORACLE for `fold_ops` on real SQLite.**
 //!
 //! The SQLite leg of the fold oracle. Restricted to the ops the SQLite backend
 //! supports through `IrAuthor::load_and_lower` + `engine.apply` WITHOUT the 12-step

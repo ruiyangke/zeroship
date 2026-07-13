@@ -1,7 +1,7 @@
-// Keystone fixture (Migration-first P2b §6b). A schema authored DECLARATIVELY,
-// exercising the P0-supported facets the author->generate->fold chain must
+// Keystone-schema fixture. A schema authored DECLARATIVELY,
+// exercising the facets the author->generate->fold chain must
 // round-trip LOSSLESSLY: type matrix, ref (Id brand), vector + metric, encrypted,
-// and id-prefix. CHECK-borne enum/min/max facets are P1 once the Expr->SQL
+// and id-prefix. CHECK-borne enum/min/max facets are handled once the Expr->SQL
 // renderer lands.
 import { t } from "zero-migrate";
 
@@ -13,10 +13,10 @@ const users = {
   age: t.number(),
   role: t.string(),
   active: t.boolean(),
-  // A DEFAULT-mode encrypted column — the §6 keystone goodie. `t.encrypted()`
+  // A DEFAULT-mode encrypted column. `t.encrypted()`
   // stamps `encrypted: { mode:"randomised", keyId:"default", wraps:"string" }` AND a
   // fail-safe auto-mask `{ kind:"full", classification:"pii" }`; the author->generate
-  // ->fold chain must recover BOTH byte-identically (HIGH-1).
+  // ->fold chain must recover BOTH byte-identically.
   token: t.encrypted(),
 };
 

@@ -1,7 +1,7 @@
-//! The tokio-free engine executor (design §C.4).
+//! The tokio-free engine executor.
 //!
 //! The engine is a real state machine whose I/O leaves are `oneshot`/reply channels
-//! woken **out-of-thread** by the host `done` callback (§B.3). So it needs an
+//! woken **out-of-thread** by the host `done` callback. So it needs an
 //! executor that drives ONE future with NO io_uring reactor and NO tokio: a single
 //! `futures::executor::block_on` on a dedicated `std::thread`. `block_on` parks the
 //! worker thread on a `std::thread`-parking `Waker`; a `Sender::send` from the JS
@@ -14,7 +14,7 @@
 //! completion callback. The napi entrypoints (`bridge.rs`) wrap it with a
 //! `JsDeferred` so the JS side gets a `Promise` resolved cross-thread when
 //! `block_on` completes (fire-and-resolve — the JS thread is NEVER blocked on a
-//! `join()`, which would deadlock libuv/Bun, §B.5).
+//! `join()`, which would deadlock libuv/Bun).
 
 use std::thread;
 
@@ -43,8 +43,8 @@ where
         .spawn(move || {
             // The ONE future, driven with NO reactor. Every suspension inside it is
             // a channel receiver woken out-of-thread by the host `done` callback
-            // (§B.3) — audited strictly-sequential (no join!/select!/spawn) in the
-            // core apply path (§C.4).
+            // — audited strictly-sequential (no join!/select!/spawn) in the
+            // core apply path.
             let out = futures::executor::block_on(make_future());
             on_done(out);
         })
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn block_on_runs_a_future_on_a_worker_thread_and_reports_out_of_thread() {
-        // Prove the exact §B.3 shape without napi: a future that awaits a oneshot
+        // Prove the exact out-of-thread wakeup shape without napi: a future that awaits a oneshot
         // fired from ANOTHER thread wakes the parked block_on and the result is
         // delivered to on_done.
         let (result_tx, result_rx) = mpsc::channel::<u64>();

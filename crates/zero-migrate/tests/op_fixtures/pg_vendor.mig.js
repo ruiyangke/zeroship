@@ -1,6 +1,6 @@
 // op.* VENDOR fixture (`zero-migrate`) — the variant-exhaustiveness +
-// cross-impl round-trip gate for the privileged Postgres primitives (vendor spec
-// §4.5). Exercises EVERY vendor Op variant at least once, modelled on the
+// cross-impl round-trip gate for the privileged Postgres primitives.
+// Exercises EVERY vendor Op variant at least once, modelled on the
 // platform's own 0025_roles_rls / 0001_extensions_schemas / 0002_auth constructs,
 // so the JS recorder's vendor named exports + table-handle augmentations stay
 // byte-identical to the Rust `Op` wire shape.
@@ -103,7 +103,7 @@ export function up() {
     ifExists: true,
   });
 
-  // ── the gated raw escape (vendor spec §2.11) ──
+  // ── the gated raw escape ──
   raw({
     sql: "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
     reason: "set tenant app GUC for pg vendor fixture",

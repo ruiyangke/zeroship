@@ -1,7 +1,7 @@
-//! **#174 — standalone `.mask()` now ROUND-TRIPS through the op.* fold.**
+//! **Standalone `.mask()` ROUND-TRIPS through the op.* fold.**
 //!
 //! `fold_to_field_defs` has always recovered the ENCRYPTED auto-mask (the fail-safe
-//! `{ full, pii }` every `t.encrypted()` column carries — see the keystone), because
+//! `{ full, pii }` every `t.encrypted()` column carries), because
 //! that mask is the kernel default a `ColType::Encrypted` column unambiguously implies.
 //!
 //! A STANDALONE `.mask()` on a PLAINTEXT column (`t.string().mask({ kind: "last4" })`)
@@ -11,8 +11,8 @@
 //! emitted no sentinel — so the RUNTIME (which DOES read the sentinel) never masked the
 //! field either.
 //!
-//! #174 closes BOTH gaps by CARRYING the mask on `IrColumn.mask` (and `Op::AddColumn`):
-//!   1. the keystone producer `descriptors_to_create_ops` carries a standalone mask onto
+//! BOTH gaps are closed by CARRYING the mask on `IrColumn.mask` (and `Op::AddColumn`):
+//!   1. the producer `descriptors_to_create_ops` carries a standalone mask onto
 //!      the produced `IrColumn`;
 //!   2. the lower `ir_column_to_field` maps `IrColumn.mask` → `FieldDescriptor.mask`
 //!      (explicit mask WINS over the encrypted auto-mask);
@@ -62,7 +62,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     let generated = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).expect("fold");
     let ssn = &generated["people"]["ssn"];
 
-    // #174 RECOVERED: the standalone mask now SURVIVES the op.* fold (carried on the IR,
+    // RECOVERED: the standalone mask now SURVIVES the op.* fold (carried on the IR,
     // re-derived into the FieldDescriptor, and emitted on the recovered FieldDef).
     let mask = ssn
         .get("mask")

@@ -1,14 +1,14 @@
-//! PHASE 3b — the SQLite 12-step table REBUILD, end-to-end against REAL temp-file
-//! SQLite through the hardened `SqliteBackend` (design §2.4). The faithful path:
+//! The SQLite 12-step table REBUILD, end-to-end against REAL temp-file
+//! SQLite through the hardened `SqliteBackend`. The faithful path:
 //! the real `DeclarativeAuthor` builds the rebuild spec from a descriptor diff, and
 //! the real backend executes the 12-step under confinement (CreatorUp rebuild DDL,
 //! EngineJournal PRAGMA/check/journal, `foreign_keys` toggles straddling the txn).
 //!
-//! Coverage (the P3b gate):
+//! Coverage:
 //! - type change with rows preserved + journaled + indexes recreated;
 //! - nullability tighten (NULL → NOT NULL) and a column RENAME via rebuild;
 //! - a goodie (mask/encrypted) survives the rebuild — the sentinel still recovers
-//!   via the P5 drift snapshot;
+//!   via the drift snapshot;
 //! - FK integrity: a rebuild whose `foreign_key_check` would FAIL aborts with a
 //!   typed error, the original table is intact, and `foreign_keys` is back ON;
 //! - confinement during rebuild: a creator `up` cannot toggle `foreign_keys` nor
@@ -384,7 +384,7 @@ async fn column_rename_rebuild_carries_data() {
 // ---------------------------------------------------------------------------
 // (3) A goodie survives the rebuild: a table with a mask + an encrypted column →
 //     rebuild (an unrelated type change on a plain column) → the mask/enc sentinels
-//     still recover via the P5 drift snapshot (the new CREATE carries them inline).
+//     still recover via the drift snapshot (the new CREATE carries them inline).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn goodie_sentinels_survive_rebuild() {
@@ -438,7 +438,7 @@ async fn goodie_sentinels_survive_rebuild() {
         .expect("goodie rebuild applies");
 
     // The drift snapshot recovers the sentinels from the rebuilt table's
-    // sqlite_master.sql (P5 §2.7).
+    // sqlite_master.sql.
     let snap = be.snapshot_schema_sqlite().await.expect("snapshot");
     let t = snap.tables.get("accounts").expect("accounts in snapshot");
     let secret = t.columns.iter().find(|c| c.name == "secret").expect("secret");
@@ -749,7 +749,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
 }
 
 // ---------------------------------------------------------------------------
-// (C2) A creator TRIGGER and a PARTIAL index survive a rebuild. The lossy pre-fix
+// A creator TRIGGER and a PARTIAL index survive a rebuild. The lossy pre-fix
 //      path rebuilt indexes from the DESIRED IndexSnapshot (dropping the WHERE
 //      clause) and NEVER recreated triggers (DROP TABLE silently destroyed them).
 //      The fix captures every dependent object's `sql` VERBATIM from the live
@@ -908,7 +908,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         // EMPTY on purpose: a DIRECT-spec caller that does not declare the dropped
         // column gets the FAIL-CLOSED safety net (the captured index over `drop_me`
         // cannot replay and aborts). The declarative path, by contrast, populates
-        // `dropped_columns` so the dependent is skipped (H1) — see the
+        // `dropped_columns` so the dependent is skipped — see the
         // `h1_drop_column_in_index_routes_to_rebuild` faithful test.
         dropped_columns: vec![],
         reason: "drop column drop_me".into(),
@@ -952,7 +952,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
 }
 
 // ---------------------------------------------------------------------------
-// (H1) A cross-table FK orphan is caught by the UNSCOPED foreign_key_check. We
+// A cross-table FK orphan is caught by the UNSCOPED foreign_key_check. We
 //      rebuild a PARENT table dropping a row a CHILD references. A check scoped to
 //      the parent passes (the orphan is in the CHILD); the unscoped check catches it.
 //      Asserts: typed ForeignKeyViolation abort, both tables intact, FK back ON.
@@ -1058,7 +1058,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
 }
 
 // ---------------------------------------------------------------------------
-// (H2) A creator-pre-created `<t>__zero_migrate_rebuild` temp table does NOT pollute the
+// A creator-pre-created `<t>__zero_migrate_rebuild` temp table does NOT pollute the
 //      rebuild. Pre-fix the shared CREATE's `IF NOT EXISTS` silently REUSED the
 //      stale temp (junk column + junk row), then RENAMEd the pollution into place.
 //      The fix DROPs the stale temp first. Asserts: post-rebuild `t` has the NEW
@@ -1149,12 +1149,12 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
-// H1 — dropping a CONSTRAINED column routes to the 12-step rebuild (a native
+// Dropping a CONSTRAINED column routes to the 12-step rebuild (a native
 // SQLite `ALTER TABLE … DROP COLUMN` ERRORS on such a column, aborting the
 // migration). Two faithful end-to-end cases on the REAL hardened backend.
 // ---------------------------------------------------------------------------
 
-// (H1-a) DROP a column that participates in an INDEX. The detector source (1)
+// DROP a column that participates in an INDEX. The detector source (1)
 // (IndexSnapshot::columns) catches it. The drop must apply via REBUILD: the
 // column is gone, its index is gone, a SURVIVING column's index is intact, and
 // the other column's data is preserved.
@@ -1268,7 +1268,7 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
     assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
 }
 
-// (H1-b) DROP a column that participates in a CHECK constraint (emitted inline by
+// DROP a column that participates in a CHECK constraint (emitted inline by
 // a numeric `min`). The CHECK is NOT in the structured SQLite snapshot — the
 // detector's source (3) (stored CREATE text scan) catches it. The drop must apply
 // via REBUILD: the column is gone and the other column's data is preserved.
@@ -1614,10 +1614,10 @@ fn simple_migration(name: &str, up: &str) -> Migration {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION (PR9b MED): the executor seam `MigrationBackend::rebuild_one`
+// REGRESSION: the executor seam `MigrationBackend::rebuild_one`
 // enforces the PER-VERSION approval SCOPE as a TRUE second gate.
 //
-// Pre-PR9b-fix, the trait `rebuild_one` took NO `scope` — so a direct seam
+// Before the fix, the trait `rebuild_one` took NO `scope` — so a direct seam
 // caller driving `MigrationBackend::rebuild_one(be, .., Approval::Approved-equiv)`
 // could rebuild a destructive table the operator never individually reviewed,
 // bypassing the engine's per-version scope gate. This test drives the SEAM

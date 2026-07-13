@@ -1,5 +1,4 @@
-//! The N-API transport (design §B.3 + §C.4 + §C.5) — compiled only with the `napi`
-//! feature.
+//! The N-API transport — compiled only with the `napi` feature.
 //!
 //! ## Sync, DB-free entrypoints (run inline, no bridge)
 //! `irVersion`, `loadVerify` — pure functions ([`crate::api`]). `loadVerify` returns
@@ -16,9 +15,9 @@
 //!
 //! The JS thread is **never** `join()`ed on the worker — that would deadlock
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
-//! in the napi call). This is the fire-and-resolve topology (§B.5).
+//! in the napi call). This is the fire-and-resolve topology.
 //!
-//! ## The tokio-free verb bridge (§B.3)
+//! ## The tokio-free verb bridge
 //! Each `SqlSession` verb ([`crate::session::NapiHostSession`]) calls
 //! [`TsfnDispatch::dispatch`], which: allocates a `futures::channel::oneshot`, moves
 //! the `Sender` into the TSFN payload, and `tsfn.call(..., Blocking)`. On the JS
@@ -84,34 +83,34 @@ impl ApplyDialect {
 }
 
 // ---------------------------------------------------------------------------
-// Sync, DB-free entrypoints (§C.5) — inline on the napi call thread.
+// Sync, DB-free entrypoints — inline on the napi call thread.
 // ---------------------------------------------------------------------------
 
-/// The IR-format version this addon was built against (§5.3 fail-closed floor).
+/// The IR-format version this addon was built against (fail-closed floor).
 #[napi(js_name = "irVersion")]
 pub fn ir_version() -> u32 {
     api::current_ir_version()
 }
 
-/// Load + verify an IR document (the sync, DB-free deploy gate, §C.5). Returns a
+/// Load + verify an IR document (the sync, DB-free deploy gate). Returns a
 /// typed [`LoadVerifyReply`]; never throws for a malformed document.
 #[napi(js_name = "loadVerify")]
 pub fn load_verify(
-    ir_json: String,
+    envelope_json: String,
     deploying_app: String,
     dialect: String,
     registry: std::collections::HashMap<String, String>,
 ) -> LoadVerifyReply {
-    api::load_verify(&ir_json, &deploying_app, &dialect, &registry)
+    api::load_verify(&envelope_json, &deploying_app, &dialect, &registry)
 }
 
 // ---------------------------------------------------------------------------
-// The host-driver TSFN payload + dispatch (§B.3).
+// The host-driver TSFN payload + dispatch.
 // ---------------------------------------------------------------------------
 
 /// What crosses to the JS thread per verb: the request + the oneshot `Sender` the
 /// `done` callback fires. Both are `Send + 'static` (owned data + a
-/// `oneshot::Sender<VerbReply>`), so no `!Send` engine state crosses (§B.3).
+/// `oneshot::Sender<VerbReply>`), so no `!Send` engine state crosses.
 struct VerbCall {
     request: JsRequest,
     reply: futures::channel::oneshot::Sender<VerbReply>,
@@ -137,7 +136,7 @@ type HostTsfn = ThreadsafeFunction<
 >;
 
 /// A [`VerbDispatch`] that fires the host-driver `ThreadsafeFunction` and parks on a
-/// oneshot the JS `done` callback fires (§B.3).
+/// oneshot the JS `done` callback fires.
 pub struct TsfnDispatch {
     tsfn: HostTsfn,
 }
@@ -160,7 +159,7 @@ impl VerbDispatch for TsfnDispatch {
         }
         // Park the (single-threaded) engine future on the oneshot the `done`
         // callback fires from the JS thread. Awaiting a `oneshot::Receiver` — NEVER
-        // a JS Promise — keeps the reactor-less block_on sufficient (§C.4).
+        // a JS Promise — keeps the reactor-less block_on sufficient.
         rx.await.unwrap_or(Err(JsError {
             message: "host driver dropped the `done` callback without replying".to_string(),
             code: None,
@@ -204,7 +203,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
                     };
                     if let Some(tx) = sender_cell.borrow_mut().take() {
                         // Fire the oneshot — this is the cross-thread Waker::wake
-                        // that unparks the engine worker's block_on (§B.3). A
+                        // that unparks the engine worker's block_on. A
                         // dropped receiver (engine gone) is not an error here.
                         let _ = tx.send(outcome);
                     }
@@ -240,7 +239,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Async, host-driven entrypoints (§C.5) — the ONE generic driver.
+// Async, host-driven entrypoints — the ONE generic driver.
 // ---------------------------------------------------------------------------
 
 /// Detach the borrow of a `create_deferred` promise `Object<'_>` (which borrows the
@@ -254,7 +253,7 @@ fn detach_promise(env: Env, promise: Object<'_>) -> Result<Object<'static>> {
     Ok(detached)
 }
 
-/// The ONE generic host-verb driver (redesign step 5a) — the single home of the
+/// The ONE generic host-verb driver — the single home of the
 /// build-dispatch → create-deferred → spawn-engine → resolve/reject plumbing every
 /// async verb shares.
 ///
@@ -265,7 +264,7 @@ fn detach_promise(env: Env, promise: Object<'_>) -> Result<Object<'static>> {
 ///   message that becomes a promise rejection).
 ///
 /// The returned `Object` is the JS `Promise<T>`; the engine's whole lifetime lives on
-/// the worker thread (the JS thread is never joined — §B.5).
+/// the worker thread (the JS thread is never joined).
 fn run_verb<T, Fut, E>(env: Env, host_driver: HostDriverFn, engine: E) -> Result<Object<'static>>
 where
     T: ToNapiValue + Send + 'static,
@@ -344,15 +343,15 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 }
 
 // ---------------------------------------------------------------------------
-// The typed verbs (§C.5) — each is a thin `run_verb` closure over the engine.
+// The typed verbs — each is a thin `run_verb` closure over the engine.
 // ---------------------------------------------------------------------------
 
-/// `applyIr` — the HOST-AUTHORING apply entry (§D.1): take a pure-JS `.ir.json`
+/// `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS IR envelope
 /// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
 /// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
 /// authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then
 /// drive `executor::apply` over the host driver. The envelope must NOT carry
-/// `owner_app`; it is stamped from `req.owner_app` (provenance, §D.1).
+/// `owner_app`; it is stamped from `req.owner_app` (provenance).
 ///
 /// This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
 /// recorder produces the envelope, this addon owns the checksum.
@@ -364,7 +363,7 @@ pub fn apply_ir(
     host_driver: HostDriverFn,
     req: ApplyRequest,
 ) -> Result<Object<'static>> {
-    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here, §D.1). The
+    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here). The
     // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
     let envelope_json = serde_json::to_string(&req.envelope)
         .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
@@ -383,7 +382,7 @@ pub fn apply_ir(
             .map_err(|e| Error::from_reason(format!("lowered migrations re-parse failed: {e}")))?
     };
 
-    // Dialect selects the backend (C1 fix, step 4e): Postgres and MySQL ride the
+    // Dialect selects the backend: Postgres and MySQL ride the
     // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
     // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
     // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,
@@ -431,14 +430,13 @@ pub fn apply_ir(
 
 /// The `project_id` an `ExecutorConfig` carries. The IR host path uses the project
 /// schema as the project id (a fresh single-app project's schema == its id in the
-/// create-first posture), matching the native oracle's `ExecutorConfig::new(schema,
-/// schema)` (`build_new_generate_pg.rs`). A distinct project id can be threaded
-/// through a future facade arg.
+/// create-first posture), matching the reference `ExecutorConfig::new(schema,
+/// schema)`. A distinct project id can be threaded through a future facade arg.
 fn owner_app_project(project_schema: &str) -> String {
     project_schema.to_string()
 }
 
-/// `status` — the generic `ops::status::status` over the host driver (§C.5).
+/// `status` — the generic `ops::status::status` over the host driver.
 /// Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
 /// typed [`StatusReply`].
 #[napi(ts_return_type = "Promise<StatusReply>")]
@@ -469,7 +467,7 @@ pub fn status(
     })
 }
 
-/// `history` — the generic `ops::status::history` over the host driver (§C.5).
+/// `history` — the generic `ops::status::history` over the host driver.
 /// Resolves to a typed [`HistoryReply`].
 #[napi(ts_return_type = "Promise<HistoryReply>")]
 pub fn history(

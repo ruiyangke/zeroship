@@ -1,4 +1,4 @@
-//! **PR14 — the OFFLINE `--sql` plan preview gate.**
+//! **The OFFLINE `--sql` plan preview gate.**
 //!
 //! These tests run with NO DB connection (no `_pg`/`_sqlite` suffix, not gated on
 //! `MIGRATE_REQUIRE_DB`): the preview's whole point is to render the SQL the engine
@@ -23,7 +23,7 @@
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::PlanStep;
 use zero_migrate::render::sql_preview::{
-    render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
+    render_ir_envelope_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
 use zero_migrate::{
     resolve_create_table_policy, MigrationIr, PolicyProfile,
@@ -121,12 +121,12 @@ fn render_representative(dialect: SqlDialect) -> String {
     } else {
         REPRESENTATIVE_IR
     };
-    let ir = resolve_ir_json(ir);
-    render_ir_json_sql(&ir, dialect, &opts())
+    let ir = resolve_envelope_json(ir);
+    render_ir_envelope_sql(&ir, dialect, &opts())
         .expect("representative IR renders offline")
 }
 
-fn resolve_ir_json(ir: &str) -> String {
+fn resolve_envelope_json(ir: &str) -> String {
     let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
     let resolved =
         resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("preview fixture IR resolves");
@@ -183,7 +183,7 @@ fn faithful_to_lowered_sql_mysql() {
 
 fn faithful_to_lowered_sql(dialect: SqlDialect) {
     // An IR with ONLY the DB-independent ops (so `lower_steps` succeeds end-to-end).
-    let ir_json = r#"{
+    let envelope_json = r#"{
       "ir_version": 1,
       "name": "faithful",
       "ops": [
@@ -197,12 +197,12 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
           "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,200,"ok"]]}
       ]
     }"#;
-    let ir_json = resolve_ir_json(ir_json);
-    let ir: MigrationIr = serde_json::from_str(&ir_json).unwrap();
+    let envelope_json = resolve_envelope_json(envelope_json);
+    let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
     let author = IrAuthor::new("public", "app_preview", dialect);
     let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("lowers offline");
 
-    let preview = render_ir_json_sql(&ir_json, dialect, &opts()).expect("renders offline");
+    let preview = render_ir_envelope_sql(&envelope_json, dialect, &opts()).expect("renders offline");
 
     for step in &steps {
         match step {
@@ -229,8 +229,8 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
 
 #[test]
 fn mysql_feature_preview_renders_mysql8_sql() {
-    let ir = resolve_ir_json(MYSQL_FEATURE_IR);
-    let out = render_ir_json_sql(&ir, SqlDialect::Mysql, &opts())
+    let ir = resolve_envelope_json(MYSQL_FEATURE_IR);
+    let out = render_ir_envelope_sql(&ir, SqlDialect::Mysql, &opts())
         .expect("MySQL feature fixture renders offline");
     assert!(out.contains("CREATE TABLE `public`.`teams`"), "{out}");
     assert!(out.contains("`id` INT AUTO_INCREMENT PRIMARY KEY"), "{out}");
@@ -266,7 +266,7 @@ fn online_rename_is_labeled_never_fabricated() {
         let ir = r#"{"ir_version":1,"name":"r","ops":[
           {"op":"renameColumn","table":"codes","from":"label","to":"display_name","type":"text"}
         ]}"#;
-        let out = render_ir_json_sql(ir, dialect, &opts()).expect("renders offline");
+        let out = render_ir_envelope_sql(ir, dialect, &opts()).expect("renders offline");
         assert!(
             out.contains(RUNTIME_RESOLVED) && out.contains("online rename"),
             "rename must be labeled runtime-resolved for {dialect:?}:\n{out}"
@@ -298,8 +298,8 @@ fn backfill_is_labeled_never_fabricated() {
           "lhs":{"node":"colRef","name":"code"},
           "rhs":{"node":"literal","value":1000}}}
     ]}"#;
-    let ir = resolve_ir_json(ir);
-    let out = render_ir_json_sql(&ir, SqlDialect::Postgres, &opts()).expect("renders offline");
+    let ir = resolve_envelope_json(ir);
+    let out = render_ir_envelope_sql(&ir, SqlDialect::Postgres, &opts()).expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("backfill"),
         "backfill must be labeled runtime-resolved:\n{out}"
@@ -314,7 +314,7 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     let ir = r#"{"ir_version":1,"name":"g","ops":[
       {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"}
     ]}"#;
-    let out = render_ir_json_sql(ir, SqlDialect::Postgres, &opts()).expect("renders offline");
+    let out = render_ir_envelope_sql(ir, SqlDialect::Postgres, &opts()).expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("catalog-probed"),
         "guarded addColumn must carry the catalog-probe label:\n{out}"
@@ -331,54 +331,7 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     );
 }
 
-/// A `.sql` (Flyway/dbmate) directory loads + renders WITHOUT a DB via `load_dir` +
-/// `render_set_sql`. Proves the `.sql` leg is offline and the verbatim body is shown.
-#[test]
-fn sql_dir_renders_offline() {
-    let dir = tempdir_with(&[
-        ("V0001__widgets.sql", "CREATE TABLE widgets (id text primary key);\n"),
-    ]);
-    let plans = zero_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
-    let out = render_set_sql(&plans, SqlDialect::Postgres, &opts());
-    assert!(out.contains("CREATE TABLE widgets (id text primary key)"), "{out}");
-    assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// MED-1 — HONESTY ON THE RAW `.sql` LEG. Operator-authored raw `.sql` is rendered
-/// VERBATIM, never dialect-transformed. A PG-only `.sql` (`SERIAL`) rendered under
-/// `--dialect sqlite` must therefore NOT be captioned with a bare `(dialect: sqlite)`
-/// claim — that would mislead an operator reviewing a SQLite go-live into thinking
-/// the PG SQL had been lowered for SQLite. The header must carry the verbatim/NOT-
-/// transformed disclaimer instead, while the body stays byte-verbatim.
-#[test]
-fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
-    let dir = tempdir_with(&[(
-        "V0001__legacy.sql",
-        "CREATE TABLE legacy (id SERIAL PRIMARY KEY, name text);\n",
-    )]);
-    let plans = zero_migrate::plan::loader::load_dir(&dir).expect("loads .sql offline");
-    // Render the PG-only raw SQL under the SQLITE dialect request.
-    let out = render_set_sql(&plans, SqlDialect::Sqlite, &opts());
-
-    // The PG SQL is shown VERBATIM (the SERIAL never became INTEGER / AUTOINCREMENT).
-    assert!(out.contains("id SERIAL PRIMARY KEY"), "raw SQL must be verbatim:\n{out}");
-
-    // CRITICAL: no bare `(dialect: sqlite)` claim anywhere — neither the doc header
-    // nor the per-plan header may assert the SQL was lowered for SQLite.
-    assert!(
-        !out.contains("(dialect: sqlite)"),
-        "raw .sql must NOT be captioned with a transformed-dialect claim:\n{out}"
-    );
-    // It DOES surface the honest verbatim/NOT-transformed disclaimer.
-    assert!(
-        out.contains("NOT dialect-transformed"),
-        "raw .sql header must disclose it is verbatim / not transformed:\n{out}"
-    );
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising, LOW-1). Scrubbing
+/// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
 /// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
 /// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect
 /// (a path dialing a fixed host would still pass here). Named honestly for what it
@@ -389,11 +342,11 @@ fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
 fn render_succeeds_without_a_dsn() {
     // Scrub any inherited DSN so the render cannot lean on an env-provided DSN.
     std::env::remove_var("DATABASE_URL");
-    let representative = resolve_ir_json(REPRESENTATIVE_IR);
-    let representative_mysql = resolve_ir_json(REPRESENTATIVE_IR_MYSQL);
-    let pg = render_ir_json_sql(&representative, SqlDialect::Postgres, &opts());
-    let sqlite = render_ir_json_sql(&representative, SqlDialect::Sqlite, &opts());
-    let mysql = render_ir_json_sql(&representative_mysql, SqlDialect::Mysql, &opts());
+    let representative = resolve_envelope_json(REPRESENTATIVE_IR);
+    let representative_mysql = resolve_envelope_json(REPRESENTATIVE_IR_MYSQL);
+    let pg = render_ir_envelope_sql(&representative, SqlDialect::Postgres, &opts());
+    let sqlite = render_ir_envelope_sql(&representative, SqlDialect::Sqlite, &opts());
+    let mysql = render_ir_envelope_sql(&representative_mysql, SqlDialect::Mysql, &opts());
     assert!(
         pg.is_ok() && sqlite.is_ok() && mysql.is_ok(),
         "offline render must not need a DSN"
@@ -406,7 +359,7 @@ fn render_succeeds_without_a_dsn() {
 /// engine-lowered DDL surface verbatim (a surfacing layer, not a re-render).
 #[test]
 fn render_plan_sql_surfaces_lowered_ddl_offline() {
-    let ir_json = r#"{
+    let envelope_json = r#"{
       "ir_version": 1,
       "name": "single",
       "ops": [
@@ -415,7 +368,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
         ]}
       ]
     }"#;
-    let ir: MigrationIr = serde_json::from_str(ir_json).unwrap();
+    let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
     let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
@@ -435,7 +388,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
     }
 }
 
-/// LOW-2 — `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
+/// `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
 /// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
 /// OnlineRename step). It locks the no-fabrication contract for the rename render
 /// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
@@ -458,13 +411,23 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
         .expect("expand-contract author lowers the rename");
     let rename = RenameStep::PgExpandContract(ec);
 
-    // Borrow a real, fully-formed AppliedPlan via the offline `.sql` loader, then swap
-    // its single DDL step for the OnlineRename step (the only piece under test).
-    let dir = tempdir_with(&[("V0001__seed.sql", "CREATE TABLE codes (id text primary key);\n")]);
-    let mut plan = zero_migrate::plan::loader::load_dir(&dir)
-        .expect("loads .sql offline")
-        .pop()
-        .expect("one plan");
+    // Build a real, fully-formed AppliedPlan in-memory (lower a trivial createTable IR
+    // via the same author the engine uses), then swap its single DDL step for the
+    // OnlineRename step (the only piece under test).
+    let seed_json = r#"{
+      "ir_version": 1,
+      "name": "seed",
+      "ops": [
+        {"op":"createTable","name":"codes","columns":[
+          {"name":"id","type":"text","nullable":false,"unique":true}
+        ]}
+      ]
+    }"#;
+    let seed: MigrationIr = serde_json::from_str(seed_json).unwrap();
+    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let mut plan = author
+        .lower_plan(&seed, &LiveSchema::default())
+        .expect("DB-independent IR lowers offline");
     plan.steps = vec![PlanStep::OnlineRename(rename)];
 
     let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
@@ -499,34 +462,44 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
             );
         }
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A malformed `.ir.json` is a hard error (the CLI maps this to a non-zero exit).
+/// A malformed IR envelope is a hard error (the CLI maps this to a non-zero exit).
 #[test]
 fn malformed_ir_is_error() {
-    let err = render_ir_json_sql("{ not json", SqlDialect::Postgres, &opts());
+    let err = render_ir_envelope_sql("{ not json", SqlDialect::Postgres, &opts());
     assert!(err.is_err(), "malformed IR must be an error");
 }
 
-// NOTE (redesign step 5c): the three offline `plan` CLI-smoke tests that shelled
+// NOTE: the three offline `plan` CLI-smoke tests that shelled
 // the retired Rust `zero-migrate` binary (`CARGO_BIN_EXE_zero-migrate`) were removed
-// with the bin. The offline SQL-preview surface they exercised — `render_ir_json_sql`
+// with the bin. The offline SQL-preview surface they exercised — `render_ir_envelope_sql`
 // / `render_set_sql` / `render_plan_sql` + the `-- [runtime-resolved]` labeling — is
 // still fully covered DB-free by the library tests above (goldens, faithfulness,
 // no-fabrication, `render_succeeds_without_a_dsn`). The command-line entry point is
 // now the `zero-migrate-engine` TS CLI (`sdks/engine/src/cli.ts`).
 
-/// Create a unique temp dir seeded with `(filename, contents)` files; caller removes.
-fn tempdir_with(files: &[(&str, &str)]) -> std::path::PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "zsm_preview_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    std::fs::create_dir_all(&base).unwrap();
-    for (name, body) in files {
-        std::fs::write(base.join(name), body).unwrap();
-    }
-    base
+/// `render_set_sql` — the multi-plan renderer. Lower a DB-independent IR to an
+/// `AppliedPlan` in-memory and render it as a one-element set, asserting the summary
+/// line + the lowered DDL surface. Symmetric with the `render_plan_sql` test above.
+#[test]
+fn render_set_sql_surfaces_lowered_ddl_offline() {
+    let envelope_json = r#"{
+      "ir_version": 1,
+      "name": "widgets",
+      "ops": [
+        {"op":"createTable","name":"widgets","columns":[
+          {"name":"id","type":"text","nullable":false,"unique":true}
+        ]}
+      ]
+    }"#;
+    let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
+    let author = IrAuthor::new("public", "app_preview", SqlDialect::Postgres);
+    let plan = author
+        .lower_plan(&ir, &LiveSchema::default())
+        .expect("DB-independent IR lowers offline");
+
+    let out = render_set_sql(&[plan], SqlDialect::Postgres, &opts());
+    assert!(out.contains("CREATE TABLE"), "the lowered DDL should surface:\n{out}");
+    assert!(out.contains("-- preview:"), "carries a summary line:\n{out}");
 }

@@ -1,7 +1,7 @@
-// op.* migration fixture — the C2 follow-on: `.column(name).add({ type })` where
+// op.* migration fixture — the follow-on: `.column(name).add({ type })` where
 // the added column carries a `.unique()` modifier. An ADD COLUMN has no inline
 // UNIQUE, so the modifier LOWERS to a separate follow-on ADD CONSTRAINT op. This
-// is the ONE PR15 behavior that ADDS ops to the IR, so it must be byte-pinned by
+// is the ONE behavior that ADDS ops to the IR, so it must be byte-pinned by
 // the cross-impl golden (op_round_trip GATE 1 + the value checksum), not only the
 // hand-written TS assertions.
 //

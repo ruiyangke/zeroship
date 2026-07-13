@@ -22,8 +22,8 @@
 //!    A `None` text param is a SQL NULL. This suite proves both param sides.
 //! 4. **Error + SQLSTATE mapping.** A failing statement surfaces a [`DbError`] whose
 //!    `message` is non-empty and whose `sqlstate` (when the driver has one) is the
-//!    real Postgres SQLSTATE — not a stringified panic. `role.rs`'s transient-retry
-//!    classifier and every `#[source]` wrap read this.
+//!    real Postgres SQLSTATE — not a stringified panic. Every `#[source]` wrap
+//!    reads this.
 //!
 //! This is the FIRST external consumer of the seam beyond the engine itself: a
 //! driver author (or the `PgDevSession` test harness) runs [`run`] against a live,
@@ -32,7 +32,7 @@
 //! in a caller-provided scratch schema, touching nothing the engine journals.
 //!
 //! Postgres-flavoured by design (it issues `BEGIN`/`ROLLBACK`, a `TEMP TABLE`, and a
-//! text→int coercion). A MySQL conformance profile would render the dialect
+//! text→timestamptz coercion). A MySQL conformance profile would render the dialect
 //! equivalents; the shape (four checks, one verdict) is the same. Gated on
 //! `pg_seam` because it names the `SqlSession` seam.
 

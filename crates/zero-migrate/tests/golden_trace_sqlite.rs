@@ -1,4 +1,4 @@
-//! HIGH #1 (spec §6.0 / §10 PR0 test 8) — the GOLDEN-TRACE ORACLE, SQLite leg.
+//! The GOLDEN-TRACE ORACLE, SQLite leg.
 //!
 //! The peer of `golden_trace_pg.rs` for the two SQLite-specific declarative paths
 //! the re-point must preserve byte-for-byte:
@@ -273,7 +273,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // Author a PG expand-contract rename and feed it as a PlanStep to a SQLite
     // backend (online() == None). The differ never produces this on SQLite; we
     // construct it directly to prove the apply_plan dispatch fails closed rather
-    // than silently dropping the rename (the §3.3 / H1 invariant).
+    // than silently dropping the rename (the fail-closed invariant).
     let rename = ExpandContractAuthor::new(PROJECT, APP)
         .author(&OnlineIntent::RenameColumn {
             table: "people".into(),

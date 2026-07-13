@@ -1,4 +1,4 @@
-//! Sync, DB-free API surface (design §C.5): load + verify an IR document.
+//! Sync, DB-free API surface: load + verify an IR document.
 //!
 //! These functions run inline on the napi call thread — they touch NO database, so
 //! there is no host bridge and no worker thread. They build the typed
@@ -10,7 +10,7 @@
 //! The load-verify path is `zero_migrate::model::load::load_ir_document`, which
 //! deserializes the closed IR AST, fails closed on an unknown `ir_version`, runs the
 //! authoritative structural + schema-confinement validation, enforces ownership
-//! against the project registry, and compares the advisory checksum hint (§2.4/§2.7).
+//! against the project registry, and compares the advisory checksum hint.
 //! It is the single DB-free gate an authoring host runs before deploy.
 
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ use zero_migrate::model::validate::Dialect;
 use crate::wire::LoadVerifyReply;
 
 /// The IR-format version this addon was built against (`ir_version` fail-closed
-/// floor, §5.3). Surfaced so a host can pre-check an artifact's version.
+/// floor). Surfaced so a host can pre-check an artifact's version.
 #[must_use]
 pub const fn current_ir_version() -> u32 {
     CURRENT_IR_VERSION
@@ -40,9 +40,9 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
     }
 }
 
-/// Load + verify an IR document (the sync, DB-free deploy gate, §C.5).
+/// Load + verify an IR document (the sync, DB-free deploy gate).
 ///
-/// - `ir_json` — the `.ir.json` document bytes (UTF-8).
+/// - `envelope_json` — the IR envelope document bytes (UTF-8).
 /// - `deploying_app` — the app id claiming the deploy (ownership is checked against
 ///   `registry`, not the artifact's self-claim).
 /// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
@@ -56,7 +56,7 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
 /// fail-closed default `load_ir_document` uses when called with `None`.
 #[must_use]
 pub fn load_verify(
-    ir_json: &str,
+    envelope_json: &str,
     deploying_app: &str,
     dialect: &str,
     registry: &HashMap<String, String>,
@@ -69,7 +69,7 @@ pub fn load_verify(
     let registry: std::collections::BTreeMap<String, String> =
         registry.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-    match load_ir_document(ir_json, deploying_app, dialect, &registry, None, None) {
+    match load_ir_document(envelope_json, deploying_app, dialect, &registry, None, None) {
         Ok(ir) => LoadVerifyReply {
             ok: true,
             ir_version: Some(ir.ir_version),
@@ -110,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_ir_json_yields_ok_false_with_message() {
+    fn malformed_envelope_json_yields_ok_false_with_message() {
         let r = load_verify("{not json", "app_x", "postgres", &empty_registry());
         assert!(!r.ok);
         assert!(r.error.is_some());
@@ -120,7 +120,7 @@ mod tests {
     fn a_populated_registry_is_accepted_typed_not_a_json_string() {
         // The registry crosses the boundary TYPED (a `Record<string,string>`), so a
         // populated map is a plain `HashMap` — no JSON string, no parse step. A
-        // malformed `.ir.json` still fails closed with a message (never a panic).
+        // malformed IR envelope still fails closed with a message (never a panic).
         let mut reg = HashMap::new();
         reg.insert("widgets".to_string(), "app_x".to_string());
         let r = load_verify("{not json", "app_x", "postgres", &reg);

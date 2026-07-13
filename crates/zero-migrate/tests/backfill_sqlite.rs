@@ -1,9 +1,9 @@
-//! PR6b — FAITHFUL e2e for the SQLite **batched / resumable backfill executor**
-//! (§2.3.1) against REAL temp-file SQLite (no shim, no PG-gating). Drives the real
+//! FAITHFUL e2e for the SQLite **batched / resumable backfill executor**
+//! against REAL temp-file SQLite (no shim, no PG-gating). Drives the real
 //! hardened migration connection + the real batched executor, then probes the rows
 //! to prove the data transform actually happened, crash-safely and exactly-once.
 //!
-//! Coverage (the spec's PR6b SQLite backfill obligations):
+//! Coverage (the SQLite backfill obligations):
 //! - a large table transforms in bounded batches, resumable;
 //! - crash mid-run (bounded run, no completion) → resume reaches the SAME final
 //!   state, EXACTLY ONCE (a `val = val + 1` transform makes a double-apply visible);
@@ -273,7 +273,7 @@ async fn sqlite_backfill_complete_rerun_is_noop() {
 }
 
 // ── REAL (numeric-affinity, non-integral) unique cursor, exactly-once ────────
-// MED (PR6b code-critic): `max_returned_cursor` parsed each RETURNING'd cell with
+// `max_returned_cursor` parsed each RETURNING'd cell with
 // `parse::<i64>()` and SILENTLY DROPPED any non-i64 value — so a UNIQUE NOT NULL
 // REAL cursor (legal, just unusual) yielded max_cursor=None even with n>0 rows
 // touched, writing last_cursor=NULL, re-scanning from the start (WHERE 1=1), and
@@ -379,7 +379,7 @@ async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
 }
 
 // ── non-BINARY (NOCASE) collation cursor: collation-consistent resume ────────
-// MED (PR6b code-critic): the window is paged with `ORDER BY <cursor> ASC` +
+// The window is paged with `ORDER BY <cursor> ASC` +
 // `<cursor> > ?1`, which honor the cursor COLUMN's declared SQLite collation
 // (NOCASE here). But the high-water mark was computed Rust-side with
 // `cells.max()` = BINARY ordering. For a NOCASE TEXT cursor whose BINARY-max ≠

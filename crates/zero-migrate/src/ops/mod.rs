@@ -6,4 +6,4 @@
 pub mod squash;
 pub mod status;
 // The confined submit path is PG-only (role provisioning over `admin_conn`, the
-// shadow dry-run harness), so it rides `native-pg`.
+// shadow dry-run harness), so it rides the PG seam (`host-pg`).

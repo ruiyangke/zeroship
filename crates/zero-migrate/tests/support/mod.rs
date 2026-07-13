@@ -1,4 +1,4 @@
-//! Shared test-support for the live-Postgres regression suite (redesign step 6a).
+//! Shared test-support for the live-Postgres regression suite.
 //!
 //! [`PgDevSession`] is a TEST-ONLY [`zero_migrate::driver::SqlSession`] implementation
 //! backed by the BLOCKING `postgres` crate. It lets the in-crate Rust tests drive the
@@ -6,7 +6,7 @@
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
 //! Postgres (:5440) through the SAME driver seam the production napi/Node `pg` host
 //! rides. This is the in-crate live-DB coverage the deleted `native-pg` tests used to
-//! provide (they drove the now-deleted compio client directly); it closes C4.
+//! provide (they drove the now-deleted compio client directly).
 //!
 //! **Never ships.** The `postgres` crate is a `[dev-dependency]` only. It pulls `tokio`
 //! transitively (blocking `postgres` wraps `tokio-postgres` on a private current-thread
@@ -14,7 +14,7 @@
 //! shipped `zero-migrate` library links neither tokio nor compio (`cargo tree -p
 //! zero-migrate -e normal` stays empty of both).
 //!
-//! **Single pinned connection (§B.6).** The seam contract is one verb at a time over
+//! **Single pinned connection.** The seam contract is one verb at a time over
 //! ONE pinned backend. The blocking `postgres::Client` is a single physical connection;
 //! it is wrapped in a `RefCell` (the seam is `&self`, the client methods are `&mut self`,
 //! and the runtime is single-threaded) so a temp table / open transaction created by one

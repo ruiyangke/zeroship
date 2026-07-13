@@ -1,7 +1,7 @@
-//! The SQL security guard attack-vector matrix — the security heart (Task 4).
+//! The SQL security guard attack-vector matrix — the security heart.
 //!
 //! Migrations are privileged arbitrary-SQL authored by untrusted creators AND
-//! a prompt-injectable AI (design §1.1). The guard is the parse-time first line
+//! a prompt-injectable AI. The guard is the parse-time first line
 //! of defense-in-depth (the least-priv `migrator` role, built later, is the
 //! second). Every vector below MUST be denied; the positive controls MUST pass;
 //! destructive ops MUST pass but be *flagged* (the gate decides on data loss).
@@ -32,7 +32,7 @@ fn assert_denied(sql: &str) {
             | GuardError::DataSecurityPolicy { .. },
         ) => {}
         Err(GuardError::Parse(e)) => panic!("expected Denied, got Parse({e:?}) for: {sql}"),
-        // PHASE 4 — the PG `guard()` here is never SQLite, so this is unreachable.
+        // The PG `guard()` here is never SQLite, so this is unreachable.
         Err(GuardError::SqliteRawSqlRejected) => {
             panic!("PG guard returned SqliteRawSqlRejected for: {sql}")
         }
@@ -1052,7 +1052,7 @@ fn mixed_migration_with_a_drop_is_flagged_but_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 5 — operational advisories + flags_for mapping
+// Operational advisories + flags_for mapping
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1849,7 +1849,7 @@ fn pg_get_object_address_own_schema_array_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 6 — public API surface smoke test (uses only crate-root re-exports)
+// Public API surface smoke test (uses only crate-root re-exports)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2031,13 +2031,13 @@ fn xpath_over_xml_value_passes() {
 }
 
 // ===========================================================================
-// T2 / T2b — Confined-unchanged regression (design §6.4, H3).
+// Confined-unchanged regression.
 //
 // The WHOLE existing fixture set above already re-runs under
 // `GuardConfig::confined(...)` (the `guard()` helper was converted to it), so a
 // green file IS the byte-identical proof for the statement-kind + body gates.
-// These add the read sites the round-1 proof omitted — func-def-target (site 2)
-// and literal-schema-ref (site 3) under `SchemaScope::Single` — plus T2b: the
+// These add the read sites the earlier proof omitted — func-def-target (site 2)
+// and literal-schema-ref (site 3) under `SchemaScope::Single` — plus: the
 // privileged constructs Platform now allows are STILL denied under Confined.
 // ===========================================================================
 

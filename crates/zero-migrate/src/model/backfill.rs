@@ -2,7 +2,7 @@
 
 use sha2::{Digest, Sha256};
 
-/// The structured definition of a large-table backfill (design §5).
+/// The structured definition of a large-table backfill.
 ///
 /// The creator/AI supplies the **target** ([`table`](Self::table)), the ordered
 /// key to page by ([`cursor_column`](Self::cursor_column)), the

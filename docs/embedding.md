@@ -123,7 +123,7 @@ Identity is threaded per `apply` call, distinct from the config:
 | `exec_cfg: &ExecutorConfig` | Project id/schema, migrator role, timeouts. |
 | `applied_by: &str` | The audit label recorded in the journal. |
 
-For the `.ir.json` **load gate**, ownership identity is threaded through
+For the IR envelope **load gate**, ownership identity is threaded through
 `load_ir_document` / `enforce_ir_ownership`: the deploying app id is
 server-stamped as `owner_app`, and a `{ live table → owning app }` registry is
 supplied so a partial-union deploy cannot mass-drop another tenant's tables
@@ -143,7 +143,7 @@ source of truth; TS imports the generated `.d.ts`). Integers cross as `bigint`
 | Verb | Kind | Purpose |
 | --- | --- | --- |
 | `irVersion()` | sync, DB-free | The IR-format version this addon was built against (the fail-closed floor + the single source of truth for the recorder's envelope). |
-| `loadVerify(irJson, deployingApp, dialect, registry)` | sync, DB-free | Load + verify an IR document: structural + confinement + ownership validation. Returns a typed `LoadVerifyReply`; never throws for a malformed document. |
+| `loadVerify(envelopeJson, deployingApp, dialect, registry)` | sync, DB-free | Load + verify an IR document: structural + confinement + ownership validation. Returns a typed `LoadVerifyReply`; never throws for a malformed document. |
 | `applyIr(hostDriver, request)` | async, host-driven | Lower the authored envelope in Rust (stamp `owner_app`, fold `Checksum::of_ir`), then drive `executor::apply` over the injected host driver. |
 | `status(hostDriver, request)` | async, host-driven | Reconcile against the live journal over the host driver. |
 | `history(hostDriver, request)` | async, host-driven | The journal audit trail over the host driver. |

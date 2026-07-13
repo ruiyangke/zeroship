@@ -1,7 +1,7 @@
-//! Additive rollback proofs for the SQLite migration backend (SQLite-parity
-//! design §2.7, P5 gate). Real temp-file SQLite throughout. Covers: additive
+//! Additive rollback proofs for the SQLite migration backend.
+//! Real temp-file SQLite throughout. Covers: additive
 //! reversals (DROP TABLE / DROP COLUMN), re-pending + re-apply, the
-//! rebuild-needed P3b-deferred typed error, and confinement of the `down`.
+//! rebuild-needed deferred typed error, and confinement of the `down`.
 
 use std::path::PathBuf;
 

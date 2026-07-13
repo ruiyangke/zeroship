@@ -1,6 +1,6 @@
-//! The enumerated dangerous-construct rules — **data, not logic** (design §1.4).
+//! The enumerated dangerous-construct rules — **data, not logic**.
 //!
-//! Every constant here names a vector from the threat model (§1.1). The guard
+//! Every constant here names a vector from the threat model. The guard
 //! (`crate::guard`) consults these; keeping them as flat data makes the
 //! security surface auditable at a glance and easy to extend.
 //!
@@ -221,7 +221,7 @@ pub const PRIVILEGED_ROLES: &[&str] = &[
 
 /// The platform's own schemas.
 ///
-/// A creator migration has **zero** business touching these (design §1.7: total
+/// A creator migration has **zero** business touching these (total
 /// isolation from the platform db). Used by the body lexical scan to catch a
 /// cross-tenant reference hidden in a PL/pgSQL body that the structural
 /// `RangeVar` check cannot see. The structural check still denies *every*
@@ -246,8 +246,8 @@ pub mod rule {
     pub const ROLE_MANAGEMENT: &str = "role_management";
     /// `CREATE/ALTER ROLE … SUPERUSER` — host-reaching privilege escalation
     /// (a superuser bypasses RLS, reads/writes arbitrary files, runs `COPY …
-    /// PROGRAM`). Denied in ALL profiles INCLUDING Platform (vendor spec §3.4:
-    /// Platform widens privilege *within* the DB, never *host* reach). Only
+    /// PROGRAM`). Denied in ALL profiles INCLUDING Platform (Platform widens
+    /// privilege *within* the DB, never *host* reach). Only
     /// Trusted (operator-owns-the-DB) skips the whole deny-list.
     pub const SUPERUSER_ROLE: &str = "superuser_role";
     /// `GRANT <host-reaching built-in role> TO ...` or granting privileges to one

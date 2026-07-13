@@ -1,5 +1,5 @@
 //! The caller's approval decision — shared by the engine gate AND the executor's
-//! own defense-in-depth gate (design §1.6).
+//! own defense-in-depth gate.
 //!
 //! [`Approval`] lived in [`crate::engine`] originally, where it gated only the
 //! public [`MigrationEngine`](crate::engine::MigrationEngine) surface. But the
@@ -16,7 +16,7 @@
 /// A destructive plan (a `DROP`/`TRUNCATE`/lossy-type-change `up`, or any
 /// rollback — a `down` is inherently destructive) needs [`Approval::Approved`] to
 /// run; a safe additive `up` runs with [`Approval::None`]. The AI never
-/// auto-applies destructive ops (design §1.6) — it passes [`Approval::None`] and
+/// auto-applies destructive ops — it passes [`Approval::None`] and
 /// surfaces the approval-required error to a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
@@ -26,7 +26,7 @@ pub enum Approval {
     Approved,
 }
 
-/// **PR9b — per-version approval scoping (anti-bypass).** An orthogonal,
+/// **Per-version approval scoping (anti-bypass).** An orthogonal,
 /// fail-closed restriction layered on top of [`Approval::Approved`]: it answers
 /// "WHICH destructive ops did the operator individually review?" so approving one
 /// reviewed online rename can NEVER blanket-authorize an *unrelated* co-bundled

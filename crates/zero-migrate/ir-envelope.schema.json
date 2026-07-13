@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MigrationIr",
-  "description": "The portable migration IR document (`.ir.json`, §2.1).\n\nDeserialized from the JS builder's output. `owner_app` is a HINT — the server\noverrides it at submit time (per-table ownership is server-authoritative) —\nbut the field is carried so the local/dev path and the checksum see it.",
+  "description": "The portable migration IR document (IR envelope).\n\nDeserialized from the JS builder's output. `owner_app` is a HINT — the server\noverrides it at submit time (per-table ownership is server-authoritative) —\nbut the field is carried so the local/dev path and the checksum see it.",
   "type": "object",
   "properties": {
     "ir_version": {
@@ -27,7 +27,7 @@
       }
     },
     "flags": {
-      "description": "All-`Option` overrides of the migration flags (Wave C merges them over\nthe derived defaults).",
+      "description": "All-`Option` overrides of the migration flags (merged over\nthe derived defaults).",
       "$ref": "#/$defs/IrFlagsOverride",
       "default": {}
     },
@@ -56,7 +56,7 @@
       "default": []
     },
     "checksum": {
-      "description": "An ADVISORY integrity hint (§2.4 point 2): the hex `Checksum::of_ir` the\nbuilder computed over the hint-domain (`ops` + `flags` + `depends_on` +\n`supersedes` + `preconditions` — NEVER `owner_app`, which is server-stamped\nand so unpredictable to the builder). The engine RECOMPUTES and is\nauthoritative; when this hint is present the loader compares its\nrecomputed hint-domain checksum to it (a mismatch is genuine drift). The\nhint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is\nexcluded from the hint domain) — folding the artifact's own checksum into\nthe artifact's checksum would be circular. `deny_unknown_fields` would\notherwise reject a `.ir.json` carrying this §2.4-permitted hint at\ndeserialize, so the field is modelled explicitly here (MED-2).",
+      "description": "An ADVISORY integrity hint: the hex `Checksum::of_ir` the\nbuilder computed over the hint-domain (`ops` + `flags` + `depends_on` +\n`supersedes` + `preconditions` — NEVER `owner_app`, which is server-stamped\nand so unpredictable to the builder). The engine RECOMPUTES and is\nauthoritative; when this hint is present the loader compares its\nrecomputed hint-domain checksum to it (a mismatch is genuine drift). The\nhint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is\nexcluded from the hint domain) — folding the artifact's own checksum into\nthe artifact's checksum would be circular. `deny_unknown_fields` would\notherwise reject an IR envelope carrying this advisory hint at\ndeserialize, so the field is modelled explicitly here.",
       "type": [
         "string",
         "null"
@@ -71,7 +71,7 @@
   ],
   "$defs": {
     "Op": {
-      "description": "The CLOSED `op.*` operation enum (§2.3), internally tagged on `\"op\"` and\ncamel-cased (`{\"op\":\"createTable\", …}`). NO `untagged`, NO `flatten` on the\nenum itself — see the module-level note + the ADR.\n\n**PR10** — every table-targeting variant carries an optional\n`schema: Option<String>` (the schema-qualifier — honored under Trusted/Platform,\npinned/refused under Confined; §2.7) and, where guardable, an optional\n`existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the\nwire (`skip_serializing_if = \"Option::is_none\"`), so they fold into\n[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are\nchecksum-neutral when unset — preserving the cross-impl single-checksum invariant.",
+      "description": "The CLOSED `op.*` operation enum, internally tagged on `\"op\"` and\ncamel-cased (`{\"op\":\"createTable\", …}`). NO `untagged`, NO `flatten` on the\nenum itself — see the module-level note + the ADR.\n\nevery table-targeting variant carries an optional\n`schema: Option<String>` (the schema-qualifier — honored under Trusted/Platform,\npinned/refused under Confined) and, where guardable, an optional\n`existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the\nwire (`skip_serializing_if = \"Option::is_none\"`), so they fold into\n[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are\nchecksum-neutral when unset — preserving the cross-impl single-checksum invariant.",
       "oneOf": [
         {
           "description": "`CREATE TABLE` with columns + table constraints + indexes.",
@@ -138,14 +138,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
+              "description": "the schema qualifier. Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifNotExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF NOT EXISTS`.",
+              "description": "the existence guard (`ifNotExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF NOT EXISTS`.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -184,14 +184,14 @@
               "$ref": "#/$defs/PartitionBounds"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifNotExists` legal here).",
+              "description": "the existence guard (`ifNotExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -231,7 +231,7 @@
               "$ref": "#/$defs/PartitionBounds"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
@@ -263,7 +263,7 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
@@ -301,14 +301,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -350,7 +350,7 @@
               "$ref": "#/$defs/TableRuntimeOptionsPatch"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
+              "description": "the schema qualifier. Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
               "type": [
                 "string",
                 "null"
@@ -384,14 +384,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF EXISTS`.",
+              "description": "the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF EXISTS`.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -413,7 +413,7 @@
           ]
         },
         {
-          "description": "`ALTER TABLE <old> RENAME TO <new>`.\n\nA whole-table rename is a FAST catalog-metadata operation (`pg_class`\nrelname swap on PG; a `sqlite_master` rewrite on SQLite) — NOT the\nonline expand-contract shape an `Op::RenameColumn` lowers to. The\nexpand-contract machinery exists to let old + new COLUMN names coexist\nacross a rolling deploy via trigger dual-write (a missing column breaks\nrunning code); there is no column-level dual-write that makes a renamed\nTABLE coexist under its old + new name, so a table rename is a single\ndirect `ALTER TABLE … RENAME TO …`. The down-migration is the inverse\nrename (`to` → `table`). Both names pass the identifier gate; `schema`\nschema-qualifies per the PR10 rules; `ifExists` guards the SOURCE table.",
+          "description": "`ALTER TABLE <old> RENAME TO <new>`.\n\nA whole-table rename is a FAST catalog-metadata operation (`pg_class`\nrelname swap on PG; a `sqlite_master` rewrite on SQLite) — NOT the\nonline expand-contract shape an `Op::RenameColumn` lowers to. The\nexpand-contract machinery exists to let old + new COLUMN names coexist\nacross a rolling deploy via trigger dual-write (a missing column breaks\nrunning code); there is no column-level dual-write that makes a renamed\nTABLE coexist under its old + new name, so a table rename is a single\ndirect `ALTER TABLE … RENAME TO …`. The down-migration is the inverse\nrename (`to` → `table`). Both names pass the identifier gate; `schema`\nschema-qualifies per the schema-qualifier rules; `ifExists` guards the SOURCE table.",
           "type": "object",
           "properties": {
             "table": {
@@ -425,14 +425,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF EXISTS`.",
+              "description": "the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never a native `IF EXISTS`.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -540,14 +540,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifNotExists` legal here).",
+              "description": "the existence guard (`ifNotExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -583,14 +583,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -703,14 +703,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifNotExists` legal here).",
+              "description": "the existence guard (`ifNotExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -774,7 +774,7 @@
               ]
             },
             "unique": {
-              "description": "Whether the dropped index is UNIQUE.\n\n**Drives the destructive/approval gating at lower** (§drop-index gating):\ndropping a plain index is reversible (re-`CREATE INDEX`), but dropping a\nUNIQUE index silently removes a data-integrity guarantee — duplicate rows\nbecome possible and a later re-add fails on the dirtied data. So a\n`unique: true` drop lowers `destructive + requires_approval` (refused\nunder `Approval::None`), matching the declarative differ's\n`render_drop_index`. The JS `op.dropIndex` builder stamps this from the\nauthored index's declared uniqueness; absent/false ⇒ a plain drop.",
+              "description": "Whether the dropped index is UNIQUE.\n\n**Drives the destructive/approval gating at lower** (drop-index gating):\ndropping a plain index is reversible (re-`CREATE INDEX`), but dropping a\nUNIQUE index silently removes a data-integrity guarantee — duplicate rows\nbecome possible and a later re-add fails on the dirtied data. So a\n`unique: true` drop lowers `destructive + requires_approval` (refused\nunder `Approval::None`), matching the declarative differ's\n`render_drop_index`. The JS `op.dropIndex` builder stamps this from the\nauthored index's declared uniqueness; absent/false ⇒ a plain drop.",
               "type": [
                 "boolean",
                 "null"
@@ -788,14 +788,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -844,14 +844,14 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -887,14 +887,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -929,14 +929,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -971,18 +971,18 @@
               "type": "string"
             },
             "value": {
-              "description": "Structured default (typed literal only in P0; synth defaults are\nvalidate-refused until the expression/default renderer lands).",
+              "description": "Structured default (typed literal only for now; synth defaults are\nvalidate-refused until the expression/default renderer lands).",
               "$ref": "#/$defs/IrDefault"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1018,14 +1018,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1068,14 +1068,14 @@
               "$ref": "#/$defs/ColType"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1112,14 +1112,14 @@
               "$ref": "#/$defs/IrConstraint"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifNotExists` legal here).",
+              "description": "the existence guard (`ifNotExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1154,14 +1154,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1196,14 +1196,14 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "description": "the existence guard (`ifExists` legal here).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1251,7 +1251,7 @@
               }
             },
             "onConflict": {
-              "description": "**PR6a** — the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:\nPG renders it natively; on a SQLite target it is a hard authoring error\n(`dialect_scope = PgOnly` / `UNSUPPORTED { kind: \"op\" }`, §9) — there is\nno portable SQLite upsert and no raw route (property A). Absent ⇒ a plain\ninsert (portable on both backends).",
+              "description": "the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:\nPG renders it natively; on a SQLite target it is a hard authoring error\n(`dialect_scope = PgOnly` / `UNSUPPORTED { kind: \"op\" }`) — there is\nno portable SQLite upsert and no raw route (property A). Absent ⇒ a plain\ninsert (portable on both backends).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/IrOnConflict"
@@ -1262,7 +1262,7 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7). DML carries `schema` but NO\nexistence guard (existence guards govern DDL object presence).",
+              "description": "the schema qualifier. DML carries `schema` but NO\nexistence guard (existence guards govern DDL object presence).",
               "type": [
                 "string",
                 "null"
@@ -1308,7 +1308,7 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
@@ -1350,7 +1350,7 @@
               ]
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
@@ -1407,7 +1407,7 @@
               "type": "string"
             },
             "schema": {
-              "description": "**PR10** — the schema qualifier (§2.7).",
+              "description": "the schema qualifier.",
               "type": [
                 "string",
                 "null"
@@ -1553,7 +1553,7 @@
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never solely a native `IF EXISTS`.",
+              "description": "the existence guard (`ifExists` legal here). Engine-\nsynthesized via a catalog probe; never solely a native `IF EXISTS`.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1631,7 +1631,7 @@
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
+              "description": "the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -1728,7 +1728,7 @@
               ]
             },
             "existenceGuard": {
-              "description": "**PR10** — the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
+              "description": "the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ExistenceGuard"
@@ -2121,7 +2121,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `CREATE ROLE <name> [LOGIN] [PASSWORD '…'] [BYPASSRLS] …`. The\n`if_not_exists` is engine-synthesized (a `pg_roles` probe; there is no\nnative `CREATE ROLE IF NOT EXISTS`). `superuser: true` lowers `SUPERUSER`,\nwhich the deny-list STILL refuses in all profiles (privilege within the DB\nwidens; host reach never does, §3.4).",
+          "description": "**VENDOR** — `CREATE ROLE <name> [LOGIN] [PASSWORD '…'] [BYPASSRLS] …`. The\n`if_not_exists` is engine-synthesized (a `pg_roles` probe; there is no\nnative `CREATE ROLE IF NOT EXISTS`). `superuser: true` lowers `SUPERUSER`,\nwhich the deny-list STILL refuses in all profiles (privilege within the DB\nwidens; host reach never does).",
           "type": "object",
           "properties": {
             "name": {
@@ -2136,7 +2136,7 @@
               ]
             },
             "password": {
-              "description": "`PASSWORD '…'` (a dev secret — §3.6).",
+              "description": "`PASSWORD '…'` (a dev secret).",
               "type": [
                 "string",
                 "null"
@@ -2410,7 +2410,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING\n(<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`\nAST, NOT a string (vendor spec §2.4) — rendered via the Expr renderer.",
+          "description": "**VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING\n(<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`\nAST, NOT a string — rendered via the Expr renderer.",
           "type": "object",
           "properties": {
             "name": {
@@ -2613,7 +2613,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>\nLANGUAGE <language> [VOLATILE|STABLE|IMMUTABLE] AS $$ <body> $$`. The `body`\nis the SINGLE raw-string escape in the whole DSL (vendor spec §2.6): a\nPL/pgSQL body is irreducibly arbitrary code, so it is operator-only and\nSTILL parse-scanned by the guard deny-list at lower. `language` is a closed\n2-set so an untrusted PL is rejected at deserialize.",
+          "description": "**VENDOR** — `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>\nLANGUAGE <language> [VOLATILE|STABLE|IMMUTABLE] AS $$ <body> $$`. The `body`\nis the SINGLE raw-string escape in the whole DSL: a\nPL/pgSQL body is irreducibly arbitrary code, so it is operator-only and\nSTILL parse-scanned by the guard deny-list at lower. `language` is a closed\n2-set so an untrusted PL is rejected at deserialize.",
           "type": "object",
           "properties": {
             "name": {
@@ -2664,7 +2664,7 @@
               ]
             },
             "body": {
-              "description": "The RAW PL/pgSQL / SQL body — the one genuine escape (§2.6).",
+              "description": "The RAW PL/pgSQL / SQL body — the one genuine escape.",
               "type": "string"
             },
             "op": {
@@ -2725,7 +2725,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — the gated raw-statement escape (vendor spec §2.11). Records\nthe verbatim SQL plus required audit metadata. Operator-only and STILL\nparse-scanned by the guard deny-list at lower.",
+          "description": "**VENDOR** — the gated raw-statement escape. Records\nthe verbatim SQL plus required audit metadata. Operator-only and STILL\nparse-scanned by the guard deny-list at lower.",
           "type": "object",
           "properties": {
             "sql": {
@@ -2788,14 +2788,14 @@
           ]
         },
         "idPrefix": {
-          "description": "**Migration-first P2a (§2b)** — the `t.id({ prefix })` typed-id prefix, a\nDECLARED-ONLY hint DB introspection cannot recover (the minted\n`usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time\ninput, not a stored column attribute). Carried so gen-types — and the\nruntime, once P5 deletes the declared-schema cache — keep the typed-id brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-P2a image. Bounded\nat validate-time ([`crate::validate`]) to the `typed_id` charset/length + the\nreserved-prefix deny-list (a hand-crafted `.ir.json` is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) — the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\nand the design §4, so the same concept is spelled ONE way across IR↔descriptor.",
+          "description": "**Migration-first** — the `t.id({ prefix })` typed-id prefix, a\nDECLARED-ONLY hint DB introspection cannot recover (the minted\n`usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time\ninput, not a stored column attribute). Carried so gen-types — and the\nruntime, once it deletes the declared-schema cache — keep the typed-id brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image. Bounded\nat validate-time ([`crate::validate`]) to the `typed_id` charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) — the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across IR↔descriptor.",
           "type": [
             "string",
             "null"
           ]
         },
         "vectorMetric": {
-          "description": "**Migration-first P2a (§2b)** — the `t.vector(n, { metric })` distance\nmetric, the other DECLARED-ONLY hint introspection cannot recover. Bounded\nSTRUCTURALLY by the closed [`VectorMetric`] enum (serde rejects an out-of-set\nmetric at deserialize); the validator additionally asserts it co-occurs only\nwith a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so\nchecksum-neutral for a non-vector / metric-less column.\n\nCamel-cased on the wire (`\"vectorMetric\"`) — same op-region convention as\n`idPrefix`, aligning with `FieldDescriptor.vector_metric`\n(`#[serde(rename = \"vectorMetric\")]`) and the design §4.",
+          "description": "**Migration-first** — the `t.vector(n, { metric })` distance\nmetric, the other DECLARED-ONLY hint introspection cannot recover. Bounded\nSTRUCTURALLY by the closed [`VectorMetric`] enum (serde rejects an out-of-set\nmetric at deserialize); the validator additionally asserts it co-occurs only\nwith a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so\nchecksum-neutral for a non-vector / metric-less column.\n\nCamel-cased on the wire (`\"vectorMetric\"`) — same op-region convention as\n`idPrefix`, aligning with `FieldDescriptor.vector_metric`\n(`#[serde(rename = \"vectorMetric\")]`).",
           "anyOf": [
             {
               "$ref": "#/$defs/VectorMetric"
@@ -2853,7 +2853,7 @@
       ]
     },
     "ColType": {
-      "description": "Dialect-NEUTRAL column type lexicon (§3.2). A CLOSED enum so the schema\nenumerates exactly the supported types and the lowering (Wave C) is a total\nmatch. Camel-cased on the wire (`\"int\"`, `\"bigInt\"`, `\"geoPoint\"`, …).",
+      "description": "Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema\nenumerates exactly the supported types and the lowering is a total\nmatch. Camel-cased on the wire (`\"int\"`, `\"bigInt\"`, `\"geoPoint\"`, …).",
       "oneOf": [
         {
           "description": "Bounded variable-length string (`VARCHAR`-ish).",
@@ -3048,7 +3048,7 @@
                   "type": "string"
                 },
                 "schema": {
-                  "description": "Optional schema qualifier for the named enum type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "description": "Optional schema qualifier for the named enum type. Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
                   "type": [
                     "string",
                     "null"
@@ -3077,7 +3077,7 @@
                   "type": "string"
                 },
                 "schema": {
-                  "description": "Optional schema qualifier for the named domain type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "description": "Optional schema qualifier for the named domain type. Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
                   "type": [
                     "string",
                     "null"
@@ -3119,10 +3119,10 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value (§6.5).",
+      "description": "A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value.",
       "oneOf": [
         {
-          "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
+          "description": "A typed scalar literal default (constrained numeric domain).",
           "type": "object",
           "properties": {
             "literal": {
@@ -3241,10 +3241,10 @@
       ]
     },
     "Expr": {
-      "description": "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize.",
+      "description": "The CLOSED expression AST node. Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize.",
       "oneOf": [
         {
-          "description": "A column reference (`c(\"name\")`). The name is a plain string, resolved\nagainst the enclosing op's single target table at apply/render time\n(§3.3.1.1(c)) — never `tsc`-bound to the live schema (§3.3).",
+          "description": "A column reference (`c(\"name\")`). The name is a plain string, resolved\nagainst the enclosing op's single target table at apply/render time\n— never `tsc`-bound to the live schema.",
           "type": "object",
           "properties": {
             "name": {
@@ -3252,7 +3252,7 @@
               "type": "string"
             },
             "table": {
-              "description": "Optional qualifying table/alias (`c(\"orders\", \"customer_id\")` →\n`table: Some(\"orders\")`). Present only for the two-arg qualified form\n(§3.4, the join-ON fix). An unqualified `c(\"col\")` leaves this `None`\nand, via `skip_serializing_if`, serializes byte-identically to the\npre-qualification wire shape — additive, no `ir_version` bump.",
+              "description": "Optional qualifying table/alias (`c(\"orders\", \"customer_id\")` →\n`table: Some(\"orders\")`). Present only for the two-arg qualified form\n(the join-ON fix). An unqualified `c(\"col\")` leaves this `None`\nand, via `skip_serializing_if`, serializes byte-identically to the\npre-qualification wire shape — additive, no `ir_version` bump.",
               "type": [
                 "string",
                 "null"
@@ -3270,7 +3270,7 @@
           ]
         },
         {
-          "description": "A typed scalar literal (a bare JS value auto-wrapped by a fluent operator\nmethod). Carries an [`IrScalar`] so the numeric domain is enforced at\ndeserialize (§2.5) and the value folds into the checksum (§2.4 point 3).",
+          "description": "A typed scalar literal (a bare JS value auto-wrapped by a fluent operator\nmethod). Carries an [`IrScalar`] so the numeric domain is enforced at\ndeserialize and the value folds into the checksum.",
           "type": "object",
           "properties": {
             "value": {
@@ -3375,7 +3375,7 @@
           ]
         },
         {
-          "description": "An allow-listed named scalar function call (§3.3.1.1(a)).",
+          "description": "An allow-listed named scalar function call.",
           "type": "object",
           "properties": {
             "fn": {
@@ -3402,7 +3402,7 @@
           ]
         },
         {
-          "description": "An engine-SYNTHESIZED helper call (§9). The per-dialect lowering is the\nengine's; the author never sees the rendered form.",
+          "description": "An engine-SYNTHESIZED helper call. The per-dialect lowering is the\nengine's; the author never sees the rendered form.",
           "type": "object",
           "properties": {
             "fn": {
@@ -3410,7 +3410,7 @@
               "$ref": "#/$defs/SynthFn"
             },
             "args": {
-              "description": "The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`\nargs, validated in-envelope structurally — §3.3.1.1(b)).",
+              "description": "The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`\nargs, validated in-envelope structurally).",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/Expr"
@@ -3482,7 +3482,7 @@
           ]
         },
         {
-          "description": "A **portable** `LIKE` pattern match (`c(\"x\").like(pattern)`) rendered exactly\nas `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.\n\nNOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is\ncase-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is\ncollation-dependent — so a dialect-uniform portability PROOF is a Phase-4\nclaiming-phase obligation (design §5). This slice adds the node + the\nfaithful syntax render only; it does not yet claim cross-dialect parity.",
+          "description": "A **portable** `LIKE` pattern match (`c(\"x\").like(pattern)`) rendered exactly\nas `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.\n\nNOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is\ncase-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is\ncollation-dependent — so a dialect-uniform portability PROOF is a\nclaiming-phase obligation. This adds the node + the\nfaithful syntax render only; it does not yet claim cross-dialect parity.",
           "type": "object",
           "properties": {
             "operand": {
@@ -3530,7 +3530,7 @@
           ]
         },
         {
-          "description": "A **PORTABLE** aggregate function application (`c.agg.count()`,\n`c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and\nMySQL (only identifier quoting differs), so there is NO dialect gate. `arg:\nNone` with `func: Count` is `COUNT(*)`; a present `arg` renders\n`<func>(<arg>)`, and `distinct` inserts `DISTINCT`\n(`count(DISTINCT <arg>)`).\n\nNB: the \"an aggregate is only legal in a grouped/SELECT context\" check is\ncoupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this\nadditive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).",
+          "description": "A **PORTABLE** aggregate function application (`c.agg.count()`,\n`c.agg.sum(e)`, `c.agg.count(e, { distinct: true })`).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and\nMySQL (only identifier quoting differs), so there is NO dialect gate. `arg:\nNone` with `func: Count` is `COUNT(*)`; a present `arg` renders\n`<func>(<arg>)`, and `distinct` inserts `DISTINCT`\n(`count(DISTINCT <arg>)`).\n\nNB: the \"an aggregate is only legal in a grouped/SELECT context\" check is\ncoupled with the view/select builder (`AGG_POSITION_INVALID`) — this\nadditive slice accepts the node STRUCTURALLY only.",
           "type": "object",
           "properties": {
             "func": {
@@ -3717,7 +3717,7 @@
           ]
         },
         {
-          "description": "**The one Layer-2 portability escape (design §3.4 / §6.4)** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nc.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting SQLite. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION (P11 / design §3.4).** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
+          "description": "**The one Layer-2 portability escape** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nc.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting SQLite. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION.** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
           "type": "object",
           "properties": {
             "default": {
@@ -3777,7 +3777,7 @@
       ]
     },
     "BinaryOp": {
-      "description": "A binary operator admitted in the closed AST (§3.3.1 method↔node table).\n\nCamel/lower-cased on the wire so the JS builder emits the same tokens\n(`{\"node\":\"binOp\",\"op\":\"eq\", …}`). The set is closed: comparison, boolean,\narithmetic, and string concatenation (`||`, the one place PG/SQLite NULL\nsemantics agree — §3.3.1).",
+      "description": "A binary operator admitted in the closed AST (method↔node table).\n\nCamel/lower-cased on the wire so the JS builder emits the same tokens\n(`{\"node\":\"binOp\",\"op\":\"eq\", …}`). The set is closed: comparison, boolean,\narithmetic, and string concatenation (`||`, the one place PG/SQLite NULL\nsemantics agree).",
       "oneOf": [
         {
           "description": "`=`",
@@ -3847,7 +3847,7 @@
       ]
     },
     "UnaryOp": {
-      "description": "A unary operator admitted in the closed AST (§3.3.1).",
+      "description": "A unary operator admitted in the closed AST.",
       "oneOf": [
         {
           "description": "boolean `NOT`",
@@ -3896,7 +3896,7 @@
       ]
     },
     "ScalarFn": {
-      "description": "The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-\nsynthesized `FnSynth`). CLOSED — a function outside this set has no builder\nmethod and no AST variant (§3.3.1.1(a)). These are the provably-identical\ncross-dialect scalars.",
+      "description": "The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-\nsynthesized `FnSynth`). CLOSED — a function outside this set has no builder\nmethod and no AST variant. These are the provably-identical\ncross-dialect scalars.",
       "oneOf": [
         {
           "description": "`coalesce(...)`",
@@ -3934,7 +3934,7 @@
           "const": "abs"
         },
         {
-          "description": "`(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a\n`mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;\nthe `%` spelling is identical on PG, SQLite, and MySQL, so this stays a\ndialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).",
+          "description": "`(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a\n`mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;\nthe `%` spelling is identical on PG, SQLite, and MySQL, so this stays a\ndialect-NEUTRAL `ScalarFn` (special-cased at the render seam).",
           "type": "string",
           "const": "mod"
         },
@@ -3964,19 +3964,19 @@
           "const": "replace"
         },
         {
-          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation\npolicy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
+          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)`.\nA PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation\npolicy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
           "type": "string",
           "const": "currentSetting"
         },
         {
-          "description": "**VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;\nrenders WITHOUT parentheses (it is a reserved keyword, not a function call).",
+          "description": "**VENDOR** — `current_user`. A nullary identity scalar;\nrenders WITHOUT parentheses (it is a reserved keyword, not a function call).",
           "type": "string",
           "const": "currentUser"
         }
       ]
     },
     "SynthFn": {
-      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins. CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);\n`concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal).",
       "oneOf": [
         {
           "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
@@ -4001,7 +4001,7 @@
       ]
     },
     "CastTarget": {
-      "description": "The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A\nnon-portable cast target is rejected (`UNSUPPORTED { kind: \"expr\" }`).",
+      "description": "The closed cast-target set, aligned to scalar `ColType` tokens. A\nnon-portable cast target is rejected (`UNSUPPORTED { kind: \"expr\" }`).",
       "oneOf": [
         {
           "description": "`text`",
@@ -4029,14 +4029,14 @@
           "const": "bytes"
         },
         {
-          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — a tenant-isolation\npolicy casts `current_setting('app.tenant_id', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
+          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — a tenant-isolation\npolicy casts `current_setting('app.tenant_id', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute.",
           "type": "string",
           "const": "uuid"
         }
       ]
     },
     "AggFunc": {
-      "description": "The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,\nSQLite, and MySQL (only the surrounding identifier quoting differs), so there\nis NO dialect gate — an [`Expr::Agg`] validates and renders on all three.",
+      "description": "The CLOSED set of PORTABLE aggregate functions (`c.agg.*`).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,\nSQLite, and MySQL (only the surrounding identifier quoting differs), so there\nis NO dialect gate — an [`Expr::Agg`] validates and renders on all three.",
       "oneOf": [
         {
           "description": "`count(...)` (or `count(*)` when the [`Expr::Agg`] `arg` is `None`).",
@@ -4317,7 +4317,7 @@
       ]
     },
     "VectorMetric": {
-      "description": "The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first P2a (§2b):** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
+      "description": "The CLOSED pgvector distance-metric lexicon. A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted IR envelope cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first:** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
       "oneOf": [
         {
           "description": "Cosine distance (`vector_cosine_ops`).",
@@ -4356,7 +4356,7 @@
       ]
     },
     "IrMaskKind": {
-      "description": "The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the\nSDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff\n`zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum — like every other IR\ntoken-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted\n`.ir.json` cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`\nsentinel render seam).\n\n**Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the\ntwo date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form\nthat `t.string().mask()` emits and that\n`zero_migrate::schema::query::mask_sentinel_for_field` reads via\n`zero_migrate::schema::diff::MaskKind::from_sql` (which accepts the kebab form). The\non-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that\nspelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.",
+      "description": "The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the\nSDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff\n`zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum — like every other IR\ntoken-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted\nIR envelope cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`\nsentinel render seam).\n\n**Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the\ntwo date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form\nthat `t.string().mask()` emits and that\n`zero_migrate::schema::query::mask_sentinel_for_field` reads via\n`zero_migrate::schema::diff::MaskKind::from_sql` (which accepts the kebab form). The\non-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that\nspelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.",
       "oneOf": [
         {
           "description": "`\"***\"` — maximum redaction. The kernel default for an encrypted column.",
@@ -4515,7 +4515,7 @@
               }
             },
             "onDelete": {
-              "description": "`ON DELETE` referential action (C1). Additive-optional: an absent\naction is checksum-neutral (`skip_serializing_if`), so a FK that sets\nno action serializes byte-identically to the pre-C1 wire image.",
+              "description": "`ON DELETE` referential action. Additive-optional: an absent\naction is checksum-neutral (`skip_serializing_if`), so a FK that sets\nno action serializes byte-identically to the prior wire image.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/RefAction"
@@ -4526,7 +4526,7 @@
               ]
             },
             "onUpdate": {
-              "description": "`ON UPDATE` referential action (C1). Additive-optional (see\n`on_delete`).",
+              "description": "`ON UPDATE` referential action. Additive-optional (see\n`on_delete`).",
               "anyOf": [
                 {
                   "$ref": "#/$defs/RefAction"
@@ -4673,7 +4673,7 @@
       ]
     },
     "RefAction": {
-      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause (C1 — design §3.3). A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n`zero_migrate::schema::query::normalize_fk_action`.",
+      "description": "The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /\n`ON UPDATE` clause. A CLOSED enum so the schema enumerates\nexactly the supported actions and serde REJECTS any out-of-set token at\nDESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /\ninjection-shaped action string into the FK render seam. Camel-cased on the\nwire (`\"cascade\"`, `\"setNull\"`, `\"noAction\"`, …); the per-dialect SQL spelling\n(`SET NULL`, `NO ACTION`, …) is the render seam's job via\n`zero_migrate::schema::query::normalize_fk_action`.",
       "oneOf": [
         {
           "description": "`ON DELETE/UPDATE CASCADE`.",
@@ -4993,7 +4993,7 @@
       ]
     },
     "IndexMethod": {
-      "description": "The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design\nline 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,\nso a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped\nmethod string into an unvalidated position that would reach the render seam.\n`gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to\nthe SQLite FTS5 virtual-table path (per-dialect lowering is Wave C's job).\nCamel/lower-cased on the wire (`\"btree\"`, `\"ivfflat\"`, …).",
+      "description": "The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,\nso a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped\nmethod string into an unvalidated position that would reach the render seam.\n`gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to\nthe SQLite FTS5 virtual-table path (per-dialect lowering is the render seam's job).\nCamel/lower-cased on the wire (`\"btree\"`, `\"ivfflat\"`, …).",
       "oneOf": [
         {
           "description": "B-tree (the default).",
@@ -5072,7 +5072,7 @@
               }
             },
             "collapse": {
-              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "description": "Affirmation: collapse to a plain table where native partitioning\nis unsupported.",
               "type": "boolean",
               "default": false
             },
@@ -5099,7 +5099,7 @@
               }
             },
             "collapse": {
-              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "description": "Affirmation: collapse to a plain table where native partitioning\nis unsupported.",
               "type": "boolean",
               "default": false
             },
@@ -5126,7 +5126,7 @@
               }
             },
             "collapse": {
-              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "description": "Affirmation: collapse to a plain table where native partitioning\nis unsupported.",
               "type": "boolean",
               "default": false
             },
@@ -5188,7 +5188,7 @@
       ]
     },
     "ExistenceGuard": {
-      "description": "**PR10** — the uniform existence-guard modifier (§2.7). Carried on a guarded\nDDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on\nthe wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE\n(decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native\n`IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /\nSQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;\nSQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A\nCLOSED 2-variant enum so serde rejects any other token at deserialize and the\nvalidate-time legal-direction check (`ifNotExists` on create*/add*; `ifExists`\non drop*/rename/alter) is a total match. Camel-cased on the wire\n(`\"ifNotExists\"`, `\"ifExists\"`).",
+      "description": "the uniform existence-guard modifier. Carried on a guarded\nDDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on\nthe wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE\n(decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native\n`IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /\nSQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;\nSQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A\nCLOSED 2-variant enum so serde rejects any other token at deserialize and the\nvalidate-time legal-direction check (`ifNotExists` on create*/add*; `ifExists`\non drop*/rename/alter) is a total match. Camel-cased on the wire\n(`\"ifNotExists\"`, `\"ifExists\"`).",
       "oneOf": [
         {
           "description": "Run the op only if the target object is ABSENT; if PRESENT with the\ndeclared shape it is a journaled satisfied no-op, and if PRESENT with a\nDIVERGENT shape the apply FAILS CLOSED (never a silent skip). Legal on the\ncreate*/add* family (`createTable`/`addColumn`/`createIndex`/`addConstraint`).",
@@ -5647,7 +5647,7 @@
       ]
     },
     "IrOnConflict": {
-      "description": "**PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted `.ir.json` cannot smuggle an arbitrary clause.",
+      "description": "the optional `insert { onConflict }` upsert clause. A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted IR envelope cannot smuggle an arbitrary clause.",
       "type": "object",
       "properties": {
         "columns": {
@@ -6039,7 +6039,7 @@
       ]
     },
     "Privilege": {
-      "description": "**VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
+      "description": "**VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE — a hand-crafted IR envelope cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
       "oneOf": [
         {
           "description": "`ALL PRIVILEGES`.",
@@ -6109,7 +6109,7 @@
       ]
     },
     "GrantTarget": {
-      "description": "**VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target (vendor spec\n§2.3). Tagged on `\"kind\"`; each shape is closed + `deny_unknown_fields` so a\nhand-crafted artifact cannot smuggle an arbitrary object class.",
+      "description": "**VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target. Tagged on `\"kind\"`; each shape is closed + `deny_unknown_fields` so a\nhand-crafted artifact cannot smuggle an arbitrary object class.",
       "oneOf": [
         {
           "description": "`… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all\nnamed tables.",
@@ -6554,7 +6554,7 @@
       ]
     },
     "FuncArg": {
-      "description": "**VENDOR** — one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The\n`r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it\nis rendered into the signature verbatim and the WHOLE statement is then\n`pg_query`-parsed by the guard (vendor spec §4.4).",
+      "description": "**VENDOR** — one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The\n`r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it\nis rendered into the signature verbatim and the WHOLE statement is then\n`pg_query`-parsed by the guard.",
       "type": "object",
       "properties": {
         "name": {
@@ -6606,7 +6606,7 @@
       ]
     },
     "FuncLanguage": {
-      "description": "**VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately\n2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is\nREJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan\neven runs (vendor spec §2.6 / §3.3).",
+      "description": "**VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately\n2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is\nREJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan\neven runs.",
       "oneOf": [
         {
           "description": "`LANGUAGE plpgsql`.",
@@ -6641,7 +6641,7 @@
       ]
     },
     "IrFlagsOverride": {
-      "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR\n(§2.1). An absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE is Wave C, NOT this type's job.",
+      "description": "All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR.\nAn absent key and an explicit `null` both mean \"no override\" here;\nthe derive-then-override MERGE happens elsewhere, NOT this type's job.",
       "type": "object",
       "properties": {
         "transactional": {
@@ -6723,7 +6723,7 @@
       "additionalProperties": false
     },
     "OnlinePhase": {
-      "description": "The phase of a zero-downtime **expand-contract** online migration (design\n§5, Plan 8). Carried only by `online` migrations (`flags.online == true`);\n`None` for an ordinary one-shot migration.\n\nAn online column RENAME (or type change) is split across **two deploys**:\n\n- **`Expand`** — additively grow the schema so old and new shapes coexist\n  (add the new nullable column, install a dual-write trigger, backfill).\n  Lands *before* dependent code switches over.\n- **`Contract`** — drop the old shape once no code uses it (drop the\n  trigger + function, drop the old column). Lands *after* code switches over.\n\nThe engine enforces the split via a gate (design Plan 8 v1.2): a `Contract`\nmigration is refused unless every `Expand` migration it `depends_on` is\n**net-applied in the journal**. This makes the journal the single source of\ntruth for the expand→contract timeline and gives cross-deploy partitioning\nfor free (a separate, later deploy can apply the contract).",
+      "description": "The phase of a zero-downtime **expand-contract** online migration.\nCarried only by `online` migrations (`flags.online == true`);\n`None` for an ordinary one-shot migration.\n\nAn online column RENAME (or type change) is split across **two deploys**:\n\n- **`Expand`** — additively grow the schema so old and new shapes coexist\n  (add the new nullable column, install a dual-write trigger, backfill).\n  Lands *before* dependent code switches over.\n- **`Contract`** — drop the old shape once no code uses it (drop the\n  trigger + function, drop the old column). Lands *after* code switches over.\n\nThe engine enforces the split via a gate: a `Contract`\nmigration is refused unless every `Expand` migration it `depends_on` is\n**net-applied in the journal**. This makes the journal the single source of\ntruth for the expand→contract timeline and gives cross-deploy partitioning\nfor free (a separate, later deploy can apply the contract).",
       "oneOf": [
         {
           "description": "The additive, coexistence-establishing half (add column, dual-write\ntrigger, backfill). Lands before dependent code switches over.",

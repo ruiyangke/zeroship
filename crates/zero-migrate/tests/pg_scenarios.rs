@@ -1,6 +1,6 @@
-//! Resurrected live-Postgres regression scenarios (redesign step 6a).
+//! Resurrected live-Postgres regression scenarios.
 //!
-//! Step 1 deleted the 42 `#![cfg(feature="native-pg")]` test files: they drove the
+//! An earlier cut deleted the 42 `#![cfg(feature="native-pg")]` test files: they drove the
 //! now-deleted native compio-postgres client directly, so they never compiled once the
 //! native driver left the tree. Their SCENARIOS — the safety-critical shipped-path
 //! coverage for applying against a REAL Postgres — return here, ADAPTED to drive the
@@ -8,9 +8,9 @@
 //! journal / drift / status path THROUGH the `driver::SqlSession` seam (the same seam
 //! the production napi/Node `pg` host rides), using the TEST-ONLY [`PgDevSession`]
 //! (blocking `postgres` crate, `[dev-dependency]` only). This is the in-crate live-DB
-//! coverage C4 flagged missing.
+//! coverage for the shipped path.
 //!
-//! Scenarios covered here (the plan's critical shipped-path list):
+//! Scenarios covered here (the critical shipped-path list):
 //!   * two-phase apply + `pg_advisory_lock` (transactional + non-transactional paths);
 //!   * journal ensure / record / read / recovery (crash between `started` and
 //!     `completed`);

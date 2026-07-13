@@ -1,29 +1,29 @@
-//! Host-authoring lower (design §D.1) — turn a pure-JS `.ir.json` ENVELOPE into the
+//! Host-authoring lower — turn a pure-JS IR envelope into the
 //! `Vec<Migration>` the engine's `executor::apply` consumes, **folding the single
-//! authoritative `Checksum::of_ir` in Rust** (never in JS, §D.1 point 2).
+//! authoritative `Checksum::of_ir` in Rust** (never in JS).
 //!
 //! ## Why the addon lowers (not the facade)
-//! The Phase-C async entrypoints (`apply`/`status`/`history`) take a pre-lowered
+//! The async entrypoints (`apply`/`status`/`history`) take a pre-lowered
 //! `Vec<Migration>` (SQL `up` + folded checksum). But the pure-JS host recorder
-//! (§D.1) can only produce the dialect-neutral `.ir.json` op ENVELOPE — the
+//! can only produce the dialect-neutral IR op envelope — the
 //! ops→SQL LOWER (`IrAuthor::load_and_lower`) is a Rust-only engine step (it routes
-//! every op through the shared snapshot-builder + DDL emitter, `lower.rs`). So the
-//! facade hands the envelope + provenance here; this module runs the SAME
-//! fail-closed LOAD GATE + LOWER the native `.ir.json` deploy path runs
-//! (`build_new_generate_pg.rs`: `IrAuthor::new(schema, app, dialect)
-//! .load_and_lower(bytes, app, &registry, &live, None)`), and the resulting
-//! `Migration.checksum` is `Checksum::of_ir` folded by Rust over the canonical op
-//! list + the server-stamped `owner_app`. The JS side emits ops; Rust owns the
-//! checksum — exactly the invariant `op_recorder.js` preserves for the in-V8 path.
+//! every op through the shared snapshot-builder + DDL emitter, `render/lower.rs`). So
+//! the facade hands the envelope + provenance here; this module runs the SAME
+//! fail-closed LOAD GATE + LOWER the IR envelope deploy path runs
+//! (`IrAuthor::new(schema, app, dialect).load_and_lower(bytes, app, &registry, &live,
+//! None)`), and the resulting `Migration.checksum` is `Checksum::of_ir` folded by
+//! Rust over the canonical op list + the server-stamped `owner_app`. The JS side emits
+//! ops; Rust owns the checksum — exactly the invariant the pure-JS recorder
+//! (`sdks/migrate/src/internal/recorder.ts`) preserves.
 //!
 //! ## Fresh-DB `LiveSchema`
 //! v1 host apply lowers against `LiveSchema::default()` (an empty live) — the
-//! fresh-DB / create-first posture the golden-path scaffold + the Phase-D oracle
+//! fresh-DB / create-first posture the golden-path scaffold + the oracle
 //! exercise (`load_and_lower(&committed, APP, &registry, &LiveSchema::default(),
-//! None)` is exactly what `build_new_generate_pg.rs` does). Incremental lowering
+//! None)`). Incremental lowering
 //! against an introspected live (FK inline-vs-defer, live UNIQUE-index drop gate)
-//! needs a `snapshot_schema` read over the host driver — a deferred follow-up
-//! (§D.1); it is NOT reached by the create-first oracle.
+//! needs a `snapshot_schema` read over the host driver — a deferred follow-up;
+//! it is NOT reached by the create-first oracle.
 
 use std::collections::BTreeMap;
 
@@ -46,18 +46,18 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
     }
 }
 
-/// Run the fail-closed `.ir.json` LOAD GATE + LOWER over an envelope, returning the
+/// Run the fail-closed IR envelope LOAD GATE + LOWER over an envelope, returning the
 /// lowered `Vec<Migration>` (with `Checksum::of_ir` folded by Rust).
 ///
-/// - `envelope_json` — the pure-JS `.ir.json` envelope bytes (`{ ir_version, name,
+/// - `envelope_json` — the pure-JS IR envelope bytes (`{ ir_version, name,
 ///   ops }`). The envelope MUST NOT carry `owner_app` (a provenance field the
-///   builder can't be trusted to set, §D.1); it is stamped from `owner_app` here.
+///   builder can't be trusted to set); it is stamped from `owner_app` here.
 /// - `owner_app` — the deploying app id (`app_…`); the ownership check + the
 ///   `owner_app` stamped onto every emitted `Migration` + folded into its checksum.
-/// - `project_schema` — the confined project schema the lower pins ops to (§2.7).
+/// - `project_schema` — the confined project schema the lower pins ops to.
 /// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
 /// - `registry_json` — the project's `{ "table": "owner_app", … }` map (drives the
-///   §8.6 ownership check); an empty object `{}` on a fresh single-app project.
+///   ownership check); an empty object `{}` on a fresh single-app project.
 ///
 /// # Errors
 /// A JSON `Err(message)` on: an unknown dialect, a malformed registry, the load gate
@@ -75,11 +75,11 @@ pub fn lower_envelope_to_migrations(
     let registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
         .map_err(|e| format!("registry_json is not a string→string map: {e}"))?;
 
-    // **System-shape fold (mirrors the native recorder, `record.rs:215`).** The
-    // pure-JS host recorder (§D.1) drains ONLY the author-declared columns — the
+    // **System-shape fold (mirrors the pure-JS recorder's fold).** The
+    // pure-JS host recorder drains ONLY the author-declared columns — the
     // platform-managed system fields (`id`/`created_at`/`updated_at`/`version`/…)
     // + the `["id"]` PRIMARY KEY are injected by `resolve_create_table_policy` under
-    // the **Confined creator profile**, NOT by the JS DSL. The native `.ir.json` on
+    // the **Confined creator profile**, NOT by the JS DSL. The native IR envelope on
     // disk is post-fold (the recorder folds before writing); the host path folds
     // here so the addon lowers the SAME resolved shape — otherwise the confined
     // table-shape guard rejects a createTable missing its system columns
@@ -95,16 +95,15 @@ pub fn lower_envelope_to_migrations(
 
     let author = IrAuthor::new(project_schema, owner_app, dialect);
 
-    // Use the GUARDED lower — the SAME entry the native `.ir.json` PG deploy path
-    // uses (`apply_standalone` → `apply_one_ir_document_postgres` →
-    // `load_and_lower_guarded`, `ir_apply.rs:532`). This matters for JOURNAL
+    // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
+    // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
     // IDENTITY: `load_and_lower_guarded` assembles an `AppliedPlan` and stamps the
     // dialect-neutral `authoritative_ir_checksum` (the `Checksum::of_ir` ANCHOR)
-    // onto EVERY DDL step's `Migration.checksum` (`lower.rs:1451-1454`). The
-    // non-guarded `load_and_lower` → `lower()` skips `assemble_plan`, so its steps
-    // carry per-step checksums instead of the shared anchor — which diverges from
-    // the native journal (the Phase-D oracle caught exactly this). Guarded here ⇒
-    // the host journal's checksum column is byte-identical to native's.
+    // onto EVERY DDL step's `Migration.checksum`. The non-guarded `load_and_lower`
+    // → `lower()` skips `assemble_plan`, so its steps carry per-step checksums
+    // instead of the shared anchor — which diverges from the reference journal
+    // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
+    // checksum column is byte-identical to the reference path's.
     let guard_cfg = match dialect {
         SqlDialect::Postgres => GuardConfig::confined(project_schema.to_string()),
         SqlDialect::Sqlite => GuardConfig::confined_sqlite(project_schema.to_string()),

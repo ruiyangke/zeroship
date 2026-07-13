@@ -1,5 +1,5 @@
-//! Guard behaviour-lock suite — MOVED here from `zero-migrate-guard`'s
-//! `guard/mod.rs` at redesign step 3b.
+//! Guard behaviour-lock suite — lives here rather than in `zero-migrate-guard`'s
+//! `guard/mod.rs`.
 //!
 //! These scenarios drive the SQL guard THROUGH the engine's IR-lower pipeline
 //! (`render::lower::IrAuthor` / `conn::ExecutorConfig`), so they must live in the
@@ -8,13 +8,13 @@
 //! guard's public API + engine internals together.
 //!
 //! Coverage map:
-//!   T11  — capability minting is named-seam-only by convention.
-//!   T4   — Platform widening is correct AND bounded (privileged constructs pass;
-//!          RCE/host-escape/cross-schema-to-creator still denied).
-//!   T4b  — DO-block privileged DDL applies under Platform; the RCE token-scan
-//!          stays hard even under Platform; the same blocks deny under Confined.
-//!   T2   — the SchemaScope swap is byte-identical under Single for the
-//!          func-def-target + literal-schema-ref read sites.
+//!   - capability minting is named-seam-only by convention.
+//!   - Platform widening is correct AND bounded (privileged constructs pass;
+//!     RCE/host-escape/cross-schema-to-creator still denied).
+//!   - DO-block privileged DDL applies under Platform; the RCE token-scan
+//!     stays hard even under Platform; the same blocks deny under Confined.
+//!   - the SchemaScope swap is byte-identical under Single for the
+//!     func-def-target + literal-schema-ref read sites.
 
 //! Included as an in-crate `#[cfg(test)] mod` from `lib.rs`, so `crate::…` paths
 //! reach the engine's internals (`render::lower`, `conn::ExecutorConfig`) that an
@@ -766,10 +766,10 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
     assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
     // NOTE: `OperatorCapability::new` is crate-private. Production code uses
     // named mint seams; tests use the `#[cfg(test)] for_test` seam. The
-    // external un-nameability is pinned by tests/trybuild_* (T8).
+    // external un-nameability is pinned by tests/trybuild_*.
 }
 
-// ---- T4: Platform widening is correct AND bounded ----------------------
+// ---- Platform widening is correct AND bounded ----------------------
 
 #[test]
 fn t4_platform_allows_privileged_constructs() {
@@ -843,7 +843,7 @@ fn t4_platform_still_denies_rce_and_host_escape() {
     }
 }
 
-// ---- T4b: DO-block privileged DDL under Platform (C2 body widening) -----
+// ---- DO-block privileged DDL under Platform (body widening) -----
 
 /// 0025's bootstrap shape: a DO block whose EXECUTE literals CREATE ROLE /
 /// ALTER ROLE … SET search_path / GRANT. ALLOWED under Platform (both the
@@ -902,10 +902,9 @@ fn t4b_neg_do_block_rce_denied_even_under_platform() {
     );
 }
 
-// ---- HIGH-2 (vendor-pg review): SUPERUSER is host-reaching, denied even
-// under Platform (vendor spec §3.4). RED pre-fix: the CreateRoleStmt arm
-// returned Ok(()) unconditionally under Platform, so `CREATE ROLE x
-// SUPERUSER` PASSED — a render-here-refuse-at-guard backstop that did not
+// ---- SUPERUSER is host-reaching, denied even under Platform. A prior bug: the
+// CreateRoleStmt arm returned Ok(()) unconditionally under Platform, so `CREATE
+// ROLE x SUPERUSER` PASSED — a render-here-refuse-at-guard backstop that did not
 // actually refuse. ----------------------------------------------------------
 
 #[test]
@@ -1004,10 +1003,10 @@ fn superuser_role_in_platform_do_body_token_scan_is_denied() {
     }
 }
 
-// ---- CRITICAL (2026-06 adversarial review #1): host-reaching built-in role
-// membership grants are RCE-equivalent and remain denied under Platform. RED
-// pre-fix: the GrantStmt/GrantRoleStmt arm returned Ok(()) immediately for
-// Platform, so `GRANT pg_execute_server_program TO …` passed.
+// ---- Host-reaching built-in role membership grants are RCE-equivalent and
+// remain denied under Platform. A prior bug: the GrantStmt/GrantRoleStmt arm
+// returned Ok(()) immediately for Platform, so `GRANT pg_execute_server_program
+// TO …` passed.
 
 #[test]
 fn host_escape_role_grant_denied_even_under_platform() {
@@ -1030,7 +1029,7 @@ fn host_escape_role_grant_denied_even_under_platform() {
     }
 }
 
-// ---- HIGH-1 (vendor-pg review): raw vendor bodies still hit gate 2 ----
+// ---- raw vendor bodies still hit gate 2 ----
 
 #[test]
 fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
@@ -1207,7 +1206,7 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     );
 }
 
-// ---- T2: SchemaScope Single is byte-identical at the read sites ---------
+// ---- SchemaScope Single is byte-identical at the read sites ---------
 
 #[test]
 fn t2_func_def_target_single_is_byte_identical() {

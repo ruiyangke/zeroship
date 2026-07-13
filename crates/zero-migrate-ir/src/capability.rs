@@ -1,4 +1,4 @@
-//! The VENDOR capability-composition policy (vendor spec §3).
+//! The VENDOR capability-composition policy.
 //!
 //! The privileged `zero-migrate` primitives (roles, grants, RLS/policies,
 //! functions, extensions, schemas, the gated raw escape) are gated NOT
@@ -7,7 +7,7 @@
 //! [`VendorCapability`] values it needs ([`crate::ir::Op::vendor_capabilities`]); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
 //! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
-//! SQL hits the Confined deny-list, §3.2 gate 2).
+//! SQL hits the Confined deny-list at the second gate).
 //!
 //! # Why flags, not a profile name
 //!
@@ -39,7 +39,7 @@ use crate::policy::{SchemaScope, TrustProfile};
 #[derive(Debug, Clone)]
 pub struct OperatorCapability(());
 
-/// Stage-M2 name for the zero-sized token that gates sealed shared-infra apply.
+/// Alias name for the zero-sized token that gates sealed shared-infra apply.
 ///
 /// This is an alias, not a second forgeable token: it still has a private field,
 /// so external crates cannot construct it.
@@ -73,8 +73,8 @@ impl Default for OperatorCapability {
 }
 
 
-/// The CLOSED set of vendor capabilities a privileged op can require (vendor spec
-/// §3.2). Each [`crate::ir::Op`] vendor variant maps to one or more of these via
+/// The CLOSED set of vendor capabilities a privileged op can require.
+/// Each [`crate::ir::Op`] vendor variant maps to one or more of these via
 /// [`crate::ir::Op::vendor_capabilities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
@@ -142,7 +142,7 @@ impl VendorCapability {
 }
 
 /// The active VENDOR capability set — a composition of boolean flags + a schema
-/// allowlist (vendor spec §3). The gate ([`grants`](Self::grants)) keys on the
+/// allowlist. The gate ([`grants`](Self::grants)) keys on the
 /// flags; the named presets ([`confined`](Self::confined) /
 /// [`operator`](Self::operator) / [`local`](Self::local)) are the compositions the
 /// trust profiles map onto.
@@ -173,11 +173,11 @@ pub struct VendorCapabilities {
     pub allow_materialized_view: bool,
     /// Whether references to schemas OTHER than the (single) project schema are
     /// admitted (the multi-schema operator posture). Cross-schema confinement is
-    /// ALSO enforced by [`SchemaScope`] at the existing PR10 gate; this flag is the
+    /// ALSO enforced by [`SchemaScope`] at the existing schema-scope gate; this flag is the
     /// capability-model mirror so the policy is self-describing.
     pub allow_cross_schema: bool,
     /// The schema allowlist this capability set permits (empty ⇒ no widening; the
-    /// project schema is always implicitly permitted by the PR10 gate).
+    /// project schema is always implicitly permitted by the schema-scope gate).
     pub schemas: Vec<String>,
 }
 
@@ -252,7 +252,7 @@ impl VendorCapabilities {
         }
     }
 
-    /// Map a [`TrustProfile`] onto its named preset (vendor spec §3.1): Confined ⇒
+    /// Map a [`TrustProfile`] onto its named preset: Confined ⇒
     /// [`confined`](Self::confined); Platform / Trusted ⇒ [`operator`](Self::operator).
     /// The TrustProfile is the EXISTING operator-gated machinery; this is the
     /// single bridge from it to the capability composition.
@@ -265,8 +265,8 @@ impl VendorCapabilities {
     }
 
     /// Derive the capability set from the validate-layer
-    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads (vendor spec
-    /// §3.2). The scope is produced ONLY by the operator-gated `GuardConfig` ctors,
+    /// [`SchemaScope`](crate::policy::SchemaScope) the loader threads. The scope is
+    /// produced ONLY by the operator-gated `GuardConfig` ctors,
     /// so it is a faithful, non-spoofable trust signal:
     /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).
     /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).
@@ -292,8 +292,8 @@ impl VendorCapabilities {
         }
     }
 
-    /// Does this capability set GRANT `cap`? The fail-closed gate predicate
-    /// (vendor spec §3.2): a vendor op whose required capability is NOT granted is
+    /// Does this capability set GRANT `cap`? The fail-closed gate predicate:
+    /// a vendor op whose required capability is NOT granted is
     /// refused.
     #[must_use]
     pub fn grants(&self, cap: VendorCapability) -> bool {

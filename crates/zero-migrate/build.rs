@@ -13,8 +13,8 @@ fn main() {
     // `--no-default-features` build does not warn on the `cfg(pg_seam)` gates.
     println!("cargo::rustc-check-cfg=cfg(pg_seam)");
 
-    // The `schema` module tree (dissolved in from the former `zero-migrate-schema`
-    // crate, redesign step 3c) carries the live-catalog introspection-EXECUTION
+    // The `schema` module tree (dissolved in from a former standalone schema
+    // crate) carries the live-catalog introspection-EXECUTION
     // helpers (`schema::diff::read_live_schema` / `estimate_row_count`, the
     // `SchemaError` driver wrapper) behind a never-declared `introspect` feature:
     // they name `compio_postgres` (a driver out of scope for this standalone — the

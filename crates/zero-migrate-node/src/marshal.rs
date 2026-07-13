@@ -1,4 +1,4 @@
-//! napi ⇄ `zero_migrate` driver-type marshaling (design §B.2).
+//! napi ⇄ `zero_migrate` driver-type marshaling.
 //!
 //! The host driver (`pg`/`mysql2` in JS) speaks JS cells; the engine speaks the
 //! driver-neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] types. This module is the
@@ -7,14 +7,14 @@
 //! [`crate::wire`] — the single source of truth for every N-API boundary type — and
 //! are re-exported here for the fold + the mock-apply test.
 //!
-//! Value union (§A.2, verified exhaustively): `Null | Text | Int | Bool | TextArray`.
+//! Value union (verified exhaustively): `Null | Text | Int | Bool | TextArray`.
 //! Ints cross as JS strings when they exceed the safe-integer domain? — NO: the
 //! engine's int domain is `i64`, but the ONLY ints the seam reads are small
 //! catalog/count values (`character_maximum_length`, `relkind`-as-char, row
 //! counts). We carry `Int` as an `f64` on the JS side (a JS `number`) for the
 //! small values the seam actually reads, and additionally accept an `i64`-as-string
 //! form (`intStr`) so a host `pg` type-parser that stringifies `int8`/`numeric`
-//! (the §D.2 contract) round-trips exactly. `Text` covers the `to_char` timestamp
+//! round-trips exactly. `Text` covers the `to_char` timestamp
 //! and all text/name/varchar cells.
 
 use zero_migrate::driver::{Bind, DbError, Row, Value};
@@ -27,7 +27,7 @@ pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 // integration test exercises the folds directly.
 // ---------------------------------------------------------------------------
 
-/// `Bind → JsCell` (Rust → JS bind fold, §B.2). `Int→int`, `Text→text`,
+/// `Bind → JsCell` (Rust → JS bind fold). `Int→int`, `Text→text`,
 /// `Bool→bool`, `Null→null`, `Decimal→text` (PG infers the numeric target from
 /// context — the same fold the MySQL `bind_to_json` proves).
 #[must_use]
@@ -48,7 +48,7 @@ pub fn bind_to_cell(bind: &Bind) -> JsCell {
     }
 }
 
-/// `JsCell → Value` (JS → Rust return fold, §B.2). The `int`/`intStr` split:
+/// `JsCell → Value` (JS → Rust return fold). The `int`/`intStr` split:
 /// `intStr` is preferred (exact int8/numeric), falling back to the `f64` `int`
 /// narrowed to `i64`.
 ///

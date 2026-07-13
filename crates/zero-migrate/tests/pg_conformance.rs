@@ -1,4 +1,4 @@
-//! Live-Postgres conformance for the `PgDevSession` driver (redesign step 6a).
+//! Live-Postgres conformance for the `PgDevSession` driver.
 //!
 //! Proves the in-crate `PgDevSession` — the TEST-ONLY [`SqlSession`] over the blocking
 //! `postgres` crate that every resurrected `*_pg` scenario drives — passes the engine's

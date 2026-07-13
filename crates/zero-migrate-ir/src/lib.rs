@@ -3,7 +3,7 @@
 //! The pure-data core the whole engine (and any external validator/checksummer)
 //! agrees on: the migration document, the closed `op.*` IR, the closed expression
 //! AST, the constrained numeric scalar, the precondition vocabulary, the
-//! typed-id machinery, the canonical checksum, the fail-closed `.ir.json` load
+//! typed-id machinery, the canonical checksum, the fail-closed IR envelope load
 //! gate (the policy-free half), and the STRUCTURAL (allow-list) validator.
 //!
 //! # A true leaf

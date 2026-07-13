@@ -1,5 +1,5 @@
-//! PR2 — faithful e2e + unit coverage for the IR `renameColumn` lowering on the
-//! **SQLite** leg (§2.6 / §2.6.1 / §2.6.2), and the dialect-router unit facts.
+//! Faithful e2e + unit coverage for the IR `renameColumn` lowering on the
+//! **SQLite** leg, and the dialect-router unit facts.
 //!
 //! The SQLite leg lowers ONE `op.renameColumn` to ONE
 //! `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` (the 12-step OFFLINE
@@ -75,7 +75,7 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
     }
 }
 
-/// Build the full PR2 `LiveSchema` (table snapshots + SQLite SDK schema `Value`s)
+/// Build the full `LiveSchema` (table snapshots + SQLite SDK schema `Value`s)
 /// for the SQLite rename leg, by routing the descriptor set through the SAME
 /// `desired_snapshot_for_dialect` the differ uses — so the live facts the rename
 /// rebuild consumes are byte-identical to a `t.*`-diff's desired snapshot.
@@ -171,7 +171,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
     }
 }
 
-// §2.6.2 — the SQLite leg: ONE `op.renameColumn` lowers to ONE
+// The SQLite leg: ONE `op.renameColumn` lowers to ONE
 // `RenameStep::SqliteRebuild` and applies via `rebuild_one` THROUGH the single
 // shared `apply_plan`. The seeded row survives, the old column is gone, the
 // journal records the rebuild — and the lowered step is a SqliteRebuild, NOT a
@@ -204,7 +204,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
     let steps = author.lower_steps(&ir, &live).expect("SQLite rename lowers");
 
-    // STRUCTURAL leg assertion (§2.6.2): exactly one step, an OnlineRename whose
+    // STRUCTURAL leg assertion: exactly one step, an OnlineRename whose
     // RenameStep is the SQLite REBUILD — NOT a PG expand-contract.
     assert_eq!(steps.len(), 1, "one renameColumn → one plan step");
     let rebuild_version = match &steps[0] {
@@ -237,7 +237,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         .await
         .expect("apply the SQLite rename rebuild");
 
-    // No PG online partition on the SQLite leg (§2.6.2).
+    // No PG online partition on the SQLite leg.
     assert!(
         out.pending_contract.is_empty(),
         "a SQLite rebuild has NO pending_contract partition"
@@ -297,7 +297,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     );
 }
 
-// §2.6 — neutral-type translation on the SQLite leg: a renameColumn whose neutral
+// Neutral-type translation on the SQLite leg: a renameColumn whose neutral
 // ColType is `Int` renders the correct SQLite affinity (INTEGER) in the rebuilt
 // table's CREATE — NOT a PG type string. (The PG-type-string assertion is the PG
 // suite's job; here we prove the SQLite leg never receives one.)
@@ -375,7 +375,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     );
 }
 
-// MED (code-critic) — IR-vs-live type reconciliation is SYMMETRIC across the two
+// IR-vs-live type reconciliation is SYMMETRIC across the two
 // legs: the SQLite leg must reject a wrong IR `ty` IDENTICALLY to the PG leg
 // (`RenameTypeMismatch`), not silently ignore the IR type and use the live type.
 // Pre-fix the SQLite leg carried the live `data_type` across UNCHANGED and renamed
@@ -404,7 +404,7 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     }
 }
 
-// MED (code-critic) — cross-app guard on the SQLite rebuild leg. The rebuild
+// Cross-app guard on the SQLite rebuild leg. The rebuild
 // routes through the declarative differ, whose `enforce_ownership` refuses a
 // structural change to a FOREIGN table. Pre-fix `sqlite_rename_rebuild` fabricated
 // BOTH ownership maps as the deploying app, so app B could silently rebuild app
@@ -437,7 +437,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
     }
 }
 
-// §2.6.2 fail-closed: a SQLite renameColumn whose table's full live structure is
+// Fail-closed: a SQLite renameColumn whose table's full live structure is
 // NOT in the LiveSchema cannot lower — it refuses rather than emit a rebuild from
 // a partial view of the table. With the IR-vs-live type reconciliation now gating
 // the lowering BEFORE the dialect dispatch, the absence of the live `from` column
@@ -468,7 +468,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     }
 }
 
-// §2.6.2 fail-closed (deeper arm): the live `from` column TYPE is known (so the
+// Fail-closed (deeper arm): the live `from` column TYPE is known (so the
 // type reconciliation passes), but the full rebuild shape — the live SDK schema
 // `Value` in `sqlite_schemas` — is absent. The SQLite leg then refuses with
 // `SqliteRenameNeedsLiveTable` rather than emit a rebuild from a partial view.
@@ -539,7 +539,7 @@ fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
     }
 }
 
-// PR2-LOW — rename-to-EXISTING-column collision (SQLite leg). A `renameColumn` whose
+// Rename-to-EXISTING-column collision (SQLite leg). A `renameColumn` whose
 // `to` equals a column that ALREADY exists on the live table must fail closed at the
 // LOWER gate (`RenameLower`), NOT silently OVERWRITE the existing `to` field def when
 // the rebuild renames the `from` key onto it (a data-loss-class silent mis-build).

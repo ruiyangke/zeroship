@@ -8,10 +8,10 @@
 //! [`MigrationBackend`](crate::apply::backend::MigrationBackend) trait.
 //!
 //! The trait is typed in DRIVER-NEUTRAL types ([`Bind`]/[`Value`]/[`Row`]/
-//! [`DbError`]), NOT `compio_postgres::{Row, Error, types::ToSql}`. Those compio
-//! types have private constructors, so a host (napi) driver could neither be
-//! *called* (it cannot extract cells from `&[&dyn ToSql]`, which serialize to the
-//! PG binary wire format) nor *return* rows/errors. The neutral types close both
+//! [`DbError`]), NOT any concrete driver's row/error/bind types. Such driver types
+//! typically have private constructors, so a host (napi) driver could neither be
+//! *called* (it cannot extract cells from opaque bind params, which serialize to a
+//! wire format) nor *return* rows/errors. The neutral types close both
 //! sides:
 //!
 //! - [`Bind`] — a field-for-field mirror of [`render::step::BindValue`](crate::render::step::BindValue),
@@ -31,7 +31,7 @@
 //!
 //! The napi host (`zero-migrate-node`'s `NapiHostSession`) is the production
 //! producer of all four; the in-crate `RecordingSession` (a host-shaped,
-//! non-compio driver) proves the generic PG apply path is genuinely
+//! in-process driver) proves the generic PG apply path is genuinely
 //! driver-neutral before any dialect-specific SQL crosses the seam.
 
 /// The driver-neutral [`SqlSession`] conformance suite — the FIRST external
@@ -60,7 +60,7 @@ use std::fmt;
 /// control (`BEGIN`/`COMMIT`/`ROLLBACK`), advisory locks, and confinement `SET`s
 /// are SQL strings issued through `batch`/`exec` by each dialect's `Backend` — they
 /// are engine logic, not driver methods.
-#[allow(async_fn_in_trait)] // !Send is by design on the single-thread compio runtime
+#[allow(async_fn_in_trait)] // !Send is by design: the napi block_on worker + JS host are single-threaded
 pub trait SqlSession {
     /// DDL / txn control / multi-statement session setup. Simple-query protocol:
     /// one `&str`, may contain `;`-separated statements, no params, no rows.
@@ -146,7 +146,7 @@ impl From<&i64> for Bind {
 }
 
 /// A nullable text bind (`Option<String>`): `None → NULL`, `Some(s) → Text` —
-/// mirrors compio's `FromSql for Option<String>` NULL handling (`backfill.rs`'s
+/// mirrors standard `FromSql for Option<String>` NULL handling (`backfill.rs`'s
 /// `last_cursor` progress write).
 impl From<&Option<String>> for Bind {
     fn from(s: &Option<String>) -> Self {
@@ -299,7 +299,7 @@ impl ColIndex for &str {
     }
 }
 
-/// The neutral analogue of `compio_postgres::types::FromSql`, implemented for
+/// The neutral analogue of a driver's `FromSql`, implemented for
 /// exactly the closed set the apply path decodes. A small, closed trait, not the
 /// open `FromSql` ecosystem.
 pub trait FromValue: Sized {
@@ -418,12 +418,12 @@ impl FromValue for char {
     }
 }
 
-/// `text[]` decoded to `Vec<String>`. Reproduces the LEGACY compio outcome on an
-/// element-NULL: `compio_postgres`' `FromSql for Vec<String>` cannot hold a NULL
+/// `text[]` decoded to `Vec<String>`. Reproduces the standard `FromSql`
+/// outcome on an element-NULL: `FromSql for Vec<String>` cannot hold a NULL
 /// element (a non-nullable `String` element), so it **errors** — and every call
 /// site coerces that error to `[]` via `.unwrap_or_default()`. This impl errors
-/// the same way so `.unwrap_or_default()` yields `[]`, keeping native and host
-/// byte-identical.
+/// the same way so `.unwrap_or_default()` yields `[]`, keeping every driver's
+/// output byte-identical.
 impl FromValue for Vec<String> {
     fn from_value(cell: &Value) -> Result<Self, DbError> {
         match cell {
@@ -441,9 +441,9 @@ impl FromValue for Vec<String> {
 }
 
 /// Nullable `text[]` decoded to `Option<Vec<String>>` (e.g. `reloptions`). A SQL
-/// NULL array → `None`; a present array → `Some(...)`. Reproduces the legacy
-/// compio outcome on an element-NULL: the inner `Vec<String>` decode errors, so
-/// the caller's `.ok().flatten()` yields `None` — byte-identical to native.
+/// NULL array → `None`; a present array → `Some(...)`. Reproduces the standard
+/// `FromSql` outcome on an element-NULL: the inner `Vec<String>` decode errors, so
+/// the caller's `.ok().flatten()` yields `None` — byte-identical across drivers.
 impl FromValue for Option<Vec<String>> {
     fn from_value(cell: &Value) -> Result<Self, DbError> {
         match cell {
@@ -456,10 +456,10 @@ impl FromValue for Option<Vec<String>> {
 
 #[cfg(test)]
 mod element_null_parity {
-    //! Dual-adapter parity: a synthetic element-NULL `reloptions`-shaped `text[]`
-    //! yields the LEGACY `[]` outcome through a canned host [`Row`]. Pins parity on
-    //! the one raw, nullable, unfiltered catalog array cell so native and host stay
-    //! interchangeable.
+    //! Decode parity: a synthetic element-NULL `reloptions`-shaped `text[]`
+    //! yields the `[]` outcome through a canned host [`Row`]. Pins parity on
+    //! the one raw, nullable, unfiltered catalog array cell so any driver adapter
+    //! stays interchangeable.
 
     use super::{Row, Value};
 

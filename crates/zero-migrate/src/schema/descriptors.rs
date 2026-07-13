@@ -14,9 +14,9 @@
 /// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance
 /// functions (`cosine_distance`, `l2_distance`, `neg_inner_product`).
 ///
-/// **Why an enum, not a string** (plan §2): the SDK validates against
+/// **Why an enum, not a string**: the SDK validates against
 /// a closed three-element set; carrying it through the Rust surface
-/// as an enum trips the rustc exhaustiveness checker if a future PR
+/// as an enum trips the rustc exhaustiveness checker if a future change
 /// adds a fourth metric — every match arm in the impl flags rather
 /// than the new metric silently routing to a default branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct GeoPoint {
 
 /// Encryption mode — chooses nonce derivation + AAD shape.
 ///
-/// Two-mode design from `docs/proposals/db-system-design.md` §7.2.
+/// Two-mode design from `docs/proposals/db-system-design.md`.
 /// The on-wire blob layout is identical between modes (the synthetic
 /// vs random distinction is fully internal to the encrypt side); the
 /// caller has to track the mode to reconstruct the right AAD on
@@ -67,8 +67,8 @@ pub enum EncryptionMode {
     /// Per-row random nonce. AAD =
     /// `(collection, column, row_pk_bytes)` — binds ciphertext to its
     /// row position. Per the Camp A architecture
-    /// (`docs/proposals/p5-encryption-backup-implementation-plan.md`
-    /// §13): plugin-db mints typed_id PKs **SDK-side** before INSERT,
+    /// (`docs/proposals/p5-encryption-backup-implementation-plan.md`):
+    /// plugin-db mints typed_id PKs **SDK-side** before INSERT,
     /// so `row_pk` is always available when `encrypt()` is called.
     /// Single-phase INSERT — no chicken-and-egg vs Microsoft Always
     /// Encrypted / MongoDB CSFLE. Defeats the ciphertext-oracle
