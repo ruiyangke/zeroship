@@ -32,7 +32,7 @@ use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec};
 // **P6b** — the hardened migration backend, used by the engine-path tests to read
 // the versioned `_mig` journal and to seed a journal-less legacy file.
-use zeroship_migrate::SqliteBackend as MigrateBackend;
+use zero_migrate::SqliteBackend as MigrateBackend;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -9450,7 +9450,7 @@ fn p5_sqlite_register_model_still_auto_migrates() {
             .await
             .expect("read journal")
             .iter()
-            .filter(|e| e.phase == zeroship_migrate::apply::journal::Phase::Completed)
+            .filter(|e| e.phase == zero_migrate::apply::journal::Phase::Completed)
             .count();
         assert!(
             completed >= 1,
