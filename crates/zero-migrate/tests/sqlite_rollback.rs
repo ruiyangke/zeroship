@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::executor::RollbackError;
 use zero_migrate::apply::journal::Phase;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::SqliteBackend;
 
 struct Paths {
@@ -145,7 +147,9 @@ async fn rollback_drop_column_additive() {
         "ALTER TABLE people ADD COLUMN nickname TEXT;",
         "ALTER TABLE people DROP COLUMN nickname;",
     );
-    be.apply_one_additive(&add, "d").await.expect("apply add column");
+    be.apply_one_additive(&add, "d")
+        .await
+        .expect("apply add column");
 
     // Column present.
     let cols = be
@@ -154,7 +158,8 @@ async fn rollback_drop_column_additive() {
         .await
         .expect("table_info");
     assert!(
-        cols.iter().any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("nickname")),
+        cols.iter()
+            .any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("nickname")),
         "nickname column present after ADD COLUMN"
     );
 
@@ -169,7 +174,9 @@ async fn rollback_drop_column_additive() {
         .await
         .expect("table_info");
     assert!(
-        !cols2.iter().any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("nickname")),
+        !cols2
+            .iter()
+            .any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("nickname")),
         "nickname column gone after DROP COLUMN rollback"
     );
 }
@@ -190,7 +197,11 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
         "ALTER TABLE t ALTER COLUMN amount TYPE TEXT;",
     );
     // Seed the base table + apply the migration so it is net-applied.
-    let base = mig("base", "CREATE TABLE t (id INTEGER PRIMARY KEY);", "DROP TABLE t;");
+    let base = mig(
+        "base",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        "DROP TABLE t;",
+    );
     be.apply_one_additive(&base, "d").await.expect("apply base");
     be.apply_one_additive(&m, "d").await.expect("apply widen");
 
@@ -219,7 +230,10 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
         ))
         .await
         .expect("read rolled_back");
-    assert!(rb_rows.is_empty(), "no rolled_back event for a refused rebuild");
+    assert!(
+        rb_rows.is_empty(),
+        "no rolled_back event for a refused rebuild"
+    );
     let net = be.applied_sqlite().await.expect("net");
     assert!(
         net.iter()
@@ -237,8 +251,14 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
 async fn malicious_down_writing_mig_is_denied() {
     let p = paths("rb_mal");
     let be = backend(&p);
-    let v_setup = mig("setup", "CREATE TABLE t (id INTEGER PRIMARY KEY);", "DROP TABLE t;");
-    be.apply_one_additive(&v_setup, "d").await.expect("apply setup");
+    let v_setup = mig(
+        "setup",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+        "DROP TABLE t;",
+    );
+    be.apply_one_additive(&v_setup, "d")
+        .await
+        .expect("apply setup");
 
     // A `down` whose statements are individually additive-looking but smuggle a
     // `_mig` write. The DROP TABLE classifies as additive (so we reach execution),

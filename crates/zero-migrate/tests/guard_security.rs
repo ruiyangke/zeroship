@@ -279,9 +279,7 @@ fn join_into_foreign_schema_is_cross_schema() {
 
 #[test]
 fn cte_referencing_foreign_schema_is_cross_schema() {
-    assert_cross_schema(
-        "WITH x AS (SELECT * FROM auth.users) SELECT * FROM x",
-    );
+    assert_cross_schema("WITH x AS (SELECT * FROM auth.users) SELECT * FROM x");
 }
 
 #[test]
@@ -379,30 +377,22 @@ fn set_benign_param_allowed() {
 
 #[test]
 fn do_block_with_copy_program_denied() {
-    assert_denied(
-        "DO $$ BEGIN COPY project_acme.t TO PROGRAM 'sh'; END $$",
-    );
+    assert_denied("DO $$ BEGIN COPY project_acme.t TO PROGRAM 'sh'; END $$");
 }
 
 #[test]
 fn do_block_with_dblink_denied() {
-    assert_denied(
-        "DO $$ BEGIN PERFORM dblink_connect('host=evil'); END $$ LANGUAGE plpgsql",
-    );
+    assert_denied("DO $$ BEGIN PERFORM dblink_connect('host=evil'); END $$ LANGUAGE plpgsql");
 }
 
 #[test]
 fn do_block_with_pg_read_file_denied() {
-    assert_denied(
-        "DO $$ BEGIN PERFORM pg_read_file('/etc/passwd'); END $$",
-    );
+    assert_denied("DO $$ BEGIN PERFORM pg_read_file('/etc/passwd'); END $$");
 }
 
 #[test]
 fn do_block_with_cross_schema_denied() {
-    assert_denied(
-        "DO $$ BEGIN INSERT INTO control.creator_billing VALUES (1); END $$",
-    );
+    assert_denied("DO $$ BEGIN INSERT INTO control.creator_billing VALUES (1); END $$");
 }
 
 #[test]
@@ -516,9 +506,7 @@ fn call_procedure_denied() {
 
 #[test]
 fn create_event_trigger_denied() {
-    assert_denied_unrecognized(
-        "CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f()",
-    );
+    assert_denied_unrecognized("CREATE EVENT TRIGGER et ON ddl_command_start EXECUTE FUNCTION f()");
 }
 
 #[test]
@@ -535,9 +523,7 @@ fn create_publication_denied() {
 
 #[test]
 fn import_foreign_schema_denied() {
-    assert_denied(
-        "IMPORT FOREIGN SCHEMA remote LIMIT TO (t) FROM SERVER srv INTO project_acme",
-    );
+    assert_denied("IMPORT FOREIGN SCHEMA remote LIMIT TO (t) FROM SERVER srv INTO project_acme");
 }
 
 #[test]
@@ -721,23 +707,17 @@ fn create_table_column_default_pg_read_file_denied() {
 
 #[test]
 fn create_table_default_subselect_pg_read_file_denied() {
-    assert_denied(
-        "CREATE TABLE project_acme.t (c int DEFAULT (SELECT pg_read_file('/x')::int))",
-    );
+    assert_denied("CREATE TABLE project_acme.t (c int DEFAULT (SELECT pg_read_file('/x')::int))");
 }
 
 #[test]
 fn create_table_check_constraint_pg_read_file_denied() {
-    assert_denied(
-        "CREATE TABLE project_acme.t (c int CHECK (c < length(pg_read_file('/x'))))",
-    );
+    assert_denied("CREATE TABLE project_acme.t (c int CHECK (c < length(pg_read_file('/x'))))");
 }
 
 #[test]
 fn alter_column_set_default_pg_read_file_denied() {
-    assert_denied(
-        "ALTER TABLE project_acme.t ALTER COLUMN c SET DEFAULT pg_read_file('/x')",
-    );
+    assert_denied("ALTER TABLE project_acme.t ALTER COLUMN c SET DEFAULT pg_read_file('/x')");
 }
 
 #[test]
@@ -748,9 +728,7 @@ fn insert_values_pg_read_file_denied() {
 
 #[test]
 fn update_set_dblink_denied() {
-    assert_denied(
-        "UPDATE project_acme.t SET c = dblink('host=evil','SELECT 1')",
-    );
+    assert_denied("UPDATE project_acme.t SET c = dblink('host=evil','SELECT 1')");
 }
 
 // --- GROUP 5: plpgsql runtime-constructed SQL ------------------------------
@@ -767,9 +745,7 @@ fn do_block_format_identifier_to_control_denied() {
 #[test]
 fn do_block_format_identifier_to_other_project_denied() {
     // format('%I.t', 'project_other') reaches another project's schema.
-    assert_denied(
-        "DO $$ BEGIN EXECUTE format('UPDATE %I.t SET x=0', 'project_other'); END $$",
-    );
+    assert_denied("DO $$ BEGIN EXECUTE format('UPDATE %I.t SET x=0', 'project_other'); END $$");
 }
 
 #[test]
@@ -1015,7 +991,10 @@ fn safe_multi_statement_migration_passes() {
 #[test]
 fn drop_table_passes_but_flagged_destructive() {
     let r = assert_ok("DROP TABLE products");
-    assert!(r.destructive, "DROP TABLE must be flagged destructive (gate decides)");
+    assert!(
+        r.destructive,
+        "DROP TABLE must be flagged destructive (gate decides)"
+    );
 }
 
 #[test]
@@ -1045,9 +1024,7 @@ fn drop_constraint_passes_but_flagged_destructive() {
 #[test]
 fn mixed_migration_with_a_drop_is_flagged_but_passes() {
     // Additive + a drop: passes (no denied construct) but flagged destructive.
-    let r = assert_ok(
-        "CREATE TABLE t2(id int); DROP TABLE old_table;",
-    );
+    let r = assert_ok("CREATE TABLE t2(id int); DROP TABLE old_table;");
     assert!(r.destructive);
 }
 
@@ -1059,10 +1036,13 @@ fn mixed_migration_with_a_drop_is_flagged_but_passes() {
 fn add_not_null_volatile_default_warns_lock() {
     // ADD COLUMN NOT NULL DEFAULT <volatile> forces a full table rewrite under
     // an ACCESS EXCLUSIVE lock — lint must warn (not deny).
-    let r = assert_ok("ALTER TABLE products ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()");
+    let r =
+        assert_ok("ALTER TABLE products ADD COLUMN created_at timestamptz NOT NULL DEFAULT now()");
     assert!(
-        r.advisories.iter().any(|a| a.message.to_lowercase().contains("lock")
-            || a.message.to_lowercase().contains("rewrite")),
+        r.advisories
+            .iter()
+            .any(|a| a.message.to_lowercase().contains("lock")
+                || a.message.to_lowercase().contains("rewrite")),
         "expected a lock/rewrite advisory, got: {:?}",
         r.advisories
     );
@@ -1073,7 +1053,9 @@ fn add_not_null_constant_default_does_not_warn() {
     // A constant default is the PG11+ metadata-only fast path — no warning.
     let r = assert_ok("ALTER TABLE products ADD COLUMN active boolean NOT NULL DEFAULT true");
     assert!(
-        !r.advisories.iter().any(|a| a.message.to_lowercase().contains("lock")),
+        !r.advisories
+            .iter()
+            .any(|a| a.message.to_lowercase().contains("lock")),
         "constant default must not warn, got: {:?}",
         r.advisories
     );
@@ -1121,7 +1103,10 @@ fn flags_for_safe_additive_does_not_require_approval() {
     let flags = flags_for(&r);
     assert!(!flags.requires_approval, "additive ⇒ no approval needed");
     assert!(!flags.destructive);
-    assert!(flags.transactional, "default additive migration is transactional");
+    assert!(
+        flags.transactional,
+        "default additive migration is transactional"
+    );
 }
 
 #[test]
@@ -1348,9 +1333,7 @@ fn own_schema_opclass_passes() {
 
 #[test]
 fn collate_clause_in_foreign_schema_is_cross_schema() {
-    assert_cross_schema(
-        "SELECT * FROM project_acme.t ORDER BY c COLLATE control.mycollation",
-    );
+    assert_cross_schema("SELECT * FROM project_acme.t ORDER BY c COLLATE control.mycollation");
     assert_cross_schema("CREATE TABLE project_acme.t (c text COLLATE control.mycol)");
 }
 
@@ -1359,9 +1342,7 @@ fn operator_definition_referencing_foreign_function_is_denied() {
     // CREATE OPERATOR is a DefineStmt — denied-by-default as an unrecognized
     // statement kind (stronger than cross-schema), and the foreign `function=`
     // qualifier is independently caught by the TypeRef slot walk.
-    assert_denied(
-        "CREATE OPERATOR project_acme.+ (leftarg=int, rightarg=int, function=control.f)",
-    );
+    assert_denied("CREATE OPERATOR project_acme.+ (leftarg=int, rightarg=int, function=control.f)");
 }
 
 #[test]
@@ -1383,9 +1364,7 @@ fn create_domain_into_own_schema_is_allowed() {
     assert_ok(
         "CREATE DOMAIN project_acme.billing_period AS date CHECK (EXTRACT(DAY FROM VALUE) = 1)",
     );
-    assert_ok(
-        "CREATE DOMAIN project_acme.kind AS text CHECK (VALUE IN ('charge','refund'))",
-    );
+    assert_ok("CREATE DOMAIN project_acme.kind AS text CHECK (VALUE IN ('charge','refund'))");
 }
 
 #[test]
@@ -1693,9 +1672,7 @@ fn nextval_foreign_sequence_in_insert_values_is_cross_schema() {
 
 #[test]
 fn nextval_foreign_sequence_in_column_default_is_cross_schema() {
-    assert_cross_schema(
-        "CREATE TABLE project_acme.t (a int DEFAULT nextval('control.s'))",
-    );
+    assert_cross_schema("CREATE TABLE project_acme.t (a int DEFAULT nextval('control.s'))");
 }
 
 // --- reg* casts naming a foreign-schema object as a string literal ---
@@ -1867,7 +1844,10 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     let g = SqlGuard::new(GuardConfig::confined("project_x"));
     let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
     let report = g.check(up).expect("safe migration passes");
-    assert!(report.destructive, "the DROP makes the migration destructive");
+    assert!(
+        report.destructive,
+        "the DROP makes the migration destructive"
+    );
     let flags = flags_for(&report);
     assert!(flags.requires_approval);
 
@@ -1875,19 +1855,31 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     assert!(g.check("ALTER SYSTEM SET x = 1").is_err());
 
     // Build a full Migration from the root types.
-    let m = { let mut __mig = Migration {
-        version: MigrationId::generate(),
-        name: "create_t".to_string(),
-        up: up.to_string(),
-        down: Some("DROP TABLE project_x.t".to_string()),
-        checksum: Checksum::of(&zero_migrate::ChecksumInput { up: "", down: None, flags: &MigrationFlags::default(), owner_app: "", depends_on: &[], supersedes: &[], preconditions: &[] }),
-        flags: MigrationFlags::default(),
-        owner_app: "app_0000000000000000000000".to_string(),
-        depends_on: vec![],
-        supersedes: Vec::new(),
-        preconditions: Vec::new(),
-        existence_guard: None,
-    }; __mig.recompute_checksum(); __mig };
+    let m = {
+        let mut __mig = Migration {
+            version: MigrationId::generate(),
+            name: "create_t".to_string(),
+            up: up.to_string(),
+            down: Some("DROP TABLE project_x.t".to_string()),
+            checksum: Checksum::of(&zero_migrate::ChecksumInput {
+                up: "",
+                down: None,
+                flags: &MigrationFlags::default(),
+                owner_app: "",
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            }),
+            flags: MigrationFlags::default(),
+            owner_app: "app_0000000000000000000000".to_string(),
+            depends_on: vec![],
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        };
+        __mig.recompute_checksum();
+        __mig
+    };
     assert!(m.version.as_str().starts_with("mig_"));
     assert_eq!(m.checksum.as_str().len(), 64);
 }
@@ -1927,7 +1919,9 @@ fn query_to_xml_literal_in_column_default_is_denied() {
 #[test]
 fn query_to_xmlschema_family_literal_cross_schema_is_denied() {
     // The whole family takes a SQL string as the first arg.
-    assert_cross_schema("SELECT query_to_xmlschema('SELECT * FROM control.users', true, false, '')");
+    assert_cross_schema(
+        "SELECT query_to_xmlschema('SELECT * FROM control.users', true, false, '')",
+    );
     assert_cross_schema(
         "SELECT query_to_xml_and_xmlschema('SELECT * FROM control.users', true, false, '')",
     );
@@ -2045,9 +2039,7 @@ fn xpath_over_xml_value_passes() {
 fn t2_func_def_target_under_single_is_cross_schema() {
     // site 2 (check_func_def_target): a CREATE/ALTER FUNCTION defining into a
     // schema other than the single project schema is CrossSchema.
-    assert_cross_schema(
-        "CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$",
-    );
+    assert_cross_schema("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$");
     assert_cross_schema("ALTER FUNCTION control.f() IMMUTABLE");
     // own-schema definition is fine.
     assert_ok("CREATE FUNCTION project_acme.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$");

@@ -320,7 +320,10 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         sql.contains("partition collapse populated-default mirror guard"),
         "bounded child create should carry the populated-default mirror guard:\n{sql}"
     );
-    assert!(sql.contains("CREATE TABLE"), "parent table DDL missing:\n{sql}");
+    assert!(
+        sql.contains("CREATE TABLE"),
+        "parent table DDL missing:\n{sql}"
+    );
     assert!(
         !sql.contains("PARTITION BY") && !sql.contains("PARTITION OF"),
         "SQLite collapse must not emit native partition syntax:\n{sql}"
@@ -366,7 +369,10 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         )
         .await
         .expect("check child tables");
-    assert!(children.is_empty(), "collapse child partitions must be no-DDL");
+    assert!(
+        children.is_empty(),
+        "collapse child partitions must be no-DDL"
+    );
 }
 
 #[compio::test]
@@ -382,7 +388,8 @@ async fn collapse_bounded_child_drop_deletes_bound_rows_on_sqlite() {
     let rendered = rendered_partition_sql(&steps);
     assert!(
         rendered.contains("partition child drop collapsed to DELETE FROM parent")
-            && rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
+            && rendered
+                .contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
         "bounded child drop must render a bounded DELETE:\n{rendered}"
     );
 
@@ -411,7 +418,8 @@ async fn collapse_default_child_drop_deletes_residual_rows_on_sqlite() {
     let steps = lower_sqlite_partition_steps(ops, &LiveSchema::default());
     let rendered = rendered_partition_sql(&steps);
     assert!(
-        rendered.contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)"),
+        rendered
+            .contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)"),
         "default child drop must render residual sibling negation:\n{rendered}"
     );
 
@@ -419,12 +427,15 @@ async fn collapse_default_child_drop_deletes_residual_rows_on_sqlite() {
     apply_sqlite_partition_steps(&backend, &steps, Approval::Approved)
         .await
         .expect("apply default child drop realization");
-    assert_eq!(sqlite_event_rows(&backend).await, vec![(42, "range".to_string())]);
+    assert_eq!(
+        sqlite_event_rows(&backend).await,
+        vec![(42, "range".to_string())]
+    );
 }
 
 #[compio::test]
-async fn collapse_create_bounded_child_mirror_guard_errors_only_when_default_has_matching_rows_sqlite()
-{
+async fn collapse_create_bounded_child_mirror_guard_errors_only_when_default_has_matching_rows_sqlite(
+) {
     let dirty_ops = vec![
         create_events_parent(),
         create_default_partition(),
@@ -494,14 +505,19 @@ async fn collapse_child_create_down_drops_rows_before_parent_drop_on_sqlite() {
     let down_child_steps = lower_sqlite_partition_steps(down_child_ops, &live);
     let rendered = rendered_partition_sql(&down_child_steps);
     assert!(
-        rendered.contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)")
-            && rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
+        rendered
+            .contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)")
+            && rendered
+                .contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
         "child-create down must realize semantic child drops:\n{rendered}"
     );
     apply_sqlite_partition_steps(&backend, &down_child_steps, Approval::Approved)
         .await
         .expect("apply semantic child drops");
-    assert!(sqlite_event_rows(&backend).await.is_empty(), "child drops remove all rows");
+    assert!(
+        sqlite_event_rows(&backend).await.is_empty(),
+        "child drops remove all rows"
+    );
 
     let drop_parent_steps = lower_sqlite_partition_steps(
         vec![Op::DropTable {
@@ -553,7 +569,10 @@ async fn collapse_range_min_value_omits_lower_delete_bound_on_sqlite() {
     apply_sqlite_partition_steps(&backend, &steps, Approval::Approved)
         .await
         .expect("apply minValue delete");
-    assert_eq!(sqlite_event_rows(&backend).await, vec![(150, "max".to_string())]);
+    assert_eq!(
+        sqlite_event_rows(&backend).await,
+        vec![(150, "max".to_string())]
+    );
 }
 
 #[test]
@@ -746,7 +765,9 @@ fn render_create_partition_default_pg() {
     .join("\n");
 
     assert!(
-        sql.contains("CREATE TABLE \"app\".\"events_default\" PARTITION OF \"app\".\"events\" DEFAULT"),
+        sql.contains(
+            "CREATE TABLE \"app\".\"events_default\" PARTITION OF \"app\".\"events\" DEFAULT"
+        ),
         "default partition SQL was:\n{sql}"
     );
 }
@@ -796,14 +817,8 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(200),
     ));
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-        let err = validate_ir_scoped(
-            &migration,
-            dialect,
-            &[],
-            None,
-            &PolicyProfile::platform(),
-        )
-        .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
+        let err = validate_ir_scoped(&migration, dialect, &[], None, &PolicyProfile::platform())
+            .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(
             matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),
             "attachPartition on {dialect:?} must fail closed as PG-only/vendor, got {err:?}"
@@ -865,5 +880,8 @@ fn render_with_storage_param_index_pg() {
 #[test]
 fn render_on_only_index_pg() {
     let sql = pg_sql(create_index(None, vec![], None, Some(true))).join("\n");
-    assert!(sql.contains("ON ONLY \"app\".\"events\""), "ON ONLY SQL was:\n{sql}");
+    assert!(
+        sql.contains("ON ONLY \"app\".\"events\""),
+        "ON ONLY SQL was:\n{sql}"
+    );
 }

@@ -21,11 +21,11 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
     Migration, RebuildError, SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -141,7 +141,10 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
     apply_first_deploy(&be, &v1).await;
 
     // Seed rows into the live table (engine mode lets the test write `main`).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.events (id, n) VALUES ('e1', 1), ('e2', 2), ('e3', 3)")
         .await
@@ -153,7 +156,11 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
         .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='events_n_idx'")
         .await
         .expect("query index pre-rebuild");
-    assert_eq!(idx_before.len(), 1, "events_n_idx exists before the rebuild");
+    assert_eq!(
+        idx_before.len(),
+        1,
+        "events_n_idx exists before the rebuild"
+    );
 
     // The rebuild for the type change.
     let rb = one_rebuild(&v1, &v2);
@@ -207,19 +214,26 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
         .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='events_n_idx'")
         .await
         .expect("query index post-rebuild");
-    assert_eq!(idx_after.len(), 1, "events_n_idx recreated after the rebuild");
+    assert_eq!(
+        idx_after.len(),
+        1,
+        "events_n_idx recreated after the rebuild"
+    );
 
     // The rebuild is journaled `completed`.
     let net = be.applied_sqlite().await.expect("read journal");
     let v = rb.migration.version.as_str();
     assert!(
-        net.iter().any(|e| e.version == v
-            && e.phase == zero_migrate::apply::journal::Phase::Completed),
+        net.iter()
+            .any(|e| e.version == v && e.phase == zero_migrate::apply::journal::Phase::Completed),
         "the rebuild must be journaled completed"
     );
 
     // FK enforcement is restored to ON after the rebuild.
-    assert!(foreign_keys_on(&be).await, "foreign_keys is ON post-rebuild");
+    assert!(
+        foreign_keys_on(&be).await,
+        "foreign_keys is ON post-rebuild"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +253,7 @@ async fn nullability_tighten_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].required = true;
@@ -251,7 +265,10 @@ async fn nullability_tighten_rebuild() {
     // Seed rows whose `body` is non-NULL (so the tightened NOT NULL holds after the
     // copy — a real backfilled migration). A NULL row would (correctly) trip the
     // new NOT NULL and abort; here we prove the happy path tightens cleanly.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.notes (id, body) VALUES ('n1', 'hello'), ('n2', 'world')")
         .await
@@ -307,7 +324,7 @@ async fn column_rename_rebuild_carries_data() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -315,7 +332,10 @@ async fn column_rename_rebuild_carries_data() {
     let p = paths("rebuild_rename");
     let be = backend(&p);
     apply_first_deploy(&be, &v1).await;
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada'), ('p2', 'grace')")
         .await
@@ -332,7 +352,11 @@ async fn column_rename_rebuild_carries_data() {
     let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
         .expect("rename diff");
-    assert_eq!(plan.rebuilds.len(), 1, "a rename yields one rebuild on SQLite");
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "a rename yields one rebuild on SQLite"
+    );
     assert!(
         plan.renames.is_empty(),
         "the PG expand-contract rename path must NOT fire on SQLite"
@@ -412,7 +436,7 @@ async fn goodie_sentinels_survive_rebuild() {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     // v2: re-type `amount` number → string (a rebuild) — the goodie columns are
     // UNCHANGED but must survive the rebuild with their sentinels intact.
@@ -440,7 +464,11 @@ async fn goodie_sentinels_survive_rebuild() {
     // sqlite_master.sql.
     let snap = be.snapshot_schema_sqlite().await.expect("snapshot");
     let t = snap.tables.get("accounts").expect("accounts in snapshot");
-    let secret = t.columns.iter().find(|c| c.name == "secret").expect("secret");
+    let secret = t
+        .columns
+        .iter()
+        .find(|c| c.name == "secret")
+        .expect("secret");
     assert!(
         secret
             .comment_sentinel
@@ -479,15 +507,12 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
     let be = backend(&p);
 
     // Build a parent + child with an inline FK, via plain migrations (engine mode).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("BEGIN IMMEDIATE")
+        .set_mode(Mode::EngineJournal)
         .await
-        .expect("begin");
-    be.actor()
-        .set_mode(Mode::CreatorUp)
-        .await
-        .expect("creator");
+        .expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
     be.actor()
         .exec("CREATE TABLE parent (id TEXT PRIMARY KEY)")
         .await
@@ -499,7 +524,10 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
         )
         .await
         .expect("create child");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("COMMIT").await.expect("commit");
 
     // Seed a parent row + a child referencing it (valid so far).
@@ -555,7 +583,10 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
     match err {
         RebuildError::ForeignKeyViolation { table, violations } => {
             assert_eq!(table, "child");
-            assert!(violations >= 1, "at least one violation row, got {violations}");
+            assert!(
+                violations >= 1,
+                "at least one violation row, got {violations}"
+            );
         }
         other => panic!("expected ForeignKeyViolation, got {other:?}"),
     }
@@ -596,7 +627,10 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
     );
 
     // No wedge: a subsequent apply on the SAME backend succeeds.
-    let next = simple_migration("after_abort", "CREATE TABLE after_abort (id TEXT PRIMARY KEY)");
+    let next = simple_migration(
+        "after_abort",
+        "CREATE TABLE after_abort (id TEXT PRIMARY KEY)",
+    );
     be.apply_one_additive(&next, "deployer")
         .await
         .expect("a subsequent apply must succeed (no wedge after the FK abort)");
@@ -619,7 +653,7 @@ async fn confinement_holds_across_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -692,7 +726,10 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
     be.apply_one_additive(&create, "deployer")
         .await
         .expect("create t");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.t (id, v) VALUES ('a', 'x')")
         .await
@@ -703,13 +740,11 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
     let spec = SqliteRebuildSpec {
         table: "t".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("t"),
-        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY, \"v\" TEXT)"
-            .into(),
+        new_table_create:
+            "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY, \"v\" TEXT)".into(),
         copy_columns: vec![("id".into(), "id".into()), ("v".into(), "v".into())],
         // A bogus index over a column that does not exist → CREATE INDEX errors.
-        recreate_objects: vec![
-            "CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into(),
-        ],
+        recreate_objects: vec!["CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into()],
         dropped_columns: vec![],
         reason: "wedge test".into(),
     };
@@ -732,14 +767,20 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
     assert!(tmp.is_empty(), "temp table rolled back");
 
     // foreign_keys is back ON.
-    assert!(foreign_keys_on(&be).await, "foreign_keys ON after the abort");
+    assert!(
+        foreign_keys_on(&be).await,
+        "foreign_keys ON after the abort"
+    );
 
     // No wedge: the connection is back in autocommit and a fresh apply succeeds.
     assert!(
         be.actor().is_autocommit().await.expect("probe"),
         "connection back in autocommit after the aborted rebuild"
     );
-    let next = simple_migration("after_wedge", "CREATE TABLE after_wedge (id TEXT PRIMARY KEY)");
+    let next = simple_migration(
+        "after_wedge",
+        "CREATE TABLE after_wedge (id TEXT PRIMARY KEY)",
+    );
     be.apply_one_additive(&next, "deployer")
         .await
         .expect("a subsequent apply must succeed (no wedge)");
@@ -768,7 +809,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -781,7 +822,10 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
     // table, an AFTER INSERT trigger on `items` that writes the sink, and a PARTIAL
     // index on `items` (a WHERE clause the lossy desired-snapshot recreate dropped).
     // We do this in one engine-wrapped txn flipping to CreatorUp for the creator DDL.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
     be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
     be.actor()
@@ -799,7 +843,10 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
         .exec("CREATE INDEX items_partial_idx ON items (n) WHERE n > 10")
         .await
         .expect("create partial index");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("COMMIT").await.expect("commit");
 
     // Seed a baseline row (engine mode).
@@ -817,9 +864,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
     // The TRIGGER still exists post-rebuild.
     let trg = be
         .actor()
-        .query(
-            "SELECT name FROM main.sqlite_master WHERE type='trigger' AND name='items_ai'",
-        )
+        .query("SELECT name FROM main.sqlite_master WHERE type='trigger' AND name='items_ai'")
         .await
         .expect("query trigger");
     assert_eq!(
@@ -839,7 +884,9 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
         .await
         .expect("read sink");
     assert_eq!(
-        sink.first().and_then(|r| r.first()).and_then(|c| c.as_deref()),
+        sink.first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref()),
         Some("fired"),
         "the trigger must FIRE post-rebuild (its side-effect lands in the sink)"
     );
@@ -847,9 +894,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
     // The PARTIAL index survives WITH its WHERE clause. Read the verbatim sql.
     let idx = be
         .actor()
-        .query(
-            "SELECT sql FROM main.sqlite_master WHERE type='index' AND name='items_partial_idx'",
-        )
+        .query("SELECT sql FROM main.sqlite_master WHERE type='index' AND name='items_partial_idx'")
         .await
         .expect("query partial index");
     let idx_sql = idx
@@ -880,7 +925,10 @@ async fn dependent_referencing_dropped_column_fails_closed() {
     let be = backend(&p);
 
     // Create t(id, drop_me) + an index over `drop_me`, in one txn.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
     be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
     be.actor()
@@ -891,7 +939,10 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         .exec("CREATE INDEX t_on_drop_me ON t (drop_me)")
         .await
         .expect("create index referencing drop_me");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("COMMIT").await.expect("commit");
 
     // A rebuild whose new shape DROPS `drop_me` (only `id` survives). The captured
@@ -899,7 +950,8 @@ async fn dependent_referencing_dropped_column_fails_closed() {
     let spec = SqliteRebuildSpec {
         table: "t".into(),
         tmp_table: SqliteRebuildSpec::tmp_name("t"),
-        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY)".into(),
+        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY)"
+            .into(),
         copy_columns: vec![("id".into(), "id".into())],
         recreate_objects: vec![],
         // EMPTY on purpose: a DIRECT-spec caller that does not declare the dropped
@@ -918,7 +970,10 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         .expect_err("a dependent referencing a dropped column must FAIL CLOSED");
     match err {
         RebuildError::DependentReplayFailed {
-            table, kind, object, ..
+            table,
+            kind,
+            object,
+            ..
         } => {
             assert_eq!(table, "t");
             assert_eq!(kind, "index");
@@ -943,9 +998,16 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='t_on_drop_me'")
         .await
         .expect("query index");
-    assert_eq!(idx.len(), 1, "the dependent index must be intact (never lost)");
+    assert_eq!(
+        idx.len(),
+        1,
+        "the dependent index must be intact (never lost)"
+    );
     // foreign_keys back ON.
-    assert!(foreign_keys_on(&be).await, "foreign_keys ON after the fail-closed abort");
+    assert!(
+        foreign_keys_on(&be).await,
+        "foreign_keys ON after the fail-closed abort"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -961,7 +1023,10 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
     let be = backend(&p);
 
     // parent(id) + child(id, parent_id REFERENCES parent), via plain DDL.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
     be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
     be.actor()
@@ -972,7 +1037,10 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         .exec("CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent (id))")
         .await
         .expect("create child");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("COMMIT").await.expect("commit");
 
     // Seed parent 'pa' and a child referencing it (referentially valid).
@@ -1041,7 +1109,10 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         .await
         .expect("read child");
     assert_eq!(
-        child.first().and_then(|r| r.first()).and_then(|c| c.as_deref()),
+        child
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref()),
         Some("pa"),
         "the child row is intact after the abort"
     );
@@ -1051,7 +1122,10 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         .await
         .expect("query tmp");
     assert!(tmp.is_empty(), "the temp table must be rolled back");
-    assert!(foreign_keys_on(&be).await, "foreign_keys ON after the cross-table abort");
+    assert!(
+        foreign_keys_on(&be).await,
+        "foreign_keys ON after the cross-table abort"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,7 +1148,7 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -1084,7 +1158,10 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
     apply_first_deploy(&be, &v1).await;
 
     // Seed a legit row.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.gadgets (id, n) VALUES ('g1', 1)")
         .await
@@ -1104,7 +1181,10 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
         .exec("INSERT INTO \"gadgets__zero_migrate_rebuild\" (junk) VALUES ('POLLUTION')")
         .await
         .expect("seed junk");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor().exec("COMMIT").await.expect("commit");
 
     // The rebuild must NOT reuse the polluted temp.
@@ -1212,7 +1292,10 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
     apply_first_deploy(&be, &v1).await;
 
     // Seed rows.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.events (id, n, extra) VALUES ('e1', 1, 'a'), ('e2', 2, 'b')")
         .await
@@ -1291,7 +1374,7 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     // v2: drop `points` (the CHECK-constrained column). `label` survives.
     let v2 = vec![CollectionDescriptor {
@@ -1304,7 +1387,7 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
 
     let p = paths("h1_check");
@@ -1313,7 +1396,10 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
 
     // Sanity: the live table's stored DDL really carries the CHECK over `points`
     // (so this test exercises the source-(3) path, not source (1)/(2)).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let ddl = be
         .actor()
         .query("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='scores'")
@@ -1364,7 +1450,10 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
         .await
         .expect("read label");
     assert_eq!(
-        labels.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        labels
+            .iter()
+            .filter_map(|r| r[0].clone())
+            .collect::<Vec<_>>(),
         vec!["x".to_string(), "y".to_string()],
         "surviving column data preserved across the CHECK-drop-via-rebuild"
     );
@@ -1391,7 +1480,7 @@ async fn nullability_loosen_rebuild_preserves_data() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].required = false;
@@ -1414,7 +1503,10 @@ async fn nullability_loosen_rebuild_preserves_data() {
     assert_eq!(notnull_before, "1", "body starts NOT NULL");
 
     // Seed rows (engine mode lets the test write `main`).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.notes (id, body) VALUES ('n1', 'hello'), ('n2', 'world')")
         .await
@@ -1441,7 +1533,10 @@ async fn nullability_loosen_rebuild_preserves_data() {
         .find(|r| r[1].as_deref() == Some("body"))
         .and_then(|r| r[3].clone())
         .expect("body present");
-    assert_eq!(notnull_after, "0", "body is now nullable after the loosen rebuild");
+    assert_eq!(
+        notnull_after, "0",
+        "body is now nullable after the loosen rebuild"
+    );
 
     // The data is preserved across the rebuild.
     let vals = be
@@ -1481,7 +1576,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let posts_fk = CollectionDescriptor {
         name: "posts".into(),
@@ -1493,7 +1588,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // v2: `author` becomes a plain string column — the FK is dropped.
     let posts_nofk = CollectionDescriptor {
@@ -1506,7 +1601,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let v1 = vec![users.clone(), posts_fk];
     let v2 = vec![users, posts_nofk];
@@ -1516,13 +1611,20 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
     apply_first_deploy(&be, &v1).await;
 
     // Pre-rebuild: `posts` has exactly one FK (author → users).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let fk_before = be
         .actor()
         .query("PRAGMA main.foreign_key_list(posts)")
         .await
         .expect("fk_list pre");
-    assert_eq!(fk_before.len(), 1, "posts starts with one FK: {fk_before:?}");
+    assert_eq!(
+        fk_before.len(),
+        1,
+        "posts starts with one FK: {fk_before:?}"
+    );
 
     // Seed a referentially-valid pair so integrity is intact going in.
     be.actor()
@@ -1568,14 +1670,21 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
         .query("SELECT COUNT(*) FROM main.posts")
         .await
         .expect("count");
-    assert_eq!(count[0][0].as_deref(), Some("2"), "rows preserved + new row inserted");
+    assert_eq!(
+        count[0][0].as_deref(),
+        Some("2"),
+        "rows preserved + new row inserted"
+    );
     // A whole-DB integrity check passes (no orphaned constraints left behind).
     let integrity = be
         .actor()
         .query("PRAGMA main.foreign_key_check")
         .await
         .expect("fk check");
-    assert!(integrity.is_empty(), "foreign_key_check is clean: {integrity:?}");
+    assert!(
+        integrity.is_empty(),
+        "foreign_key_check is clean: {integrity:?}"
+    );
     assert!(foreign_keys_on(&be).await, "foreign_keys ON post-rebuild");
 }
 
@@ -1637,7 +1746,7 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -1645,7 +1754,10 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
     let p = paths("rebuild_scope");
     let be = backend(&p);
     apply_first_deploy(&be, &v1).await;
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.events (id, n) VALUES ('e1', 1)")
         .await
@@ -1696,7 +1808,8 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
     );
     let net = be.applied_sqlite().await.expect("read journal");
     assert!(
-        !net.iter().any(|e| e.version == rb.migration.version.as_str()),
+        !net.iter()
+            .any(|e| e.version == rb.migration.version.as_str()),
         "a scope-refused rebuild is not journaled"
     );
 

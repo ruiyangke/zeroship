@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use zero_migrate::model::capability::VendorCapability;
-use zero_migrate::model::op_support;
 use zero_migrate::model::ir::{
-    ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
-    IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
+    ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn,
+    IrConstraintKind, IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction,
+    ViewQuery,
 };
+use zero_migrate::model::op_support;
 use zero_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
 use zero_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
 use zero_migrate::{
@@ -88,7 +89,10 @@ fn fixture_ops() -> Vec<Op> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if !file_name.ends_with(".golden.json") {
             continue;
         }
@@ -186,7 +190,10 @@ fn assert_decision_well_formed(decision: SupportDecision, label: &str) {
             );
         }
         SupportDecision::Unsupported { code, reason } => {
-            assert!(!code.is_empty(), "{label}: unsupported cells must carry a code");
+            assert!(
+                !code.is_empty(),
+                "{label}: unsupported cells must carry a code"
+            );
             assert!(
                 !reason.is_empty(),
                 "{label}: unsupported cells must carry a reason"
@@ -204,13 +211,22 @@ fn assert_current_cell_matches(op: &Op, dialect: Dialect) {
         SupportDecision::Supported {
             render: RenderMode::Offline,
         } => {
-            assert!(validate_current(op, dialect), "{label}: validate should accept");
-            assert!(lower_current(op, dialect), "{label}: offline lower should succeed");
+            assert!(
+                validate_current(op, dialect),
+                "{label}: validate should accept"
+            );
+            assert!(
+                lower_current(op, dialect),
+                "{label}: offline lower should succeed"
+            );
         }
         SupportDecision::Supported {
             render: RenderMode::LiveResolved,
         } => {
-            assert!(validate_current(op, dialect), "{label}: validate should accept");
+            assert!(
+                validate_current(op, dialect),
+                "{label}: validate should accept"
+            );
         }
         SupportDecision::Unsupported { .. } => {
             if validate_current(op, dialect) {
@@ -300,7 +316,10 @@ fn support_declarations_cover_every_op_and_dialect() {
                 );
             }
             SupportTier::Vendor(caps) => {
-                assert!(!caps.is_empty(), "{tag}: vendor tier must name capabilities");
+                assert!(
+                    !caps.is_empty(),
+                    "{tag}: vendor tier must name capabilities"
+                );
                 assert_eq!(
                     caps,
                     op_support::vendor_capabilities(op).as_slice(),

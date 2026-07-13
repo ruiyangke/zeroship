@@ -32,11 +32,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor,
     FieldDescriptor, SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -67,7 +67,10 @@ fn sqlite_author() -> DeclarativeAuthor {
 }
 
 fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
-    d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect()
+    d.ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect()
 }
 
 /// The declared `SQLite` type of `column` on `table`, via `PRAGMA table_info`
@@ -107,7 +110,7 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
 
     let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
@@ -126,7 +129,9 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     // REAL end-state: the vector column is a BLOB (sqlite-divergences: vector is a
     // packed BLOB, no vec0 vtable on the migrate-engine path).
     assert_eq!(
-        column_type(&be, "docs", "embedding").await.to_ascii_uppercase(),
+        column_type(&be, "docs", "embedding")
+            .await
+            .to_ascii_uppercase(),
         "BLOB",
         "a vector(N) field is a BLOB column on SQLite (not a vec0 virtual table)"
     );
@@ -143,7 +148,11 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
         "a vector field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
-        plan2.all_migrations().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
         plan2.rebuilds.len()
     );
 }
@@ -170,7 +179,7 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[mk()])
         .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
@@ -186,7 +195,9 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
             .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
     }
     assert_eq!(
-        column_type(&be, "docs", "embedding").await.to_ascii_uppercase(),
+        column_type(&be, "docs", "embedding")
+            .await
+            .to_ascii_uppercase(),
         "BLOB",
         "innerProduct vector applies as a plain BLOB on the SQLite engine path"
     );
@@ -208,7 +219,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
     let plan = sqlite_author()
@@ -257,7 +268,11 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
         "a geoPoint field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
-        plan2.all_migrations().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
         plan2.rebuilds.len()
     );
 }
@@ -288,13 +303,13 @@ async fn fts_field_applies_cleanly_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // DIALECT-AWARE desired: on SQLite the FTS index is the FTS5 vtable, not the PG
     // `__fts` GIN index. (Using the PG-default `desired_snapshot` here is exactly the
     // pre-fix bug — it would emit the broken `__fts` index.)
-    let desired = desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite)
-        .expect("desired");
+    let desired =
+        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite).expect("desired");
     let plan = sqlite_author()
         .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("diff");
@@ -355,15 +370,19 @@ async fn fts_field_applies_cleanly_on_sqlite() {
     // no spurious ADD/DROP).
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
-    let desired2 = desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite)
-        .expect("re-desired");
+    let desired2 =
+        desired_snapshot_for_dialect(PROJECT, &[mk()], SqlDialect::Sqlite).expect("re-desired");
     let plan2 = sqlite_author()
         .diff(&desired2, &live, &own, &[])
         .expect("re-diff must succeed");
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
         "an FTS field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
-        plan2.all_migrations().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
         plan2.rebuilds.len()
     );
 }

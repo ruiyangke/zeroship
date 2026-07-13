@@ -15,12 +15,12 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::{PlanStep, RenameStep};
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig,
     FieldDescriptor, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{PlanStep, RenameStep};
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -89,7 +89,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -97,7 +97,10 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let p = paths("apply_plan_rename");
     let be = backend(&p);
     apply_first_deploy(&be, &v1).await;
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada'), ('p2', 'grace')")
         .await
@@ -115,7 +118,11 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
         .expect("rename diff");
-    assert_eq!(plan.rebuilds.len(), 1, "a rename yields one rebuild on SQLite");
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "a rename yields one rebuild on SQLite"
+    );
     assert!(plan.renames.is_empty(), "no PG expand-contract on SQLite");
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
     let rebuild_version = rebuild.migration.version.as_str().to_string();
@@ -124,7 +131,9 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     // (Clone so the same rebuild — same version — can be replayed for the
     // idempotency check; the SQLite rebuild version is a freshly-minted UUIDv7, so
     // a re-diff would mint a different one; net-applied-skip keys on the SAME id.)
-    let steps = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild.clone()))];
+    let steps = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(
+        rebuild.clone(),
+    ))];
     let engine = MigrationEngine::new();
     let out = engine
         .apply_plan(
@@ -173,10 +182,8 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     // The journal records the rebuild's version (via rebuild_one, not run_online).
     let applied = be.applied(&exec_cfg()).await.expect("read journal");
     assert!(
-        applied
-            .iter()
-            .any(|e| e.version == rebuild_version
-                && matches!(e.phase, zero_migrate::apply::journal::Phase::Completed)),
+        applied.iter().any(|e| e.version == rebuild_version
+            && matches!(e.phase, zero_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration's version is journaled completed"
     );
 
@@ -229,7 +236,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -243,7 +250,10 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     {
         let be_a = SqliteBackend::open(&app, &journal_a).expect("open backend A");
         apply_first_deploy(&be_a, &v1).await;
-        be_a.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+        be_a.actor()
+            .set_mode(Mode::EngineJournal)
+            .await
+            .expect("mode");
         be_a.actor()
             .exec("INSERT INTO main.people (id, nickname) VALUES ('p1', 'ada')")
             .await
@@ -261,7 +271,11 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, std::slice::from_ref(&hint))
         .expect("rename diff");
-    assert_eq!(plan.rebuilds.len(), 1, "a rename yields one rebuild on SQLite");
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "a rename yields one rebuild on SQLite"
+    );
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
     let rebuild_version = rebuild.migration.version.as_str().to_string();
 
@@ -323,7 +337,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();

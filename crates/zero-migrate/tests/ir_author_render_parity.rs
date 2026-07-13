@@ -18,15 +18,14 @@
 use std::collections::{BTreeSet, HashMap};
 
 use zero_migrate::model::ir::{
-    ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr,
-    Op,
+    ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
 };
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
-    CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
-    LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot, resolve_create_table_policy,
-};
 use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{
+    resolve_create_table_policy, CollectionDescriptor, DeclarativeAuthor, DesiredSchema,
+    FieldDescriptor, IndexDescriptor, LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot,
+};
 
 /// A live `TableSnapshot` placeholder for an FK target — only its presence as a
 /// live key matters to the differ's inline-vs-defer decision.
@@ -58,7 +57,9 @@ const OWNER: &str = "app_test";
 /// surface (the `UUIDv7` version + the human name are non-deterministic identity,
 /// excluded from the parity comparison).
 fn sql_pairs(migs: &[zero_migrate::Migration]) -> Vec<(String, Option<String>)> {
-    migs.iter().map(|m| (m.up.clone(), m.down.clone())).collect()
+    migs.iter()
+        .map(|m| (m.up.clone(), m.down.clone()))
+        .collect()
 }
 
 /// Run the declarative path: descriptors → `desired_snapshot` → `diff` against an
@@ -100,10 +101,12 @@ fn ir_pairs_for(
         preconditions: vec![],
         checksum: None,
     };
-    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
-        .expect("parity IR resolves");
+    let ir =
+        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("parity IR resolves");
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
-    let migs = author.lower(&ir, &LiveSchema::from(live)).expect("ir lower");
+    let migs = author
+        .lower(&ir, &LiveSchema::from(live))
+        .expect("ir lower");
     sql_pairs(&migs)
 }
 
@@ -134,10 +137,14 @@ fn create_table_render_is_byte_identical_pg() {
                 unique: true,
                 ..Default::default()
             },
-            FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() },
+            FieldDescriptor {
+                name: "qty".into(),
+                ty: "int".into(),
+                ..Default::default()
+            },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
 
     let ops = vec![Op::CreateTable {
@@ -148,28 +155,49 @@ fn create_table_render_is_byte_identical_pg() {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
             IrColumn {
                 name: "slug".into(),
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: Some(true), id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: Some(true),
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
             IrColumn {
                 name: "qty".into(),
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
         ],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
 
@@ -180,8 +208,12 @@ fn create_table_render_is_byte_identical_pg() {
         "createTable render must be byte-identical across the declarative and IR paths"
     );
     // Sanity: the render is non-trivial (a CREATE TABLE + at least the unique index).
-    assert!(decl.iter().any(|(up, _)| up.contains("CREATE TABLE \"app\".\"widgets\"")));
-    assert!(decl.iter().any(|(up, _)| up.contains("CREATE UNIQUE INDEX")));
+    assert!(decl
+        .iter()
+        .any(|(up, _)| up.contains("CREATE TABLE \"app\".\"widgets\"")));
+    assert!(decl
+        .iter()
+        .any(|(up, _)| up.contains("CREATE UNIQUE INDEX")));
 }
 
 #[test]
@@ -198,7 +230,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // `authors` is declared (so it stays in the union, not dropped) AND already
     // live (so the FK inlines, not deferred). The diff then emits ONLY the `posts`
@@ -208,10 +240,12 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let mut live_snapshot = SchemaSnapshot::default();
-    live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
+    live_snapshot
+        .tables
+        .insert("authors".into(), empty_table_snapshot());
 
     let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors])
         .expect("desired snapshot");
@@ -227,18 +261,27 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
-            ty: ColType::Ref { references: "authors".into() },
+            ty: ColType::Ref {
+                references: "authors".into(),
+            },
             nullable: None,
             default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
     let mut live = BTreeSet::new();
@@ -248,9 +291,14 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     // Compare only the `posts`-related render (the empty live `authors` snapshot
     // makes the differ also backfill `authors`' system fields — a test-setup
     // artifact unrelated to the createTable-with-FK render we are pinning).
-    let decl_posts: Vec<_> =
-        decl.into_iter().filter(|(up, _)| up.contains("posts")).collect();
-    let ir_posts: Vec<_> = ir.into_iter().filter(|(up, _)| up.contains("posts")).collect();
+    let decl_posts: Vec<_> = decl
+        .into_iter()
+        .filter(|(up, _)| up.contains("posts"))
+        .collect();
+    let ir_posts: Vec<_> = ir
+        .into_iter()
+        .filter(|(up, _)| up.contains("posts"))
+        .collect();
     assert_eq!(
         decl_posts, ir_posts,
         "createTable-with-inline-FK render must match across paths"
@@ -281,25 +329,34 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "vault".into(),
         columns: vec![IrColumn {
             // The IR carries an encrypted column wrapping a string.
             name: "secret".into(),
-            ty: ColType::Encrypted { of: Box::new(ColType::String) },
+            ty: ColType::Encrypted {
+                of: Box::new(ColType::String),
+            },
             nullable: None,
             default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
 
@@ -324,15 +381,19 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         "an encrypted column must create its masked sibling on both paths"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains(r#""secret_masked" text"#)),
+        decl.iter()
+            .any(|(up, _)| up.contains(r#""secret_masked" text"#)),
         "an encrypted nullable column's masked sibling must render nullable on PG"
     );
     assert!(
-        !decl.iter().any(|(up, _)| up.contains(r#""secret_masked" text NOT NULL"#)),
+        !decl
+            .iter()
+            .any(|(up, _)| up.contains(r#""secret_masked" text NOT NULL"#)),
         "an encrypted nullable column's masked sibling must not render NOT NULL on PG"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
+        decl.iter()
+            .any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on both paths"
     );
 }
@@ -352,7 +413,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "people".into(),
@@ -376,10 +437,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
 
@@ -395,7 +456,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         "an explicit masked column must create its masked sibling on both paths"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
+        decl.iter()
+            .any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
         "the explicit mask sentinel must be emitted on both paths"
     );
 }
@@ -414,7 +476,7 @@ fn add_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[desc])
         .expect("desired snapshot");
@@ -424,7 +486,7 @@ fn add_column_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let live_full = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
         .expect("live snapshot");
@@ -454,7 +516,10 @@ fn add_column_render_is_byte_identical_pg() {
     live.insert("people".to_string());
     let ir = ir_pairs(ops, &live);
 
-    assert_eq!(decl, ir, "addColumn render must be byte-identical across paths");
+    assert_eq!(
+        decl, ir,
+        "addColumn render must be byte-identical across paths"
+    );
     assert!(decl.iter().any(|(up, _)| up.contains("ADD COLUMN")));
 }
 
@@ -466,8 +531,16 @@ fn create_index_render_is_byte_identical_pg() {
         name: "events".into(),
         owner_app: OWNER.into(),
         fields: vec![
-            FieldDescriptor { name: "kind".into(), ty: "string".into(), ..Default::default() },
-            FieldDescriptor { name: "at".into(), ty: "date".into(), ..Default::default() },
+            FieldDescriptor {
+                name: "kind".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "at".into(),
+                ty: "date".into(),
+                ..Default::default()
+            },
         ],
         indexes: vec![IndexDescriptor {
             name: "events_kind_at_idx".into(),
@@ -478,12 +551,13 @@ fn create_index_render_is_byte_identical_pg() {
     };
     // Diff against a live table that already has the columns but not the index, so
     // the ONLY emitted op is the CREATE INDEX.
-    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
-        .expect("desired");
+    let desired =
+        zero_migrate::render::declarative::desired_snapshot(SCHEMA, std::slice::from_ref(&desc))
+            .expect("desired");
     let mut live_desc = desc;
     live_desc.indexes = vec![];
-    let live_full = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
-        .expect("live");
+    let live_full =
+        zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new(SCHEMA, OWNER);
@@ -500,10 +574,10 @@ fn create_index_render_is_byte_identical_pg() {
         using: None,
         r#where: None,
 
-    include: Vec::new(),
-    with: None,
-    only: None,
-    concurrently: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
         schema: None,
         existence_guard: None,
         nulls_not_distinct: None,
@@ -512,7 +586,10 @@ fn create_index_render_is_byte_identical_pg() {
     live.insert("events".to_string());
     let ir = ir_pairs(ops, &live);
 
-    assert_eq!(decl, ir, "createIndex render must be byte-identical across paths");
+    assert_eq!(
+        decl, ir,
+        "createIndex render must be byte-identical across paths"
+    );
     assert!(decl.iter().any(|(up, _)| up.contains("CREATE INDEX")));
 
     // Silence the unused-import lint for IrIndex (reserved for a future
@@ -542,7 +619,11 @@ fn create_index_render_is_byte_identical_pg() {
 // ===========================================================================
 
 /// Lower a single IR op on the given dialect, returning the migration list.
-fn ir_lower_one(op: Op, live: &BTreeSet<String>, dialect: SqlDialect) -> Vec<zero_migrate::Migration> {
+fn ir_lower_one(
+    op: Op,
+    live: &BTreeSet<String>,
+    dialect: SqlDialect,
+) -> Vec<zero_migrate::Migration> {
     let ir = MigrationIr {
         ir_version: 1,
         name: "m".into(),
@@ -568,19 +649,29 @@ fn alter_column_type_render_is_byte_identical_pg() {
     let desired_desc = CollectionDescriptor {
         name: "widgets".into(),
         owner_app: OWNER.into(),
-        fields: vec![FieldDescriptor { name: "qty".into(), ty: "number".into(), ..Default::default() }],
+        fields: vec![FieldDescriptor {
+            name: "qty".into(),
+            ty: "number".into(),
+            ..Default::default()
+        }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let live_desc = CollectionDescriptor {
         name: "widgets".into(),
         owner_app: OWNER.into(),
-        fields: vec![FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() }],
+        fields: vec![FieldDescriptor {
+            name: "qty".into(),
+            ty: "int".into(),
+            ..Default::default()
+        }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
-    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
-    let live = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc])
+        .expect("desired");
+    let live =
+        zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("widgets".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
@@ -605,8 +696,13 @@ fn alter_column_type_render_is_byte_identical_pg() {
         &live_set,
         SqlDialect::Postgres,
     ));
-    assert_eq!(decl, ir, "setColumnType render must be byte-identical across paths");
-    assert!(decl.iter().any(|(up, _)| up.contains("ALTER COLUMN \"qty\" TYPE")));
+    assert_eq!(
+        decl, ir,
+        "setColumnType render must be byte-identical across paths"
+    );
+    assert!(decl
+        .iter()
+        .any(|(up, _)| up.contains("ALTER COLUMN \"qty\" TYPE")));
 }
 
 #[test]
@@ -617,19 +713,31 @@ fn set_column_not_null_render_is_byte_identical_pg() {
     let desired_desc = CollectionDescriptor {
         name: "people".into(),
         owner_app: OWNER.into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: true, ..Default::default() }],
+        fields: vec![FieldDescriptor {
+            name: "name".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let live_desc = CollectionDescriptor {
         name: "people".into(),
         owner_app: OWNER.into(),
-        fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, ..Default::default() }],
+        fields: vec![FieldDescriptor {
+            name: "name".into(),
+            ty: "string".into(),
+            required: false,
+            ..Default::default()
+        }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
-    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
-    let live = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
+    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc])
+        .expect("desired");
+    let live =
+        zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("people".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
@@ -674,7 +782,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let authors = CollectionDescriptor {
         name: "authors".into(),
@@ -686,9 +794,10 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
-    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
+    let desired = zero_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors])
+        .expect("desired");
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
         .diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
         .expect("diff");
@@ -701,7 +810,10 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             up.contains("ADD CONSTRAINT \"pinned_fkey\"") && up.contains("FOREIGN KEY")
         })
         .collect();
-    assert!(!decl.is_empty(), "the differ must defer the authors.pinned FK to a stand-alone ADD CONSTRAINT");
+    assert!(
+        !decl.is_empty(),
+        "the differ must defer the authors.pinned FK to a stand-alone ADD CONSTRAINT"
+    );
 
     // Stand-alone IR addConstraint(fk) on `authors.pinned` → posts(id) — the SAME
     // single-column FK shape the differ deferred.
@@ -721,7 +833,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -731,7 +843,10 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
         &live_set,
         SqlDialect::Postgres,
     ));
-    assert_eq!(decl, ir, "addConstraint(fk) render must be byte-identical to the differ's deferred FK");
+    assert_eq!(
+        decl, ir,
+        "addConstraint(fk) render must be byte-identical to the differ's deferred FK"
+    );
     assert!(ir.iter().any(|(up, _)| up.contains("FOREIGN KEY")));
 }
 
@@ -761,7 +876,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -794,7 +909,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -831,7 +946,7 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
                         on_update: None,
                         deferrable,
                         initially_deferred,
-                    
+
                         not_valid: None,
                     },
                 },
@@ -885,7 +1000,7 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
                     on_update: Some(RefAction::Restrict),
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -919,7 +1034,7 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
-                
+
                     not_valid: None,
                 },
             },
@@ -951,7 +1066,9 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             table: "widgets".into(),
             constraint: IrConstraint {
                 name: Some("widgets_slug_key".into()),
-                kind: IrConstraintKind::Unique { columns: vec!["slug".into()] },
+                kind: IrConstraintKind::Unique {
+                    columns: vec!["slug".into()],
+                },
             },
             schema: None,
             existence_guard: None,
@@ -962,8 +1079,11 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     assert_eq!(
         uniq,
         vec![(
-            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_slug_key\" UNIQUE (slug)".to_string(),
-            Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string()),
+            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_slug_key\" UNIQUE (slug)"
+                .to_string(),
+            Some(
+                "ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string()
+            ),
         )],
         "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
     );
@@ -1040,7 +1160,12 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
         (
             Op::AddConstraint {
                 table: "widgets".into(),
-                constraint: IrConstraint { name: None, kind: IrConstraintKind::Unique { columns: vec!["slug".into()] } },
+                constraint: IrConstraint {
+                    name: None,
+                    kind: IrConstraintKind::Unique {
+                        columns: vec!["slug".into()],
+                    },
+                },
                 schema: None,
                 existence_guard: None,
             },
@@ -1081,10 +1206,14 @@ fn create_table_render_is_byte_identical_sqlite() {
                 unique: true,
                 ..Default::default()
             },
-            FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() },
+            FieldDescriptor {
+                name: "qty".into(),
+                ty: "int".into(),
+                ..Default::default()
+            },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "widgets".into(),
@@ -1094,28 +1223,49 @@ fn create_table_render_is_byte_identical_sqlite() {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
             IrColumn {
                 name: "slug".into(),
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: Some(true), id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: Some(true),
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
             IrColumn {
                 name: "qty".into(),
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
         ],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
 
@@ -1154,7 +1304,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // `authors` is declared (stays in the union) AND already live (so the FK
     // INLINES — on SQLite a non-live FK target is a hard error, no late ADD
@@ -1164,10 +1314,12 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let mut live_snapshot = SchemaSnapshot::default();
-    live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
+    live_snapshot
+        .tables
+        .insert("authors".into(), empty_table_snapshot());
 
     let desired = zero_migrate::render::declarative::desired_snapshot_for_dialect(
         SCHEMA,
@@ -1187,18 +1339,27 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
-            ty: ColType::Ref { references: "authors".into() },
+            ty: ColType::Ref {
+                references: "authors".into(),
+            },
             nullable: None,
             default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
     let mut live = BTreeSet::new();
@@ -1208,15 +1369,22 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     // Compare only the `posts`-related render (the empty live `authors` snapshot
     // makes the differ also backfill `authors`' system fields — a test-setup
     // artifact unrelated to the createTable-with-FK render we are pinning).
-    let decl_posts: Vec<_> =
-        decl.into_iter().filter(|(up, _)| up.contains("posts")).collect();
-    let ir_posts: Vec<_> = ir.into_iter().filter(|(up, _)| up.contains("posts")).collect();
+    let decl_posts: Vec<_> = decl
+        .into_iter()
+        .filter(|(up, _)| up.contains("posts"))
+        .collect();
+    let ir_posts: Vec<_> = ir
+        .into_iter()
+        .filter(|(up, _)| up.contains("posts"))
+        .collect();
     assert_ne!(
         decl_posts, ir_posts,
         "SQLite createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        ir_posts.iter().any(|(up, _)| up.contains("FOREIGN KEY") || up.contains("REFERENCES")),
+        ir_posts
+            .iter()
+            .any(|(up, _)| up.contains("FOREIGN KEY") || up.contains("REFERENCES")),
         "the FK must be inlined into the resolved SQLite CREATE"
     );
 }
@@ -1234,24 +1402,33 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "vault".into(),
         columns: vec![IrColumn {
             name: "secret".into(),
-            ty: ColType::Encrypted { of: Box::new(ColType::String) },
+            ty: ColType::Encrypted {
+                of: Box::new(ColType::String),
+            },
             nullable: None,
             default: None,
-            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
@@ -1269,15 +1446,18 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         "an encrypted column must create its masked sibling on the SQLite leg too"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* zero-migrate:mask:"#)),
+        ir.iter()
+            .any(|(up, _)| up.contains(r#""secret_masked" TEXT /* zero-migrate:mask:"#)),
         "an encrypted nullable column's masked sibling must render nullable on SQLite"
     );
     assert!(
-        !ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
+        !ir.iter()
+            .any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
         "an encrypted nullable column's masked sibling must not render NOT NULL on SQLite"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
+        ir.iter()
+            .any(|(up, _)| up.contains("zero-migrate:mask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on the SQLite leg too"
     );
 }
@@ -1297,7 +1477,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "people".into(),
@@ -1321,10 +1501,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }];
 
@@ -1340,7 +1520,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         "an explicit masked column must create its masked sibling on the SQLite leg"
     );
     assert!(
-        ir.iter().any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
+        ir.iter()
+            .any(|(up, _)| up.contains("zero-migrate:mask:kind=last4,classification=spi")),
         "the explicit mask sentinel must be emitted on the SQLite leg"
     );
 }
@@ -1356,21 +1537,27 @@ fn add_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
-    let desired =
-        zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
-            .expect("desired snapshot");
+    let desired = zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        SCHEMA,
+        &[desc],
+        SqlDialect::Sqlite,
+    )
+    .expect("desired snapshot");
     let live_desc = CollectionDescriptor {
         name: "people".into(),
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
-    let live_full =
-        zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
-            .expect("live snapshot");
+    let live_full = zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        SCHEMA,
+        &[live_desc],
+        SqlDialect::Sqlite,
+    )
+    .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
@@ -1397,7 +1584,10 @@ fn add_column_render_is_byte_identical_sqlite() {
     live.insert("people".to_string());
     let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
 
-    assert_eq!(decl, ir, "addColumn render must be byte-identical across paths on SQLite");
+    assert_eq!(
+        decl, ir,
+        "addColumn render must be byte-identical across paths on SQLite"
+    );
     assert!(decl.iter().any(|(up, _)| up.contains("ADD COLUMN")));
 }
 
@@ -1407,8 +1597,16 @@ fn create_index_render_is_byte_identical_sqlite() {
         name: "events".into(),
         owner_app: OWNER.into(),
         fields: vec![
-            FieldDescriptor { name: "kind".into(), ty: "string".into(), ..Default::default() },
-            FieldDescriptor { name: "at".into(), ty: "date".into(), ..Default::default() },
+            FieldDescriptor {
+                name: "kind".into(),
+                ty: "string".into(),
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "at".into(),
+                ty: "date".into(),
+                ..Default::default()
+            },
         ],
         indexes: vec![IndexDescriptor {
             name: "events_kind_at_idx".into(),
@@ -1417,14 +1615,20 @@ fn create_index_render_is_byte_identical_sqlite() {
         }],
         runtime_options: Default::default(),
     };
-    let desired =
-        zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
-            .expect("desired");
+    let desired = zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        SCHEMA,
+        std::slice::from_ref(&desc),
+        SqlDialect::Sqlite,
+    )
+    .expect("desired");
     let mut live_desc = desc;
     live_desc.indexes = vec![];
-    let live_full =
-        zero_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
-            .expect("live");
+    let live_full = zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        SCHEMA,
+        &[live_desc],
+        SqlDialect::Sqlite,
+    )
+    .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
@@ -1441,10 +1645,10 @@ fn create_index_render_is_byte_identical_sqlite() {
         using: None,
         r#where: None,
 
-    include: Vec::new(),
-    with: None,
-    only: None,
-    concurrently: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
         schema: None,
         existence_guard: None,
         nulls_not_distinct: None,
@@ -1453,6 +1657,9 @@ fn create_index_render_is_byte_identical_sqlite() {
     live.insert("events".to_string());
     let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
 
-    assert_eq!(decl, ir, "createIndex render must be byte-identical across paths on SQLite");
+    assert_eq!(
+        decl, ir,
+        "createIndex render must be byte-identical across paths on SQLite"
+    );
     assert!(decl.iter().any(|(up, _)| up.contains("CREATE INDEX")));
 }

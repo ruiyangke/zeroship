@@ -91,7 +91,10 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
     let outcome = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect("descriptor-generated SQLite DDL is trusted — empty clean outcome");
-    assert!(!outcome.destructive, "trusted descriptor path: not destructive");
+    assert!(
+        !outcome.destructive,
+        "trusted descriptor path: not destructive"
+    );
     assert!(
         outcome.advisories.is_empty(),
         "trusted descriptor path: no advisories"

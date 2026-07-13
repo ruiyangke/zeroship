@@ -24,9 +24,9 @@
 
 use std::cell::RefCell;
 
+use bytes::BytesMut;
 use postgres::types::{Format, IsNull, Kind, ToSql, Type};
 use postgres::{Client, NoTls, Row as PgRow};
-use bytes::BytesMut;
 
 use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
@@ -41,7 +41,9 @@ pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
 /// `postgres` crate parses both.
 #[must_use]
 pub fn pg_url() -> Option<String> {
-    std::env::var(PG_URL_ENV).ok().filter(|s| !s.trim().is_empty())
+    std::env::var(PG_URL_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// Print the standard skip notice and return — used by every live test's early-out
@@ -95,10 +97,7 @@ fn to_db_error(e: &postgres::Error) -> DbError {
     let message = e
         .as_db_error()
         .map_or_else(|| e.to_string(), |db| db.message().to_string());
-    DbError {
-        message,
-        sqlstate,
-    }
+    DbError { message, sqlstate }
 }
 
 /// Resolve a `Kind::Domain(base)` chain down to its concrete base type — so an
@@ -222,9 +221,7 @@ impl<'a> postgres::types::FromSql<'a> for PgNumericText {
 /// The binary numeric is: `i16 ndigits, i16 weight, u16 sign, u16 dscale`, then
 /// `ndigits` base-10000 `i16` digit groups. This yields the exact decimal string
 /// with no f64 rounding.
-fn pg_numeric_from_binary(
-    raw: &[u8],
-) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
+fn pg_numeric_from_binary(raw: &[u8]) -> Result<String, Box<dyn std::error::Error + Sync + Send>> {
     if raw.len() < 8 {
         return Err("numeric binary too short".into());
     }
@@ -449,9 +446,7 @@ impl SqlSession for PgDevSession {
 
 /// Drain a `RowIter` fully, returning (decoded rows, `rows_affected`). Used by
 /// `exec_text` (ignores rows, reads the count).
-fn drain_row_iter(
-    mut iter: postgres::RowIter<'_>,
-) -> Result<(Vec<Row>, u64), DbError> {
+fn drain_row_iter(mut iter: postgres::RowIter<'_>) -> Result<(Vec<Row>, u64), DbError> {
     use postgres::fallible_iterator::FallibleIterator;
     let mut out = Vec::new();
     loop {

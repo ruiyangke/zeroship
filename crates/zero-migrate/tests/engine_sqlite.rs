@@ -22,15 +22,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::{JournaledKind, Phase};
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
-    desired_snapshot, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeApplyError,
+    desired_snapshot, Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DryRunError, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
     MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
 };
-use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -84,7 +86,10 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
 
 /// `PRAGMA main.table_info(<table>)` → the declared `SQLite` type of `column`.
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let info = be
         .actor()
         .query(&format!("PRAGMA main.table_info({table})"))
@@ -125,7 +130,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     // v2: the SAME column re-typed to string → TEXT affinity. A genuine type change
     // → the diff yields exactly one rebuild.
@@ -156,7 +161,10 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
         .expect("engine applies the create-table deploy");
 
     // Seed rows into the live table (engine mode lets the test write `main`).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.accounts (id, amount) VALUES ('a1', 1), ('a2', 2), ('a3', 3)")
         .await
@@ -164,7 +172,9 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
 
     // The column is REAL-affinity before the rebuild.
     assert_eq!(
-        column_type(&be, "accounts", "amount").await.to_ascii_uppercase(),
+        column_type(&be, "accounts", "amount")
+            .await
+            .to_ascii_uppercase(),
         "REAL",
         "amount is REAL (number) before the rebuild"
     );
@@ -173,9 +183,20 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
     let (live, ownership) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan2 = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan_declarative carries the rebuild (no fail-close)");
-    assert_eq!(plan2.rebuilds.len(), 1, "the type change yields one rebuild");
+    assert_eq!(
+        plan2.rebuilds.len(),
+        1,
+        "the type change yields one rebuild"
+    );
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();
 
     // Drive it through the GENERIC public engine path. A rebuild is destructive ⇒
@@ -190,7 +211,10 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
     );
 
     // Data is preserved (all three rows survived the copy).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let count = be
         .actor()
         .query("SELECT COUNT(*) FROM main.accounts")
@@ -200,7 +224,9 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
 
     // The table shape is the NEW schema: `amount` now has TEXT affinity.
     assert_eq!(
-        column_type(&be, "accounts", "amount").await.to_ascii_uppercase(),
+        column_type(&be, "accounts", "amount")
+            .await
+            .to_ascii_uppercase(),
         "TEXT",
         "the rebuilt column has the new TEXT type"
     );
@@ -231,7 +257,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -257,7 +283,10 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
         .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
         .await
         .expect("apply create");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.ledger (id, balance) VALUES ('r1', 42)")
         .await
@@ -267,7 +296,14 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
     let (live, ownership) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan2 = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan rebuild");
     assert_eq!(plan2.rebuilds.len(), 1);
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();
@@ -275,7 +311,10 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
         .apply_declarative(&plan2, Approval::Approved, &be, &cfg, "deployer")
         .await
         .expect("first rebuild apply");
-    assert!(first.applied.applied.contains(&rebuild_version), "applied once");
+    assert!(
+        first.applied.applied.contains(&rebuild_version),
+        "applied once"
+    );
 
     // (b) Re-apply the SAME plan instance: the versioned-journal `completed` gate
     //     skips it — applied stays empty, the rebuild version is reported skipped.
@@ -296,7 +335,14 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
     //     the plan carries NO rebuild at all.
     let (live2, ownership2) = live_from(&v2);
     let plan_rerun = engine
-        .plan_declarative(&desired2, &live2, &ownership2, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live2,
+            &ownership2,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("re-plan from live");
     assert!(
         plan_rerun.rebuilds.is_empty() && plan_rerun.plain.items.is_empty(),
@@ -304,15 +350,24 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
     );
 
     // The row + the new shape survived the idempotent re-runs.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let count = be
         .actor()
         .query("SELECT COUNT(*) FROM main.ledger")
         .await
         .expect("count");
-    assert_eq!(count[0][0].as_deref(), Some("1"), "row preserved across re-runs");
     assert_eq!(
-        column_type(&be, "ledger", "balance").await.to_ascii_uppercase(),
+        count[0][0].as_deref(),
+        Some("1"),
+        "row preserved across re-runs"
+    );
+    assert_eq!(
+        column_type(&be, "ledger", "balance")
+            .await
+            .to_ascii_uppercase(),
         "TEXT",
         "the new shape is stable across re-runs"
     );
@@ -338,7 +393,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "email_address".into();
@@ -364,7 +419,10 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
         .await
         .expect("apply create");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.contacts (id, email) VALUES ('c1', 'a@b.test')")
         .await
@@ -379,7 +437,14 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
         to: "email_address".into(),
     }];
     let plan2 = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &hints, &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &hints,
+            &guard_cfg(),
+        )
         .expect("plan rename");
 
     // The rename is a REBUILD, NOT an online expand-contract: renames is EMPTY,
@@ -412,18 +477,26 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
 
     // The column is renamed and the data FOLLOWED the rename (to ← from copy).
     assert_eq!(
-        column_type(&be, "contacts", "email_address").await.to_ascii_uppercase(),
+        column_type(&be, "contacts", "email_address")
+            .await
+            .to_ascii_uppercase(),
         "TEXT",
         "the renamed-to column exists with its type"
     );
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let val = be
         .actor()
         .query("SELECT email_address FROM main.contacts WHERE id = 'c1'")
         .await
         .expect("read renamed column");
     assert_eq!(
-        val.first().and_then(|r| r.first()).and_then(std::clone::Clone::clone).as_deref(),
+        val.first()
+            .and_then(|r| r.first())
+            .and_then(std::clone::Clone::clone)
+            .as_deref(),
         Some("a@b.test"),
         "the value followed the rename into email_address"
     );
@@ -488,7 +561,14 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
     let (live, ownership) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan2 = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan rebuild");
     assert_eq!(plan2.rebuilds.len(), 1);
     let rebuild_version = plan2.rebuilds[0].migration.version.as_str().to_string();
@@ -559,7 +639,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     // v2: drop `legacy` (destructive — a rebuild on SQLite, CHECK-constrained).
     let v2 = vec![CollectionDescriptor {
@@ -572,7 +652,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     // v3: add `note` on top of the post-destructive shape (additive forward).
     let v3 = vec![CollectionDescriptor {
@@ -592,7 +672,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
 
     let p = paths("roll_forward_destructive");
@@ -616,7 +696,10 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
         .apply_declarative(&plan1, Approval::None, &be, &cfg, "deployer")
         .await
         .expect("apply v1");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.accounts (id, amount, legacy) VALUES ('a1', 10, 1), ('a2', 20, 2)")
         .await
@@ -626,7 +709,14 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
     let (live1, own1) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan2 = engine
-        .plan_declarative(&desired2, &live1, &own1, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live1,
+            &own1,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan v2");
     assert_eq!(plan2.rebuilds.len(), 1, "the destructive drop is a rebuild");
     let v2_version = plan2.rebuilds[0].migration.version.as_str().to_string();
@@ -646,14 +736,20 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
         column_type(&be, "accounts", "legacy").await.is_empty(),
         "the destructive drop removed `legacy`"
     );
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let amounts = be
         .actor()
         .query("SELECT amount FROM main.accounts ORDER BY id")
         .await
         .expect("read amount");
     assert_eq!(
-        amounts.iter().filter_map(|r| r[0].clone()).collect::<Vec<_>>(),
+        amounts
+            .iter()
+            .filter_map(|r| r[0].clone())
+            .collect::<Vec<_>>(),
         vec!["10", "20"],
         "the surviving `amount` data carried through the destructive rebuild"
     );
@@ -662,9 +758,19 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
     let (live2, own2) = live_from(&v2);
     let desired3 = desired_snapshot(PROJECT, &v3).expect("v3 desired");
     let plan3 = engine
-        .plan_declarative(&desired3, &live2, &own2, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired3,
+            &live2,
+            &own2,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan v3");
-    assert!(plan3.rebuilds.is_empty(), "v3 is a plain additive forward step");
+    assert!(
+        plan3.rebuilds.is_empty(),
+        "v3 is a plain additive forward step"
+    );
     let v3_version = plan3
         .plain
         .items
@@ -685,18 +791,31 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
         column_type(&be, "accounts", "legacy").await.is_empty(),
         "the dropped column stays gone (no rollback resurrected it)"
     );
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let count = be
         .actor()
         .query("SELECT COUNT(*) FROM main.accounts")
         .await
         .expect("count");
-    assert_eq!(count[0][0].as_deref(), Some("2"), "rows survived the whole roll-forward history");
+    assert_eq!(
+        count[0][0].as_deref(),
+        Some("2"),
+        "rows survived the whole roll-forward history"
+    );
 
     // EVERY step is journaled `completed` — nothing was rolled back.
-    assert!(is_completed(&be, &v2_version).await, "the destructive rebuild is completed");
+    assert!(
+        is_completed(&be, &v2_version).await,
+        "the destructive rebuild is completed"
+    );
     for v in &v3_version {
-        assert!(is_completed(&be, v).await, "the additive forward step {v} is completed");
+        assert!(
+            is_completed(&be, v).await,
+            "the additive forward step {v} is completed"
+        );
     }
 }
 
@@ -726,8 +845,8 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
                     ..Default::default()
                 }],
                 indexes: vec![],
-            runtime_options: Default::default(),
-    },
+                runtime_options: Default::default(),
+            },
             CollectionDescriptor {
                 name: "posts".into(),
                 owner_app: APP.into(),
@@ -738,8 +857,8 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
                     ..Default::default()
                 }],
                 indexes: vec![],
-            runtime_options: Default::default(),
-    },
+                runtime_options: Default::default(),
+            },
         ]
     };
 
@@ -766,7 +885,10 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         .expect("apply cold deploy");
 
     // Both tables exist + seed one row in each.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     for t in ["users", "posts"] {
         let rows = be
             .actor()
@@ -790,8 +912,11 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
     //     SAME declared set. The diff against the REAL live schema must be EMPTY —
     //     no spurious drop of either table (the declared-set guard). ---
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
-    let own: HashMap<String, String> =
-        desired1.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let own: HashMap<String, String> = desired1
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
     let desired2 = desired_snapshot(PROJECT, &set()).expect("re-desired");
     let plan2 = engine
         .plan_declarative(&desired2, &live, &own, &sqlite_author(), &[], &guard_cfg())
@@ -800,7 +925,12 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         plan2.plain.items.is_empty() && plan2.rebuilds.is_empty(),
         "a warm reboot of the same declared set must yield an EMPTY diff (no spurious \
          drop/add/rebuild); got plain={:?} rebuilds={}",
-        plan2.plain.items.iter().map(|i| i.migration.name.clone()).collect::<Vec<_>>(),
+        plan2
+            .plain
+            .items
+            .iter()
+            .map(|i| i.migration.name.clone())
+            .collect::<Vec<_>>(),
         plan2.rebuilds.len()
     );
     // Applying the empty plan is a clean no-op.
@@ -811,7 +941,10 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
 
     // BOTH tables are still present + usable after the warm reboot: the seeded rows
     // survive AND a fresh write into each succeeds (no table was dropped/recreated).
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("INSERT INTO main.users (id, handle) VALUES ('u2', 'grace')")
         .await
@@ -830,8 +963,16 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
         .query("SELECT COUNT(*) FROM main.posts")
         .await
         .expect("count posts");
-    assert_eq!(users_n[0][0].as_deref(), Some("2"), "users: seeded + new row both present");
-    assert_eq!(posts_n[0][0].as_deref(), Some("2"), "posts: seeded + new row both present");
+    assert_eq!(
+        users_n[0][0].as_deref(),
+        Some("2"),
+        "users: seeded + new row both present"
+    );
+    assert_eq!(
+        posts_n[0][0].as_deref(),
+        Some("2"),
+        "posts: seeded + new row both present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +1023,10 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
     // `main`, but an EMPTY `_mig` journal. Create the table directly (engine
     // mode lets the test write `main`); do NOT journal it.
     be.ensure_journal_sqlite().await.expect("ensure journal");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec("CREATE TABLE main.widgets (id TEXT PRIMARY KEY, label TEXT)")
         .await
@@ -917,13 +1061,20 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
         .expect("baseline is in the journal");
     assert_eq!(entry.phase, Phase::Completed);
     assert_eq!(entry.kind, Some(JournaledKind::Baseline));
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let count = be
         .actor()
         .query("SELECT COUNT(*) FROM main.widgets")
         .await
         .expect("count");
-    assert_eq!(count[0][0].as_deref(), Some("1"), "the legacy row survived adoption");
+    assert_eq!(
+        count[0][0].as_deref(),
+        Some("1"),
+        "the legacy row survived adoption"
+    );
 
     // Re-baselining the SAME version is an idempotent no-op (a retried boot).
     let again = be
@@ -951,7 +1102,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let (live, ownership) = live_from(&[CollectionDescriptor {
         name: "widgets".into(),
@@ -962,11 +1113,18 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }]);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan = engine
-        .plan_declarative(&desired2, &live, &ownership, &sqlite_author(), &[], &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            &live,
+            &ownership,
+            &sqlite_author(),
+            &[],
+            &guard_cfg(),
+        )
         .expect("plan additive on top of baseline");
     engine
         .apply_declarative(&plan, Approval::None, &be, &cfg, "deployer")
@@ -977,13 +1135,20 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
         "the additive column landed on the adopted table (no drift/collision)"
     );
     // And the legacy data still survives the additive deploy on the adopted file.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let count2 = be
         .actor()
         .query("SELECT COUNT(*) FROM main.widgets")
         .await
         .expect("count after additive");
-    assert_eq!(count2[0][0].as_deref(), Some("1"), "legacy row survives the additive deploy");
+    assert_eq!(
+        count2[0][0].as_deref(),
+        Some("1"),
+        "legacy row survives the additive deploy"
+    );
 }
 
 #[compio::test]
@@ -1005,7 +1170,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
     let plan1 = engine
@@ -1088,7 +1253,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }];
     let desired = desired_snapshot(PROJECT, &v1).expect("v1 desired");
     let plan = engine

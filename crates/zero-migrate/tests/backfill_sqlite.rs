@@ -22,9 +22,9 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{apply::backend::BackfillError, BackfillSpec};
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::SqliteBackend;
+use zero_migrate::{apply::backend::BackfillError, BackfillSpec};
 
 /// A process-wide lock serializing every backfill test in this file. The
 /// crash-fuzz test arms the PROCESS-GLOBAL fault registry
@@ -37,7 +37,9 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     // Recover from a poisoned lock (a panicking test still releases the window).
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct Paths {
@@ -50,7 +52,11 @@ fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
     let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -73,7 +79,10 @@ async fn seed_nums(be: &SqliteBackend, n: i64) {
         vals.push(format!("({i}, {i}, 0)"));
     }
     actor
-        .exec(&format!("INSERT INTO nums (id, val, done) VALUES {}", vals.join(", ")))
+        .exec(&format!(
+            "INSERT INTO nums (id, val, done) VALUES {}",
+            vals.join(", ")
+        ))
         .await
         .expect("seed rows");
 }
@@ -166,12 +175,18 @@ async fn sqlite_backfill_resumes_exactly_once_after_crash() {
         .expect("resumed run");
     assert!(out2.resumed, "the re-run resumed from a committed cursor");
     assert_eq!(out2.batches, 7, "remaining 700 rows / 100 = 7 batches");
-    assert_eq!(out2.rows_updated, 700, "only the remaining 700 rows touched");
+    assert_eq!(
+        out2.rows_updated, 700,
+        "only the remaining 700 rows touched"
+    );
     assert!(out2.complete);
 
     // The exactly-once proof: EVERY row is val = id + 1 (none twice, none missed).
     let mismatches = scalar_i64(&be, "SELECT count(*) FROM nums WHERE val <> id + 1").await;
-    assert_eq!(mismatches, 0, "every row incremented EXACTLY once across the crash");
+    assert_eq!(
+        mismatches, 0,
+        "every row incremented EXACTLY once across the crash"
+    );
     let total = scalar_i64(&be, "SELECT count(*) FROM nums WHERE done = 1").await;
     assert_eq!(total, 1000);
 }
@@ -217,7 +232,10 @@ async fn sqlite_backfill_fault_injected_crash_then_resume_exactly_once() {
     assert_eq!(resumed.rows_updated, 300, "only the remaining 300 rows");
     assert!(resumed.complete);
     let mismatches = scalar_i64(&be, "SELECT count(*) FROM nums WHERE val <> id + 1").await;
-    assert_eq!(mismatches, 0, "every row incremented EXACTLY once across the fault crash");
+    assert_eq!(
+        mismatches, 0,
+        "every row incremented EXACTLY once across the fault crash"
+    );
 }
 
 // ── natural (numeric) cursor order, not lexical ──────────────────────────────
@@ -240,7 +258,10 @@ async fn sqlite_backfill_cursor_is_numeric_order() {
     assert!(out.complete);
     assert_eq!(out.rows_updated, 1000, "no row skipped or double-touched");
     let mismatches = scalar_i64(&be, "SELECT count(*) FROM nums WHERE val <> id + 1").await;
-    assert_eq!(mismatches, 0, "numeric-order paging touched every row exactly once");
+    assert_eq!(
+        mismatches, 0,
+        "numeric-order paging touched every row exactly once"
+    );
 }
 
 // ── idempotent re-run after completion ───────────────────────────────────────
@@ -266,7 +287,10 @@ async fn sqlite_backfill_complete_rerun_is_noop() {
         .await
         .expect("rerun");
     assert!(again.complete);
-    assert_eq!(again.batches, 0, "completed backfill re-run runs no batches");
+    assert_eq!(
+        again.batches, 0,
+        "completed backfill re-run runs no batches"
+    );
     assert_eq!(again.rows_updated, 0);
     let mismatches = scalar_i64(&be, "SELECT count(*) FROM nums WHERE val <> id + 1").await;
     assert_eq!(mismatches, 0, "no double-apply on re-run");
@@ -304,7 +328,10 @@ async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
         vals.push(format!("({i}.5, {i}, {i}, 0)"));
     }
     actor
-        .exec(&format!("INSERT INTO rnums (rk, id, val, done) VALUES {}", vals.join(", ")))
+        .exec(&format!(
+            "INSERT INTO rnums (rk, id, val, done) VALUES {}",
+            vals.join(", ")
+        ))
         .await
         .expect("seed rnums");
 }
@@ -334,8 +361,14 @@ async fn sqlite_backfill_real_cursor_advances_exactly_once() {
         .await
         .expect("REAL-cursor backfill runs to completion");
     assert!(out.complete, "backfill completed");
-    assert_eq!(out.batches, 5, "50 rows / 10 per batch = 5 batches (cursor advanced, not reset)");
-    assert_eq!(out.rows_updated, 50, "every row touched ONCE (a reset loop would touch more)");
+    assert_eq!(
+        out.batches, 5,
+        "50 rows / 10 per batch = 5 batches (cursor advanced, not reset)"
+    );
+    assert_eq!(
+        out.rows_updated, 50,
+        "every row touched ONCE (a reset loop would touch more)"
+    );
 
     // Exactly-once: every row val == id + 1. A dropped-cursor re-scan would push some
     // row to id+2 (double-apply) before the `done=0` filter caught up, or leave a row
@@ -370,12 +403,21 @@ async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
         .expect("resumed REAL run");
-    assert!(out2.resumed, "the re-run resumed from a committed REAL cursor");
-    assert_eq!(out2.rows_updated, 30, "only the remaining 30 rows touched (no re-touch)");
+    assert!(
+        out2.resumed,
+        "the re-run resumed from a committed REAL cursor"
+    );
+    assert_eq!(
+        out2.rows_updated, 30,
+        "only the remaining 30 rows touched (no re-touch)"
+    );
     assert!(out2.complete);
 
     let mismatches = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE val <> id + 1").await;
-    assert_eq!(mismatches, 0, "every row incremented EXACTLY once across the crash (REAL cursor)");
+    assert_eq!(
+        mismatches, 0,
+        "every row incremented EXACTLY once across the crash (REAL cursor)"
+    );
 }
 
 // ── non-BINARY (NOCASE) collation cursor: collation-consistent resume ────────
@@ -445,10 +487,19 @@ async fn sqlite_backfill_nocase_cursor_exactly_once() {
     // Every row touched EXACTLY once: val == 1. A collation-blind BINARY max
     // re-includes 'B' on the next window, landing it at val=2.
     let two = scalar_i64(&be, "SELECT count(*) FROM ci WHERE val = 2").await;
-    assert_eq!(two, 0, "no row double-applied (collation-consistent resume cursor)");
+    assert_eq!(
+        two, 0,
+        "no row double-applied (collation-consistent resume cursor)"
+    );
     let ones = scalar_i64(&be, "SELECT count(*) FROM ci WHERE val = 1").await;
-    assert_eq!(ones, 2, "every row incremented exactly once under a NOCASE cursor");
-    assert_eq!(out.rows_updated, 2, "exactly 2 row-updates total (no re-touch)");
+    assert_eq!(
+        ones, 2,
+        "every row incremented exactly once under a NOCASE cursor"
+    );
+    assert_eq!(
+        out.rows_updated, 2,
+        "exactly 2 row-updates total (no re-touch)"
+    );
 }
 
 // ── cursor-safety + identifier gates (defense-in-depth) ──────────────────────
@@ -467,7 +518,10 @@ async fn sqlite_backfill_rejects_nonunique_cursor() {
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
         .unwrap_err();
-    assert!(matches!(err, BackfillError::CursorNotUniqueNotNull { .. }), "{err:?}");
+    assert!(
+        matches!(err, BackfillError::CursorNotUniqueNotNull { .. }),
+        "{err:?}"
+    );
 }
 
 #[compio::test]
@@ -484,7 +538,10 @@ async fn sqlite_backfill_rejects_cursor_mutation() {
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
         .unwrap_err();
-    assert!(matches!(err, BackfillError::CursorColumnMutated { .. }), "{err:?}");
+    assert!(
+        matches!(err, BackfillError::CursorColumnMutated { .. }),
+        "{err:?}"
+    );
 }
 
 #[compio::test]
@@ -499,5 +556,8 @@ async fn sqlite_backfill_rejects_schema_qualified_table() {
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
         .unwrap_err();
-    assert!(matches!(err, BackfillError::InvalidIdentifier { what: "table", .. }), "{err:?}");
+    assert!(
+        matches!(err, BackfillError::InvalidIdentifier { what: "table", .. }),
+        "{err:?}"
+    );
 }

@@ -19,9 +19,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::{
-    apply::executor::LockMode, fold_ops, model::ir::Op, sqlite_canonical_type, Approval, ExecutorConfig,
-    IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PolicyProfile, SchemaSnapshot, SqlDialect,
-    SqliteBackend, resolve_create_table_policy,
+    apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy,
+    sqlite_canonical_type, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine,
+    MigrationIr, PolicyProfile, SchemaSnapshot, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_fold";
@@ -37,7 +37,11 @@ fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
     let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -49,7 +53,10 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(t, o)| (t.to_string(), o.to_string()))
+        .collect()
 }
 
 /// Apply one IR doc through the REAL `SQLite` pipeline (`load_and_lower` + engine
@@ -78,7 +85,9 @@ async fn apply_doc(
     .expect("load gate (sqlite)");
     let ops = document.ops.clone();
     let live = LiveSchema::from_tables(live_tables.clone());
-    let plan = author.lower_plan(&document, &live).expect("lower the doc plan on SQLite");
+    let plan = author
+        .lower_plan(&document, &live)
+        .expect("lower the doc plan on SQLite");
     let engine = MigrationEngine::new();
     engine
         .apply_plan(
@@ -187,7 +196,10 @@ async fn fold_equals_introspect_sqlite() {
     all_ops.extend(apply_doc(&be, drop_idx, &full, &live_tables, Approval::None).await);
 
     // INTROSPECT the live SQLite schema.
-    let live = be.snapshot_schema_sqlite().await.expect("introspect live SQLite schema");
+    let live = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect live SQLite schema");
 
     // FOLD the SAME ops offline (no DB), SQLite dialect.
     let folded = fold_ops(&all_ops, SqlDialect::Sqlite, PROJECT).expect("fold the corpus offline");

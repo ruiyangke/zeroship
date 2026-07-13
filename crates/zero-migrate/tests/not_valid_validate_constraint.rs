@@ -14,9 +14,7 @@
 use std::path::PathBuf;
 
 use zero_migrate::model::expr::{BinaryOp, Expr};
-use zero_migrate::model::ir::{
-    IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op,
-};
+use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op};
 use zero_migrate::model::support::Dialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::{
@@ -87,8 +85,13 @@ fn check_not_valid(not_valid: Option<bool>) -> Op {
             kind: IrConstraintKind::Check {
                 expr: Expr::BinOp {
                     op: BinaryOp::Gt,
-                    lhs: Box::new(Expr::ColRef { name: "qty".into(), table: None }),
-                    rhs: Box::new(Expr::Literal { value: IrScalar::Int(0) }),
+                    lhs: Box::new(Expr::ColRef {
+                        name: "qty".into(),
+                        table: None,
+                    }),
+                    rhs: Box::new(Expr::Literal {
+                        value: IrScalar::Int(0),
+                    }),
                 },
                 not_valid,
             },
@@ -115,7 +118,10 @@ fn pg_add_foreign_key_not_valid_renders_not_valid_tail() {
     let up = sql.join(";\n");
     assert!(up.contains("ADD CONSTRAINT"), "{up}");
     assert!(up.contains("FOREIGN KEY"), "{up}");
-    assert!(up.trim_end().ends_with("NOT VALID"), "FK body must end NOT VALID: {up}");
+    assert!(
+        up.trim_end().ends_with("NOT VALID"),
+        "FK body must end NOT VALID: {up}"
+    );
 }
 
 #[test]
@@ -123,16 +129,25 @@ fn pg_add_check_not_valid_renders_not_valid_tail() {
     let sql = pg_sql(check_not_valid(Some(true)));
     let up = sql.join(";\n");
     assert!(up.contains("CHECK ("), "{up}");
-    assert!(up.trim_end().ends_with("NOT VALID"), "CHECK body must end NOT VALID: {up}");
+    assert!(
+        up.trim_end().ends_with("NOT VALID"),
+        "CHECK body must end NOT VALID: {up}"
+    );
 }
 
 #[test]
 fn pg_plain_add_constraint_omits_not_valid() {
     // Absent `not_valid` must be checksum-neutral: no NOT VALID in the rendered DDL.
     let fk = pg_sql(fk_not_valid(None)).join(";\n");
-    assert!(!fk.contains("NOT VALID"), "plain FK must not render NOT VALID: {fk}");
+    assert!(
+        !fk.contains("NOT VALID"),
+        "plain FK must not render NOT VALID: {fk}"
+    );
     let ck = pg_sql(check_not_valid(None)).join(";\n");
-    assert!(!ck.contains("NOT VALID"), "plain CHECK must not render NOT VALID: {ck}");
+    assert!(
+        !ck.contains("NOT VALID"),
+        "plain CHECK must not render NOT VALID: {ck}"
+    );
 }
 
 #[test]
@@ -172,28 +187,31 @@ fn validate_constraint_op_is_postgres_only() {
 #[test]
 fn not_valid_on_create_time_constraint_is_refused_everywhere() {
     // NOT VALID is meaningless at create-time; refused fail-closed on every dialect.
-    let create = |not_valid: Option<bool>| {
-        Op::CreateTable {
-            name: "line_items".into(),
-            columns: vec![],
-            primary_key: None,
-            constraints: vec![IrConstraint {
-                name: Some("line_items_qty_positive".into()),
-                kind: IrConstraintKind::Check {
-                    expr: Expr::BinOp {
-                        op: BinaryOp::Gt,
-                        lhs: Box::new(Expr::ColRef { name: "qty".into(), table: None }),
-                        rhs: Box::new(Expr::Literal { value: IrScalar::Int(0) }),
-                    },
-                    not_valid,
+    let create = |not_valid: Option<bool>| Op::CreateTable {
+        name: "line_items".into(),
+        columns: vec![],
+        primary_key: None,
+        constraints: vec![IrConstraint {
+            name: Some("line_items_qty_positive".into()),
+            kind: IrConstraintKind::Check {
+                expr: Expr::BinOp {
+                    op: BinaryOp::Gt,
+                    lhs: Box::new(Expr::ColRef {
+                        name: "qty".into(),
+                        table: None,
+                    }),
+                    rhs: Box::new(Expr::Literal {
+                        value: IrScalar::Int(0),
+                    }),
                 },
-            }],
-            indexes: vec![],
-            partition_by: None,
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        }
+                not_valid,
+            },
+        }],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
     };
     assert!(!validates(create(Some(true)), Dialect::Postgres));
 }
@@ -228,5 +246,8 @@ fn recorder_golden_carries_not_valid_and_validate_constraint() {
 
     assert!(fk_not_valid, "golden must record an FK with notValid");
     assert!(check_not_valid, "golden must record a CHECK with notValid");
-    assert_eq!(validate_count, 2, "golden must record two validateConstraint ops");
+    assert_eq!(
+        validate_count, 2,
+        "golden must record two validateConstraint ops"
+    );
 }

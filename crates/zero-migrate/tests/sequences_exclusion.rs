@@ -7,14 +7,13 @@ use zero_migrate::model::validate::{
     validate_ir, validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
 };
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
-    fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
-    ExclusionMethod, ExclusionOperator, Expr, IndexElement, IrConstraint, IrConstraintKind,
-    IrColumn, IrDefault, IrScalar, LiveSchema, MigrationIr, Op, ScalarFn, SequenceOwnedBy,
-    SequenceRef, UnaryOp,
-    SafeI64, SafeU64,
-};
 use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{
+    fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod,
+    ExclusionOperator, Expr, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrScalar, LiveSchema, MigrationIr, Op, SafeI64, SafeU64, ScalarFn, SequenceOwnedBy,
+    SequenceRef, UnaryOp,
+};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
@@ -33,7 +32,11 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
     }
 }
 
-fn lower(ops: Vec<Op>, dialect: SqlDialect, live: &BTreeSet<String>) -> Vec<zero_migrate::Migration> {
+fn lower(
+    ops: Vec<Op>,
+    dialect: SqlDialect,
+    live: &BTreeSet<String>,
+) -> Vec<zero_migrate::Migration> {
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
     author
         .lower(&ir(ops), &LiveSchema::from(live))
@@ -89,7 +92,11 @@ fn nextval_col(name: &str, schema: Option<&str>) -> IrColumn {
 
 #[test]
 fn postgres_renders_create_alter_drop_sequence() {
-    let create = lower(vec![create_sequence_op()], SqlDialect::Postgres, &BTreeSet::new());
+    let create = lower(
+        vec![create_sequence_op()],
+        SqlDialect::Postgres,
+        &BTreeSet::new(),
+    );
     assert_eq!(
         create[0].up,
         r#"CREATE SEQUENCE "app"."invoice_seq" AS bigint INCREMENT BY 5 START WITH 100 CACHE 10 CYCLE OWNED BY "app"."invoices"."id""#
@@ -150,7 +157,9 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
         &BTreeSet::new(),
     );
     assert!(
-        with_schema[0].up.contains("DEFAULT nextval('app.invoice_seq'::regclass)"),
+        with_schema[0]
+            .up
+            .contains("DEFAULT nextval('app.invoice_seq'::regclass)"),
         "schema-qualified nextval default must render pg_dump-style: {}",
         with_schema[0].up
     );
@@ -171,7 +180,9 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
         &BTreeSet::new(),
     );
     assert!(
-        without_schema[0].up.contains("DEFAULT nextval('invoice_seq'::regclass)"),
+        without_schema[0]
+            .up
+            .contains("DEFAULT nextval('invoice_seq'::regclass)"),
         "unqualified nextval default must render pg_dump-style: {}",
         without_schema[0].up
     );
@@ -238,8 +249,13 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
         &PolicyProfile::platform(),
     )
     .unwrap_err();
-    assert_eq!(err.code, zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE);
-    assert!(err.reason.contains("nextval defaults require an integer column"));
+    assert_eq!(
+        err.code,
+        zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
+    );
+    assert!(err
+        .reason
+        .contains("nextval defaults require an integer column"));
 
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
@@ -260,7 +276,8 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
 
 #[test]
 fn fold_tracks_sequence_existence_and_drop() {
-    let created = fold_ops(&[create_sequence_op()], SqlDialect::Postgres, SCHEMA).expect("fold create");
+    let created =
+        fold_ops(&[create_sequence_op()], SqlDialect::Postgres, SCHEMA).expect("fold create");
     assert!(created.sequences.contains_key("invoice_seq"));
 
     let dropped = fold_ops(
@@ -299,7 +316,10 @@ fn postgres_renders_comment_on_all_structured_targets() {
                 comment: Some("Login email".into()),
             },
             Op::Comment {
-                target: CommentTarget::Index { schema: None, name: "users_email_idx".into() },
+                target: CommentTarget::Index {
+                    schema: None,
+                    name: "users_email_idx".into(),
+                },
                 comment: Some("Email lookup".into()),
             },
             Op::Comment {
@@ -311,15 +331,24 @@ fn postgres_renders_comment_on_all_structured_targets() {
                 comment: Some("Email uniqueness".into()),
             },
             Op::Comment {
-                target: CommentTarget::View { schema: None, name: "active_users".into() },
+                target: CommentTarget::View {
+                    schema: None,
+                    name: "active_users".into(),
+                },
                 comment: Some("Active users".into()),
             },
             Op::Comment {
-                target: CommentTarget::Type { schema: None, name: "user_status".into() },
+                target: CommentTarget::Type {
+                    schema: None,
+                    name: "user_status".into(),
+                },
                 comment: Some("Allowed states".into()),
             },
             Op::Comment {
-                target: CommentTarget::Sequence { schema: None, name: "invoice_seq".into() },
+                target: CommentTarget::Sequence {
+                    schema: None,
+                    name: "invoice_seq".into(),
+                },
                 comment: None,
             },
             Op::Comment {
@@ -355,7 +384,10 @@ fn sqlite_and_mysql_fail_closed_on_comment_on() {
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
         let err = validate_ir(
             &ir(vec![Op::Comment {
-                target: CommentTarget::Table { schema: None, name: "users".into() },
+                target: CommentTarget::Table {
+                    schema: None,
+                    name: "users".into(),
+                },
                 comment: Some("Users".into()),
             }]),
             dialect,
@@ -381,7 +413,10 @@ fn fold_tracks_and_clears_table_and_column_comments() {
 
     let mut set_ops = base.ops;
     set_ops.push(Op::Comment {
-        target: CommentTarget::Table { schema: None, name: "users".into() },
+        target: CommentTarget::Table {
+            schema: None,
+            name: "users".into(),
+        },
         comment: Some("User accounts".into()),
     });
     set_ops.push(Op::Comment {
@@ -407,7 +442,10 @@ fn fold_tracks_and_clears_table_and_column_comments() {
 
     let mut cleared_ops = set_ops;
     cleared_ops.push(Op::Comment {
-        target: CommentTarget::Table { schema: None, name: "users".into() },
+        target: CommentTarget::Table {
+            schema: None,
+            name: "users".into(),
+        },
         comment: None,
     });
     cleared_ops.push(Op::Comment {
@@ -418,7 +456,8 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         },
         comment: None,
     });
-    let cleared = fold_ops(&cleared_ops, SqlDialect::Postgres, SCHEMA).expect("fold clear comments");
+    let cleared =
+        fold_ops(&cleared_ops, SqlDialect::Postgres, SCHEMA).expect("fold clear comments");
     let users = cleared.tables.get("users").expect("users table");
     assert_eq!(users.comment, None);
     assert_eq!(
@@ -441,11 +480,17 @@ fn idx_col(name: &str) -> IndexElement {
 }
 
 fn lower_email_expr() -> Expr {
-    Expr::FnCall { r#fn: ScalarFn::Lower, args: vec![Expr::col("email")] }
+    Expr::FnCall {
+        r#fn: ScalarFn::Lower,
+        args: vec![Expr::col("email")],
+    }
 }
 
 fn active_true_expr() -> Expr {
-    Expr::UnaryOp { op: UnaryOp::IsTrue, operand: Box::new(Expr::col("active")) }
+    Expr::UnaryOp {
+        op: UnaryOp::IsTrue,
+        operand: Box::new(Expr::col("active")),
+    }
 }
 
 #[test]
@@ -458,10 +503,10 @@ fn postgres_and_sqlite_render_partial_index_where() {
         using: None,
         r#where: Some(active_true_expr()),
 
-    include: Vec::new(),
-    with: None,
-    only: None,
-    concurrently: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
         schema: None,
         existence_guard: None,
         nulls_not_distinct: None,
@@ -485,16 +530,21 @@ fn postgres_and_sqlite_render_partial_index_where() {
 fn postgres_and_sqlite_render_expression_index_elements() {
     let op = Op::CreateIndex {
         table: "users".into(),
-        columns: vec![idx_col("email"), IndexElement::Expr { expr: lower_email_expr() }],
+        columns: vec![
+            idx_col("email"),
+            IndexElement::Expr {
+                expr: lower_email_expr(),
+            },
+        ],
         name: Some("users_email_lower_idx".into()),
         unique: None,
         using: None,
         r#where: Some(active_true_expr()),
 
-    include: Vec::new(),
-    with: None,
-    only: None,
-    concurrently: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
         schema: None,
         existence_guard: None,
         nulls_not_distinct: None,
@@ -518,25 +568,27 @@ fn postgres_and_sqlite_render_expression_index_elements() {
 fn mysql_fail_closes_on_expression_index_elements() {
     let err = validate_ir(
         &ir(vec![Op::CreateIndex {
-                table: "users".into(),
-                columns: vec![IndexElement::Expr { expr: lower_email_expr() }],
-                name: Some("users_email_lower_idx".into()),
-                unique: None,
-                using: None,
-                r#where: None,
+            table: "users".into(),
+            columns: vec![IndexElement::Expr {
+                expr: lower_email_expr(),
+            }],
+            name: Some("users_email_lower_idx".into()),
+            unique: None,
+            using: None,
+            r#where: None,
 
             include: Vec::new(),
             with: None,
             only: None,
             concurrently: None,
-                schema: None,
-                existence_guard: None,
-                nulls_not_distinct: None,
-            }]),
+            schema: None,
+            existence_guard: None,
+            nulls_not_distinct: None,
+        }]),
         Dialect::Mysql,
         &[],
     )
-        .unwrap_err();
+    .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.kind, Some(UnsupportedKind::Op));
     assert!(err.reason.contains("expression elements"));
@@ -546,25 +598,25 @@ fn mysql_fail_closes_on_expression_index_elements() {
 fn mysql_fail_closes_on_partial_index_predicate() {
     let err = validate_ir(
         &ir(vec![Op::CreateIndex {
-                table: "users".into(),
-                columns: vec![idx_col("active")],
-                name: Some("users_active_idx".into()),
-                unique: None,
-                using: None,
-                r#where: Some(active_true_expr()),
+            table: "users".into(),
+            columns: vec![idx_col("active")],
+            name: Some("users_active_idx".into()),
+            unique: None,
+            using: None,
+            r#where: Some(active_true_expr()),
 
             include: Vec::new(),
             with: None,
             only: None,
             concurrently: None,
-                schema: None,
-                existence_guard: None,
-                nulls_not_distinct: None,
-            }]),
+            schema: None,
+            existence_guard: None,
+            nulls_not_distinct: None,
+        }]),
         Dialect::Mysql,
         &[],
     )
-        .unwrap_err();
+    .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.kind, Some(UnsupportedKind::Op));
     assert!(err.reason.contains("partial indexes"));
@@ -577,11 +629,15 @@ fn exclusion_constraint() -> IrConstraint {
             using_method: ExclusionMethod::Gist,
             elements: vec![
                 ExclusionElement {
-                    target: ColumnOrExpr::Column { name: "room".into() },
+                    target: ColumnOrExpr::Column {
+                        name: "room".into(),
+                    },
                     operator: ExclusionOperator::Equal,
                 },
                 ExclusionElement {
-                    target: ColumnOrExpr::Column { name: "during".into() },
+                    target: ColumnOrExpr::Column {
+                        name: "during".into(),
+                    },
                     operator: ExclusionOperator::Overlaps,
                 },
             ],
@@ -633,7 +689,9 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
                     using_method: ExclusionMethod::Gist,
                     elements: vec![
                         ExclusionElement {
-                            target: ColumnOrExpr::Column { name: "room".into() },
+                            target: ColumnOrExpr::Column {
+                                name: "room".into(),
+                            },
                             operator: ExclusionOperator::Equal,
                         },
                         ExclusionElement {

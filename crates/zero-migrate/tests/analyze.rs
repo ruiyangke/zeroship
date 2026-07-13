@@ -37,15 +37,26 @@ fn destructive_drop_fires_on_drop_table() {
     let a = first("DROP TABLE orders", rule::DESTRUCTIVE_DROP).expect("DROP TABLE must warn");
     assert_eq!(a.severity, Severity::Warning);
     assert!(a.message.to_lowercase().contains("data loss"));
-    assert!(a.suggestion.unwrap().to_lowercase().contains("expand-contract"));
+    assert!(a
+        .suggestion
+        .unwrap()
+        .to_lowercase()
+        .contains("expand-contract"));
 }
 
 #[test]
 fn destructive_drop_fires_on_drop_column() {
-    let a = first("ALTER TABLE orders DROP COLUMN legacy", rule::DESTRUCTIVE_DROP)
-        .expect("DROP COLUMN must warn");
+    let a = first(
+        "ALTER TABLE orders DROP COLUMN legacy",
+        rule::DESTRUCTIVE_DROP,
+    )
+    .expect("DROP COLUMN must warn");
     assert!(a.message.contains("legacy"));
-    assert!(a.suggestion.unwrap().to_lowercase().contains("expand-contract"));
+    assert!(a
+        .suggestion
+        .unwrap()
+        .to_lowercase()
+        .contains("expand-contract"));
 }
 
 #[test]
@@ -59,7 +70,10 @@ fn destructive_drop_fires_on_drop_constraint() {
 #[test]
 fn destructive_drop_does_not_fire_on_create_table() {
     // A pure additive CREATE TABLE is not destructive.
-    assert!(!fires("CREATE TABLE orders(id bigint primary key)", rule::DESTRUCTIVE_DROP));
+    assert!(!fires(
+        "CREATE TABLE orders(id bigint primary key)",
+        rule::DESTRUCTIVE_DROP
+    ));
 }
 
 #[test]
@@ -77,7 +91,11 @@ fn backward_incompatible_rename_fires_on_rename_column() {
     .expect("RENAME COLUMN must warn");
     assert_eq!(a.severity, Severity::Warning);
     assert!(a.message.contains("email"));
-    assert!(a.suggestion.unwrap().to_lowercase().contains("expand-contract"));
+    assert!(a
+        .suggestion
+        .unwrap()
+        .to_lowercase()
+        .contains("expand-contract"));
 }
 
 #[test]
@@ -226,11 +244,18 @@ fn constraint_not_validated_fires_on_unique_with_concurrently_suggestion() {
 
 #[test]
 fn non_concurrent_index_fires() {
-    let a = first("CREATE INDEX idx_users_name ON users(name)", rule::NON_CONCURRENT_INDEX)
-        .expect("plain CREATE INDEX must warn");
+    let a = first(
+        "CREATE INDEX idx_users_name ON users(name)",
+        rule::NON_CONCURRENT_INDEX,
+    )
+    .expect("plain CREATE INDEX must warn");
     assert_eq!(a.severity, Severity::Warning);
     assert!(a.message.to_lowercase().contains("blocks writes"));
-    assert!(a.suggestion.unwrap().to_lowercase().contains("concurrently"));
+    assert!(a
+        .suggestion
+        .unwrap()
+        .to_lowercase()
+        .contains("concurrently"));
 }
 
 #[test]
@@ -319,7 +344,11 @@ fn add_column_bigserial_primary_key_fires() {
 fn add_column_plain_nullable_int_stays_clean() {
     // A plain nullable column with no constraints emits nothing.
     let sql = "ALTER TABLE t ADD COLUMN x int";
-    assert!(adv(sql).is_empty(), "plain nullable ADD COLUMN must be clean, got: {:?}", adv(sql));
+    assert!(
+        adv(sql).is_empty(),
+        "plain nullable ADD COLUMN must be clean, got: {:?}",
+        adv(sql)
+    );
 }
 
 #[test]
@@ -350,10 +379,12 @@ fn add_constraint_bare_primary_key_fires() {
 
 #[test]
 fn truncate_fires_as_warning_data_loss() {
-    let a = first("TRUNCATE orders", rule::TRUNCATE_DATA_LOSS)
-        .expect("TRUNCATE must warn");
+    let a = first("TRUNCATE orders", rule::TRUNCATE_DATA_LOSS).expect("TRUNCATE must warn");
     assert_eq!(a.severity, Severity::Warning);
-    assert!(a.message.to_lowercase().contains("data loss") || a.message.to_lowercase().contains("all rows"));
+    assert!(
+        a.message.to_lowercase().contains("data loss")
+            || a.message.to_lowercase().contains("all rows")
+    );
 }
 
 #[test]
@@ -368,7 +399,10 @@ fn add_column_generated_stored_fires_table_rewrite() {
 
 #[test]
 fn cluster_fires_lock_heavy() {
-    assert!(fires("CLUSTER orders USING idx_orders", rule::LOCK_HEAVY_MAINTENANCE));
+    assert!(fires(
+        "CLUSTER orders USING idx_orders",
+        rule::LOCK_HEAVY_MAINTENANCE
+    ));
 }
 
 #[test]
@@ -385,12 +419,19 @@ fn plain_vacuum_does_not_fire() {
 fn reindex_non_concurrent_fires_with_concurrently_suggestion() {
     let a = first("REINDEX TABLE orders", rule::LOCK_HEAVY_MAINTENANCE)
         .expect("non-concurrent REINDEX must warn");
-    assert!(a.suggestion.unwrap().to_lowercase().contains("concurrently"));
+    assert!(a
+        .suggestion
+        .unwrap()
+        .to_lowercase()
+        .contains("concurrently"));
 }
 
 #[test]
 fn reindex_concurrently_does_not_fire() {
-    assert!(!fires("REINDEX TABLE CONCURRENTLY orders", rule::LOCK_HEAVY_MAINTENANCE));
+    assert!(!fires(
+        "REINDEX TABLE CONCURRENTLY orders",
+        rule::LOCK_HEAVY_MAINTENANCE
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +498,11 @@ fn add_constraint_plain_unique_still_fires() {
 fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
     // CONCURRENTLY can't run inside a txn block, so it must be its OWN migration —
     // the suggestion must say so (it is unactionable inside a multi-statement txn).
-    let a = first("CREATE INDEX idx_users_name ON users(name)", rule::NON_CONCURRENT_INDEX)
-        .expect("plain CREATE INDEX must warn");
+    let a = first(
+        "CREATE INDEX idx_users_name ON users(name)",
+        rule::NON_CONCURRENT_INDEX,
+    )
+    .expect("plain CREATE INDEX must warn");
     let s = a.suggestion.unwrap().to_lowercase();
     assert!(s.contains("concurrently"));
     assert!(
@@ -487,14 +531,26 @@ fn a_migration_with_advisories_still_passes_the_guard() {
         .check(sql)
         .expect("operational footguns must NOT be denied by the guard");
     // The guard surfaced advisories...
-    assert!(!report.advisories.is_empty(), "advisories should be present");
-    assert!(report.advisories.iter().any(|a| a.rule == rule::ADD_NOT_NULL_NO_DEFAULT));
+    assert!(
+        !report.advisories.is_empty(),
+        "advisories should be present"
+    );
+    assert!(report
+        .advisories
+        .iter()
+        .any(|a| a.rule == rule::ADD_NOT_NULL_NO_DEFAULT));
     assert!(report
         .advisories
         .iter()
         .any(|a| a.rule == rule::BACKWARD_INCOMPATIBLE_RENAME));
-    assert!(report.advisories.iter().any(|a| a.rule == rule::NON_CONCURRENT_INDEX));
-    assert!(report.advisories.iter().any(|a| a.rule == rule::DESTRUCTIVE_DROP));
+    assert!(report
+        .advisories
+        .iter()
+        .any(|a| a.rule == rule::NON_CONCURRENT_INDEX));
+    assert!(report
+        .advisories
+        .iter()
+        .any(|a| a.rule == rule::DESTRUCTIVE_DROP));
     // ...and it still flagged the DROP as destructive (the gate's signal, not the
     // analyzer's — the analyzer only ENRICHES, it does not drive the gate).
     assert!(report.destructive);
@@ -529,11 +585,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
     // Author a destructive drop the way the differ / RawSqlAuthor would, then
     // run the analyzer seam over it.
     let drop = RawSqlAuthor::new("proj_acme", "app_acme")
-        .wrap(
-            "drop_legacy",
-            "DROP TABLE \"proj_acme\".\"legacy\"",
-            None,
-        )
+        .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
         .unwrap();
     let advisories = analyze_migration(&drop);
     assert!(
@@ -545,7 +597,12 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         .iter()
         .find(|a| a.rule == rule::DESTRUCTIVE_DROP)
         .unwrap();
-    assert!(a.suggestion.as_deref().unwrap().to_lowercase().contains("expand-contract"));
+    assert!(a
+        .suggestion
+        .as_deref()
+        .unwrap()
+        .to_lowercase()
+        .contains("expand-contract"));
     // sanity: a benign additive migration gets no advisories.
     let add = zero_migrate::DeterministicAuthor::new("proj_acme", "app_acme")
         .author(&zero_migrate::AuthorRequest::CreateTable {

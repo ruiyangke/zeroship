@@ -21,13 +21,13 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::Phase;
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError,
     DeclarativeAuthor, DeclarativeDeployOutcome, DeclarativeDeployPlan, EngineError,
     ExecutorConfig, FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint,
     SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";
@@ -42,7 +42,11 @@ fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
     let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -63,7 +67,11 @@ fn guard_cfg() -> GuardConfig {
 
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
     let d = desired_snapshot(PROJECT, descs).expect("desired_snapshot");
-    let ownership = d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let ownership = d
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
     (d.snapshot, ownership)
 }
 
@@ -82,7 +90,10 @@ async fn capture(be: &SqliteBackend) -> String {
         out.push_str(&format!("#{i}|{:?}|{:?}\n", e.phase, e.kind));
     }
     out.push_str("# people table_info (cid name type notnull)\n");
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     let info = be
         .actor()
         .query("PRAGMA main.table_info(people)")
@@ -104,11 +115,14 @@ fn assert_frozen(name: &str, body: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden-traces");
     std::fs::create_dir_all(&dir).expect("golden-traces dir");
     let path = dir.join(format!("{name}.txt"));
-    if let Ok(frozen) = std::fs::read_to_string(&path) { assert_eq!(
-        body, frozen,
-        "golden-trace fixture `{name}` drift vs the frozen committed fixture at {}",
-        path.display()
-    ); } else {
+    if let Ok(frozen) = std::fs::read_to_string(&path) {
+        assert_eq!(
+            body,
+            frozen,
+            "golden-trace fixture `{name}` drift vs the frozen committed fixture at {}",
+            path.display()
+        );
+    } else {
         std::fs::write(&path, body).expect("write fresh fixture");
         panic!(
             "golden-trace fixture `{name}` was ABSENT — wrote a fresh capture to {}. \
@@ -142,7 +156,9 @@ async fn oracle_apply(
     cfg: &ExecutorConfig,
 ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
     if !plan.plain.denied.is_empty() {
-        return Err(DeclarativeApplyError::Plain(EngineError::Denied(plan.plain.denied.clone())));
+        return Err(DeclarativeApplyError::Plain(EngineError::Denied(
+            plan.plain.denied.clone(),
+        )));
     }
     if plan.plain.requires_approval && approval != Approval::Approved {
         return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
@@ -157,13 +173,28 @@ async fn oracle_apply(
     for rebuild in &plan.rebuilds {
         // The trait method (returns ApplyError), matching the engine's seam — not
         // the inherent `SqliteBackend::rebuild_one` (which returns RebuildError).
-        MigrationBackend::rebuild_one(be, &rebuild.spec, &rebuild.migration, &ApprovalScope::All, "deployer")
-            .await
-            .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e)))?;
-        applied.applied.push(rebuild.migration.version.as_str().to_string());
+        MigrationBackend::rebuild_one(
+            be,
+            &rebuild.spec,
+            &rebuild.migration,
+            &ApprovalScope::All,
+            "deployer",
+        )
+        .await
+        .map_err(|e| DeclarativeApplyError::Plain(EngineError::Apply(e)))?;
+        applied
+            .applied
+            .push(rebuild.migration.version.as_str().to_string());
     }
-    assert!(plan.renames.is_empty(), "SQLite plans never carry PG renames");
-    Ok(DeclarativeDeployOutcome { applied, pending_contract: Vec::new(), opened_obligations: Vec::new() })
+    assert!(
+        plan.renames.is_empty(),
+        "SQLite plans never carry PG renames"
+    );
+    Ok(DeclarativeDeployOutcome {
+        applied,
+        pending_contract: Vec::new(),
+        opened_obligations: Vec::new(),
+    })
 }
 
 fn people_v1() -> Vec<CollectionDescriptor> {
@@ -177,18 +208,33 @@ fn people_v1() -> Vec<CollectionDescriptor> {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }]
 }
 
 /// Build the second-deploy rename plan (nickname → handle) against a live snapshot.
-fn rename_plan(engine: &MigrationEngine, live: &SchemaSnapshot, ownership: &HashMap<String, String>) -> DeclarativeDeployPlan {
+fn rename_plan(
+    engine: &MigrationEngine,
+    live: &SchemaSnapshot,
+    ownership: &HashMap<String, String>,
+) -> DeclarativeDeployPlan {
     let mut v2 = people_v1();
     v2[0].fields[0].name = "handle".into();
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
-    let hint = RenameHint { table: "people".into(), from: "nickname".into(), to: "handle".into() };
+    let hint = RenameHint {
+        table: "people".into(),
+        from: "nickname".into(),
+        to: "handle".into(),
+    };
     engine
-        .plan_declarative(&desired2, live, ownership, &sqlite_author(), std::slice::from_ref(&hint), &guard_cfg())
+        .plan_declarative(
+            &desired2,
+            live,
+            ownership,
+            &sqlite_author(),
+            std::slice::from_ref(&hint),
+            &guard_cfg(),
+        )
         .expect("plan rename")
 }
 
@@ -201,26 +247,31 @@ async fn golden_b_sqlite_rename_rebuild() {
     let engine = MigrationEngine::new();
     let cfg = exec_cfg();
 
-    async fn run_one(
-        engine: &MigrationEngine,
-        cfg: &ExecutorConfig,
-        leg: &str,
-    ) -> String {
+    async fn run_one(engine: &MigrationEngine, cfg: &ExecutorConfig, leg: &str) -> String {
         let p = paths(&format!("golden_b_{leg}"));
         let be = backend(&p);
         apply_first_deploy(&be, &people_v1()).await;
         // Seed rows so the rebuild carries data.
-        be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+        be.actor()
+            .set_mode(Mode::EngineJournal)
+            .await
+            .expect("mode");
         be.actor()
             .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
             .await
             .expect("seed");
         let (live, ownership) = live_from(&people_v1());
         let plan = rename_plan(engine, &live, &ownership);
-        assert_eq!(plan.rebuilds.len(), 1, "{leg}: rename → exactly one rebuild");
+        assert_eq!(
+            plan.rebuilds.len(),
+            1,
+            "{leg}: rename → exactly one rebuild"
+        );
         assert!(plan.renames.is_empty(), "{leg}: no PG renames on SQLite");
         if leg == "oracle" {
-            oracle_apply(engine, &plan, Approval::Approved, &be, cfg).await.expect("oracle rename");
+            oracle_apply(engine, &plan, Approval::Approved, &be, cfg)
+                .await
+                .expect("oracle rename");
         } else {
             engine
                 .apply_declarative(&plan, Approval::Approved, &be, cfg, "deployer")
@@ -257,9 +308,9 @@ async fn golden_b_sqlite_rename_rebuild() {
 
 #[compio::test]
 async fn golden_g_sqlite_pg_rename_fails_closed() {
-    use zero_migrate::{PlanStep, RenameStep};
     use zero_migrate::ExpandContractAuthor;
     use zero_migrate::OnlineIntent;
+    use zero_migrate::{PlanStep, RenameStep};
 
     let engine = MigrationEngine::new();
     let cfg = exec_cfg();
@@ -302,5 +353,8 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // Nothing was journaled for the rename.
     let entries = be.applied_sqlite().await.expect("read journal");
     let people_only_create = entries.iter().all(|e| e.phase == Phase::Completed);
-    assert!(people_only_create, "the fail-closed left the journal intact");
+    assert!(
+        people_only_create,
+        "the fail-closed left the journal intact"
+    );
 }

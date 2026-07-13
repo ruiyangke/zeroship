@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
-    GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot,
-    SqliteBackend, SqlGuard,
+    GuardConfig, GuardError, IndexDescriptor, Migration, MigrationEngine, SchemaSnapshot, SqlGuard,
+    SqliteBackend,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -75,7 +75,7 @@ fn goodies_desc() -> CollectionDescriptor {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }
 }
 
@@ -101,7 +101,9 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
 
     // The generated `up` is UNqualified (lands in `main` = the app file).
     assert!(
-        create.up.contains(r#"CREATE TABLE IF NOT EXISTS "accounts" ("#),
+        create
+            .up
+            .contains(r#"CREATE TABLE IF NOT EXISTS "accounts" ("#),
         "engine-generated SQLite up must be unqualified: {}",
         create.up
     );
@@ -112,7 +114,9 @@ async fn descriptor_to_sqlite_apply_roundtrips_mask_and_encryption() {
     );
     // Mask + encryption sentinels ride inline (the SQLite wire).
     assert!(
-        create.up.contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
+        create
+            .up
+            .contains(r#""ssn_masked" TEXT /* zero-migrate:mask:"#),
         "mask sentinel must ride inline: {}",
         create.up
     );
@@ -208,7 +212,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let posts = CollectionDescriptor {
         name: "posts".into(),
@@ -220,7 +224,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[users, posts]).expect("desired_snapshot");
 
@@ -291,7 +295,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[posts]).expect("desired_snapshot");
     let author = sqlite_author();
@@ -354,7 +358,10 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     let err = guard
         .check("SELECT 1")
         .expect_err("SQLite-keyed guard must refuse raw SQL");
-    assert!(matches!(err, GuardError::SqliteRawSqlRejected), "got: {err:?}");
+    assert!(
+        matches!(err, GuardError::SqliteRawSqlRejected),
+        "got: {err:?}"
+    );
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(GuardConfig::confined(PROJECT).for_dialect(SqlDialect::Postgres));
@@ -413,7 +420,7 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields.push(FieldDescriptor {
@@ -449,7 +456,8 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
 
     // UNqualified + no PG `COMMENT ON COLUMN`.
     assert!(
-        add.up.contains(r#"ALTER TABLE "accounts" ADD COLUMN "note""#),
+        add.up
+            .contains(r#"ALTER TABLE "accounts" ADD COLUMN "note""#),
         "ADD COLUMN must be unqualified SQLite-legal DDL: {}",
         add.up
     );
@@ -471,7 +479,8 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
         .await
         .expect("table_info");
     assert!(
-        cols.iter().any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("note")),
+        cols.iter()
+            .any(|r| r.get(1).and_then(Clone::clone).as_deref() == Some("note")),
         "the `note` column must exist after the second-deploy ADD COLUMN: {cols:?}"
     );
 }
@@ -497,7 +506,7 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
             columns: vec!["handle".into()],
             unique: false,
         }],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // Second deploy: the same table WITHOUT the index → DROP INDEX.
     let mut v2 = v1.clone();
@@ -517,10 +526,16 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
     // The user index exists after the first deploy.
     let before = be
         .actor()
-        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'")
+        .query(
+            "SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'",
+        )
         .await
         .expect("query index pre-drop");
-    assert_eq!(before.len(), 1, "the user index must exist before the drop: {before:?}");
+    assert_eq!(
+        before.len(),
+        1,
+        "the user index must exist before the drop: {before:?}"
+    );
 
     // Second deploy: diff produces a DROP INDEX.
     let (live, ownership) = live_from(&[v1]);
@@ -547,7 +562,9 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
         .unwrap_or_else(|e| panic!("DROP INDEX must apply on SQLite: {e:?}"));
     let after = be
         .actor()
-        .query("SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'")
+        .query(
+            "SELECT name FROM main.sqlite_master WHERE type='index' AND name='accounts_handle_idx'",
+        )
         .await
         .expect("query index post-drop");
     assert!(
@@ -573,7 +590,7 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // Second deploy: the same column re-typed to `string` (`text`) — a type change.
     let mut v2 = v1.clone();
@@ -610,7 +627,9 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
     );
     // No PG-shaped ALTER COLUMN DDL leaked into the plain migration set.
     assert!(
-        plan.migrations.iter().all(|m| !m.up.contains("ALTER COLUMN")),
+        plan.migrations
+            .iter()
+            .all(|m| !m.up.contains("ALTER COLUMN")),
         "no dangling PG ALTER COLUMN DDL on the SQLite path"
     );
 }
@@ -669,7 +688,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }
 }
 
@@ -716,13 +735,28 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
             .find(|c| c.name == name)
             .map_or("<missing>", |c| c.data_type.as_str())
     };
-    assert_eq!(live_type("secret"), "blob", "encrypted column introspects as SQLite blob");
-    assert_eq!(live_type("amount"), "real", "number column introspects as SQLite real");
-    assert_eq!(live_type("occurred_at"), "text", "date column introspects as SQLite text");
+    assert_eq!(
+        live_type("secret"),
+        "blob",
+        "encrypted column introspects as SQLite blob"
+    );
+    assert_eq!(
+        live_type("amount"),
+        "real",
+        "number column introspects as SQLite real"
+    );
+    assert_eq!(
+        live_type("occurred_at"),
+        "text",
+        "date column introspects as SQLite text"
+    );
 
     // Ownership travels alongside the union (the introspected snapshot has none).
-    let ownership: HashMap<String, String> =
-        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let ownership: HashMap<String, String> = first
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
 
     // Second deploy: the SAME descriptor — an UNCHANGED schema. Diffing the
     // PG-spelled desired against the SQLite-spelled REAL live must NOT flag a
@@ -757,7 +791,10 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
     assert!(
         plan.rebuilds.is_empty(),
         "an unchanged schema must emit no SQLite rebuild: {:?}",
-        plan.rebuilds.iter().map(|r| &r.spec.reason).collect::<Vec<_>>()
+        plan.rebuilds
+            .iter()
+            .map(|r| &r.spec.reason)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -785,8 +822,11 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
         .snapshot_schema_sqlite()
         .await
         .expect("real introspected live snapshot");
-    let ownership: HashMap<String, String> =
-        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let ownership: HashMap<String, String> = first
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
 
     // Second deploy: re-type `amount` from number (`real`) to string (`text`) — a
     // REAL change across affinity classes.
@@ -798,7 +838,11 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
     let plan = sqlite_author()
         .diff(&desired2, &live, &ownership, &[])
         .expect("a real number→string type change generates a rebuild (P3b)");
-    assert_eq!(plan.rebuilds.len(), 1, "the genuine type change yields one rebuild");
+    assert_eq!(
+        plan.rebuilds.len(),
+        1,
+        "the genuine type change yields one rebuild"
+    );
     let rb = &plan.rebuilds[0];
     assert_eq!(rb.spec.table, "ledger");
     assert!(
@@ -832,7 +876,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields[0].ty = "string".into();
@@ -888,16 +932,21 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 // ===========================================================================
 
 fn golden_find<'a>(migs: &'a [Migration], name: &str) -> &'a Migration {
-    migs.iter()
-        .find(|m| m.name == name)
-        .unwrap_or_else(|| panic!("migration {name} present; have: {:?}",
-            migs.iter().map(|m| &m.name).collect::<Vec<_>>()))
+    migs.iter().find(|m| m.name == name).unwrap_or_else(|| {
+        panic!(
+            "migration {name} present; have: {:?}",
+            migs.iter().map(|m| &m.name).collect::<Vec<_>>()
+        )
+    })
 }
 
 fn golden_live(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
     let d = desired_snapshot(PROJECT, descs).expect("golden live desired_snapshot");
-    let ownership: HashMap<String, String> =
-        d.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let ownership: HashMap<String, String> = d
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
     (d.snapshot, ownership)
 }
 
@@ -913,7 +962,7 @@ async fn golden_sqlite_create_table_and_index() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -949,7 +998,7 @@ async fn golden_sqlite_create_table_and_index() {
             columns: vec!["title".into()],
             unique: false,
         }],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[users, accounts]).expect("desired_snapshot");
     let migs = sqlite_author()
@@ -971,7 +1020,10 @@ async fn golden_sqlite_create_table_and_index() {
         accounts_mig.up,
         "CREATE TABLE IF NOT EXISTS \"accounts\" (\n  id TEXT PRIMARY KEY,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  created_by TEXT NULL,\n  updated_by TEXT NULL,\n  version INTEGER NOT NULL DEFAULT 1,\n  deleted_at TEXT NULL,\n  \"title\" TEXT NOT NULL,\n  \"ssn\" TEXT,\n  \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */,\n  \"secret\" BLOB /* zero-migrate:enc:randomised:k1:string */,\n  \"secret_masked\" TEXT /* zero-migrate:mask:kind=full,classification=pii */,\n  \"owner\" TEXT,\n  CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"users\" (id)\n);\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\")",
     );
-    assert_eq!(accounts_mig.down.as_deref(), Some(r#"DROP TABLE "accounts""#));
+    assert_eq!(
+        accounts_mig.down.as_deref(),
+        Some(r#"DROP TABLE "accounts""#)
+    );
 
     // create_index — engine render path: unqualified, no USING/WITH, unqualified DROP.
     let idx = golden_find(&migs, "create_index_accounts_title_idx");
@@ -979,7 +1031,10 @@ async fn golden_sqlite_create_table_and_index() {
         idx.up,
         r#"CREATE INDEX IF NOT EXISTS "accounts_title_idx" ON "accounts" ("title")"#,
     );
-    assert_eq!(idx.down.as_deref(), Some(r#"DROP INDEX IF EXISTS "accounts_title_idx""#));
+    assert_eq!(
+        idx.down.as_deref(),
+        Some(r#"DROP INDEX IF EXISTS "accounts_title_idx""#)
+    );
 }
 
 #[compio::test]
@@ -994,7 +1049,7 @@ async fn golden_sqlite_add_column() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields.push(FieldDescriptor {
@@ -1025,7 +1080,10 @@ async fn golden_sqlite_add_column() {
     // NO COMMENT ON COLUMN.
     let note = golden_find(&migs, "add_column_accounts_note");
     assert_eq!(note.up, r#"ALTER TABLE "accounts" ADD COLUMN "note" text"#);
-    assert_eq!(note.down.as_deref(), Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#));
+    assert_eq!(
+        note.down.as_deref(),
+        Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#)
+    );
 
     // encrypted — inline `/* zero-migrate:enc:… */`, lowercase `bytea`, no COMMENT tail.
     let secret = golden_find(&migs, "add_column_accounts_secret");
@@ -1073,7 +1131,7 @@ async fn golden_sqlite_drops() {
             columns: vec!["title".into()],
             unique: false,
         }],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let gone = CollectionDescriptor {
         name: "gone".into(),
@@ -1084,7 +1142,7 @@ async fn golden_sqlite_drops() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired_accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -1096,7 +1154,7 @@ async fn golden_sqlite_drops() {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let (live, ownership) = golden_live(&[live_accounts, gone]);
     let desired = desired_snapshot(PROJECT, &[desired_accounts]).expect("desired");
@@ -1160,7 +1218,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     // v1: `owner` is a plain STRING (→ snapshot `text` → SQLite TEXT affinity).
     let accounts_v1 = CollectionDescriptor {
@@ -1172,7 +1230,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
 
     let p = paths("differ_string_to_ref_noop");
@@ -1204,8 +1262,11 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
         owner_live_type, "text",
         "the live `owner` column introspects as the SQLite text affinity (faithful path)"
     );
-    let ownership: HashMap<String, String> =
-        first.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let ownership: HashMap<String, String> = first
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
 
     // v2: re-declare `owner` as a `ref` to `users` — a within-TEXT-affinity facet
     // change (string → ref). On SQLite this adds no FK via ALTER and is physically the
@@ -1220,7 +1281,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     };
     let desired2 = desired_snapshot(PROJECT, &[users, accounts_v2]).expect("v2 desired");
     let plan = sqlite_author()
@@ -1257,7 +1318,10 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
         plan.rebuilds.len(),
         1,
         "string→ref yields exactly one rebuild (the FK add), got: {:?}",
-        plan.rebuilds.iter().map(|r| &r.spec.reason).collect::<Vec<_>>()
+        plan.rebuilds
+            .iter()
+            .map(|r| &r.spec.reason)
+            .collect::<Vec<_>>()
     );
     let reason = &plan.rebuilds[0].spec.reason;
     assert!(

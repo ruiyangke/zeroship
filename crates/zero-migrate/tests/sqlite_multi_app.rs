@@ -27,11 +27,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor,
     SchemaSnapshot, SqliteBackend,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 const PROJECT: &str = "prj_demo";
 
@@ -67,7 +67,7 @@ fn coll(name: &str, owner: &str, fields: Vec<FieldDescriptor>) -> CollectionDesc
         owner_app: owner.into(),
         fields,
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }
 }
 
@@ -94,7 +94,11 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
     let desired = desired_snapshot(PROJECT, &[from_a, from_b])
         .expect("identical declarations union without conflict");
     // ONE merged table, owned by the smallest declarer.
-    assert_eq!(desired.snapshot.tables.len(), 1, "the two identical decls merge to one table");
+    assert_eq!(
+        desired.snapshot.tables.len(),
+        1,
+        "the two identical decls merge to one table"
+    );
     assert_eq!(
         desired.owner_of("shared"),
         Some("app_a"),
@@ -117,12 +121,19 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
         .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='shared'")
         .await
         .expect("introspect");
-    assert_eq!(rows.len(), 1, "the unioned `shared` table exists on the SQLite file");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the unioned `shared` table exists on the SQLite file"
+    );
 
     // A re-diff against the REAL live snapshot → ZERO drift (idempotent union).
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
-    let own: HashMap<String, String> =
-        desired.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let own: HashMap<String, String> = desired
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
     let again_desired = desired_snapshot(
         PROJECT,
         &[
@@ -137,7 +148,11 @@ async fn identical_redeclaration_unions_idempotently_and_applies() {
     assert!(
         plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
         "an identical re-declaration must re-diff ZERO-drift; got migs={:?} rebuilds={}",
-        plan2.all_migrations().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
         plan2.rebuilds.len()
     );
 }
@@ -156,8 +171,11 @@ async fn conflicting_declaration_is_rejected_fail_closed() {
     match err {
         DeclarativeError::ConflictingDeclaration { table, apps } => {
             assert_eq!(table, "shared");
-            assert_eq!(apps, vec!["app_a".to_string(), "app_b".to_string()],
-                "the error names every conflicting declarer (sorted, deduped)");
+            assert_eq!(
+                apps,
+                vec!["app_a".to_string(), "app_b".to_string()],
+                "the error names every conflicting declarer (sorted, deduped)"
+            );
         }
         other => panic!("expected ConflictingDeclaration, got {other:?}"),
     }
@@ -174,11 +192,18 @@ async fn drop_of_table_owned_by_another_app_is_refused() {
     // Live: a table owned by `app_other`.
     let live_desired = desired_snapshot(
         PROJECT,
-        &[coll("theirs", "app_other", vec![field("x", "string", true)])],
+        &[coll(
+            "theirs",
+            "app_other",
+            vec![field("x", "string", true)],
+        )],
     )
     .expect("live desired");
-    let live_ownership: HashMap<String, String> =
-        live_desired.ownership.iter().map(|(t, a)| (t.clone(), a.clone())).collect();
+    let live_ownership: HashMap<String, String> = live_desired
+        .ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect();
     assert_eq!(live_ownership.get("theirs"), Some(&"app_other".to_string()));
 
     // Desired: empty (the deploying app declares nothing) — but the differ must NOT
@@ -188,7 +213,11 @@ async fn drop_of_table_owned_by_another_app_is_refused() {
         .diff(&desired_empty, &live_desired.snapshot, &live_ownership, &[])
         .expect_err("a non-owner drop of a live table must be refused");
     match err {
-        DeclarativeError::NotTableOwner { table, owner, deploying_app } => {
+        DeclarativeError::NotTableOwner {
+            table,
+            owner,
+            deploying_app,
+        } => {
             assert_eq!(table, "theirs");
             assert_eq!(owner, "app_other");
             assert_eq!(deploying_app, "app_demo");

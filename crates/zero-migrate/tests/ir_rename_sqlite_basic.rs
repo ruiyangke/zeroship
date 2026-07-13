@@ -22,18 +22,18 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::apply::backend::sqlite::Mode;
+use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zero_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zero_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
-use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::{PlanStep, RenameStep};
-use zero_migrate::{
-    apply::executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
-    SqliteBackend, PolicyProfile, resolve_create_table_policy,
-};
 use zero_migrate::schema::query::SqlDialect as SchemaDialect;
+use zero_migrate::{
+    apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig,
+    MigrationBackend, MigrationEngine, PolicyProfile, SqlDialect, SqliteBackend,
+};
+use zero_migrate::{PlanStep, RenameStep};
 
 const PROJECT: &str = "prj_rename";
 const APP: &str = "app_rename";
@@ -48,7 +48,11 @@ fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
     let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -71,7 +75,7 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
             ..Default::default()
         }],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }
 }
 
@@ -136,7 +140,14 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 ty: ColType::Text, // the e2e tables use text fields
                 nullable: Some(!f.required),
                 default: None,
-                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None })
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            })
             .collect();
         let ir = MigrationIr {
             ir_version: 1,
@@ -149,10 +160,10 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 constraints: vec![],
                 indexes: vec![],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: None,
-            schema: None,
+                runtime_options: None,
+                schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -163,9 +174,18 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
         };
         let ir =
             resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
-        let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("lower create");
+        let steps = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect("lower create");
         engine
-            .apply_plan(&steps, Approval::None, be, &exec_cfg(), "deploy", LockMode::Acquire)
+            .apply_plan(
+                &steps,
+                Approval::None,
+                be,
+                &exec_cfg(),
+                "deploy",
+                LockMode::Acquire,
+            )
             .await
             .expect("apply create");
     }
@@ -186,7 +206,10 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     first_deploy(&be, &v1).await;
 
     // Seed rows BEFORE the rename — they must survive the rebuild.
-    be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
     be.actor()
         .exec(
             "INSERT INTO main.people (id, created_at, updated_at, version, nickname) VALUES \
@@ -202,7 +225,9 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // Lower the rename `nickname → handle` on the SQLite leg.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
-    let steps = author.lower_steps(&ir, &live).expect("SQLite rename lowers");
+    let steps = author
+        .lower_steps(&ir, &live)
+        .expect("SQLite rename lowers");
 
     // STRUCTURAL leg assertion: exactly one step, an OnlineRename whose
     // RenameStep is the SQLite REBUILD — NOT a PG expand-contract.
@@ -233,7 +258,14 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // destructive ⇒ Approval::Approved).
     let engine = MigrationEngine::new();
     let out = engine
-        .apply_plan(&steps, Approval::Approved, &be, &exec_cfg(), "deployer", LockMode::Acquire)
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            LockMode::Acquire,
+        )
         .await
         .expect("apply the SQLite rename rebuild");
 
@@ -260,7 +292,11 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     );
 
     // The old column is GONE.
-    let info = be.actor().query("PRAGMA main.table_info(people)").await.expect("table_info");
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(people)")
+        .await
+        .expect("table_info");
     assert!(
         info.iter().all(|r| r[1].as_deref() != Some("nickname")),
         "the old column name is gone after the rebuild rename"
@@ -287,8 +323,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         .filter(|e| matches!(e.phase, zero_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version.as_str().to_string())
         .collect();
-    let added: std::collections::BTreeSet<String> =
-        after.difference(&before).cloned().collect();
+    let added: std::collections::BTreeSet<String> = after.difference(&before).cloned().collect();
     assert_eq!(
         added,
         std::collections::BTreeSet::from([rebuild_version.clone()]),
@@ -323,15 +358,22 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: None,
-                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
 
-            partition_by: None,
+                partition_by: None,
 
-            runtime_options: None,
-            schema: None,
+                runtime_options: None,
+                schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -340,9 +382,18 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
             preconditions: vec![],
             checksum: None,
         };
-        let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("create");
+        let steps = author
+            .lower_steps(&ir, &LiveSchema::default())
+            .expect("create");
         engine
-            .apply_plan(&steps, Approval::None, &be, &exec_cfg(), "deploy", LockMode::Acquire)
+            .apply_plan(
+                &steps,
+                Approval::None,
+                &be,
+                &exec_cfg(),
+                "deploy",
+                LockMode::Acquire,
+            )
             .await
             .expect("apply create");
     }
@@ -395,7 +446,9 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
         .lower_steps(&ir, &live)
         .expect_err("the SQLite leg must reject a wrong IR type identically to PG");
     match err {
-        IrLowerError::RenameTypeMismatch { table, from, to, .. } => {
+        IrLowerError::RenameTypeMismatch {
+            table, from, to, ..
+        } => {
             assert_eq!(table, "people");
             assert_eq!(from, "nickname");
             assert_eq!(to, "handle");
@@ -416,7 +469,8 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
     let v1 = vec![descriptor("people", "nickname", "string")];
     // Build the live facts, then OVERWRITE the owner to a different app.
     let mut live = live_schema_for(&v1);
-    live.table_ownership.insert("people".into(), "app_other".into());
+    live.table_ownership
+        .insert("people".into(), "app_other".into());
 
     // The IrAuthor deploys as `APP` (≠ app_other) — a non-owner rename.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
@@ -464,7 +518,9 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
             assert_eq!(t, "ghost");
             assert_eq!(c, "a");
         }
-        other => panic!("expected RenameNeedsLiveColumn (the outermost fail-closed gate), got: {other}"),
+        other => {
+            panic!("expected RenameNeedsLiveColumn (the outermost fail-closed gate), got: {other}")
+        }
     }
 }
 
@@ -484,7 +540,9 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
         // Derive the live `data_type` for a text column the SAME way the builder
         // does, so the reconciliation passes (live == IR-derived).
         let v1 = vec![descriptor("ghost", "a", "string")];
-        live_schema_for(&v1).table_snapshots["ghost"].columns[0].data_type.clone()
+        live_schema_for(&v1).table_snapshots["ghost"].columns[0]
+            .data_type
+            .clone()
     };
     let mut live = LiveSchema::default();
     live.tables.insert("ghost".into());
@@ -509,9 +567,9 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
             constraints: vec![],
             runtime_options: Default::default(),
 
-        partition_by: None,
+            partition_by: None,
 
-        comment: None,
+            comment: None,
             stored_create_sql: None,
         },
     );
@@ -531,11 +589,21 @@ fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
         name: table.into(),
         owner_app: APP.into(),
         fields: vec![
-            FieldDescriptor { name: a.into(), ty: "string".into(), required: true, ..Default::default() },
-            FieldDescriptor { name: b.into(), ty: "string".into(), required: true, ..Default::default() },
+            FieldDescriptor {
+                name: a.into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: b.into(),
+                ty: "string".into(),
+                required: true,
+                ..Default::default()
+            },
         ],
         indexes: vec![],
-    runtime_options: Default::default(),
+        runtime_options: Default::default(),
     }
 }
 
@@ -551,9 +619,9 @@ fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
     let live = live_schema_for(&[descriptor2("people", "nickname", "handle")]);
     // Rename nickname → handle, but `handle` ALREADY exists.
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
-    let err = author
-        .lower_steps(&ir, &live)
-        .expect_err("a SQLite rename whose `to` collides with an existing live column must fail closed");
+    let err = author.lower_steps(&ir, &live).expect_err(
+        "a SQLite rename whose `to` collides with an existing live column must fail closed",
+    );
     match err {
         IrLowerError::RenameLower(msg) => {
             assert!(

@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::actor::SqliteActorError;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.
@@ -229,7 +231,9 @@ async fn confine_c_load_extension_denied() {
     // and `evil.so` does not exist anyway.)
     let pc = paths("c_pc");
     let pbe = backend(&pc);
-    pbe.ensure_journal_sqlite().await.expect("bootstrap journal");
+    pbe.ensure_journal_sqlite()
+        .await
+        .expect("bootstrap journal");
     pbe.apply_one_additive(&mig("CREATE TABLE t AS SELECT abs(-1) AS x;"), "tester")
         .await
         .expect("CTAS with an allowlisted function must SUCCEED on the hardened backend");
@@ -352,7 +356,8 @@ async fn confine_g_creator_trigger_writing_mig_denied() {
     );
     let net = be.applied_sqlite().await.expect("journal readable");
     assert!(
-        !net.iter().any(|e| e.version == "forged" || e.version == "forged2"),
+        !net.iter()
+            .any(|e| e.version == "forged" || e.version == "forged2"),
         "no creator trigger can forge a journal row under the main=app-file model"
     );
 }
@@ -377,7 +382,9 @@ async fn confine_h_cross_tenant_denied() {
     }
 
     let be = SqliteBackend::open(&a_app, &a_journal).expect("open A backend");
-    be.ensure_journal_sqlite().await.expect("bootstrap A journal");
+    be.ensure_journal_sqlite()
+        .await
+        .expect("bootstrap A journal");
 
     // A creator `up` on A tries to ATTACH B and read its secret — denied at the
     // ATTACH (no foreign alias can ever be bound on this connection).
@@ -409,8 +416,7 @@ async fn confine_i_creator_read_of_mig_journal_denied() {
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     // A creator `up` that copies the journal into an app table — the SELECT issues a
     // Read on `"_mig".schema_migrations`, which must be denied at prepare.
-    let attack =
-        "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
+    let attack = "CREATE TABLE stolen AS SELECT * FROM \"_mig\".schema_migrations;";
     assert_denied_and_journal_clean(&be, attack, DenyKind::Authorizer).await;
     // Positive control: the SAME read-into-table SUCCEEDS on a raw connection (no
     // authorizer), proving the hardened deny is the M1 confinement rule and not a
@@ -466,7 +472,10 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
     // DEFENSIVE surfaces as an Exec error (not a silent apply); the table's real
     // schema is untouched.
     assert!(
-        matches!(err, SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)),
+        matches!(
+            err,
+            SqliteActorError::Exec(_) | SqliteActorError::Poisoned(_)
+        ),
         "direct sqlite_master write must be rejected by DEFENSIVE, got: {err}"
     );
     // Positive control: with DEFENSIVE off + writable_schema on, a raw connection
@@ -483,7 +492,10 @@ async fn confine_direct_sqlite_master_write_still_blocked_by_defensive() {
         let res = conn.execute_batch(
             "UPDATE sqlite_master SET sql = 'CREATE TABLE t (id INTEGER, pwned TEXT)' WHERE name = 't';",
         );
-        assert!(res.is_ok(), "control: raw sqlite_master edit succeeds: {res:?}");
+        assert!(
+            res.is_ok(),
+            "control: raw sqlite_master edit succeeds: {res:?}"
+        );
     }
 }
 

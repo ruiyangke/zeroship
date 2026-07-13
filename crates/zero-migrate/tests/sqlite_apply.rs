@@ -5,9 +5,11 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::apply::journal::Phase;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::conn::ExecutorConfig;
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::model::precondition::{Precondition, PreconditionCheck};
 use zero_migrate::PreconditionVerdict;
 use zero_migrate::SqliteBackend;
@@ -152,7 +154,8 @@ async fn unqualified_ddl_persists_to_app_file_and_reapply_idempotent() {
         // The journal recorded it as completed.
         let net = be.applied_sqlite().await.expect("read journal");
         assert!(
-            net.iter().any(|e| e.version == v && e.phase == Phase::Completed),
+            net.iter()
+                .any(|e| e.version == v && e.phase == Phase::Completed),
             "version must be journaled completed"
         );
         // Drop the backend here so both the app file and journal file are flushed
@@ -215,7 +218,10 @@ async fn native_event_seq_is_monotonic() {
     assert_eq!(rows.len(), 2);
     let s0: i64 = rows[0][1].as_deref().unwrap().parse().unwrap();
     let s1: i64 = rows[1][1].as_deref().unwrap().parse().unwrap();
-    assert!(s1 > s0, "event_seq must strictly increase across migrations");
+    assert!(
+        s1 > s0,
+        "event_seq must strictly increase across migrations"
+    );
 
     // "go native seq": there is NO standalone `event_seq` counter table any more.
     let cnt = be
@@ -240,7 +246,10 @@ async fn native_event_seq_is_monotonic() {
         .await
         .expect("introspect autoincrement");
     let has_seq: i64 = autoinc[0][0].as_deref().unwrap().parse().unwrap();
-    assert_eq!(has_seq, 1, "AUTOINCREMENT must be active (sqlite_sequence present)");
+    assert_eq!(
+        has_seq, 1,
+        "AUTOINCREMENT must be active (sqlite_sequence present)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +275,10 @@ async fn journal_update_delete_denied_confined() {
         .apply_one_additive(&upd, "attacker")
         .await
         .expect_err("journal UPDATE must be denied");
-    assert!(e.is_authorizer_denied(), "expected authorizer deny, got {e}");
+    assert!(
+        e.is_authorizer_denied(),
+        "expected authorizer deny, got {e}"
+    );
 
     // A creator `up` trying to DELETE the journal — denied too.
     let del = mig(&format!(
@@ -276,7 +288,10 @@ async fn journal_update_delete_denied_confined() {
         .apply_one_additive(&del, "attacker")
         .await
         .expect_err("journal DELETE must be denied");
-    assert!(e.is_authorizer_denied(), "expected authorizer deny, got {e}");
+    assert!(
+        e.is_authorizer_denied(),
+        "expected authorizer deny, got {e}"
+    );
 
     // The original checksum is intact.
     let net = be.applied_sqlite().await.expect("read journal");
@@ -426,10 +441,8 @@ async fn failed_up_rolls_back_atomically() {
     // First statement creates a table; the second is a hard error (creating the
     // SAME table again ⇒ "table ok already exists") ⇒ the whole transaction must
     // roll back, including the first statement's table.
-    let m = mig(
-        "CREATE TABLE ok (id INTEGER); \
-         CREATE TABLE ok (id INTEGER);",
-    );
+    let m = mig("CREATE TABLE ok (id INTEGER); \
+         CREATE TABLE ok (id INTEGER);");
     let res = be.apply_one_additive(&m, "d").await;
     assert!(res.is_err(), "a failing up must error");
 
@@ -445,7 +458,10 @@ async fn failed_up_rolls_back_atomically() {
         .query("SELECT name FROM main.sqlite_master WHERE type='table' AND name='ok'")
         .await
         .expect("introspect");
-    assert!(rows.is_empty(), "partial DDL must be rolled back atomically");
+    assert!(
+        rows.is_empty(),
+        "partial DDL must be rolled back atomically"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -463,10 +479,8 @@ async fn failed_up_does_not_wedge_next_apply_on_same_backend() {
     let be = backend(&p);
 
     // First: a failing up (duplicate CREATE TABLE in one batch) → must error.
-    let bad = mig(
-        "CREATE TABLE dup (id INTEGER); \
-         CREATE TABLE dup (id INTEGER);",
-    );
+    let bad = mig("CREATE TABLE dup (id INTEGER); \
+         CREATE TABLE dup (id INTEGER);");
     let res = be.apply_one_additive(&bad, "d").await;
     assert!(res.is_err(), "the bad up must error");
 

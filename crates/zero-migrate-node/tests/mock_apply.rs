@@ -26,7 +26,9 @@ use std::cell::RefCell;
 use zero_migrate::apply::executor::apply;
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 
 use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
 use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
@@ -139,8 +141,8 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
     let outcome = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg = ExecutorConfig::new("prj_mock", "proj_mock")
-            .with_migrator_role("migrator_prj_mock");
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
         let version_str = migration.version.as_str().to_string();
 
@@ -182,8 +184,8 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
     let log = futures::executor::block_on(async {
         let mock = MockDispatch::new();
         let session = NapiHostSession::new(mock);
-        let cfg = ExecutorConfig::new("prj_mock", "proj_mock")
-            .with_migrator_role("migrator_prj_mock");
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
         let migration = trivial_migration();
 
         apply(

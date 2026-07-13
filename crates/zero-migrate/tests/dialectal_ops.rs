@@ -2,10 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::model::ir::{
-    IndexElement, IndexMethod, IrFlagsOverride, Op,
-};
-use zero_migrate::model::validate::{validate_ir, CODE_OP_INVALID, Dialect};
+use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
+use zero_migrate::model::validate::{validate_ir, Dialect, CODE_OP_INVALID};
 use zero_migrate::{
     resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
     MigrationEngine, MigrationIr, PlanStep, PolicyProfile, SqlDialect, SqliteBackend,
@@ -83,7 +81,10 @@ fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
         let steps = IrAuthor::new(PROJECT, APP, dialect)
             .lower_steps(&pg_only_ir(), &LiveSchema::default())
             .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
-        assert!(steps.is_empty(), "{dialect:?} should skip absent pg-only leg");
+        assert!(
+            steps.is_empty(),
+            "{dialect:?} should skip absent pg-only leg"
+        );
     }
 }
 
@@ -97,7 +98,11 @@ fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
     let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths { _dir: dir, app, journal }
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
@@ -105,7 +110,10 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(t, o)| (t.to_string(), o.to_string()))
+        .collect()
 }
 
 fn resolved_envelope_json(raw: &str) -> String {
@@ -141,7 +149,10 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
     let engine = MigrationEngine::new();
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let plan = engine.plan(&migrations, &guard_cfg);
-    assert!(plan.denied.is_empty(), "clean SQLite plan should not be denied");
+    assert!(
+        plan.denied.is_empty(),
+        "clean SQLite plan should not be denied"
+    );
     engine
         .apply(
             &plan,
@@ -158,7 +169,10 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
         .query("SELECT name FROM pragma_table_info('docs') WHERE name='pg_only'")
         .await
         .expect("pragma_table_info probe");
-    assert!(rows.is_empty(), "SQLite must not apply the absent pg-only leg");
+    assert!(
+        rows.is_empty(),
+        "SQLite must not apply the absent pg-only leg"
+    );
 }
 
 #[test]

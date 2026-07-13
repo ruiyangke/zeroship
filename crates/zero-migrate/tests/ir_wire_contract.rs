@@ -48,15 +48,26 @@ fn drop_table_fields_are_camel_case() {
     };
     let v = serde_json::to_value(&op).unwrap();
     assert_eq!(v["op"], "dropTable");
-    assert_eq!(v["existenceGuard"], "ifExists", "the guard serializes camelCased: {v}");
-    assert!(v.get("ifExists").is_none(), "the old native ifExists bool must NOT appear: {v}");
-    assert!(v.get("if_exists").is_none(), "snake_case if_exists must NOT appear: {v}");
+    assert_eq!(
+        v["existenceGuard"], "ifExists",
+        "the guard serializes camelCased: {v}"
+    );
+    assert!(
+        v.get("ifExists").is_none(),
+        "the old native ifExists bool must NOT appear: {v}"
+    );
+    assert!(
+        v.get("if_exists").is_none(),
+        "snake_case if_exists must NOT appear: {v}"
+    );
     // round-trips from the camelCase wire form
     let back: Op =
         serde_json::from_str(r#"{"op":"dropTable","table":"t","existenceGuard":"ifExists"}"#)
             .unwrap();
     match back {
-        Op::DropTable { existence_guard, .. } => {
+        Op::DropTable {
+            existence_guard, ..
+        } => {
             assert_eq!(existence_guard, Some(ExistenceGuard::IfExists));
         }
         _ => panic!("expected DropTable"),
@@ -71,7 +82,9 @@ fn drop_table_fields_are_camel_case() {
         serde_json::from_str(r#"{"op":"dropView","name":"v","existenceGuard":"ifExists"}"#)
             .unwrap();
     match view {
-        Op::DropView { existence_guard, .. } => {
+        Op::DropView {
+            existence_guard, ..
+        } => {
             assert_eq!(existence_guard, Some(ExistenceGuard::IfExists));
         }
         _ => panic!("expected DropView"),
@@ -88,7 +101,11 @@ fn backfill_fields_are_camel_case() {
         "set":{"x":{"node":"literal","value":1}},"name":"bf"}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match &op {
-        Op::Backfill { cursor_column, batch_size, .. } => {
+        Op::Backfill {
+            cursor_column,
+            batch_size,
+            ..
+        } => {
             assert_eq!(cursor_column, "id");
             assert_eq!(batch_size.get(), 100);
         }
@@ -97,7 +114,10 @@ fn backfill_fields_are_camel_case() {
     let v = serde_json::to_value(&op).unwrap();
     assert!(v.get("cursorColumn").is_some(), "must be cursorColumn: {v}");
     assert!(v.get("batchSize").is_some(), "must be batchSize: {v}");
-    assert!(v.get("cursor_column").is_none(), "snake_case must not appear: {v}");
+    assert!(
+        v.get("cursor_column").is_none(),
+        "snake_case must not appear: {v}"
+    );
 }
 
 #[test]
@@ -112,9 +132,18 @@ fn fk_constraint_fields_are_camel_case_and_nested() {
     let v = serde_json::to_value(&op).unwrap();
     let kind = &v["constraint"]["kind"];
     assert_eq!(kind["kind"], "fk");
-    assert!(kind.get("referencesTable").is_some(), "must be referencesTable: {v}");
-    assert!(kind.get("referencesColumns").is_some(), "must be referencesColumns: {v}");
-    assert!(kind.get("references_table").is_none(), "snake_case must not appear: {v}");
+    assert!(
+        kind.get("referencesTable").is_some(),
+        "must be referencesTable: {v}"
+    );
+    assert!(
+        kind.get("referencesColumns").is_some(),
+        "must be referencesColumns: {v}"
+    );
+    assert!(
+        kind.get("references_table").is_none(),
+        "snake_case must not appear: {v}"
+    );
 }
 
 #[test]
@@ -143,10 +172,22 @@ fn ir_column_facet_fields_are_camel_case() {
         identity: None,
     };
     let v = serde_json::to_value(&col).unwrap();
-    assert_eq!(v["idPrefix"], "post", "idPrefix is camelCase on the wire: {v}");
-    assert_eq!(v["vectorMetric"], "cosine", "vectorMetric is camelCase on the wire: {v}");
-    assert!(v.get("id_prefix").is_none(), "snake_case id_prefix must NOT appear: {v}");
-    assert!(v.get("vector_metric").is_none(), "snake_case vector_metric must NOT appear: {v}");
+    assert_eq!(
+        v["idPrefix"], "post",
+        "idPrefix is camelCase on the wire: {v}"
+    );
+    assert_eq!(
+        v["vectorMetric"], "cosine",
+        "vectorMetric is camelCase on the wire: {v}"
+    );
+    assert!(
+        v.get("id_prefix").is_none(),
+        "snake_case id_prefix must NOT appear: {v}"
+    );
+    assert!(
+        v.get("vector_metric").is_none(),
+        "snake_case vector_metric must NOT appear: {v}"
+    );
 
     // deny_unknown_fields: the camelCase wire form round-trips; snake_case is rejected.
     let camel = r#"{"name":"id","type":"uuid","idPrefix":"post"}"#;
@@ -190,8 +231,7 @@ fn identity_by_default_round_trips_and_absent_identity_omits_key() {
     };
     let plain = serde_json::to_string(&without_identity).expect("plain column serializes");
     assert_eq!(
-        plain,
-        r#"{"name":"id","type":"bigInt"}"#,
+        plain, r#"{"name":"id","type":"bigInt"}"#,
         "a column without identity must keep the byte-identical omitted-key image"
     );
     let plain_back: IrColumn = serde_json::from_str(&plain).expect("plain column round-trips");
@@ -240,9 +280,9 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
+        runtime_options: None,
         schema: None,
         existence_guard: None,
     };
@@ -267,9 +307,9 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
         constraints: vec![],
         indexes: vec![],
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
+        runtime_options: None,
         schema: None,
         existence_guard: None,
     };
@@ -303,9 +343,18 @@ fn migration_ir_envelope_stays_snake_case() {
     let ir: MigrationIr = serde_json::from_str(json).unwrap();
     assert_eq!(ir.owner_app, "app_x");
     let v = serde_json::to_value(&ir).unwrap();
-    assert!(v.get("ir_version").is_some(), "envelope stays snake_case: {v}");
-    assert!(v.get("owner_app").is_some(), "envelope stays snake_case: {v}");
-    assert!(v["flags"].get("requires_approval").is_some(), "flags stay snake_case: {v}");
+    assert!(
+        v.get("ir_version").is_some(),
+        "envelope stays snake_case: {v}"
+    );
+    assert!(
+        v.get("owner_app").is_some(),
+        "envelope stays snake_case: {v}"
+    );
+    assert!(
+        v["flags"].get("requires_approval").is_some(),
+        "flags stay snake_case: {v}"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -406,7 +455,9 @@ fn sequence_signed_ints_below_2pow53_accepted() {
         "start":9007199254740991}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match op {
-        Op::CreateSequence { increment, start, .. } => {
+        Op::CreateSequence {
+            increment, start, ..
+        } => {
             assert_eq!(increment.expect("increment").get(), -9_007_199_254_740_991);
             assert_eq!(start.expect("start").get(), 9_007_199_254_740_991);
         }
@@ -501,7 +552,10 @@ fn expr_ast_is_camel_case_and_round_trips() {
         rhs: Box::new(Expr::lit(IrScalar::Int(0))),
     };
     let v = serde_json::to_value(&e).unwrap();
-    assert_eq!(v["node"], "binOp", "node tag is camelCase on key \"node\": {v}");
+    assert_eq!(
+        v["node"], "binOp",
+        "node tag is camelCase on key \"node\": {v}"
+    );
     assert_eq!(v["op"], "gt");
     assert_eq!(v["lhs"]["node"], "colRef");
     assert_eq!(v["lhs"]["name"], "total");
@@ -697,7 +751,10 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
     let canonical: IrScalar = serde_json::from_str(r#"{"bytes":"AAEC"}"#).unwrap();
     // re-serialize must be canonical base64
     let reser = serde_json::to_string(&canonical).unwrap();
-    assert_eq!(reser, r#"{"bytes":"AAEC"}"#, "bytes must re-encode canonically");
+    assert_eq!(
+        reser, r#"{"bytes":"AAEC"}"#,
+        "bytes must re-encode canonically"
+    );
     // a valid round-trip of arbitrary bytes
     let v: IrScalar = serde_json::from_str(r#"{"bytes":"3q2+7w=="}"#).unwrap();
     let back: IrScalar = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
@@ -764,7 +821,10 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
         Op::AddColumn { mask, .. } => {
             let m = mask.expect("the carried mask deserializes onto the op");
             assert_eq!(m.kind, zero_migrate::model::ir::IrMaskKind::Last4);
-            assert_eq!(m.classification, zero_migrate::model::ir::IrClassification::Spi);
+            assert_eq!(
+                m.classification,
+                zero_migrate::model::ir::IrClassification::Spi
+            );
         }
         other => panic!("expected AddColumn, got {other:?}"),
     }
@@ -799,7 +859,11 @@ fn add_column_omits_absent_optionals() {
         "absent `default` must be OMITTED, not serialized as null: {v}"
     );
     // The serialized object is EXACTLY the four present keys.
-    assert_eq!(obj.len(), 4, "addColumn with no opts must emit exactly op/table/column/type: {v}");
+    assert_eq!(
+        obj.len(),
+        4,
+        "addColumn with no opts must emit exactly op/table/column/type: {v}"
+    );
     // …and it still round-trips.
     let back: Op = serde_json::from_value(v).unwrap();
     assert_eq!(op, back);
@@ -829,7 +893,17 @@ fn create_index_omits_all_absent_optionals() {
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently", "nullsNotDistinct"] {
+    for absent in [
+        "name",
+        "unique",
+        "using",
+        "where",
+        "include",
+        "with",
+        "only",
+        "concurrently",
+        "nullsNotDistinct",
+    ] {
         assert!(
             !obj.contains_key(absent),
             "absent `{absent}` must be OMITTED, not null: {v}"
@@ -847,11 +921,21 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         ty: ColType::Uuid,
         nullable: None,
         default: None,
-        unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None };
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    };
     let cv = serde_json::to_value(&col).unwrap();
     let cobj = cv.as_object().unwrap();
     for absent in ["nullable", "default", "unique"] {
-        assert!(!cobj.contains_key(absent), "IrColumn absent `{absent}` must be omitted: {cv}");
+        assert!(
+            !cobj.contains_key(absent),
+            "IrColumn absent `{absent}` must be omitted: {cv}"
+        );
     }
     // IrIndex name/unique/using/where absent.
     let ix = IrIndex {
@@ -872,18 +956,35 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
     };
     let iv = serde_json::to_value(&ix).unwrap();
     let iobj = iv.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only", "nullsNotDistinct"] {
-        assert!(!iobj.contains_key(absent), "IrIndex absent `{absent}` must be omitted: {iv}");
+    for absent in [
+        "name",
+        "unique",
+        "using",
+        "where",
+        "include",
+        "with",
+        "only",
+        "nullsNotDistinct",
+    ] {
+        assert!(
+            !iobj.contains_key(absent),
+            "IrIndex absent `{absent}` must be omitted: {iv}"
+        );
     }
     // The absent per-element opclass/collation must be omitted too (byte-neutral).
     let elem = iv["columns"][0].as_object().unwrap();
     for absent in ["opclass", "collation", "order"] {
-        assert!(!elem.contains_key(absent), "IndexElement absent `{absent}` must be omitted: {iv}");
+        assert!(
+            !elem.contains_key(absent),
+            "IndexElement absent `{absent}` must be omitted: {iv}"
+        );
     }
     // IrConstraint.name absent.
     let con = IrConstraint {
         name: None,
-        kind: IrConstraintKind::Unique { columns: vec!["id".into()] },
+        kind: IrConstraintKind::Unique {
+            columns: vec!["id".into()],
+        },
     };
     let conv = serde_json::to_value(&con).unwrap();
     assert!(
@@ -925,8 +1026,14 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
         existence_guard: None,
     };
     let value = serde_json::to_value(&parent).unwrap();
-    assert!(value.get("partitionBy").is_some(), "partition key must be camelCase: {value}");
-    assert!(value.get("partition_by").is_none(), "snake_case partition key must not serialize: {value}");
+    assert!(
+        value.get("partitionBy").is_some(),
+        "partition key must be camelCase: {value}"
+    );
+    assert!(
+        value.get("partition_by").is_none(),
+        "snake_case partition key must not serialize: {value}"
+    );
     assert_eq!(
         value
             .get("partitionBy")
@@ -1004,8 +1111,8 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
 
 #[test]
 fn expr_case_omits_absent_else() {
-    use zero_migrate::Expr;
     use zero_migrate::model::expr::{CaseBranch, UnaryOp};
+    use zero_migrate::Expr;
     let e = Expr::Case {
         branches: vec![CaseBranch {
             when: Expr::UnaryOp {
@@ -1032,8 +1139,8 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
     // fix, the Rust side folded `"nullable":null,"default":null` while the JS
     // doc omitted them — distinct bytes, distinct checksum. After the fix both
     // canonicalize to the same omitted-key image.
-    use zero_migrate::{Checksum, MigrationFlags};
     use zero_migrate::model::ir::ColType;
+    use zero_migrate::{Checksum, MigrationFlags};
 
     // Rust-built op (None optionals).
     let rust_op = Op::AddColumn {
@@ -1067,8 +1174,7 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
     // serializer produced — must ALSO decode to the same logical op AND, once we
     // omit on re-serialize, hash to the same value (deny_unknown_fields permits
     // a present-but-null optional on input; canonicalization drops it).
-    let null_json =
-        r#"{"op":"addColumn","table":"t","column":"x","type":"int","nullable":null,"default":null}"#;
+    let null_json = r#"{"op":"addColumn","table":"t","column":"x","type":"int","nullable":null,"default":null}"#;
     let null_op: Op = serde_json::from_str(null_json).unwrap();
     let null_ck = Checksum::of_ir(&CanonicalOpList(&[null_op]), &flags, "app", &[], &[], &[]);
     assert_eq!(

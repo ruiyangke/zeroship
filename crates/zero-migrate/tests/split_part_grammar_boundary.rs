@@ -9,11 +9,11 @@
 //! functions an author may BUILD; they are distinct lists.
 
 use std::collections::BTreeMap;
-use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::model::expr::{Expr, SynthFn};
 use zero_migrate::model::ir::{IrScalar, IrValue};
 use zero_migrate::model::load::load_ir_document;
 use zero_migrate::model::validate::Dialect;
+use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";
@@ -23,9 +23,16 @@ fn split(col: &str, delim: &str, n: i64) -> Expr {
     Expr::FnSynth {
         r#fn: SynthFn::SplitPart,
         args: vec![
-            Expr::ColRef { name: col.into(), table: None },
-            Expr::Literal { value: IrScalar::Str(delim.into()) },
-            Expr::Literal { value: IrScalar::Int(n) },
+            Expr::ColRef {
+                name: col.into(),
+                table: None,
+            },
+            Expr::Literal {
+                value: IrScalar::Str(delim.into()),
+            },
+            Expr::Literal {
+                value: IrScalar::Int(n),
+            },
         ],
     }
 }
@@ -51,8 +58,9 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
             ]}}"#
         );
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let err = load_ir_document(&ir, APP, dialect, &registry(), None, None)
-                .expect_err(&format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"));
+            let err = load_ir_document(&ir, APP, dialect, &registry(), None, None).expect_err(
+                &format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"),
+            );
             // The closed ScalarFn enum has no such variant → a deserialize/contract
             // rejection. (Never a silent acceptance that would later mis-apply.)
             let msg = err.to_string();
@@ -96,7 +104,8 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
     let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None, None)
         .expect_err("out-of-envelope splitPart must reject on SQLite");
     assert!(
-        err.to_string().contains("EXPR_NOT_PORTABLE") || err.to_string().to_lowercase().contains("portable"),
+        err.to_string().contains("EXPR_NOT_PORTABLE")
+            || err.to_string().to_lowercase().contains("portable"),
         "the SQLite leg must reject with EXPR_NOT_PORTABLE; got: {err}"
     );
 }

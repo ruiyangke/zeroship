@@ -1,10 +1,10 @@
-use zero_migrate::{
-    BinaryOp, ColType, Expr, IrColumn, IrDefault, IrFlagsOverride, IrScalar, IrAuthor,
-    IrLowerError, LiveSchema, MigrationIr, Op, CURRENT_IR_VERSION,
-};
-use zero_migrate::{GuardDir, GuardProbe};
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::schema::query::SqlDialect;
+use zero_migrate::{
+    BinaryOp, ColType, Expr, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError,
+    IrScalar, LiveSchema, MigrationIr, Op, CURRENT_IR_VERSION,
+};
+use zero_migrate::{GuardDir, GuardProbe};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
@@ -47,10 +47,10 @@ fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
         constraints: Vec::new(),
         indexes: Vec::new(),
 
-    partition_by: None,
+        partition_by: None,
 
-    runtime_options: None,
-            schema: None,
+        runtime_options: None,
+        schema: None,
         existence_guard: None,
     }
 }
@@ -111,14 +111,20 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
             create_table(
                 "subscriptions",
                 vec![
-                    col("tier", ColType::Enum {
-                        name: "plan_tier".to_string(),
-                        schema: None,
-                    }),
-                    col("period", ColType::Domain {
-                        name: "billing_period".to_string(),
-                        schema: None,
-                    }),
+                    col(
+                        "tier",
+                        ColType::Enum {
+                            name: "plan_tier".to_string(),
+                            schema: None,
+                        },
+                    ),
+                    col(
+                        "period",
+                        ColType::Domain {
+                            name: "billing_period".to_string(),
+                            schema: None,
+                        },
+                    ),
                 ],
             ),
         ],
@@ -154,14 +160,20 @@ fn sqlite_enum_and_domain_inline_at_column_use_site() {
             create_table(
                 "subscriptions",
                 vec![
-                    col("tier", ColType::Enum {
-                        name: "plan_tier".to_string(),
-                        schema: None,
-                    }),
-                    col("period", ColType::Domain {
-                        name: "billing_period".to_string(),
-                        schema: None,
-                    }),
+                    col(
+                        "tier",
+                        ColType::Enum {
+                            name: "plan_tier".to_string(),
+                            schema: None,
+                        },
+                    ),
+                    col(
+                        "period",
+                        ColType::Domain {
+                            name: "billing_period".to_string(),
+                            schema: None,
+                        },
+                    ),
                 ],
             ),
         ],
@@ -187,14 +199,20 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
             create_table(
                 "subscriptions",
                 vec![
-                    col("tier", ColType::Enum {
-                        name: "plan_tier".to_string(),
-                        schema: None,
-                    }),
-                    col("period", ColType::Domain {
-                        name: "billing_period".to_string(),
-                        schema: None,
-                    }),
+                    col(
+                        "tier",
+                        ColType::Enum {
+                            name: "plan_tier".to_string(),
+                            schema: None,
+                        },
+                    ),
+                    col(
+                        "period",
+                        ColType::Domain {
+                            name: "billing_period".to_string(),
+                            schema: None,
+                        },
+                    ),
                 ],
             ),
         ],

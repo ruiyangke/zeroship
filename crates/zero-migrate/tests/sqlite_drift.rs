@@ -6,9 +6,11 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::apply::drift::diff_snapshots;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zero_migrate::conn::ExecutorConfig;
+use zero_migrate::model::migration::{
+    Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
+};
 use zero_migrate::SqliteBackend;
 
 struct Paths {
@@ -140,14 +142,20 @@ async fn out_of_band_alter_detected_as_structural_drift() {
     let p = paths("snap_drift");
     let be = backend(&p);
     be.apply_one_additive(
-        &mig("t", "CREATE TABLE widgets (id INTEGER PRIMARY KEY, label TEXT);"),
+        &mig(
+            "t",
+            "CREATE TABLE widgets (id INTEGER PRIMARY KEY, label TEXT);",
+        ),
         "d",
     )
     .await
     .expect("apply");
 
     // The expected snapshot (what the migrations declared).
-    let expected = be.snapshot_schema_sqlite().await.expect("expected snapshot");
+    let expected = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("expected snapshot");
     drop(be); // close the hardened connection so a raw conn can write the app file.
 
     // Out-of-band ALTER: add a column the migration journal knows nothing about,
