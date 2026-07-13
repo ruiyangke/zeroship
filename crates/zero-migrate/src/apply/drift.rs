@@ -1824,8 +1824,8 @@ fn diff_named(
 /// entries, and (when a structural diff is run) missing / unexpected objects.
 ///
 /// Assembled by the caller from [`check_checksum_drift`] and
-/// [`diff_snapshots`]; it carries reports only, never DDL or a remediation plan
-/// #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// [`diff_snapshots`]; it carries reports only, never DDL or a remediation plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriftReport {
     /// Net-applied versions whose journal checksum disagrees with the set.
     pub checksum_drift: Vec<ChecksumDrift>,
