@@ -254,13 +254,27 @@ impl ExecutorConfig {
     /// into Platform. `schemas` is the cross-schema allowlist; `extensions` is
     /// the `CREATE EXTENSION` allowlist.
     ///
-    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI was retired into
-    /// the `zero-migrate-engine` TS CLI, and production Platform
-    /// applies flow through the napi host path. The token stays the in-crate
-    /// enforcement primitive.
+    /// # The operator-side production Platform seam
+    ///
+    /// This is the PUBLIC, token-gated seam an operator-side host uses to build a
+    /// Platform-trust executor — the APPLY-half peer of the already-public
+    /// [`GuardConfig::platform`](crate::guard::GuardConfig::platform) LOWER-half
+    /// seam. It requires an [`OperatorCapability`] token exactly like
+    /// `GuardConfig::platform`, so the external boundary is unchanged: an external
+    /// crate can NAME [`TrustProfile::Platform`](crate::model::policy::TrustProfile::Platform)
+    /// (it is not fielded), but it can only reach a Platform executor by holding
+    /// the token — minted through the engine's named production seam
+    /// [`OperatorCapability::new`](crate::model::capability::OperatorCapability::new).
+    ///
+    /// The napi host path is NOT the only legitimate Platform-apply producer: an
+    /// operator-side native host (e.g. the platform's own migrate binary) applies
+    /// its own trusted infra schema through this seam over an injected
+    /// [`SqlSession`](crate::driver::SqlSession). Making this `pub` closes the
+    /// asymmetry the guard-crate side never had — `GuardConfig::platform` was
+    /// always reachable, so LOWER could reach Platform trust externally while
+    /// APPLY could not; both halves now share one token-gated public posture.
     #[must_use]
-    #[cfg(test)]
-    pub(crate) fn platform(
+    pub fn platform(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
