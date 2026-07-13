@@ -36,8 +36,8 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -350,10 +350,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
@@ -482,10 +481,7 @@ async fn cleanup(state: &AppState, creators: &[Uuid], pats: &[&Pat]) {
 
 #[compio::test]
 async fn onboard_returns_real_account_link() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "onboard").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -529,10 +525,7 @@ async fn onboard_returns_real_account_link() {
 
 #[compio::test]
 async fn callback_rejects_acct_not_owned_by_creator() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "callback-forge").await;
     let creator = make_user(&fx.state, "creator").await;
     let attacker = make_user(&fx.state, "attacker").await;
@@ -582,10 +575,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
 
 #[compio::test]
 async fn callback_accepts_owned_account_and_persists_flags() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "callback-ok").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -638,10 +628,7 @@ async fn callback_accepts_owned_account_and_persists_flags() {
 
 #[compio::test]
 async fn checkout_stamps_server_fee_not_client_value() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "checkout-fee").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -716,10 +703,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
 
 #[compio::test]
 async fn checkout_honors_operator_set_fee_policy() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "checkout-policy").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
@@ -782,10 +766,7 @@ async fn checkout_honors_operator_set_fee_policy() {
 /// returns 400 and posts NO PaymentIntent.
 #[compio::test]
 async fn checkout_rejected_when_charges_not_enabled() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "checkout-not-ready").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -858,10 +839,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
 /// empty cart_id is a 400 — no PI is created at all, so no stale replay.
 #[compio::test]
 async fn checkout_rejects_empty_cart_id_no_stale_replay() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "checkout-cartid").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -955,10 +933,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
 /// every fee to the cap regardless of percent). The handler rejects it 400.
 #[compio::test]
 async fn fee_policy_rejects_floor_above_cap() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "fee-floor-cap").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
@@ -1001,10 +976,7 @@ async fn fee_policy_rejects_floor_above_cap() {
 /// call.
 #[compio::test]
 async fn checkout_rejects_bad_currency() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "checkout-currency").await;
     let creator = make_user(&fx.state, "creator").await;
     let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
@@ -1049,10 +1021,7 @@ async fn checkout_rejects_bad_currency() {
 
 #[compio::test]
 async fn fee_policy_set_is_operator_only() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "fee-authz").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;

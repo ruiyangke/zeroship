@@ -23,10 +23,14 @@ use zeroship_control::{
 
 mod common;
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -118,10 +122,9 @@ impl Fixture {
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider: common::platform_auth_provider(jwks.jwks_url()),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            metering_provider: zeroship_control::metering::provider::build_provider(
-                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-            )
-            .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
@@ -265,10 +268,7 @@ macro_rules! init_control {
 
 #[compio::test]
 async fn create_pat_with_valid_policy_returns_jwt() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "valid", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -297,10 +297,7 @@ async fn create_pat_with_valid_policy_returns_jwt() {
 
 #[compio::test]
 async fn create_pat_with_policy_exceeding_user_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "viewer", Some("readonly")).await;
     let app = init_control!(fx);
 
@@ -325,10 +322,7 @@ async fn create_pat_with_policy_exceeding_user_returns_400() {
 
 #[compio::test]
 async fn app_owner_can_create_any_resource_pat_for_owned_action() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "owner-any", None).await;
     // The owned resource must be a REAL app row: `app_members.app_id` is a
     // `uuid` column with an FK into `zeroship.apps(id)`, and `apps.plan_id`
@@ -366,10 +360,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
 
 #[compio::test]
 async fn create_pat_with_invalid_resource_id_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "invalid-resource", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -407,10 +398,7 @@ async fn create_pat_with_invalid_resource_id_returns_400() {
 
 #[compio::test]
 async fn create_pat_with_empty_statement_actions_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "empty-actions", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -445,10 +433,7 @@ async fn create_pat_with_empty_statement_actions_returns_400() {
 
 #[compio::test]
 async fn create_pat_with_empty_statement_resources_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "empty-resources", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -483,10 +468,7 @@ async fn create_pat_with_empty_statement_resources_returns_400() {
 
 #[compio::test]
 async fn create_pat_with_mfa_condition_returns_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "mfa-condition", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -522,10 +504,7 @@ async fn create_pat_with_mfa_condition_returns_400() {
 
 #[compio::test]
 async fn list_pats_returns_user_tokens_without_secret() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "list", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -551,10 +530,7 @@ async fn list_pats_returns_user_tokens_without_secret() {
 
 #[compio::test]
 async fn delete_pat_marks_revoked() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "delete", Some("admin")).await;
     let app = init_control!(fx);
 
@@ -596,10 +572,7 @@ async fn delete_pat_marks_revoked() {
 
 #[compio::test]
 async fn using_revoked_pat_returns_401() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoked-use", Some("admin")).await;
     let app = init_control!(fx);
     let pat = common::authz_fixture::admin_pat(&fx.state).await;

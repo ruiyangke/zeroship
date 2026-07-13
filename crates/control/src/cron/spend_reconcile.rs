@@ -13,19 +13,12 @@
 //! It is logged (and dropped) here so the wire variant has a producer and the
 //! transition is observable.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use zeroship_core::types::ControlEvent;
 
 use crate::audit::{self, Action, AuditEntry};
 use crate::registry::RegistryError;
 use crate::spend::{spend_state_str, SpendEngine, SpendTransition};
 use crate::AppState;
-
-/// Default tick cadence in seconds (~1 min). Spend is a soft, minute-scale
-/// money bound — a 60s tick bounds new over-limit work without thrashing PG.
-pub const DEFAULT_TICK_SECS: u64 = 60;
 
 /// Stable `pg_advisory_lock` key for the spend-reconcile sweep (#2).
 ///
@@ -38,28 +31,6 @@ pub const DEFAULT_TICK_SECS: u64 = 60;
 /// FIXED 64-bit constant unique to this sweep (derived from "zsspend1" — must
 /// never collide with another advisory-lock user).
 const SPEND_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_7370_6e64_0001;
-
-/// Cron entry point. Loops forever; each iteration runs one [`tick`] then
-/// sleeps `tick_secs`. A transient PG error is logged and swallowed so the
-/// cron task survives (mirrors `audit_retention` / `orphaned_app_reaper`).
-//
-// `AppState`/`Registry` hold `!Send` handles; the lint is structural.
-#[allow(clippy::future_not_send)]
-pub async fn run(state: Arc<AppState>, tick_secs: u64) {
-    tracing::info!(tick_secs, "control spend_reconcile cron starting");
-    loop {
-        match tick(&state).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(transitions = n, "control spend_reconcile sweep completed");
-            }
-            Ok(_) => { /* steady state; stay quiet */ }
-            Err(e) => {
-                tracing::error!(error = %e, "control spend_reconcile tick failed");
-            }
-        }
-        compio::time::sleep(Duration::from_secs(tick_secs)).await;
-    }
-}
 
 /// Run one reconcile sweep. Exposed so an integration test can drive a single
 /// tick deterministically without sitting on the cron sleep. Returns the
@@ -146,15 +117,5 @@ async fn emit_transition(state: &AppState, t: &SpendTransition) {
     match serde_json::to_string(&event) {
         Ok(json) => tracing::info!(target: "control.spend", event = %json, "spend state transition"),
         Err(e) => tracing::warn!(error = %e, "spend: failed to encode ControlEvent::SpendState"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_tick_is_one_minute() {
-        assert_eq!(DEFAULT_TICK_SECS, 60);
     }
 }

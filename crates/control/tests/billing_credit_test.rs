@@ -24,6 +24,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -38,17 +40,15 @@ use zeroship_authz::{
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::credit::{self, GrantOutcome};
-use zeroship_control::metering::Metering;
 use zeroship_control::registry::RegistryError;
 use zeroship_control::stripe_client::{Period, StripeApi};
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize
@@ -224,6 +224,7 @@ impl Drop for Fixture {
 }
 
 async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    let mock = common::stripe_mock::start_mock_stripe().await;
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -234,6 +235,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -271,14 +281,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
-        tax_provider: zeroship_control::tax::build_tax_provider(
-            &zeroship_control::tax::TaxProviderConfig::native(),
-        )
-        .expect("native tax provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
+        tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
@@ -324,6 +330,7 @@ async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
 
 /// A plan charging 1 cent/request, no included CU (fx = 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -374,28 +381,20 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = std::collections::HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -479,10 +478,7 @@ async fn insert_grant(
 
 #[compio::test]
 async fn credit_ledger_is_append_only_and_kind_sign_checked() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "appendonly").await;
     let creator = make_user(&fx.state, "appendonly").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -552,10 +548,7 @@ async fn credit_ledger_is_append_only_and_kind_sign_checked() {
 
 #[compio::test]
 async fn finalize_consumes_oldest_first_and_balances() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "consume").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -630,10 +623,7 @@ async fn finalize_consumes_oldest_first_and_balances() {
 
 #[compio::test]
 async fn reconcile_rerun_does_not_double_consume() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -692,10 +682,7 @@ async fn reconcile_rerun_does_not_double_consume() {
 
 #[compio::test]
 async fn consume_helper_is_idempotent_on_draft_redrive() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "draftredrive").await;
     let creator = make_user(&fx.state, "draftredrive").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -739,10 +726,7 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 
 #[compio::test]
 async fn expired_grant_is_not_consumed() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "expired").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -782,10 +766,7 @@ async fn expired_grant_is_not_consumed() {
 
 #[compio::test]
 async fn non_usd_grant_is_not_drawn_against_usd_bill() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "currency").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -831,10 +812,7 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
 
 #[compio::test]
 async fn grant_helper_idempotency_key_and_fingerprint() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "granthelper").await;
     let creator = make_user(&fx.state, "granthelper").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -969,10 +947,7 @@ fn billing_self() -> Policy {
 
 #[compio::test]
 async fn grant_endpoint_operator_only_and_idempotency_conflict() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "endpoint").await;
     let creator = make_user(&fx.state, "endpoint").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1071,10 +1046,7 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
 
 #[compio::test]
 async fn grant_note_change_is_a_conflict() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "notefp").await;
     let creator = make_user(&fx.state, "notefp").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1165,10 +1137,7 @@ async fn grant_note_change_is_a_conflict() {
 
 #[compio::test]
 async fn grant_idempotency_key_is_creator_scoped() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "xtenant").await;
     let creator_a = make_user(&fx.state, "xtenant-a").await;
     let creator_b = make_user(&fx.state, "xtenant-b").await;
@@ -1236,10 +1205,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
 
 #[compio::test]
 async fn grant_kind_is_case_insensitive() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "kindcase").await;
     let creator = make_user(&fx.state, "kindcase").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1296,10 +1262,7 @@ async fn grant_kind_is_case_insensitive() {
 
 #[compio::test]
 async fn grant_endpoint_unknown_creator_is_fk_400() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "fk400").await;
     let op_user = make_user(&fx.state, "operator-fk").await;
     let op_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_any()).await;
@@ -1355,10 +1318,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
 
 #[compio::test]
 async fn consume_takes_per_creator_advisory_lock() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "lock").await;
     let creator = make_user(&fx.state, "lock").await;
     let other = make_user(&fx.state, "lock-other").await;
@@ -1486,10 +1446,7 @@ async fn consume_takes_per_creator_advisory_lock() {
 
 #[compio::test]
 async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "emptyledger").await;
     let creator = make_user(&fx.state, "emptyledger").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1540,10 +1497,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
 
 #[compio::test]
 async fn consume_with_zero_subtotal_short_circuits() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "zerosub").await;
     let creator = make_user(&fx.state, "zerosub").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1598,10 +1552,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
 
 #[compio::test]
 async fn late_grant_is_not_drawn_by_an_earlier_consume() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "lategrant").await;
     let creator = make_user(&fx.state, "lategrant").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1669,10 +1620,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
 
 #[compio::test]
 async fn grant_rejects_non_operator_kinds_at_the_boundary() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "kindreject").await;
     let creator = make_user(&fx.state, "kindreject").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1721,10 +1669,7 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
 
 #[compio::test]
 async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "grantref").await;
     let creator = make_user(&fx.state, "grantref").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1788,10 +1733,7 @@ async fn credit_ledger_grant_ref_check_binds_kind_to_grant_reference() {
 
 #[compio::test]
 async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "creditcap").await;
     let creator = make_user(&fx.state, "creditcap").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -1855,10 +1797,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
 
 #[compio::test]
 async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "consume-vs-planchange").await;
     let creator = make_user(&fx.state, "cvp").await;
     ensure_creator_billing(&fx.state, creator).await;

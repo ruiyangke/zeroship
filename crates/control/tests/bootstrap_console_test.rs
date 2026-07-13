@@ -38,11 +38,15 @@ use zeroship_control::{EnvStore, Registry};
 /// regression test can prove its ABSENCE.
 const SERVICE_TOKEN_ENV_KEY: &str = "ZEROSHIP_CONTROL_SERVICE_TOKEN";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("AUTH_DB_URL"))
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 async fn pg(db_url: &str) -> Client {
@@ -199,10 +203,7 @@ async fn cleanup(control: &Client, host: &str) {
 
 #[compio::test]
 async fn seed_creates_all_artifacts_and_is_idempotent() {
-    let Some(url) = db_url() else {
-        eprintln!("[bootstrap_console_test] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let url = db_url();
 
     // A unique host per run keeps the derived ids hermetic even when several
     // test binaries share the DB.

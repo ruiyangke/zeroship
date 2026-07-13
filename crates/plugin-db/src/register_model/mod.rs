@@ -149,9 +149,9 @@ async fn exec_register_model(
     // **P5 — the cutover (dialect-conditional; do NOT brick SQLite dev).** The
     // schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-
     // model-design.md` §6/§9/§12 P5) makes `zeroship-migrate` the SOLE PG schema
-    // applier: the engine creates/migrates the per-app PG schema (and provisions
-    // the `migrator_<app_id>` role) at DEPLOY, BEFORE go-live (P6,
-    // `control`'s `deploy_migrate::apply_bundle_migrations`). So on the PG dialect
+    // applier: the `zeroship-migrated` service creates/migrates the per-app PG
+    // schema (and provisions the migration/runtime roles) before go-live via
+    // `POST /v1/apps/{id}/migrations/apply`. So on the PG dialect
     // `registerModel` STOPS being a schema authority — it issues NO runtime DDL
     // (no `bootstrap` create-schema / `plan` / `validate` / `apply`). This is what
     // eliminates the two-applier overlap (plugin-db + engine both running DDL

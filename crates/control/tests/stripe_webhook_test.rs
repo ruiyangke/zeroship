@@ -19,11 +19,15 @@ use zeroship_control::{
     SecretString, StripeStore,
 };
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .or_else(|_| std::env::var("AUTH_DB_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -124,10 +128,9 @@ impl Fixture {
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            metering_provider: zeroship_control::metering::provider::build_provider(
-                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-            )
-            .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
@@ -305,10 +308,7 @@ macro_rules! init_control {
 
 #[compio::test]
 async fn invoice_paid_webhook_records_app_audit_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "record-audit").await;
     let app = init_control!(fx);
     // `creator_accounts.creator_id` FKs to `users(id)` — seed a real user so
@@ -387,10 +387,7 @@ async fn invoice_paid_webhook_records_app_audit_row() {
 /// `invoice_payments` table and no webhook append, so the row never appears.
 #[compio::test]
 async fn infra_invoice_paid_appends_charge_payment_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "infra-payment").await;
     let app = init_control!(fx);
     let seed = side_conn(&db_url).await;
@@ -590,10 +587,7 @@ async fn charge_row_count(conn: &compio_postgres::Client, invoice_id: &str) -> i
 /// cash_collected == 2× the amount → PR-3's over-refund cap inflates.
 #[compio::test]
 async fn distinct_events_same_invoice_append_one_charge_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "idem-distinct-evt").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -659,10 +653,7 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
 /// `(invoice_id, provider_ref)` idempotency index keeps it to one.
 #[compio::test]
 async fn same_event_retry_after_later_failure_appends_one_charge_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     // Wire a flaky mock that fails the FIRST settlement-id GET, then succeeds.
     let base_url = start_flaky_invoice_mock(1).await;
     let fx = Fixture::new_with_stripe(&db_url, "idem-same-evt-retry", "sk_test_mock", &base_url).await;
@@ -750,10 +741,7 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
 /// CLAIMED the event — so the cash row was dropped AND never retried.
 #[compio::test]
 async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "fail-closed-append").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -824,10 +812,7 @@ async fn payout_row_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i
 /// charge row committed, and ZERO payout rows (the payout FK was never reached).
 #[compio::test]
 async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "d3-infra-no-connect").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -868,10 +853,7 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
 /// did NOT break the legitimate Connect payout path.
 #[compio::test]
 async fn non_infra_invoice_paid_still_routes_to_payout() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "d3-connect-payout").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -924,10 +906,7 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
 /// actually settled the charge.
 #[compio::test]
 async fn payout_with_mismatched_settling_account_is_rejected() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "m4-attribution").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -985,10 +964,7 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
 /// payload WITHOUT them recorded NO linkage → a real dispute could never resolve.
 #[compio::test]
 async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     // A healthy mock (fail_n=0) that serves the expanded invoice with pi_flaky/ch_flaky.
     let base_url = start_flaky_invoice_mock(0).await;
     let fx = Fixture::new_with_stripe(&db_url, "d2-fetch-linkage", "sk_test_mock", &base_url).await;
@@ -1049,10 +1025,7 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
 /// Stripe retried forever (poison).
 #[compio::test]
 async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     // A mock that returns the SAME fixed pi_/ch_ for EVERY invoice — modelling a
     // settling object reused across the void+reissue. Uniquified per run so the
     // persistent test DB's global-unique constraint never collides across runs.
@@ -1154,10 +1127,7 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
 /// CLAIMED (1 ledger row) and dunning never armed.
 #[compio::test]
 async fn payment_failed_record_error_fails_closed_unclaimed() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "m1-dunning-failclosed").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1200,10 +1170,7 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
 /// checkout gate.
 #[compio::test]
 async fn account_updated_disables_cached_charges_flag() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "m2-account-updated").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1262,10 +1229,7 @@ async fn account_updated_disables_cached_charges_flag() {
 /// and guards against a future handler being wired to BOTH rails.
 #[compio::test]
 async fn dispute_funds_event_does_not_double_debit() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "m2-funds-nodouble").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1363,10 +1327,7 @@ async fn dispute_debit_count(conn: &compio_postgres::Client, invoice_id: &str) -
 /// same key would succeed (no serialization).
 #[compio::test]
 async fn lock_event_serializes_same_event() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "m3-event-lock").await;
     let probe = side_conn(&db_url).await;
     let event_id = format!("evt_lock_{}", Uuid::new_v4().simple());
@@ -1482,10 +1443,7 @@ fn setup_intent_body(event_id: &str, creator_id: Uuid) -> String {
 /// payouts-table dedup of its own, so the handler runs twice (two audit rows).
 #[compio::test]
 async fn redelivered_event_is_deduped_handler_not_rerun() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "dedup-replay").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1519,10 +1477,7 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
 /// (no audit row). Proves sig-verify-FIRST ordering.
 #[compio::test]
 async fn forged_event_rejected_before_ledger_claim() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     // Real secret + verification ON.
     let fx = Fixture::new_with_secret(&db_url, "dedup-forged", "whsec_test_g6", false).await;
     let app = init_control!(fx);
@@ -1552,10 +1507,7 @@ async fn forged_event_rejected_before_ledger_claim() {
 /// The retry (after the user exists) succeeds and is then recorded once.
 #[compio::test]
 async fn handler_failure_is_retried_not_lost() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "dedup-retry").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1671,10 +1623,7 @@ fn refund_updated_body(event_id: &str, re_id: &str, status: &str) -> String {
 /// permanently "refunded" and a re-refund was blocked by the over-refund cap.
 #[compio::test]
 async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-cash").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1772,10 +1721,7 @@ async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
 /// (a credit refund carries none natively) to exercise the clawback path end-to-end.
 #[compio::test]
 async fn refund_updated_failed_credit_claws_back_grant() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-claw").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1849,10 +1795,7 @@ async fn refund_updated_failed_credit_claws_back_grant() {
 /// no-op — it must NOT reverse a healthy refund.
 #[compio::test]
 async fn refund_updated_succeeded_is_noop() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "refund-updated-ok").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -1903,10 +1846,7 @@ fn payout_failed_body(event_id: &str, po_id: &str, account: &str, amount: i64) -
 /// ledger row, no creator notification.
 #[compio::test]
 async fn payout_failed_records_failure_and_notifies_once() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "payout-failed").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2026,10 +1966,7 @@ fn pi_failed_body(event_id: &str, pi_id: &str, account: &str, amount: i64) -> St
 /// RED pre-fix: it fell into the deferred "acked but not acted on" arm — silently dropped.
 #[compio::test]
 async fn payment_intent_failed_surfaces_record_and_notifies_once() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "pi-failed").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2109,10 +2046,7 @@ fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
 /// — which runs ahead of the signature block — is the gate under test.
 #[compio::test]
 async fn webhook_oversized_body_rejected_413() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "boundary-413").await;
     let app = init_control!(fx);
     // 256 KiB + 1 byte of valid-ish JSON padding.
@@ -2130,10 +2064,7 @@ async fn webhook_oversized_body_rejected_413() {
 /// (inside the verify block) is reached.
 #[compio::test]
 async fn webhook_oversized_signature_header_rejected_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-sig", "whsec_test_boundary", false).await;
     let app = init_control!(fx);
     let body = json!({"id":"evt_x","type":"setup_intent.succeeded","created":1,"data":{"object":{"id":"seti_x"}}}).to_string();
@@ -2153,10 +2084,7 @@ async fn webhook_oversized_signature_header_rejected_400() {
 /// no `t`/`v1` → verify fails). Proves the unsigned request never reaches a handler.
 #[compio::test]
 async fn webhook_missing_signature_header_rejected_400() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig", false).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2180,10 +2108,7 @@ async fn webhook_missing_signature_header_rejected_400() {
 /// RED if `verify_stripe_signature` early-exits on the first non-matching v1.
 #[compio::test]
 async fn webhook_second_v1_matches_is_accepted() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let secret = "whsec_test_rotation";
     let fx = Fixture::new_with_secret(&db_url, "boundary-multiv1", secret, false).await;
     let app = init_control!(fx);
@@ -2228,10 +2153,7 @@ fn verify_empty_secret_is_err() {
 /// PROD posture.
 #[compio::test]
 async fn webhook_empty_secret_not_insecure_dev_is_500() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     // Empty secret, insecure_dev=false — the production-misconfig posture.
     let fx = Fixture::new_with_secret(&db_url, "boundary-emptysecret", "", false).await;
     let app = init_control!(fx);
@@ -2251,10 +2173,7 @@ async fn webhook_empty_secret_not_insecure_dev_is_500() {
 /// this pins the full webhook() path).
 #[compio::test]
 async fn concurrent_same_event_dispatches_once() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "concurrent-dispatch").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2300,10 +2219,7 @@ async fn concurrent_same_event_dispatches_once() {
 /// payout_failures row written.
 #[compio::test]
 async fn payout_failed_without_connected_account_acks_no_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "payout-noacct").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2345,10 +2261,7 @@ async fn payout_failed_without_connected_account_acks_no_row() {
 /// PI failure → benign 200 ack (`no_connected_account`), no connect_checkout_failures row.
 #[compio::test]
 async fn payment_intent_failed_without_connected_account_acks_no_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "pifail-noacct").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
@@ -2392,10 +2305,7 @@ async fn payment_intent_failed_without_connected_account_acks_no_row() {
 /// claimed (it was validly delivered; re-processing it would be a no-op).
 #[compio::test]
 async fn account_updated_unlinked_account_acks_not_linked() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[stripe_webhook_test] DB URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "acct-unlinked").await;
     let app = init_control!(fx);
 

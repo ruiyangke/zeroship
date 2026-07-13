@@ -43,8 +43,8 @@ fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
     FX_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -115,10 +115,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
@@ -129,6 +128,12 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             zeroship_control::billing_read::ProjectedChargeCache::default(),
         ),
     });
+
+    // Migrations seed no pricing catalog (operator data; fail-closed when
+    // absent), so ensure the global FX row + platform counters exist — these
+    // tests read/restore them and must not depend on another binary seeding
+    // first (see common::seed_pricing_catalog).
+    common::seed_pricing_catalog(&state.control_pg).await;
 
     Fixture { state, blob_root, deploy_tmp_dir }
 }
@@ -287,7 +292,7 @@ async fn current_fx(state: &AppState) -> u64 {
 /// the actor + old→new is written.
 #[compio::test]
 async fn operator_put_updates_and_get_reflects_with_audit() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "op-put").await;
     let seed = current_fx(&fx.state).await;
@@ -364,7 +369,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
 /// stored value is unchanged. This is the operator-only invariant.
 #[compio::test]
 async fn creator_put_is_forbidden_and_value_unchanged() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "creator-403").await;
     let seed = current_fx(&fx.state).await;
@@ -416,7 +421,7 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
 /// closed — the floor is enforced at the handler, not just the DB CHECK).
 #[compio::test]
 async fn below_floor_put_is_rejected_400_value_unchanged() {
-    let Some(db) = db_url() else { return };
+    let db = db_url();
     let _guard = lock_fx();
     let fx = build_fixture(&db, "below-floor").await;
     let seed = current_fx(&fx.state).await;

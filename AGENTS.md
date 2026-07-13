@@ -45,7 +45,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
-| **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
+| **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/metering/provider/` · `crates/stream/` · `crates/control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
 | **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/core/init.rs` |
@@ -96,7 +96,7 @@ Creator Platform                          App Runtime
 ────────────────                          ───────────
 Control Plane ───deploy bundle──────────→ Object Storage
               ───update routes──────────→ Gateway (HTTP pull every 5s)
-              ───register model─────────→ PostgreSQL (per-app schema)
+zeroship-migrated ─apply app migrations──→ PostgreSQL (per-app schema)
 
 Auth Service ←──401 redirect────────────← Gateway (end-user not logged in)
              ───JWT cookie──────────────→ Gateway (validates per request)
@@ -121,7 +121,8 @@ crates/
 ├── plugin-db/        env.db.* native ops
 ├── plugin-kv/        env.kv.* native ops
 ├── plugin-storage/   env.storage.* native ops
-├── metering/         Meter (atomic per-(app,metric) counters) + compio flush task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
+├── metering/         Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
+├── stream/           Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
 │
 │ System 1 — Creator Platform
 ├── control/          Control plane (app CRUD, deploy, billing, env, route registry)

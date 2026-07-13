@@ -1035,20 +1035,17 @@ fn metering_kv_ops_counts_are_exact_and_per_app() {
     let (status, body, meter) = run_app_metered(backend, KV_METER_APP, app_id);
     assert_ok(status, &body);
 
-    let snap = meter.drain();
+    let events = meter.drain();
     let id = uuid::Uuid::parse_str(app_id).unwrap();
-    let usage = snap.get(&id).expect("meter recorded usage for the app");
     assert_eq!(
-        usage.custom.get("kv_writes").copied(),
+        usage_value(&events, id, "kv_writes"),
         Some(3),
-        "set + set + incr = 3 kv_writes; got {:?}",
-        usage.custom
+        "set + set + incr = 3 kv_writes; got {events:?}"
     );
     assert_eq!(
-        usage.custom.get("kv_reads").copied(),
+        usage_value(&events, id, "kv_reads"),
         Some(2),
-        "get + get(miss) = 2 kv_reads; got {:?}",
-        usage.custom
+        "get + get(miss) = 2 kv_reads; got {events:?}"
     );
 }
 
@@ -1074,12 +1071,23 @@ export default {
     let (status, body, meter) = run_app_metered(backend, APP, app_id);
     assert_ok(status, &body);
 
-    let snap = meter.drain();
+    let events = meter.drain();
     let id = uuid::Uuid::parse_str(app_id).unwrap();
     // No successful op ⇒ no metric for this app at all (drain omits zero apps).
     assert!(
-        snap.get(&id).is_none(),
+        !events.iter().any(|event| event.subject.app == Some(id)),
         "a failed kv op must emit no metric; got {:?}",
-        snap.get(&id)
+        events
     );
+}
+
+fn usage_value(
+    events: &[zeroship_core::usage_event::UsageEvent],
+    app_id: uuid::Uuid,
+    meter: &str,
+) -> Option<u64> {
+    events
+        .iter()
+        .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+        .map(|event| event.value)
 }

@@ -113,6 +113,8 @@ pub enum ApplyRequestError {
     ProvisionSchema(compio_postgres::Error),
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] RoleError),
+    #[error("runtime app role provision: {0}")]
+    ProvisionRuntimeRole(compio_postgres::Error),
     #[error("migration preflight: {0}")]
     Preflight(#[from] PostgresIrApplyError),
     #[error("sealed migration apply: {0}")]
@@ -498,6 +500,9 @@ async fn apply_ir_documents_with_policy(
             format!("migrated-approved:{principal_id}")
         }
     };
+    provision_runtime_app_role(&conn, &schema, &role)
+        .await
+        .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
     let outcome = apply_sealed(
         &backend,
         sealed_policy.sealed,
@@ -511,6 +516,9 @@ async fn apply_ir_documents_with_policy(
     .await;
     let outcome = match outcome {
         Ok(outcome) => {
+            provision_runtime_app_role(&conn, &schema, &role)
+                .await
+                .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
             migration_store.mark_applied(*app_id, migration_id).await?;
             let applied = outcome.applied.clone();
             let skipped = outcome.skipped.clone();
@@ -877,7 +885,8 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::StoredPolicyCeilingVersion(_)
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::ProvisionSchema(_)
-        | ApplyRequestError::ProvisionRole(_) => (
+        | ApplyRequestError::ProvisionRole(_)
+        | ApplyRequestError::ProvisionRuntimeRole(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),
@@ -915,6 +924,57 @@ fn postgres_ir_apply_error_kind(
 
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn quote_lit(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
+
+fn runtime_app_role_name(app_id: &str) -> String {
+    format!("app_{app_id}_role")
+}
+
+async fn provision_runtime_app_role(
+    conn: &compio_postgres::Client,
+    schema: &str,
+    migrator_role: &str,
+) -> Result<(), compio_postgres::Error> {
+    let schema_q = quote_ident(schema);
+    let role = runtime_app_role_name(schema);
+    let role_q = quote_ident(&role);
+    let template_q = quote_ident(APP_ROLE_TEMPLATE);
+    let migrator_q = quote_ident(migrator_role);
+
+    conn.batch_execute(&format!(
+        "DO $runtime_app_role$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{template_lit}') THEN
+                EXECUTE 'CREATE ROLE {template_q} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_lit}') THEN
+                EXECUTE 'CREATE ROLE {role_q} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE {template_q}';
+            END IF;
+         END $runtime_app_role$",
+        template_lit = quote_lit(APP_ROLE_TEMPLATE),
+        role_lit = quote_lit(&role),
+    ))
+    .await?;
+
+    conn.batch_execute(&format!(
+        // USAGE only — the runtime role does DML, never DDL. Object creation
+        // (tables, sequences) is the migrator role's job; plugin-db's
+        // register_model is a no-op on Postgres. Granting CREATE here would let
+        // app runtime code author schema objects, which it must not.
+        "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
+         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
+         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
+         ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_q};
+         ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
+             GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
+    ))
+    .await
 }
 
 #[cfg(test)]

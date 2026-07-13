@@ -23,15 +23,6 @@ path = "src/bin/mock_stripe.rs"
 name = "dev-provision"
 path = "src/bin/dev_provision.rs"
 
-# Metering / billing hot-path load + contention measurement (#29). A
-# `harness = false` binary (the runtime-crate bench convention) that drives the
-# REAL Metering::ingest_at / SpendEngine::evaluate_all / reconcile-read paths
-# against a DEDICATED live Postgres. Gated on METERING_LOAD_DB (no DB ⇒ prints a
-# how-to note and exits 0). See the file header for run instructions.
-[[bench]]
-name = "metering_load"
-harness = false
-
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
@@ -45,6 +36,7 @@ zeroship-auth = { workspace = true }
 # the same `email_suppressions` contract auth uses. PR-0 deliberately left control
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
+zeroship-stream = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 # `with-chrono-0_4` so PAT issuance / the console seed can map
 # `TIMESTAMPTZ` columns to `chrono::DateTime<Utc>` directly.
@@ -61,6 +53,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 async-trait = { workspace = true }
+bitflags = "2.11"
 mimalloc = { workspace = true }
 subtle = "2"
 zeroize = "1"

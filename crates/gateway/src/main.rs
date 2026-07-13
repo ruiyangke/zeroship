@@ -660,19 +660,21 @@ fn main() -> std::io::Result<()> {
     ));
 
     // ── Metering infrastructure (coverage #27) ───────────────────────────
-    // The gateway is a SECOND metering producer. ONE process-wide meter,
-    // shared into `GateState` (so the response path records
-    // `gateway_egress_bytes` for static/redirect/error bodies the worker
-    // never sees) AND drained by the single flush task spawned just below.
-    // Mirrors the worker's wiring exactly — same `Meter`, same
-    // `spawn_flush_task`, same `/internal/usage` ingest. The producer id is
-    // restart-unique (`boot_worker_id` folds a per-boot nonce onto a stable
-    // base) so the per-process `SequenceSource` resetting to 1 each boot
-    // cannot collide with pre-restart `(worker_id, sequence)` rows and be
-    // dropped as a phantom duplicate (silent under-bill — the boot-nonce
-    // lesson). The `gate-` prefix makes gateway and worker producer ids
-    // never collide, so their reports simply SUM in `usage_aggregates`.
-    let meter = Arc::new(zeroship_metering::Meter::new());
+    // The gateway is a SECOND usage producer. ONE process-wide meter, shared
+    // into `GateState` (so the response path records `gateway_egress_bytes` for
+    // static/redirect/error bodies the worker never sees) AND drained by the
+    // usage outbox spawned just below. Mirrors the worker: same `Meter`, same
+    // shared `build_usage_outbox_from_env` producer → the billing stream. The
+    // `gate-…-<uuid>` source is unique per boot so gateway and worker producer
+    // ids never collide; their events simply SUM in `usage_aggregates`.
+    let gate_meter_source = {
+        let base = std::env::var("HOSTNAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("gate-{port}"));
+        format!("gate-{base}-{}", uuid::Uuid::new_v4())
+    };
+    let meter = Arc::new(zeroship_metering::Meter::with_source(gate_meter_source.clone()));
 
     let state = Arc::new(GateState {
         config: GateConfig {
@@ -688,6 +690,11 @@ fn main() -> std::io::Result<()> {
         },
         routes: sync::RouteCache::new(),
         hash_ring,
+        // TODO(S5 throughput backstop, billing-provider-platform design v7
+        // Pillar 4/5): make this plan-aware so FREE-tier apps get a tighter
+        // default per-app cap. The current registry is global; wiring the
+        // route's plan into limiter defaults belongs in the gateway config
+        // slice, not in the usage-aggregate recompute writer.
         rate_limiters: enforce::RateLimitRegistry::new(1000, 2000),
         per_rule_rate_limits: enforce::PerRuleRateLimitRegistry::new(),
         concurrency: enforce::ConcurrencyRegistry::new(100),
@@ -712,27 +719,42 @@ fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{bind_host}:{port}");
 
-    // Spawn the metering flush task (coverage #27). Drains the gateway's
-    // meter every ~10s and POSTs a `UsageReport` to control's
-    // `/internal/usage` — the SAME idempotent ingest the worker uses. The
-    // restart-unique producer base is `$HOSTNAME` (k8s/compose) else the
-    // bind addr; `boot_worker_id` folds the per-boot nonce. Detached
-    // background task: it never sits on the proxy hot path.
-    let gate_meter_base = std::env::var("HOSTNAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| bind_addr.clone());
-    let gate_producer_id = zeroship_metering::boot_worker_id(&format!("gate-{gate_meter_base}"));
-    zeroship_metering::spawn_flush_task(
-        Arc::clone(&meter),
-        zeroship_metering::FlushConfig {
-            control_url: state.config.control_url.clone(),
-            control_key: state.config.control_key.clone(),
-            worker_id: gate_producer_id.clone(),
-            interval: zeroship_metering::DEFAULT_FLUSH_INTERVAL,
+    // Spawn the gateway usage-event outbox (coverage #27). Drains the gateway's
+    // meter every ~10s and publishes UsageEvents to the billing stream via the
+    // SAME shared producer wiring as the worker. Disabled (drain-and-drop) when
+    // REDPANDA_BROKERS is unset. Detached — never on the proxy hot path.
+    // Env wins, the `[metering]` file overlay back-fills (config-file driven).
+    let fm = &boot.overlay.config.metering;
+    let gate_stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
+        zeroship_metering::UsageStreamSettings {
+            brokers: fm.redpanda_brokers.clone(),
+            topic: fm.usage_events_topic.clone(),
+            group_id: fm.producer_group_id.clone(),
+            wal_path: fm.outbox_wal_path.clone(),
         },
     );
-    tracing::info!(producer_id = %gate_producer_id, "gateway metering flush task started");
+    match zeroship_metering::build_usage_outbox(&gate_meter_source, &gate_stream_settings) {
+        Ok(Some((outbox, outbox_config))) => {
+            let topic = outbox.topic().to_string();
+            zeroship_metering::spawn_outbox_task(Arc::clone(&meter), outbox, outbox_config);
+            tracing::info!(producer = %gate_meter_source, topic = %topic, "gateway usage-event outbox started");
+        }
+        Ok(None) => {
+            zeroship_metering::spawn_disabled_drain_task(
+                Arc::clone(&meter),
+                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
+                "REDPANDA_BROKERS is not set".to_string(),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(producer = %gate_meter_source, error = %error, "gateway usage stream configuration failed; metering outbox disabled");
+            zeroship_metering::spawn_disabled_drain_task(
+                Arc::clone(&meter),
+                zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
+                format!("usage stream configuration failed: {error}"),
+            );
+        }
+    }
     if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
         tracing::warn!(
             bind = %bind_addr,
