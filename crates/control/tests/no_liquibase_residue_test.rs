@@ -68,8 +68,8 @@ fn control_crate_has_no_operational_liquibase_residue() {
     assert!(
         offenders.is_empty(),
         "control crate still has operational Liquibase residue (the platform DB \
-         is migrated by `zeroship-migrate migrate --dir db/migrations-ts --profile \
-         platform`, not Liquibase). Offending lines:\n{}",
+         is migrated by `zeroship-platform-migrate --migrations-dir db/migrations-ts`, \
+         not Liquibase). Offending lines:\n{}",
         offenders.join("\n")
     );
 }

@@ -3,7 +3,6 @@ members = ["crates/*", "crates/authz", "crates/compio-s3"]
 resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
-    "crates/zeroship-migrate-node",
     "refs",
 ]
 
@@ -49,8 +48,8 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
 # schemars 1.x: `schemars::schema_for!(T)` -> `schemars::Schema`, `#[derive(schemars::JsonSchema)]`.
-# Used only by zeroship-migrate to emit the discriminated-union schema the JS
-# `op.*` builder targets; leaf, sync, no tokio.
+# Emits the discriminated-union schema the JS `op.*` builder targets; leaf, sync,
+# no tokio.
 schemars = "1"
 
 # Crypto
@@ -133,8 +132,7 @@ libc = "0.2"
 # `seccompiler` is Firecracker's audited seccomp-bpf compiler (default-deny
 # syscall filter); `landlock` is the ABI-aware Landlock LSM wrapper (read-only
 # filesystem ruleset, requires Linux >= 5.13). Both are pure-Rust, no C
-# toolchain. Used by `zeroship-migrate`'s V8 frontend recorder child + sandbox
-# module — the build-time analogue of the apply-time least-priv migrator role.
+# toolchain — the build-time analogue of the apply-time least-priv migrator role.
 seccompiler = "0.5"
 landlock = "0.4"
 itoa = "1"
@@ -199,16 +197,10 @@ compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
-# V8 decoupling: the shared inherited edge defaults to the V8-free core. Consumers
-# that need the in-Rust V8 host (JS authoring front-end + live-MySQL backend) opt
-# in with `features = ["zsv8"]` (or `js-cli`). Without this key on the workspace
-# entry, per-edge `default-features = false` is silently IGNORED under Cargo's
-# workspace-inheritance rules, so the V8-free consumers (plugin-db, migrated) would
-# still link the V8 host. The migrate CLI bins build via the package's own
-# `default = ["js-cli"]`, which is unaffected by this workspace-edge default.
-zeroship-migrate = { path = "crates/zeroship-migrate", default-features = false }
 # Phase F: the monorepo's native-PG producer (`CompioPgSession`) for the published
-# `zero-migrate` engine's driver-neutral `SqlSession` seam.
+# `zero-migrate` engine's driver-neutral `SqlSession` seam. This adapter — together
+# with the published `zero-migrate` engine below — is the sole migration path now;
+# the in-tree `crates/zeroship-migrate` engine has been deleted.
 zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
 # The published, standalone `zero-migrate` engine (path dep may point outside the
 # workspace). The `zeroship-migrated` service consumes it (via the adapter) instead
@@ -225,9 +217,6 @@ zeroship-auth = { path = "crates/auth" }
 zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }
 zeroship-mailer = { path = "crates/mailer" }
-# Control plane — declared here only so the P7 capstone e2e crate
-# (`crates/schema-authority-e2e`) can dev-depend on its real deploy-migrate fn.
-zeroship-control = { path = "crates/control" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -61,10 +61,9 @@ pub struct ApplyMigrationsResponse {
 /// A failure loading/lowering/applying a `.ir.json` bundle through the published
 /// `zero-migrate` engine over the [`CompioPgSession`] seam.
 ///
-/// This replaces the in-tree `zeroship_migrate::PostgresIrApplyError` (which the
-/// engine no longer exports): the service owns the file-read + lower + apply loop
-/// now, so it owns the error taxonomy for it too. The variants preserve the same
-/// HTTP-status mapping the previous surface had.
+/// The service owns the file-read + lower + apply loop over the published
+/// `zero-migrate` engine, so it owns the error taxonomy for it too. The variants
+/// map to distinct HTTP statuses (see [`ir_apply_error_kind`]).
 #[derive(Debug, thiserror::Error)]
 pub enum IrApplyError {
     /// Reading a `.ir.json` file failed.
