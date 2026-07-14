@@ -32,8 +32,28 @@
 //!   load-time legality gate (`deny_unknown_fields`, registry-validated,
 //!   fail-closed, name-normalized).
 //!
-//! Composition (`compose_strict`/`compose_clamp`), `EffectivePolicy`, and seal
-//! verification are Phase 1b-ii — NOT in this cut.
+//! # Phase 1b-ii — the composition algebra, unforgeable `EffectivePolicy`, and seal
+//!
+//! On top of the value order this cut adds the SECURITY CROWN JEWEL:
+//!
+//! - [`value_order`] — the per-knob VALUE lattice (`⊑_value`/`⊔_value`/`⊓_value`),
+//!   derived from each [`knob::KnobKind`] so no facet-specific meet can drift.
+//! - [`compose`] — [`RootCeiling`] (the only trust anchor), [`compose_strict`]
+//!   (untrusted-draft ingress: pointwise `draft ⊑ ceiling` grants + union-up
+//!   require/inject/validate + compose-time collision blame + the creatable-scope
+//!   lint), [`compose_clamp`] (meet of two trusted ceilings — associative, total),
+//!   and the UNFORGEABLE [`EffectivePolicy`] with its decision-query API
+//!   (`grants`/`obligations`/`injects_for`/`validates_for`/`is_injected_shape`). All
+//!   scope resolution lives here; the guard holds no `Scope`.
+//! - [`seal`] — [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
+//!   the sealed inject total order) ‖ registry digest ‖ `(dialect, matcher_version)`
+//!   ‖ `ceiling_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
+//!   tamper or binding mismatch.
+//!
+//! The pointwise-grant admissibility check is proven by a brute-force COMPOSITION
+//! ORACLE (`tests/compose_oracle.rs`): `compose_strict` is `Ok` IFF the draft is
+//! pointwise `⊑` the ceiling at every object and key. Where prose review of the
+//! escalation check could not be trusted, the oracle-green code is authoritative.
 
 pub mod compose;
 pub mod document;
@@ -41,6 +61,7 @@ pub mod knob;
 pub mod registry;
 pub mod rule;
 pub mod scope;
+pub mod seal;
 pub mod value_order;
 
 pub use document::{LoadContext, LoadError, LoadWarning, PolicyDoc, SUPPORTED_POLICY_VERSION};
@@ -64,3 +85,4 @@ pub use compose::{
     compose_clamp, compose_strict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy,
     RootCeiling, ShapeElement,
 };
+pub use seal::{seal, SealError, SealedPolicy};

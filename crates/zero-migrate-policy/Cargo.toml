@@ -3,13 +3,14 @@ name = "zero-migrate-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The zero-migrate Policy Decision Point (PDP): the mechanism half of the policy system. Phase 1a ships the SCOPE LATTICE — Scope { Nothing | All | Of{include, exclude} } over one/two-segment identifier globs, with normalize / subset (⊑) / meet (⊓) / join (⊔) / difference (∖), verified exhaustively by a brute-force oracle. A true LEAF: pure data + algebra, zero I/O, NO SQL deps, no dependency on the engine."
+description = "The zero-migrate Policy Decision Point (PDP): the mechanism half of the policy system. Ships the SCOPE LATTICE (Scope { Nothing | All | Of{include, exclude} } with ⊑/⊓/⊔/∖), the knob/rule/document model + strict loader, the per-knob VALUE order, and the COMPOSITION ALGEBRA — RootCeiling, compose_strict (pointwise-⊑ untrusted-draft ingress) / compose_clamp (trusted-ceiling meet), the UNFORGEABLE EffectivePolicy decision-query API, and the identity-bound SealedPolicy HMAC. Escalation-critical checks are proven by brute-force oracles. A true LEAF: pure data + algebra, zero I/O, NO SQL deps, no dependency on the engine."
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 

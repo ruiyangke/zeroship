@@ -398,19 +398,16 @@ impl EffectivePolicy {
     // consumer.
 
     /// The require rules in composition order (seal payload).
-    #[allow(dead_code)]
     pub(crate) fn require_rules(&self) -> &[Rule] {
         &self.requires
     }
 
     /// The inject rules in the sealed total order (seal payload).
-    #[allow(dead_code)]
     pub(crate) fn inject_rules(&self) -> &[Rule] {
         &self.injects
     }
 
     /// The validate rules in composition order (seal payload).
-    #[allow(dead_code)]
     pub(crate) fn validate_rules(&self) -> &[Rule] {
         &self.validates
     }
@@ -418,7 +415,6 @@ impl EffectivePolicy {
     /// The grant rules flattened to `(key, scope, value)` in key-sorted, then
     /// rule-order, form (seal payload). Key order is deterministic (BTreeMap); within
     /// a key, rules keep composition order.
-    #[allow(dead_code)]
     pub(crate) fn grant_rules_canonical(&self) -> Vec<(&KnobKey, &Scope, &KnobValue)> {
         let mut out = Vec::new();
         for (key, km) in &self.grants.keys {
