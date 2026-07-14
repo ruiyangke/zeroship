@@ -155,6 +155,11 @@ pub struct ApplyRequest {
     pub registry: std::collections::HashMap<String, String>,
     /// The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value.
     pub envelope: JsonValue,
+    /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
+    /// table-shape injection. The engine constructs NO default ceiling — `None`
+    /// injects nothing (the author-owned shape passes through); the monorepo caller
+    /// passes zeroship's confined ceiling here (Phase 3).
+    pub policy_ceiling: Option<String>,
     /// Whether destructive changes are pre-approved.
     pub approved: bool,
     /// The audit `applied_by` label recorded in the journal.

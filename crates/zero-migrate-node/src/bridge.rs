@@ -389,6 +389,7 @@ pub fn apply_ir(
             &req.project_schema,
             &req.dialect,
             &registry_json,
+            req.policy_ceiling.as_deref(),
         )
         .map_err(Error::from_reason)?;
         serde_json::from_str(&json)
