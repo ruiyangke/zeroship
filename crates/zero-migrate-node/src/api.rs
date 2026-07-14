@@ -17,9 +17,13 @@ use std::collections::HashMap;
 
 use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
 use zero_migrate::model::load::load_ir_document;
+use zero_migrate::model::profile::PolicyProfile;
 use zero_migrate::model::validate::Dialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
-use zero_migrate::{render_artifacts, render_artifacts_from_descriptors, DEFAULT_PROJECT_SCHEMA};
+use zero_migrate::{
+    render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy,
+    DEFAULT_PROJECT_SCHEMA,
+};
 
 use crate::wire::{GenArtifactsReply, LoadVerifyReply};
 
@@ -90,23 +94,48 @@ pub fn load_verify(
 ///
 /// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
 ///
-/// Returns a [`GenArtifactsReply`]; a malformed envelope / incoherent op stream
-/// yields `ok: false` with the message, never a panic.
+/// # System-shape resolution (mirrors `lower.rs`)
+/// The pure-JS recorder emits RAW, author-only `createTable` ops — it drains ONLY
+/// the author-declared columns; the platform-managed system fields
+/// (`id`/`created_at`/`updated_at`/`created_by`/`updated_by`/`version`/`deleted_at`)
+/// + the `["id"]` PRIMARY KEY + the system indexes are injected by
+/// [`resolve_create_table_policy`] under the **Confined** creator profile, NOT by the
+/// JS DSL (exactly the fold `crate::lower::lower_envelope_to_migrations` runs before
+/// it lowers). So each envelope is resolved here — per-envelope, as its own
+/// [`MigrationIr`], with the SAME `PolicyProfile::confined()` the apply-side lower
+/// uses — BEFORE the ops are concatenated and folded. Resolution stays OUT of the
+/// shared [`render_artifacts`] tail: the manual descriptor path already resolves
+/// inside `descriptors_to_create_ops`, so double-resolving there would be wrong. This
+/// keeps the generated + manual paths byte-identical (both feed RESOLVED ops to the
+/// one renderer).
+///
+/// Returns a [`GenArtifactsReply`]; a malformed envelope / a table-shape resolve
+/// failure / an incoherent op stream yields `ok: false` with the message, never a
+/// panic.
 #[must_use]
 pub fn gen_artifacts_from_envelopes(
     envelopes: &[serde_json::Value],
     project_schema: Option<&str>,
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
+    let confined = PolicyProfile::confined();
     let mut ops: Vec<Op> = Vec::new();
     for (i, env) in envelopes.iter().enumerate() {
-        let ir: MigrationIr = match serde_json::from_value(env.clone()) {
+        let raw_ir: MigrationIr = match serde_json::from_value(env.clone()) {
             Ok(ir) => ir,
             Err(e) => {
                 return gen_err(format!("envelope[{i}] is not a valid IR document: {e}"));
             }
         };
-        ops.extend(ir.ops);
+        // Resolve the confined system shape (system columns + [id] PK + system
+        // indexes) BEFORE folding — the JS recorder emits author-only ops.
+        let resolved = match resolve_create_table_policy(&raw_ir, &confined) {
+            Ok(ir) => ir,
+            Err(e) => {
+                return gen_err(format!("envelope[{i}] table-shape resolve failed: {e}"));
+            }
+        };
+        ops.extend(resolved.ops);
     }
     match render_artifacts(&ops, schema) {
         Ok(a) => gen_ok(a),
@@ -191,9 +220,10 @@ mod tests {
 
     #[test]
     fn gen_artifacts_from_envelopes_renders_both_files() {
-        // A minimal generated source: one create-table envelope. The ops are folded
-        // as-authored (the recorder resolves system columns upstream; here we author
-        // a single user column to exercise the pure fold + emit).
+        // A minimal generated source: one create-table envelope carrying ONLY the
+        // author column — exactly the RAW shape the pure-JS recorder emits (no system
+        // columns). `gen_artifacts_from_envelopes` resolves the confined system shape
+        // before folding.
         let envelope = serde_json::json!({
             "ir_version": current_ir_version(),
             "name": "create_widgets",
@@ -214,6 +244,68 @@ mod tests {
             ts.contains("label: t.string(),"),
             "env.db.ts renders the builder chain: {ts}"
         );
+    }
+
+    #[test]
+    fn gen_artifacts_from_raw_author_only_envelope_injects_system_fields_and_indexes() {
+        // WALL 1 regression: the pure-JS recorder emits RAW author-only createTable ops
+        // (NO system columns). `gen_artifacts_from_envelopes` MUST resolve the confined
+        // system shape (7 system fields + [id] PK + 3 system indexes) before folding —
+        // otherwise the generated descriptor is missing them entirely. Pre-fix this
+        // path fed the raw ops straight to `render_artifacts`, so none of the 7 system
+        // fields (nor the system indexes) appeared. Model the envelope EXACTLY as the
+        // recorder writes it: a `createTable` with only the author column, no primary
+        // key, no system cols.
+        let envelope = serde_json::json!({
+            "ir_version": current_ir_version(),
+            "name": "create_widgets",
+            "ops": [{
+                "op": "createTable",
+                "name": "widgets",
+                "columns": [{ "name": "label", "type": "string" }],
+                "primaryKey": null
+            }]
+        });
+        let reply = gen_artifacts_from_envelopes(&[envelope], None);
+        assert!(reply.ok, "render ok: {:?}", reply.error);
+        let runtime = reply.runtime_json.expect("runtime json");
+        let v: serde_json::Value = serde_json::from_str(&runtime).expect("runtime json parses");
+
+        // All 7 platform system fields are present in the folded descriptor.
+        let fields = &v["collections"]["widgets"]["fields"];
+        for sys in [
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at",
+        ] {
+            assert!(
+                fields.get(sys).is_some(),
+                "the RESOLVED generated descriptor must carry system field `{sys}`: {fields}"
+            );
+        }
+        assert!(
+            fields.get("label").is_some(),
+            "the author column survives resolution: {fields}"
+        );
+
+        // The 3 confined system indexes (deleted_at / updated_at / created_by) are
+        // injected too.
+        let idx_fields: Vec<String> = v["collections"]["widgets"]["indexes"]
+            .as_array()
+            .expect("indexes array")
+            .iter()
+            .filter_map(|i| i["fields"][0].as_str().map(str::to_string))
+            .collect();
+        for sys_idx in ["deleted_at", "updated_at", "created_by"] {
+            assert!(
+                idx_fields.iter().any(|f| f == sys_idx),
+                "the resolved descriptor carries the `{sys_idx}` system index: {idx_fields:?}"
+            );
+        }
     }
 
     #[test]

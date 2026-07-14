@@ -7,9 +7,18 @@
 //!     `descriptors_to_create_ops` and then the SAME renderer tail.
 //!
 //! This test constructs the SAME logical schema two independent ways — a
-//! hand-authored `op.*` `CreateTable` (resolved through the create-table policy so
-//! the platform system columns are injected exactly as the JS recorder path would)
-//! AND an equivalent `CollectionDescriptor` — and pins:
+//! **RAW author-only** `op.*` `CreateTable` (the exact shape the pure-JS recorder
+//! emits — NO system columns/indexes) resolved through the create-table policy
+//! (`resolve_create_table_policy` under the Confined profile), EXACTLY as the
+//! `gen_artifacts_from_envelopes` napi path now does before folding — AND an
+//! equivalent `CollectionDescriptor` (which `descriptors_to_create_ops` resolves
+//! internally) — and pins:
+//!
+//! This is the TRUE byte-identical guarantee: the generated side feeds RAW,
+//! UNRESOLVED envelope ops (author columns only) and the resolution injects the 7
+//! system fields + `[id]` PK + 3 system indexes, so the descriptor path (which
+//! resolves the same way) still matches byte-for-byte. Earlier this test resolved
+//! and compared, but did not START from the recorder's raw author-only shape.
 //!   1. the two produce BYTE-IDENTICAL `schema.runtime.json` (the byte-identical
 //!      guarantee: one renderer, not two);
 //!   2. the emitted `schema.runtime.json` parses + satisfies the v1 contract the
@@ -20,8 +29,8 @@
 
 use serde_json::Value;
 
-use zero_migrate::model::ir::{ColType, IrColumn, MigrationIr, Op, TableRuntimeOptions};
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
+use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 use zero_migrate::{
     render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy, PolicyProfile,
 };
@@ -29,8 +38,10 @@ use zero_migrate::{
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
 
-/// A `CollectionDescriptor` for a `people` table with a plain `name` string and a
-/// `required` `email` string — the MANUAL source.
+/// A `CollectionDescriptor` for a `people` table with a plain `name` string, a
+/// `required` `email` string, and an author-declared named index on `name` — the
+/// MANUAL source. The author index exercises the Wall-2 producer path (author
+/// indexes must survive alongside the injected system indexes).
 fn people_descriptor() -> CollectionDescriptor {
     CollectionDescriptor {
         name: "people".to_string(),
@@ -48,55 +59,34 @@ fn people_descriptor() -> CollectionDescriptor {
                 ..Default::default()
             },
         ],
-        indexes: Vec::new(),
+        indexes: vec![IndexDescriptor {
+            name: "people_name_idx".to_string(),
+            columns: vec!["name".to_string()],
+            unique: false,
+        }],
         runtime_options: TableRuntimeOptions::default(),
     }
 }
 
-/// The SAME `people` table hand-authored as an `op.*` `CreateTable` (the GENERATED
-/// source shape the JS recorder emits pre-resolution: user columns only, no system
-/// fields), then resolved through the create-table policy so the platform system
-/// columns are injected — the identical shape `descriptors_to_create_ops` yields.
-fn people_ops_generated() -> Vec<Op> {
-    let create = Op::CreateTable {
-        name: "people".to_string(),
-        columns: vec![
-            IrColumn {
-                name: "name".to_string(),
-                ty: ColType::String,
-                nullable: None,
-                default: None,
-                unique: None,
-                id_prefix: None,
-                vector_metric: None,
-                case_sensitive: None,
-                mask: None,
-                generated: None,
-                identity: None,
-            },
-            IrColumn {
-                name: "email".to_string(),
-                ty: ColType::String,
-                nullable: Some(false),
-                default: None,
-                unique: None,
-                id_prefix: None,
-                vector_metric: None,
-                case_sensitive: None,
-                mask: None,
-                generated: None,
-                identity: None,
-            },
+/// The RAW `people` `createTable` envelope EXACTLY as the pure-JS recorder emits it:
+/// author columns ONLY (no system fields), no top-level primary key, plus the ONE
+/// author-declared index. This is the UNRESOLVED shape — [`people_ops_generated`]
+/// resolves it through the confined profile, mirroring `gen_artifacts_from_envelopes`.
+fn people_raw_envelope() -> MigrationIr {
+    let create: Op = serde_json::from_value(serde_json::json!({
+        "op": "createTable",
+        "name": "people",
+        "columns": [
+            { "name": "name", "type": "string" },
+            { "name": "email", "type": "string", "nullable": false }
         ],
-        primary_key: None,
-        constraints: Vec::new(),
-        indexes: Vec::new(),
-        partition_by: None,
-        runtime_options: Some(TableRuntimeOptions::default()),
-        schema: None,
-        existence_guard: None,
-    };
-    let ir = MigrationIr {
+        "primaryKey": null,
+        "indexes": [
+            { "name": "people_name_idx", "columns": [{ "kind": "column", "name": "name" }] }
+        ]
+    }))
+    .expect("raw createTable envelope deserializes");
+    MigrationIr {
         ir_version: zero_migrate::model::ir::CURRENT_IR_VERSION,
         name: "create_people".to_string(),
         owner_app: OWNER.to_string(),
@@ -106,9 +96,37 @@ fn people_ops_generated() -> Vec<Op> {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         checksum: None,
-    };
-    // Inject the platform system columns exactly as the produce path does.
-    resolve_create_table_policy(&ir, &PolicyProfile::confined())
+    }
+}
+
+/// The GENERATED source: the RAW author-only recorder envelope resolved through the
+/// create-table policy under the Confined profile — the EXACT step
+/// `gen_artifacts_from_envelopes` runs before folding. The raw side carries NO system
+/// columns; resolution injects the 7 system fields + `[id]` PK + 3 system indexes.
+fn people_ops_generated() -> Vec<Op> {
+    let raw = people_raw_envelope();
+    // Sanity: the raw recorder shape has ONLY the two author columns — no system
+    // fields, no top-level PK. If this ever grows system columns the test is no
+    // longer exercising the resolution path.
+    if let Op::CreateTable {
+        columns,
+        primary_key,
+        ..
+    } = &raw.ops[0]
+    {
+        assert_eq!(
+            columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["name", "email"],
+            "the raw recorder envelope carries author columns ONLY (pre-resolution)"
+        );
+        assert!(
+            primary_key.is_none(),
+            "the raw recorder envelope has no author primary key"
+        );
+    } else {
+        panic!("expected a createTable");
+    }
+    resolve_create_table_policy(&raw, &PolicyProfile::confined())
         .expect("create-table policy resolves")
         .ops
 }
@@ -177,6 +195,14 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
             "index fields is a string array: {idx}"
         );
     }
+    // Wall-2: the author-declared index survives into the descriptor alongside the
+    // injected system indexes (it is NOT dropped by the producer).
+    assert!(
+        indexes
+            .iter()
+            .any(|idx| idx["name"] == "people_name_idx"),
+        "the author-declared index is emitted, not dropped: {indexes:?}"
+    );
 }
 
 #[test]

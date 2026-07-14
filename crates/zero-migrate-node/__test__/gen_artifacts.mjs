@@ -1,19 +1,21 @@
 // Behavioral JS gate for the sync, DB-free `genArtifacts` verb through the REAL
 // napi boundary. Proves:
-//   1. the GENERATED source (a RESOLVED create-table IR envelope — the shape the
-//      recorder emits, with the 7 platform system columns + system indexes injected)
-//      and the MANUAL source (the equivalent declared descriptor set, which the
-//      producer resolves internally) emit BYTE-IDENTICAL `runtimeJson` + `envDbTs`;
-//   2. the emitted `runtimeJson` parses + satisfies the v1 shape;
+//   1. the GENERATED source (a RAW author-only create-table IR envelope — the exact
+//      shape the pure-JS recorder emits, with NO system columns) and the MANUAL
+//      source (the equivalent declared descriptor set) emit BYTE-IDENTICAL
+//      `runtimeJson` + `envDbTs`;
+//   2. the emitted `runtimeJson` parses + satisfies the v1 shape (incl. the 7 system
+//      fields the RESOLVE injects);
 //   3. the emitted `envDbTs` is a real `.ts` module of `t.*()` builder calls;
 //   4. the error arms fail soft (never throw) — both-arms + no-arm + malformed.
 //
-// NB on (1): `fold_to_field_defs` folds ops AS-AUTHORED — it does not itself inject
-// system columns. The generated pipeline's recorder resolves the create-table
-// (system columns + `id` PK + the deleted_at/updated_at/created_by system indexes)
-// BEFORE the ops reach the fold; the manual producer (`descriptors_to_create_ops`)
-// does the same resolution. So the generated envelope below carries the RESOLVED
-// ops — exactly what makes the two sources "equivalent" and therefore byte-identical.
+// NB on (1): the pure-JS recorder emits RAW author-only ops. `genArtifacts` resolves
+// the confined system shape (the 7 system columns + `id` PK + the deleted_at/
+// updated_at/created_by system indexes) via `resolve_create_table_policy` BEFORE the
+// ops reach the fold; the manual producer (`descriptors_to_create_ops`) does the same
+// resolution. So the RAW generated envelope below and the descriptor set both resolve
+// to the SAME shape — which is what makes them byte-identical. This gate feeds RAW
+// (unresolved) ops on purpose: the true guarantee that resolution is wired.
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
@@ -25,7 +27,9 @@ function assert(cond, msg) {
   }
 }
 
-// --- The GENERATED source: the RESOLVED create-table envelope (recorder shape). ---
+// --- The GENERATED source: the RAW author-only create-table envelope (recorder shape:
+//     author columns ONLY, no system fields, no author PK — genArtifacts resolves the
+//     confined system shape before folding). ---
 const envelope = {
   ir_version: addon.irVersion(),
   name: 'create_widgets',
@@ -34,23 +38,12 @@ const envelope = {
       op: 'createTable',
       name: 'widgets',
       columns: [
-        { name: 'id', type: 'text', nullable: false },
-        { name: 'created_at', type: 'timestamp', nullable: false },
-        { name: 'updated_at', type: 'timestamp', nullable: false },
-        { name: 'created_by', type: 'text', nullable: true },
-        { name: 'updated_by', type: 'text', nullable: true },
-        { name: 'version', type: 'int', nullable: false },
-        { name: 'deleted_at', type: 'timestamp', nullable: true },
         { name: 'label', type: 'text' },
         { name: 'count', type: 'int', nullable: false },
       ],
-      primaryKey: ['id'],
+      primaryKey: null,
       constraints: [],
-      indexes: [
-        { columns: [{ kind: 'column', name: 'deleted_at' }] },
-        { columns: [{ kind: 'column', name: 'updated_at' }] },
-        { columns: [{ kind: 'column', name: 'created_by' }] },
-      ],
+      indexes: [],
       runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
     },
   ],
