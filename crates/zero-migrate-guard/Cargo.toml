@@ -29,6 +29,11 @@ thiserror = { workspace = true }
 # `VendorCapabilities`/`OperatorCapability`/`DestructiveOps`), and the
 # `SqlDialect` deploy-target enum the guard keys dialect behaviour on.
 zero-migrate-ir = { workspace = true }
+# The Policy Decision Point: the unforgeable EffectivePolicy the guard now queries
+# (grants/obligations) for its capability + data-security gate, plus the KnobKey/
+# KnobValue vocabulary and the object model (ObjectName). The guard holds an
+# EffectivePolicy and asks it — it no longer reads a raw VendorCapabilities bit.
+zero-migrate-policy = { workspace = true }
 
 [dev-dependencies]
 # The guard's in-crate tests mint operator-gated profiles.
