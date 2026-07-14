@@ -59,6 +59,23 @@ pub const KEY_PG_SCHEMA: &str = "pg.schema";
 /// `CREATE SCHEMA` (PerSchema Bool grant), engine-neutral spelling — the same
 /// capability under the `core.` namespace the portable op vocabulary uses.
 pub const KEY_CORE_CREATE_SCHEMA: &str = "core.create_schema";
+/// Namespace-authority: may CREATE a table matching this scope (PerTable Bool
+/// grant, default-deny). The per-op anchor of the II.2.6a creation-gating: an
+/// object comes into existence ONLY where this grants (structured `createTable`
+/// AND a classified raw `CREATE TABLE` both check it). The compose-time
+/// `creatable ⊑ mandatory-inject` lint lives in the policy crate; the guard
+/// enforces the per-op grant.
+pub const KEY_CORE_CREATE_TABLE: &str = "core.create_table";
+/// Namespace-authority: may name/move a table INTO this scope — the TARGET of a
+/// `RENAME` / `SET SCHEMA` / create-as (PerTable Bool grant, default-deny,
+/// II.2.6a). Closes the rename-TOCTOU: a cross-scope move needs this grant on the
+/// target scope.
+pub const KEY_CORE_RENAME_INTO: &str = "core.rename_into";
+/// Namespace-authority: may `ALTER`/`DROP`/`RENAME` an INJECTED shape element
+/// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny,
+/// II.2.6b). Injected shape is the operator's floor and immutable by default; only
+/// this grant waves the injected-shape-immutability denial.
+pub const KEY_CORE_ALTER_INJECTED_COLUMN: &str = "core.alter_injected_column";
 /// `CREATE/DROP POLICY` — row-security policy (PerTable Bool grant).
 pub const KEY_PG_POLICY: &str = "pg.policy";
 /// RLS `ENABLE/FORCE/DISABLE/NO FORCE` (PerTable Bool grant).
@@ -217,6 +234,10 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_PG_EXTENSION, ObjectModel::Global, true, "CREATE EXTENSION (per-name allowlist on pg.extensions)."),
             bool_grant(KEY_PG_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (Postgres spelling)."),
             bool_grant(KEY_CORE_CREATE_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (engine-neutral spelling)."),
+            // ── namespace-authority creation/movement/immutability grants (II.2.6) ─
+            bool_grant(KEY_CORE_CREATE_TABLE, ObjectModel::PerTable, false, "May CREATE a table matching this scope (default-deny namespace anchor)."),
+            bool_grant(KEY_CORE_RENAME_INTO, ObjectModel::PerTable, false, "May name/move a table INTO this scope (RENAME / SET SCHEMA target)."),
+            bool_grant(KEY_CORE_ALTER_INJECTED_COLUMN, ObjectModel::PerTable, false, "May ALTER/DROP/RENAME an injected shape element (column, pinned PK, index)."),
             bool_grant(KEY_PG_POLICY, ObjectModel::PerTable, true, "CREATE/DROP POLICY (row-security policy)."),
             bool_grant(KEY_PG_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
             bool_grant(KEY_PG_PARTITION, ObjectModel::Global, false, "ALTER TABLE ATTACH/DETACH PARTITION."),
@@ -290,6 +311,27 @@ mod tests {
         // PerTable: RLS + policy.
         assert_eq!(om(KEY_PG_RLS), ObjectModel::PerTable);
         assert_eq!(om(KEY_PG_POLICY), ObjectModel::PerTable);
+        // PerTable: the namespace-authority creation/movement/immutability anchors.
+        assert_eq!(om(KEY_CORE_CREATE_TABLE), ObjectModel::PerTable);
+        assert_eq!(om(KEY_CORE_RENAME_INTO), ObjectModel::PerTable);
+        assert_eq!(om(KEY_CORE_ALTER_INJECTED_COLUMN), ObjectModel::PerTable);
+    }
+
+    #[test]
+    fn namespace_authority_grants_default_deny() {
+        // Creation/movement/immutability anchors are Grant-polarity + default-deny:
+        // an object comes into existence / a shape mutates only where explicitly
+        // granted (II.2.6).
+        let reg = builtin_registry();
+        for k in [
+            KEY_CORE_CREATE_TABLE,
+            KEY_CORE_RENAME_INTO,
+            KEY_CORE_ALTER_INJECTED_COLUMN,
+        ] {
+            let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
+            assert_eq!(def.polarity, Polarity::Grant, "{k} is a Grant");
+            assert_eq!(def.default, KnobValue::Bool(false), "{k} defaults to deny");
+        }
     }
 
     #[test]
