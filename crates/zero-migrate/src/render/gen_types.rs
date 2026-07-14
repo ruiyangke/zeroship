@@ -537,9 +537,8 @@ fn render_env_db_ts(
 /// the modifiers (`.unique()`/`.required()`/`.enum()`/`.min()`/`.max()`/`.mask()`/
 /// `.fts()`/`.default()`) chain off it in a stable order.
 fn render_builder_chain(def: &Value) -> String {
-    let obj = match def.as_object() {
-        Some(o) => o,
-        None => return "t.json()".to_string(),
+    let Some(obj) = def.as_object() else {
+        return "t.json()".to_string();
     };
     let type_token = obj.get("type").and_then(Value::as_str).unwrap_or("json");
     let has_encrypted = obj.get("encrypted").is_some();
@@ -647,9 +646,8 @@ fn render_builder_chain(def: &Value) -> String {
 /// `{ … }` opts. The FULL facet is always preserved in `schema.runtime.json`; this
 /// collapse is a readability choice, not a loss.
 fn render_encrypted_base(obj: &serde_json::Map<String, Value>) -> String {
-    let enc = match obj.get("encrypted").and_then(Value::as_object) {
-        Some(e) => e,
-        None => return "t.encrypted()".to_string(),
+    let Some(enc) = obj.get("encrypted").and_then(Value::as_object) else {
+        return "t.encrypted()".to_string();
     };
     let mode = enc.get("mode").and_then(Value::as_str);
     let key_id = enc.get("keyId").and_then(Value::as_str);
@@ -843,7 +841,7 @@ fn first_divergence(committed: &str, generated: &str) -> String {
     loop {
         line += 1;
         match (c.next(), g.next()) {
-            (Some(a), Some(b)) if a == b => continue,
+            (Some(a), Some(b)) if a == b => {}
             (a, b) => {
                 return format!(
                     "  first divergence at line {line}:\n  - committed: {}\n  + generated: {}",

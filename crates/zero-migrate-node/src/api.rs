@@ -15,11 +15,13 @@
 
 use std::collections::HashMap;
 
-use zero_migrate::model::ir::CURRENT_IR_VERSION;
+use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
 use zero_migrate::model::load::load_ir_document;
 use zero_migrate::model::validate::Dialect;
+use zero_migrate::render::declarative::CollectionDescriptor;
+use zero_migrate::{render_artifacts, render_artifacts_from_descriptors, DEFAULT_PROJECT_SCHEMA};
 
-use crate::wire::LoadVerifyReply;
+use crate::wire::{GenArtifactsReply, LoadVerifyReply};
 
 /// The IR-format version this addon was built against (`ir_version` fail-closed
 /// floor). Surfaced so a host can pre-check an artifact's version.
@@ -82,6 +84,75 @@ pub fn load_verify(
     }
 }
 
+/// Render the two schema artifacts from the GENERATED source: a set of IR
+/// envelopes (`{ ir_version, name, ops }`). Each envelope's `ops` are concatenated
+/// in order and folded through the shared renderer.
+///
+/// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
+///
+/// Returns a [`GenArtifactsReply`]; a malformed envelope / incoherent op stream
+/// yields `ok: false` with the message, never a panic.
+#[must_use]
+pub fn gen_artifacts_from_envelopes(
+    envelopes: &[serde_json::Value],
+    project_schema: Option<&str>,
+) -> GenArtifactsReply {
+    let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
+    let mut ops: Vec<Op> = Vec::new();
+    for (i, env) in envelopes.iter().enumerate() {
+        let ir: MigrationIr = match serde_json::from_value(env.clone()) {
+            Ok(ir) => ir,
+            Err(e) => {
+                return gen_err(format!("envelope[{i}] is not a valid IR document: {e}"));
+            }
+        };
+        ops.extend(ir.ops);
+    }
+    match render_artifacts(&ops, schema) {
+        Ok(a) => gen_ok(a),
+        Err(e) => gen_err(e.to_string()),
+    }
+}
+
+/// Render the two schema artifacts from the MANUAL source: a declared
+/// `CollectionDescriptor` set. The descriptors are turned into `createTable` ops via
+/// the producer and folded through the SAME renderer tail — so the manual output is
+/// byte-identical to the generated output for an equivalent schema.
+///
+/// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
+///
+/// Returns a [`GenArtifactsReply`]; a descriptor set the producer/fold refuses
+/// yields `ok: false` with the message, never a panic.
+#[must_use]
+pub fn gen_artifacts_from_descriptors(
+    descriptors: &[CollectionDescriptor],
+    project_schema: Option<&str>,
+) -> GenArtifactsReply {
+    let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
+    match render_artifacts_from_descriptors(descriptors, schema) {
+        Ok(a) => gen_ok(a),
+        Err(e) => gen_err(e.to_string()),
+    }
+}
+
+fn gen_ok(artifacts: zero_migrate::GeneratedArtifacts) -> GenArtifactsReply {
+    GenArtifactsReply {
+        ok: true,
+        env_db_ts: Some(artifacts.env_db_ts),
+        runtime_json: Some(artifacts.runtime_json),
+        error: None,
+    }
+}
+
+fn gen_err(msg: impl Into<String>) -> GenArtifactsReply {
+    GenArtifactsReply {
+        ok: false,
+        env_db_ts: None,
+        runtime_json: None,
+        error: Some(msg.into()),
+    }
+}
+
 fn err_report(msg: impl Into<String>) -> LoadVerifyReply {
     LoadVerifyReply {
         ok: false,
@@ -116,6 +187,62 @@ mod tests {
         let r = load_verify("{not json", "app_x", "postgres", &empty_registry());
         assert!(!r.ok);
         assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn gen_artifacts_from_envelopes_renders_both_files() {
+        // A minimal generated source: one create-table envelope. The ops are folded
+        // as-authored (the recorder resolves system columns upstream; here we author
+        // a single user column to exercise the pure fold + emit).
+        let envelope = serde_json::json!({
+            "ir_version": current_ir_version(),
+            "name": "create_widgets",
+            "ops": [{
+                "op": "createTable",
+                "name": "widgets",
+                "columns": [{ "name": "label", "type": "string" }],
+                "primaryKey": null
+            }]
+        });
+        let reply = gen_artifacts_from_envelopes(&[envelope], None);
+        assert!(reply.ok, "render ok: {:?}", reply.error);
+        let runtime = reply.runtime_json.expect("runtime json");
+        let ts = reply.env_db_ts.expect("env.db.ts");
+        assert!(runtime.contains("\"version\": 1"), "v1 descriptor: {runtime}");
+        assert!(runtime.contains("\"widgets\""), "carries the table: {runtime}");
+        assert!(
+            ts.contains("label: t.string(),"),
+            "env.db.ts renders the builder chain: {ts}"
+        );
+    }
+
+    #[test]
+    fn gen_artifacts_from_a_malformed_envelope_fails_soft() {
+        let bad = serde_json::json!({ "ir_version": current_ir_version(), "ops": "not-an-array" });
+        let reply = gen_artifacts_from_envelopes(&[bad], None);
+        assert!(!reply.ok);
+        assert!(reply.error.is_some());
+        assert!(reply.runtime_json.is_none());
+    }
+
+    #[test]
+    fn gen_artifacts_from_descriptors_renders_both_files() {
+        use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+        let descriptor = CollectionDescriptor {
+            name: "widgets".to_string(),
+            owner_app: "app_x".to_string(),
+            fields: vec![FieldDescriptor {
+                name: "label".to_string(),
+                ty: "string".to_string(),
+                ..Default::default()
+            }],
+            indexes: Vec::new(),
+            runtime_options: Default::default(),
+        };
+        let reply = gen_artifacts_from_descriptors(&[descriptor], None);
+        assert!(reply.ok, "render ok: {:?}", reply.error);
+        assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
+        assert!(reply.env_db_ts.unwrap().contains("label: t.string(),"));
     }
 
     #[test]

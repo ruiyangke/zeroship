@@ -247,6 +247,156 @@ pub struct HistoryReply {
     pub events: Vec<HistoryEventDto>,
 }
 
+// ---------------------------------------------------------------------------
+// `genArtifacts` — the sync, DB-free schema-artifact emitter verb.
+// ---------------------------------------------------------------------------
+
+/// The typed reply for `genArtifacts`: the two CO-EMITTED artifact strings.
+///
+/// napi-neutral (plain string/option fields) so [`crate::api`] builds it on the
+/// napi-free test path too. `ok=false` + `error` on a fold/produce failure (never a
+/// throw).
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Clone)]
+pub struct GenArtifactsReply {
+    /// `true` iff both artifacts rendered cleanly.
+    pub ok: bool,
+    /// The generated `env.db.ts` source (a real `.ts` module of `t.*()` builder
+    /// calls + the `declare module "zeroship"` augmentation). `None` on failure.
+    pub env_db_ts: Option<String>,
+    /// The `schema.runtime.json` bytes (the v1 `RuntimeSchemaDescriptor`, pretty +
+    /// trailing newline). `None` on failure.
+    pub runtime_json: Option<String>,
+    /// A human-readable error when `ok == false`.
+    pub error: Option<String>,
+}
+
+/// One declared field of a collection — the MANUAL-source `FieldDescriptor` mirror.
+///
+/// Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
+/// The common facets are typed scalars; the rich sub-object facets (`encrypted`,
+/// `mask`, `generated`, `identity`) cross as REAL JS values ([`JsonValue`]) and
+/// deserialize into the engine `FieldDescriptor` verbatim.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct FieldDescriptorDto {
+    /// The field (column) name.
+    pub name: String,
+    /// The DSL type token (`string` | `number` | `boolean` | `date` |
+    /// `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | …).
+    #[napi(js_name = "type")]
+    pub ty: String,
+    /// `true` ⇒ `NOT NULL`.
+    pub required: Option<bool>,
+    /// `true` ⇒ a unique index over this column.
+    pub unique: Option<bool>,
+    /// For a `ref` field, the referenced collection (FK target table).
+    pub references: Option<String>,
+    /// `ref` ON DELETE policy (`cascade`|`restrict`|`setNull`|`setDefault`|`noAction`).
+    pub on_delete: Option<String>,
+    /// `ref` ON UPDATE policy.
+    pub on_update: Option<String>,
+    /// Whether the FK is `DEFERRABLE INITIALLY DEFERRED`.
+    pub deferrable: Option<bool>,
+    /// Column `DEFAULT` value.
+    pub default: Option<JsonValue>,
+    /// Numeric `min` bound (lifts a CHECK).
+    pub min: Option<f64>,
+    /// Numeric `max` bound (lifts a CHECK).
+    pub max: Option<f64>,
+    /// Enum membership (string or numeric members).
+    #[napi(js_name = "enum")]
+    pub enum_values: Option<Vec<JsonValue>>,
+    /// A `t.id(prefix)` typed-id prefix.
+    pub id_prefix: Option<String>,
+    /// A `t.vector(dims, …)` dimensionality.
+    pub vector_dims: Option<i64>,
+    /// A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`).
+    pub vector_metric: Option<String>,
+    /// `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful.
+    pub case_sensitive: Option<bool>,
+    /// The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim).
+    pub encrypted: Option<JsonValue>,
+    /// The `.mask({ kind, classification })` sub-object (verbatim).
+    pub mask: Option<JsonValue>,
+    /// `t.string().fts(language?)` participation flag.
+    pub fts: Option<bool>,
+    /// The FTS tsvector configuration token.
+    pub fts_language: Option<String>,
+    /// A generated/computed column facet (structured IR, never raw SQL).
+    pub generated: Option<JsonValue>,
+    /// A SQL identity column facet.
+    pub identity: Option<JsonValue>,
+}
+
+/// One declared named index of a collection (the `_indexes` array entry).
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct IndexDescriptorDto {
+    /// The index name (already collision-stable from the SDK).
+    pub name: String,
+    /// The columns the index covers, in order.
+    pub columns: Vec<String>,
+    /// `true` ⇒ a unique index.
+    pub unique: Option<bool>,
+}
+
+/// Per-collection runtime options that do not round-trip through catalog state.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct RuntimeOptionsDto {
+    /// `schema(...).softDelete()`.
+    pub soft_delete: Option<bool>,
+    /// `schema(...).withVersioning()`.
+    pub versioning: Option<bool>,
+    /// `schema(...).strictness(...)` — `"strict"` | `"lenient"` | `"off"`. Default
+    /// (absent) is `"strict"`.
+    pub strictness: Option<String>,
+}
+
+/// One declared collection (table) — the MANUAL-source `CollectionDescriptor` mirror.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct CollectionDescriptorDto {
+    /// The collection (table) name.
+    pub name: String,
+    /// The declaring app id (`app_…`). The migrate producer stamps ownership from it.
+    pub owner_app: String,
+    /// The declared fields (columns), excluding platform system fields (injected by
+    /// the producer).
+    pub fields: Vec<FieldDescriptorDto>,
+    /// The declared named indexes.
+    pub indexes: Option<Vec<IndexDescriptorDto>>,
+    /// Per-collection runtime options (`softDelete`/`versioning`/`strictness`).
+    pub runtime_options: Option<RuntimeOptionsDto>,
+}
+
+/// The tagged SOURCE for `genArtifacts` — EITHER IR envelopes (the generated
+/// source) OR a declared descriptor set (the manual source). A `#[napi(object)]`
+/// cannot be a Rust enum with data, so the two arms are optional fields; exactly one
+/// must be populated. Both arms funnel through the SAME Rust renderer, so their
+/// output is byte-identical for equivalent schemas.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct GenArtifactsSource {
+    /// The GENERATED source: a set of IR envelopes (`{ ir_version, name, ops }`), in
+    /// version order. Their `ops` are concatenated and folded. Mutually exclusive
+    /// with `descriptors`.
+    pub envelopes: Option<Vec<JsonValue>>,
+    /// The MANUAL source: a declared `CollectionDescriptor` set. Turned into
+    /// `createTable` ops via the producer, then folded through the same tail.
+    /// Mutually exclusive with `envelopes`.
+    pub descriptors: Option<Vec<CollectionDescriptorDto>>,
+    /// The project schema the fold threads (FK `definition`s embed it). Optional;
+    /// defaults to `"public"`.
+    pub project_schema: Option<String>,
+}
+
 /// The typed reply for the sync, DB-free `loadVerify` gate. Never throws for a
 /// malformed document; `ok=false` + a message.
 ///
