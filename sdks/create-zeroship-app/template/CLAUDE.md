@@ -60,9 +60,11 @@ the handler with `env.auth.getUser()` / `env.auth.requireUser()`.
 - `env.db` — typed structured CRUD, `env.db.<collection>.find()/insert()/delete()`,
   **no raw SQL**. The types come from `migrations/` → `generated/zeroship/env.db.ts`.
   **To add/change a table: edit a migration** (op.* DSL). Gen-types records
-  `migrations/*.ts` in the sandbox and folds transient IR in memory; there is no
+  `migrations/*.ts` in-process and folds transient IR in memory; there is no
   committed `.ir.json` sibling. Regenerate the generated artifacts via the Vite
-  build or `zeroship-migrate-js gen-types`.
+  build (`pnpm build`, or `vite build --mode development` to write without the
+  generated-artifact check); the dev server (`pnpm dev`) also regenerates on any
+  change under `migrations/`.
 - `@zeroship/storage` — `bucket("name").put/get/delete/list`, object storage.
 - `@zeroship/kv` — ephemeral key-value: get/set with TTL, atomic counters, leases.
 - `env.auth` — request identity: `getUser()` → user or `null`, `requireUser()`
@@ -76,10 +78,11 @@ pnpm build      # → dist/app.zship
 ```
 
 `pnpm build` runs `vite build`; the zeroship plugin discovers the `"use server"`
-RPC functions, folds migrations into the generated `env.db` types, bundles the
-server module + static client, and writes `dist/app.zship`. If a build that
-ships migrations runs the gen-types generated-artifact check, keep
-`zeroship-migrate-js` on PATH (or set `ZEROSHIP_MIGRATE_JS_BIN`).
+RPC functions, folds migrations into the generated `env.db` types (in-process —
+no external binary), bundles the server module + static client, and writes
+`dist/app.zship`. A production build runs the gen-types generated-artifact check
+and fails if `generated/zeroship/{env.db.ts,schema.runtime.json}` drift from the
+migrations — regenerate with `vite build --mode development`.
 
 ## Deploy
 

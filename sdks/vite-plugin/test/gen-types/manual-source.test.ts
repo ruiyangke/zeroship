@@ -141,18 +141,15 @@ describe("Cut 1 — manual schema source", () => {
       // Options reflected.
       assert.equal(json.collections.users.options.softDelete, true, "softDelete honoured");
 
-      // KNOWN STEP-1 GAP (standalone `descriptors_to_create_ops`): the manual
-      // producer hardcodes `Op::CreateTable { indexes: Vec::new() }`
-      // (zero-migrate fold.rs:3090), so it injects the SYSTEM indexes but DROPS
-      // author-declared named indexes. The JS mapper carries the index into the
-      // DTO correctly (see schema-module-to-descriptors); the drop is entirely
-      // downstream in the Rust producer. Pin the current behaviour so a fix in
-      // the standalone flips this expectation loudly.
+      // W2 (standalone `descriptors_to_create_ops`, commit 24038ed): author-declared
+      // named indexes now SURVIVE the manual producer path — they are carried through
+      // `descriptors_to_create_ops` into the CreateTable op, alongside the injected
+      // system indexes. (The earlier Step-1 gap that dropped them is fixed.)
       const idxNames: string[] = json.collections.users.indexes.map((i: { name: string }) => i.name);
       assert.ok(idxNames.includes("users_updated_at_idx"), "system index injected");
       assert.ok(
-        !idxNames.includes("users_email_idx"),
-        "author named index is dropped by the standalone producer (known Step-1 gap)",
+        idxNames.includes("users_email_idx"),
+        "author named index survives descriptors_to_create_ops (W2 fix)",
       );
     } finally {
       await fx.cleanup();
