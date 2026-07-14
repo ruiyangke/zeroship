@@ -168,20 +168,54 @@ impl GuardConfig {
         }
     }
 
+    /// Construct a **Confined** guard whose PDP is a caller-composed
+    /// [`EffectivePolicy`] (Phase 2 Step 2b). Unlike [`GuardConfig::confined`] — whose
+    /// effective policy is derived from the fixed confined [`VendorCapabilities`] and
+    /// therefore carries no `inject` rules — this takes an `EffectivePolicy` that may
+    /// carry inject/validate rules + scoped creation grants, so the guard's raw-SQL
+    /// classification (II.2.5: `RawCreateInInjectScope` / creation-gating) and
+    /// injected-shape immutability (II.2.6b) can be exercised against a real inject
+    /// scope. The belt still runs (Confined posture); `project_schema` supplies the
+    /// cross-schema confinement pin.
+    ///
+    /// This is the forward-compatible seam toward Step 3's
+    /// `from_policy(&EffectivePolicy, dialect)` — it does not delete or alter any
+    /// existing constructor. The `EffectivePolicy` is unforgeable (only
+    /// `compose_strict`/`compose_clamp` produce one), so a caller cannot smuggle an
+    /// escalated grant through it.
+    #[must_use]
+    pub fn confined_with_effective(
+        project_schema: impl Into<String>,
+        effective: EffectivePolicy,
+    ) -> Self {
+        Self::from_policy(
+            effective,
+            SqlDialect::Postgres,
+            TrustProfile::Confined,
+            VendorCapabilities::confined(),
+            false,
+            SchemaScope::Single(project_schema.into()),
+            Vec::new(),
+            false,
+            DestructiveOps::Allow,
+        )
+    }
+
     /// The ONLY constructor reachable from the submission ingress and every
     /// creator-path author. Always `Confined`, single-schema, empty extensions.
     /// Needs NO token — Confined is the safe default anyone may construct.
     #[must_use]
     pub fn confined(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
+        let schemas = SchemaScope::Single(project_schema.into());
         Self::from_policy(
-            effective_policy_from_caps(&capabilities, &[]),
+            effective_policy_from_caps(&capabilities, &[], &schemas),
             // Default to the PG line-1 guard — byte-identical to before PHASE 4.
             SqlDialect::Postgres,
             TrustProfile::Confined,
             capabilities,
             false,
-            SchemaScope::Single(project_schema.into()),
+            schemas,
             Vec::new(),
             false,
             DestructiveOps::Allow,
@@ -199,13 +233,14 @@ impl GuardConfig {
     #[must_use]
     pub fn confined_sqlite(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
+        let schemas = SchemaScope::Single(project_schema.into());
         Self::from_policy(
-            effective_policy_from_caps(&capabilities, &[]),
+            effective_policy_from_caps(&capabilities, &[], &schemas),
             SqlDialect::Sqlite,
             TrustProfile::Confined,
             capabilities,
             false,
-            SchemaScope::Single(project_schema.into()),
+            schemas,
             Vec::new(),
             false,
             DestructiveOps::Allow,
@@ -219,13 +254,14 @@ impl GuardConfig {
     #[must_use]
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
+        let schemas = SchemaScope::Single(project_schema.into());
         Self::from_policy(
-            effective_policy_from_caps(&capabilities, &[]),
+            effective_policy_from_caps(&capabilities, &[], &schemas),
             SqlDialect::Mysql,
             TrustProfile::Confined,
             capabilities,
             false,
-            SchemaScope::Single(project_schema.into()),
+            schemas,
             Vec::new(),
             false,
             DestructiveOps::Allow,
@@ -282,7 +318,8 @@ impl GuardConfig {
         self.extension_allowlist = extensions;
         // The `pg.extensions` StrSet grant in the effective policy carries the
         // allowlist, so re-derive it after mutating the field.
-        self.effective = effective_policy_from_caps(&self.capabilities, &self.extension_allowlist);
+        self.effective =
+            effective_policy_from_caps(&self.capabilities, &self.extension_allowlist, &self.schemas);
         self
     }
 
@@ -309,6 +346,7 @@ impl GuardConfig {
         self.effective = effective_policy_from_posture(
             &self.capabilities,
             &self.extension_allowlist,
+            &self.schemas,
             self.require_rls,
             self.destructive_ops,
         );
@@ -327,15 +365,16 @@ impl GuardConfig {
     ) -> Self {
         let mut capabilities = VendorCapabilities::operator();
         capabilities.schemas = schemas.clone();
+        let schema_scope = SchemaScope::Allowlist(schemas);
         Self::from_policy(
-            effective_policy_from_caps(&capabilities, &extension_allowlist),
+            effective_policy_from_caps(&capabilities, &extension_allowlist, &schema_scope),
             // Platform is a PG-only posture (it fail-closes to Confined on SQLite
             // via `for_dialect`); the config itself is always PG.
             SqlDialect::Postgres,
             TrustProfile::Platform,
             capabilities,
             false,
-            SchemaScope::Allowlist(schemas),
+            schema_scope,
             extension_allowlist,
             false,
             DestructiveOps::Allow,
@@ -356,8 +395,12 @@ impl GuardConfig {
     #[must_use]
     pub fn trusted(_cap: &OperatorCapability) -> Self {
         let capabilities = VendorCapabilities::operator();
+        // Inert empty allowlist → `creation_grant_schemas` yields a ⊤ creation
+        // grant, but Trusted skips the whole belt (no statement-kind gate), so the
+        // grant is never consulted; kept uniform.
+        let schema_scope = SchemaScope::Allowlist(Vec::new());
         Self::from_policy(
-            effective_policy_from_caps(&capabilities, &[]),
+            effective_policy_from_caps(&capabilities, &[], &schema_scope),
             SqlDialect::Postgres,
             TrustProfile::Trusted,
             capabilities,
@@ -366,7 +409,7 @@ impl GuardConfig {
             // cross-schema walk) nor `extension_allowlist` (no statement-kind
             // gate). Kept empty so a future code path can never accidentally
             // read a stale allowlist.
-            SchemaScope::Allowlist(Vec::new()),
+            schema_scope,
             Vec::new(),
             false,
             DestructiveOps::Allow,
@@ -556,8 +599,37 @@ fn global_witness() -> ObjectName {
 ///
 /// The build is total: a malformed intermediate document is a programming error
 /// (fixed literals), so any failure fails closed to `deny_all`.
-fn effective_policy_from_caps(caps: &VendorCapabilities, allowlist: &[String]) -> EffectivePolicy {
-    effective_policy_from_posture(caps, allowlist, false, DestructiveOps::Allow)
+fn effective_policy_from_caps(
+    caps: &VendorCapabilities,
+    allowlist: &[String],
+    schemas: &SchemaScope,
+) -> EffectivePolicy {
+    effective_policy_from_posture(caps, allowlist, schemas, false, DestructiveOps::Allow)
+}
+
+/// The `core.create_table` / `core.rename_into` creation-gating grant scope for a
+/// posture (II.2.6a). Creation is now default-deny; a posture that legitimately
+/// creates tables must GRANT the anchor over the region it owns:
+///
+/// - **Confined** `Single(project_schema)` → grant scoped to that one schema
+///   (`["<schema>"]`), so a confined migration may create/rename tables in its own
+///   project schema but nowhere else. An empty project schema (the degenerate
+///   [`GuardConfig::default`]) grants `all` — there is no schema to scope by, and a
+///   default guard historically created tables freely; the cross-schema walk is the
+///   real confinement there.
+/// - **Platform** `Allowlist(schemas)` → grant scoped to each allowlisted schema.
+///   Empty allowlist ⇒ `all` (Trusted's inert shape never reaches this — Trusted
+///   skips the belt entirely).
+///
+/// Returns `None` for a `⊤` (all-schemas) grant, or `Some(scopes)` for the concrete
+/// schema list to author `include`-scoped grants over.
+fn creation_grant_schemas(schemas: &SchemaScope) -> Option<Vec<String>> {
+    match schemas {
+        SchemaScope::Single(s) if !s.is_empty() => Some(vec![s.clone()]),
+        SchemaScope::Single(_) => None, // empty project schema → ⊤
+        SchemaScope::Allowlist(list) if !list.is_empty() => Some(list.clone()),
+        SchemaScope::Allowlist(_) | SchemaScope::Unconfined => None,
+    }
 }
 
 /// Like [`effective_policy_from_caps`], additionally folding the data-security
@@ -566,6 +638,7 @@ fn effective_policy_from_caps(caps: &VendorCapabilities, allowlist: &[String]) -
 fn effective_policy_from_posture(
     caps: &VendorCapabilities,
     allowlist: &[String],
+    schemas: &SchemaScope,
     require_rls: bool,
     destructive_ops: DestructiveOps,
 ) -> EffectivePolicy {
@@ -597,6 +670,28 @@ fn effective_policy_from_posture(
     grant_bool(policy_registry::KEY_CORE_RAW_VIEW_BODY, caps.allow_raw_view_body);
     grant_bool(policy_registry::KEY_PG_MATERIALIZED_VIEW, caps.allow_materialized_view);
     grant_bool(policy_registry::KEY_CORE_CROSS_SCHEMA, caps.allow_cross_schema);
+
+    // ── namespace-authority creation-gating (II.2.6a) ──────────────────────────
+    // Creation is default-deny; a posture that legitimately creates/moves tables
+    // GRANTS `core.create_table` + `core.rename_into` over the region it owns (its
+    // project schema(s)), so an existing confined/platform `CREATE TABLE` in-scope
+    // stays an effective allow while a create OUTSIDE that scope is now denied.
+    {
+        let create_scope = match creation_grant_schemas(schemas) {
+            Some(list) => serde_json::json!({ "include": list }),
+            None => serde_json::json!("all"),
+        };
+        for key in [
+            policy_registry::KEY_CORE_CREATE_TABLE,
+            policy_registry::KEY_CORE_RENAME_INTO,
+        ] {
+            grant_rules.push(serde_json::json!({
+                "key": key,
+                "value": true,
+                "scope": create_scope,
+            }));
+        }
+    }
 
     // ── CREATE EXTENSION name allowlist (StrSet) ───────────────────────────────
     if !allowlist.is_empty() {
@@ -1744,7 +1839,7 @@ pub fn check_raw_view_body_text(
         .unwrap_or_else(|| SchemaScope::Allowlist(Vec::new()));
     let capabilities = VendorCapabilities::confined();
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        effective_policy_from_caps(&capabilities, &[]),
+        effective_policy_from_caps(&capabilities, &[], &schemas),
         SqlDialect::Postgres,
         TrustProfile::Confined,
         capabilities,
