@@ -83,6 +83,6 @@ pub use scope::{
 pub use value_order::{join_value, leq_value, meet_value, ValueOrderError};
 pub use compose::{
     compose_clamp, compose_strict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy,
-    RootCeiling, ShapeElement,
+    GrantRegion, RootCeiling, ShapeElement,
 };
 pub use seal::{seal, SealError, SealedPolicy};

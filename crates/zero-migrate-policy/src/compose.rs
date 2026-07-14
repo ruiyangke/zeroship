@@ -311,6 +311,38 @@ impl EffectivePolicy {
         }
     }
 
+    /// `grant_is_top(key)` — is `key` granted (above its default) over the WHOLE
+    /// universe (`Scope::All`, ⊤)? True iff the region where `value ≠ default` is
+    /// `Scope::All`. This is the distinction the guard's II.2.5 scoped-raw-SQL rules
+    /// hinge on: an unqualified name / `SET search_path` / opaque body is admitted
+    /// **only** under a ⊤-scoped `core.raw_sql` grant; a merely-scoped grant (any
+    /// `Of{…}` region) is "non-⊤" and refuses them. `false` for an unknown key, a key
+    /// with no grant above default, or a strictly-narrower-than-⊤ grant.
+    #[must_use]
+    pub fn grant_is_top(&self, key: &KnobKey) -> bool {
+        matches!(self.grant_region(key), GrantRegion::Top)
+    }
+
+    /// `grant_region(key)` — the shape of the region where `key` is granted above its
+    /// default: `Ungranted` (nowhere / unknown key), `Top` (the whole universe, ⊤),
+    /// or `Scoped` (a proper, strictly-narrower-than-⊤ region). This is the three-way
+    /// distinction the guard's II.2.5 scoped-raw-SQL rules turn on: unqualified names /
+    /// `SET search_path` / opaque bodies are admitted under a `Top` `core.raw_sql`
+    /// grant, DENIED under a `Scoped` one, and simply not raw-SQL-gated at all when
+    /// `Ungranted`.
+    #[must_use]
+    pub fn grant_region(&self, key: &KnobKey) -> GrantRegion {
+        match self.grants.keys.get(key) {
+            Some(km) => match km.granted_scope() {
+                Ok(Scope::All) => GrantRegion::Top,
+                Ok(Scope::Nothing) => GrantRegion::Ungranted,
+                Ok(Scope::Of { .. }) => GrantRegion::Scoped,
+                Err(_) => GrantRegion::Ungranted,
+            },
+            None => GrantRegion::Ungranted,
+        }
+    }
+
     /// `obligations(object)` — every covering require rule's `(key, value)` at
     /// `object`, in composition order. The guard unions valued requires per object.
     #[must_use]
@@ -424,6 +456,19 @@ impl EffectivePolicy {
         }
         out
     }
+}
+
+/// The shape of the region where a grant key is above its default (II.2.5). The
+/// guard's scoped-raw-SQL rules turn on the three-way `Ungranted`/`Top`/`Scoped`
+/// distinction. See [`EffectivePolicy::grant_region`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GrantRegion {
+    /// Granted nowhere above default (or unknown key).
+    Ungranted,
+    /// Granted over the whole universe (`Scope::All`, ⊤).
+    Top,
+    /// Granted over a proper, strictly-narrower-than-⊤ region.
+    Scoped,
 }
 
 /// A shape element the guard asks about for injected-shape immutability (II.2.6b).

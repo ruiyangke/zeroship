@@ -39,7 +39,57 @@ use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
 use zero_migrate_ir::policy_registry;
-use zero_migrate_policy::{EffectivePolicy, KnobKey, KnobValue, ObjectName};
+use zero_migrate_policy::{
+    normalize_pg_identifier, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName,
+    ShapeElement,
+};
+
+/// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
+/// conservative-deny rules the policy redesign introduces on top of the deny-list:
+/// raw-SQL create/DDL classification, per-op creation-gating, and injected-shape
+/// immutability. Each fails closed with the design's named error code.
+pub mod namespace_rule {
+    /// II.2.5 — a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
+    /// `PARTITION OF` / `CREATE TABLE AS EXECUTE` / `INHERITS`) targets an object an
+    /// `inject` rule covers; injection cannot rewrite raw text, so only the
+    /// structured DSL may create an injected table.
+    pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
+    /// II.2.6a — a create (`CREATE TABLE`, structured or classified-raw) is not
+    /// covered by a `core.create_table` grant (default-deny namespace anchor).
+    pub const CREATE_TABLE_NOT_GRANTED: &str = "CreateTableNotGranted";
+    /// II.2.6a — a `CREATE SCHEMA` (structured or classified-raw) is not covered by
+    /// a `core.create_schema` grant.
+    pub const CREATE_SCHEMA_NOT_GRANTED: &str = "CreateSchemaNotGranted";
+    /// II.2.5 — a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
+    /// engine cannot re-inject over raw text, so the move is denied.
+    pub const RAW_RENAME_INTO_INJECT_SCOPE: &str = "RawRenameIntoInjectScope";
+    /// II.2.6a — a rename/move into a scope is not covered by a `core.rename_into`
+    /// grant at the target.
+    pub const RENAME_INTO_NOT_GRANTED: &str = "RenameIntoNotGranted";
+    /// II.2.5 — an unqualified object reference under a non-⊤ `core.raw_sql` grant is
+    /// unattributable (no live search_path to resolve it) → ⊤-only → deny.
+    pub const UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL: &str = "UnqualifiedNameUnderScopedRawSql";
+    /// II.2.5 — `SET search_path` (or equivalent) under a non-⊤ `core.raw_sql` grant
+    /// mutates the very name-resolution context attribution depends on → refused.
+    pub const SEARCH_PATH_UNDER_SCOPED_RAW_SQL: &str = "SearchPathUnderScopedRawSql";
+    /// II.2.5 — an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
+    /// `DO`) under a non-⊤ `core.raw_sql` grant defeats statement-level attribution.
+    pub const OPAQUE_BODY_UNDER_SCOPED_RAW_SQL: &str = "OpaqueBodyUnderScopedRawSql";
+    /// II.2.5 — a raw statement the parser cannot classify into exactly one shape,
+    /// or whose target is dynamic/unqualified, is unattributable under a non-⊤ grant.
+    pub const UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL: &str = "UnattributableRawUnderScopedRawSql";
+    /// II.2.6b — an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
+    /// inject rule contributes, without an explicit `core.alter_injected_column` grant.
+    pub const INJECTED_SHAPE_IMMUTABLE: &str = "InjectedShapeImmutable";
+    /// II.2.6b — an index-mutating op on an injected index.
+    pub const INJECTED_INDEX_IMMUTABLE: &str = "InjectedIndexImmutable";
+    /// II.2.6b — a PK-replacing/dropping op on a table whose PK a covering inject
+    /// rule pins.
+    pub const INJECTED_PRIMARY_KEY_IMMUTABLE: &str = "InjectedPrimaryKeyImmutable";
+    /// II.2.6b (H3) — a rename-into where a name-matching element diverges
+    /// structurally from the injected shape (type/nullability/default/key/PK-columns).
+    pub const INJECTED_SHAPE_CONFORMANCE_MISMATCH: &str = "InjectedShapeConformanceMismatch";
+}
 
 /// Stable data-security policy rule ids. These are policy decisions layered on
 /// the guard, not deny-list parser rules.
@@ -569,6 +619,47 @@ impl GuardConfig {
             _ => DestructiveOps::Forbid,
         }
     }
+
+    // ── namespace-authority decision queries (Phase 2 Step 2b, II.2.5/II.2.6) ───
+
+    /// The project schema an UNQUALIFIED relation resolves to under this config's
+    /// cross-schema pin: the confined `Single(project_schema)`, or the sole entry of
+    /// a single-schema Platform allowlist. `None` when there is no unique pinned
+    /// schema (empty confined default, multi-schema Platform, Unconfined) — an
+    /// unqualified name is then not uniquely attributable by the guard.
+    fn pinned_schema(&self) -> Option<String> {
+        match &self.schemas {
+            SchemaScope::Single(s) if !s.is_empty() => Some(s.clone()),
+            SchemaScope::Allowlist(list) if list.len() == 1 => Some(list[0].clone()),
+            _ => None,
+        }
+    }
+
+    /// True iff the effective policy grants Bool `key` (default-deny) at the concrete
+    /// normalized `object`. Fails closed (`false`) on an unknown key or non-Bool value.
+    fn grants_namespace_bool(&self, key: &str, object: &ObjectName) -> bool {
+        self.grants_bool_at(key, object)
+    }
+
+    /// The [`GrantRegion`] of `core.raw_sql` — the ⊤/Scoped/Ungranted posture the
+    /// scoped-raw-SQL rules (II.2.5) turn on.
+    fn raw_sql_region(&self) -> GrantRegion {
+        match KnobKey::parse(policy_registry::KEY_CORE_RAW_SQL) {
+            Ok(k) => self.effective.grant_region(&k),
+            Err(_) => GrantRegion::Ungranted,
+        }
+    }
+
+    /// Does ANY covering `inject` rule contribute to `object`? A raw create/rename
+    /// into an inject scope is denied (injection can't rewrite raw text, II.2.5).
+    fn injects_cover(&self, object: &ObjectName) -> bool {
+        !self.effective.injects_for(object).is_empty()
+    }
+
+    /// Is `element` on `object` an injected shape element (II.2.6b, name-match-at-op-time)?
+    fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool {
+        self.effective.is_injected_shape(object, element)
+    }
 }
 
 impl Default for GuardConfig {
@@ -862,6 +953,16 @@ pub enum GuardError {
         /// The offending statement or IR op.
         statement: String,
     },
+    /// A NAMESPACE-authority rule (II.2.5 raw-SQL classification / II.2.6
+    /// creation-gating + injected-shape immutability) denied the migration. Each is
+    /// a conservative-deny with the design's named error code (see [`namespace_rule`]).
+    #[error("namespace policy '{rule}' denied: {statement}")]
+    NamespacePolicy {
+        /// The stable namespace rule id (see [`namespace_rule`]).
+        rule: &'static str,
+        /// The offending statement text.
+        statement: String,
+    },
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
@@ -1102,10 +1203,442 @@ impl SqlGuard {
         //     (least-priv `migrator` role) defense, same limit as `set_config`.
         self.check_sql_string_arg_calls(json, raw)?;
 
+        // 3f. NAMESPACE-authority (II.2.5 raw-SQL classification / II.2.6
+        //     creation-gating + injected-shape immutability). A raw statement must
+        //     ALSO clear the structured gate for whatever it does: a raw create must
+        //     pass `core.create_table` and is denied in any inject scope; a raw
+        //     rename-into is denied; a raw alter of an injected shape is immutable;
+        //     and unqualified names / SET search_path / opaque bodies are denied
+        //     under any non-⊤ `core.raw_sql` grant. Fail-closed throughout.
+        self.check_namespace_authority(node, raw)?;
+
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
 
+        Ok(())
+    }
+
+    /// NAMESPACE-authority enforcement (Phase 2 Step 2b — II.2.5 raw-SQL
+    /// classification + II.2.6 creation-gating / injected-shape immutability).
+    ///
+    /// A raw statement the guard sees via [`SqlGuard::check`] must ALSO clear the
+    /// structured gate for whatever it does. Injection is an IR transform that cannot
+    /// rewrite raw text, so every rule here fails closed. Dispatch is by parsed shape:
+    ///
+    /// - a **create** (`CreateStmt` incl. `LIKE`/`INHERITS`/`PARTITION OF`,
+    ///   `CreateTableAsStmt` = CTAS / `SELECT INTO` / `CREATE TABLE AS EXECUTE`) must
+    ///   pass `core.create_table` at the target AND is denied wherever any inject rule
+    ///   covers it (`RawCreateInInjectScope`);
+    /// - a `CreateSchemaStmt` must pass `core.create_schema`;
+    /// - a `RenameStmt`/`AlterObjectSchemaStmt` that moves a table checks
+    ///   `core.rename_into` and is denied into any inject scope
+    ///   (`RawRenameIntoInjectScope`); a `RENAME COLUMN` of an injected column is
+    ///   immutable;
+    /// - an `AlterTableStmt` touching an injected column/PK/index is immutable
+    ///   (`InjectedShapeImmutable`/`InjectedPrimaryKeyImmutable`/`InjectedIndexImmutable`);
+    /// - `SET search_path`, unqualified names, and opaque-body constructs are denied
+    ///   under a **Scoped** (non-⊤) `core.raw_sql` grant.
+    fn check_namespace_authority(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
+        // Scoped-raw-SQL rules (II.2.5) — only under a Scoped (non-⊤, non-empty)
+        // `core.raw_sql` grant. Ungranted (the plain confined/platform DDL path) and
+        // Top (fully-trusted raw) both skip them, preserving existing behaviour.
+        if self.cfg.raw_sql_region() == GrantRegion::Scoped {
+            self.check_scoped_raw_sql(node, raw)?;
+        }
+
+        match node {
+            // ── raw create: CREATE TABLE (incl. LIKE / INHERITS / PARTITION OF) ──
+            NodeEnum::CreateStmt(c) => {
+                let target = self.resolve_relation_target(c.relation.as_ref(), raw)?;
+                self.gate_raw_create(&target, raw)?;
+            }
+            // ── CTAS / SELECT INTO / CREATE TABLE AS EXECUTE ────────────────────
+            NodeEnum::CreateTableAsStmt(cta) => {
+                // A materialized view is not a table create; only OBJECT_TABLE /
+                // SELECT INTO bring a table into existence. Other objtypes fall
+                // through (matview creation is gated by its own vendor cap).
+                if cta.objtype == ObjectType::ObjectTable as i32 || cta.is_select_into {
+                    let rel = cta.into.as_ref().and_then(|i| i.rel.as_ref());
+                    let target = self.resolve_relation_target(rel, raw)?;
+                    self.gate_raw_create(&target, raw)?;
+                }
+            }
+            // ── CREATE SCHEMA ───────────────────────────────────────────────────
+            NodeEnum::CreateSchemaStmt(cs) => {
+                // An unqualified/dynamic schema name is unattributable → fail closed
+                // unless create_schema is ⊤. `schemaname` empty ⇒ AUTHORIZATION-only
+                // form; treat as unattributable.
+                let name = cs.schemaname.trim();
+                let obj = if name.is_empty() {
+                    None
+                } else {
+                    normalize_pg_identifier(name)
+                };
+                match obj {
+                    Some(schema_obj) => {
+                        if !self
+                            .cfg
+                            .grants_namespace_bool(policy_registry::KEY_CORE_CREATE_SCHEMA, &schema_obj)
+                        {
+                            return Err(namespace_denied(
+                                namespace_rule::CREATE_SCHEMA_NOT_GRANTED,
+                                raw,
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(namespace_denied(
+                            namespace_rule::CREATE_SCHEMA_NOT_GRANTED,
+                            raw,
+                        ))
+                    }
+                }
+            }
+            // ── RENAME (table / column) ─────────────────────────────────────────
+            NodeEnum::RenameStmt(r) => self.check_rename(r, raw)?,
+            // ── SET SCHEMA (move a table across schemas) ────────────────────────
+            NodeEnum::AlterObjectSchemaStmt(a) => self.check_set_schema(a, raw)?,
+            // ── ALTER TABLE (injected-shape immutability) ───────────────────────
+            NodeEnum::AlterTableStmt(at) => self.check_alter_table_injected(at, raw)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Resolve the concrete normalized [`ObjectName`] a create/rename targets. An
+    /// unqualified relation resolves to the config's pinned project schema (the
+    /// search_path is pinned under Confined); when there is no unique pinned schema,
+    /// the target is unattributable and the statement fails closed under any grant.
+    fn resolve_relation_target(
+        &self,
+        rel: Option<&protobuf::RangeVar>,
+        raw: &str,
+    ) -> Result<ObjectName, GuardError> {
+        let Some(rel) = rel else {
+            return Err(namespace_denied(
+                namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
+                raw,
+            ));
+        };
+        let relname = rel.relname.trim();
+        if relname.is_empty() {
+            return Err(namespace_denied(
+                namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
+                raw,
+            ));
+        }
+        let schema = if rel.schemaname.trim().is_empty() {
+            // Unqualified. Resolve to the pinned project schema; if none, the name is
+            // unattributable → deny (fail-closed).
+            match self.cfg.pinned_schema() {
+                Some(s) => s,
+                None => {
+                    return Err(namespace_denied(
+                        namespace_rule::UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL,
+                        raw,
+                    ))
+                }
+            }
+        } else {
+            rel.schemaname.trim().to_string()
+        };
+        let qualified = format!("{schema}.{relname}");
+        normalize_pg_identifier(&qualified).ok_or_else(|| {
+            namespace_denied(namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL, raw)
+        })
+    }
+
+    /// Gate a raw CREATE-TABLE-shaped statement: `core.create_table` must grant the
+    /// target AND no inject rule may cover it (II.2.5/II.2.6a). The inject check comes
+    /// first — a table inside an inject scope can ONLY be created via the structured
+    /// DSL, so even a `core.create_table` grant cannot admit a raw create there.
+    fn gate_raw_create(&self, target: &ObjectName, raw: &str) -> Result<(), GuardError> {
+        if self.cfg.injects_cover(target) {
+            return Err(namespace_denied(
+                namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
+                raw,
+            ));
+        }
+        if !self
+            .cfg
+            .grants_namespace_bool(policy_registry::KEY_CORE_CREATE_TABLE, target)
+        {
+            return Err(namespace_denied(
+                namespace_rule::CREATE_TABLE_NOT_GRANTED,
+                raw,
+            ));
+        }
+        Ok(())
+    }
+
+    /// `ALTER TABLE … RENAME TO` (table move) / `RENAME COLUMN` (injected-column
+    /// immutability). A bare same-schema table rename still re-anchors under
+    /// `core.rename_into` at the target and is denied into any inject scope.
+    fn check_rename(&self, r: &protobuf::RenameStmt, raw: &str) -> Result<(), GuardError> {
+        let is_table = r.rename_type == ObjectType::ObjectTable as i32;
+        let is_column = r.rename_type == ObjectType::ObjectColumn as i32;
+        if !is_table && !is_column {
+            return Ok(());
+        }
+        // The object being renamed (its current name).
+        let source = self.resolve_relation_target(r.relation.as_ref(), raw)?;
+        if is_column {
+            // RENAME COLUMN <subname> — immutable if the OLD column name is injected.
+            let col = r.subname.trim();
+            if !col.is_empty()
+                && self
+                    .cfg
+                    .is_injected_shape(&source, &ShapeElement::Column(col))
+                && !self.cfg.grants_namespace_bool(
+                    policy_registry::KEY_CORE_ALTER_INJECTED_COLUMN,
+                    &source,
+                )
+            {
+                return Err(namespace_denied(
+                    namespace_rule::INJECTED_SHAPE_IMMUTABLE,
+                    raw,
+                ));
+            }
+            return Ok(());
+        }
+        // Table rename: the new name is `newname` in the SAME schema as the source
+        // (RENAME TO cannot change schema). Re-anchor at the target.
+        let new_schema = source.schema.clone();
+        let new_name = r.newname.trim();
+        if new_name.is_empty() {
+            return Err(namespace_denied(
+                namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
+                raw,
+            ));
+        }
+        let target = ObjectName {
+            schema: new_schema,
+            table: Some(new_name.as_bytes().to_vec()),
+        };
+        self.gate_rename_into(&source, &target, raw)
+    }
+
+    /// `ALTER TABLE … SET SCHEMA <newschema>` — a cross-schema table move.
+    fn check_set_schema(
+        &self,
+        a: &protobuf::AlterObjectSchemaStmt,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        if a.object_type != ObjectType::ObjectTable as i32 {
+            return Ok(());
+        }
+        let source = self.resolve_relation_target(a.relation.as_ref(), raw)?;
+        let new_schema = a.newschema.trim();
+        if new_schema.is_empty() {
+            return Err(namespace_denied(
+                namespace_rule::UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL,
+                raw,
+            ));
+        }
+        let table = source
+            .table
+            .clone()
+            .unwrap_or_else(|| source.schema.clone());
+        let target = ObjectName {
+            schema: new_schema.as_bytes().to_vec(),
+            table: Some(table),
+        };
+        self.gate_rename_into(&source, &target, raw)
+    }
+
+    /// Shared rename/move gate (II.2.5/II.2.6b/d). Only fires when the move CROSSES a
+    /// scope boundary (the covering inject/rename-grant set differs before vs after):
+    /// - denied into ANY inject scope (`RawRenameIntoInjectScope` — the moved table
+    ///   would owe an injection the raw path cannot supply);
+    /// - otherwise requires `core.rename_into` at the target.
+    fn gate_rename_into(
+        &self,
+        source: &ObjectName,
+        target: &ObjectName,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        // A no-op rename (same normalized name) crosses no boundary.
+        if source == target {
+            return Ok(());
+        }
+        // Moving INTO an inject scope: raw text cannot carry the injection.
+        if self.cfg.injects_cover(target) {
+            return Err(namespace_denied(
+                namespace_rule::RAW_RENAME_INTO_INJECT_SCOPE,
+                raw,
+            ));
+        }
+        if !self
+            .cfg
+            .grants_namespace_bool(policy_registry::KEY_CORE_RENAME_INTO, target)
+        {
+            return Err(namespace_denied(
+                namespace_rule::RENAME_INTO_NOT_GRANTED,
+                raw,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Injected-shape immutability for `ALTER TABLE` subcommands (II.2.6b): a
+    /// `DROP COLUMN` / `ALTER COLUMN` (type/nullability) on an injected column, or a
+    /// `DROP CONSTRAINT` of a pinned PK, is denied unless `core.alter_injected_column`
+    /// grants the table. An injected-index `DROP INDEX` is handled on the `DropStmt`
+    /// arm (indexes are not `ALTER TABLE` subcommands here).
+    fn check_alter_table_injected(
+        &self,
+        at: &protobuf::AlterTableStmt,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        // ALTER TABLE only — a matview/index objtype carries no injected table shape.
+        if at.objtype != ObjectType::ObjectTable as i32
+            && at.objtype != ObjectType::ObjectType as i32
+        {
+            // objtype 0 (unset) is the common ALTER TABLE spelling; only skip a
+            // clearly non-table objtype. Fall through for TABLE / unset.
+            if at.objtype != 0 {
+                return Ok(());
+            }
+        }
+        let target = self.resolve_relation_target(at.relation.as_ref(), raw)?;
+        let granted = self
+            .cfg
+            .grants_namespace_bool(policy_registry::KEY_CORE_ALTER_INJECTED_COLUMN, &target);
+        for cmd in &at.cmds {
+            let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+                continue;
+            };
+            use AlterTableType as A;
+            let col = c.name.trim();
+            // Column-touching subtypes: DROP COLUMN / ALTER COLUMN TYPE /
+            // SET|DROP NOT NULL / SET DEFAULT / DROP IDENTITY, etc.
+            let touches_column = matches!(
+                AlterTableType::try_from(c.subtype),
+                Ok(A::AtDropColumn
+                    | A::AtAlterColumnType
+                    | A::AtColumnDefault
+                    | A::AtCookedColumnDefault
+                    | A::AtDropNotNull
+                    | A::AtSetNotNull
+                    | A::AtDropIdentity
+                    | A::AtSetIdentity
+                    | A::AtAddIdentity)
+            );
+            if touches_column
+                && !col.is_empty()
+                && self
+                    .cfg
+                    .is_injected_shape(&target, &ShapeElement::Column(col))
+                && !granted
+            {
+                return Err(namespace_denied(
+                    namespace_rule::INJECTED_SHAPE_IMMUTABLE,
+                    raw,
+                ));
+            }
+            // DROP CONSTRAINT — may drop the pinned PK. We cannot always tell which
+            // constraint is the PK from the name alone, so if the table's PK is
+            // pinned by a covering inject rule, a DROP CONSTRAINT is immutable
+            // (fail-closed) unless granted.
+            if matches!(AlterTableType::try_from(c.subtype), Ok(A::AtDropConstraint))
+                && self.cfg.is_injected_shape(&target, &ShapeElement::PrimaryKey)
+                && !granted
+            {
+                return Err(namespace_denied(
+                    namespace_rule::INJECTED_PRIMARY_KEY_IMMUTABLE,
+                    raw,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Scoped-raw-SQL refusals (II.2.5): under a Scoped (non-⊤) `core.raw_sql` grant,
+    /// an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/`DO`), a
+    /// `SET search_path` (or `set_config`/`ALTER ROLE|DATABASE … SET search_path`),
+    /// and any unqualified object reference are unattributable and DENIED — only a
+    /// ⊤-scoped grant may carry them.
+    fn check_scoped_raw_sql(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
+        match node {
+            // Opaque bodies: the outer parse cannot see what the body touches.
+            NodeEnum::CreateFunctionStmt(_)
+            | NodeEnum::CreateTrigStmt(_)
+            | NodeEnum::DoStmt(_)
+            | NodeEnum::AlterFunctionStmt(_) => {
+                return Err(namespace_denied(
+                    namespace_rule::OPAQUE_BODY_UNDER_SCOPED_RAW_SQL,
+                    raw,
+                ));
+            }
+            // SET search_path (and role/session_authorization name-resolution GUCs).
+            NodeEnum::VariableSetStmt(s) => {
+                let name = s.name.to_ascii_lowercase();
+                if name == "search_path"
+                    || raw.to_ascii_lowercase().contains("search_path")
+                {
+                    return Err(namespace_denied(
+                        namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
+                        raw,
+                    ));
+                }
+            }
+            // ALTER ROLE / ALTER DATABASE … SET search_path — a persisted GUC.
+            NodeEnum::AlterRoleSetStmt(_) | NodeEnum::AlterDatabaseSetStmt(_) => {
+                if raw.to_ascii_lowercase().contains("search_path") {
+                    return Err(namespace_denied(
+                        namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
+                        raw,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        // `set_config('search_path', …)` (the function form) + any UNQUALIFIED object
+        // reference are both unattributable under a scoped grant: re-serialize the
+        // statement and walk it structurally. An `A_Const` first arg to `set_config`
+        // naming `search_path` refuses; a `RangeVar` with an empty schemaname and a
+        // non-`pg_` relname is an unqualified reference (fail-closed).
+        if let Ok(json) = pg_query::parse(raw)
+            .map_err(|e| ParseError::Syntax(e.to_string()))
+            .and_then(|p| {
+                let Some(first) = p.protobuf.stmts.first() else {
+                    return Ok(Value::Null);
+                };
+                guard_stmt_json(first, raw).map_err(|_| ParseError::Syntax("json".into()))
+            })
+        {
+            let mut set_config_search_path = false;
+            walk_set_config_calls(&json, &mut |param| {
+                if param.eq_ignore_ascii_case("search_path") {
+                    set_config_search_path = true;
+                    return true;
+                }
+                false
+            });
+            if set_config_search_path {
+                return Err(namespace_denied(
+                    namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
+                    raw,
+                ));
+            }
+            let mut unqualified = false;
+            walk_range_vars(&json, &mut |schema, relname| {
+                let is_pg_catalog =
+                    relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
+                if schema.trim().is_empty() && !relname.trim().is_empty() && !is_pg_catalog {
+                    unqualified = true;
+                    return true;
+                }
+                false
+            });
+            if unqualified {
+                return Err(namespace_denied(
+                    namespace_rule::UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL,
+                    raw,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -3339,6 +3872,16 @@ fn guard_stmt_json<T: serde::Serialize>(raw_stmt: &T, raw: &str) -> Result<Value
 /// Build a [`GuardError::Denied`].
 fn denied(rule: &'static str, statement: &str) -> GuardError {
     GuardError::Denied {
+        rule,
+        statement: statement.to_string(),
+    }
+}
+
+/// Build a [`GuardError::NamespacePolicy`] for a namespace-authority denial
+/// (II.2.5/II.2.6). Distinct from [`denied`] (deny-list) so callers can match the
+/// named error code on a separate variant.
+fn namespace_denied(rule: &'static str, statement: &str) -> GuardError {
+    GuardError::NamespacePolicy {
         rule,
         statement: statement.to_string(),
     }

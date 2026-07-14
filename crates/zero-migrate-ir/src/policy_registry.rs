@@ -242,7 +242,11 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_PG_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
             bool_grant(KEY_PG_PARTITION, ObjectModel::Global, false, "ALTER TABLE ATTACH/DETACH PARTITION."),
             bool_grant(KEY_PG_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
-            bool_grant(KEY_CORE_RAW_SQL, ObjectModel::Global, false, "The gated raw-statement escape (pgRaw)."),
+            // `core.raw_sql` is OBJECT-scoped (II.2.5): "raw_sql only in staging" is a
+            // statement-level referenced-object containment guarantee, and the guard's
+            // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
+            // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
+            bool_grant(KEY_CORE_RAW_SQL, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
             bool_grant(KEY_CORE_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
             bool_grant(KEY_PG_MATERIALIZED_VIEW, ObjectModel::Global, false, "PostgreSQL materialized views."),
             bool_grant(KEY_CORE_CROSS_SCHEMA, ObjectModel::Global, false, "References to non-project schemas."),
@@ -304,7 +308,8 @@ mod tests {
         assert_eq!(om(KEY_PG_ROLE), ObjectModel::Global);
         assert_eq!(om(KEY_PG_GRANT), ObjectModel::Global);
         assert_eq!(om(KEY_PG_EXTENSION), ObjectModel::Global);
-        assert_eq!(om(KEY_CORE_RAW_SQL), ObjectModel::Global);
+        // `core.raw_sql` is object-scoped (II.2.5): "raw_sql only in staging".
+        assert_eq!(om(KEY_CORE_RAW_SQL), ObjectModel::PerTable);
         // PerSchema: schema creation.
         assert_eq!(om(KEY_PG_SCHEMA), ObjectModel::PerSchema);
         assert_eq!(om(KEY_CORE_CREATE_SCHEMA), ObjectModel::PerSchema);

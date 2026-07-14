@@ -452,6 +452,7 @@ fn decision_of(g: &SqlGuard, sql: &str) -> GuardDecision {
         Ok(_) => GuardDecision::Allow,
         Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
         Err(GuardError::Parse(_)) => GuardDecision::Parse,
         Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
@@ -467,6 +468,7 @@ fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
         Ok(()) => GuardDecision::Allow,
         Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
         Err(GuardError::Parse(_)) => GuardDecision::Parse,
         Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
