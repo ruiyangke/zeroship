@@ -8,7 +8,7 @@
 //! patterns (II.2.7), and validates against the registry before producing them.
 
 use crate::knob::{KnobKey, KnobValue};
-use crate::scope::{Scope, SegGlob};
+use crate::scope::{Pattern, Scope, SegGlob};
 
 /// A single scoped policy rule.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -115,8 +115,10 @@ pub enum ValidatePredicate {
     /// The table must carry an index over exactly these columns.
     RequireIndex { columns: Vec<String> },
     /// The created/renamed table's NORMALIZED name must NOT match any pattern
-    /// (II.2.6c — journal-lookalike defense).
-    TableNameForbidden { patterns: Vec<NameGlob> },
+    /// (II.2.6c — journal-lookalike defense). Patterns are full schema-qualified
+    /// scope [`Pattern`]s (`*.journal`, `public.schema_migrations`), not bare
+    /// column-name globs.
+    TableNameForbidden { patterns: Vec<Pattern> },
 }
 
 /// A single-identifier glob used inside validate predicates (column/table names).

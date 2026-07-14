@@ -578,7 +578,8 @@ fn resolve_predicate(wp: WirePredicate) -> Result<ValidatePredicate, LoadError> 
         }
         WirePredicate::RequireIndex { columns } => ValidatePredicate::RequireIndex { columns },
         WirePredicate::TableNameForbidden { patterns } => {
-            ValidatePredicate::TableNameForbidden { patterns: name_globs(&patterns)? }
+            // Table-name patterns are full schema.table scope patterns.
+            ValidatePredicate::TableNameForbidden { patterns: normalize_patterns(&patterns)? }
         }
     })
 }
