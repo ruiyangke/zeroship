@@ -85,28 +85,36 @@ The creator writes a `schema(...)` literal in a committed **`schema.ts` at app r
 
 ---
 
-## 5. The emitter: in-process, library-linked (no CLI subprocess) — and it must be *built*
+## 5. The emitter: a Rust engine verb (reusing the surviving logical fold), linked in-process (no CLI subprocess)
 
-> **It does not exist post-Phase-F.** The gen-types emitter (the code that turns a snapshot into `env.db.ts` + `schema.runtime.json`) was deleted with the in-tree engine in Phase F stage 5. The standalone `/home/ruiyang/Projects/zero-migrate` repo has **no** gen-types emitter, no `env.db.ts` writer, no `schema.runtime.json` writer — only `fold.rs` / `snapshot.rs` / `lower.rs`. So this is **not an "extract the emitter" task; it is an "author the emitter fresh" task.** Its home is a **new toolchain JS package the vite plugin imports** (working name `@zeroship/schema-emit`; final name TBD). This package is the shared tail every source funnels through.
+> **The hard part survived Phase F; only the thin wrapper + its napi exposure were deleted.** The standalone `/home/ruiyang/Projects/zero-migrate` repo **already carries the logical recovery seam**: `fold_to_field_defs` (ops → per-collection logical wire-`FieldDef` map — the *logical* view, not the physical `SchemaSnapshot`), `descriptors_to_create_ops` (a declared descriptor set → ops), `descriptor_to_sdk_schema`, and a passing `gen_types_mask_roundtrip` test (`crates/zero-migrate/tests/`). All exported from `crates/zero-migrate/src/lib.rs:199-200`. What was deleted with the in-tree engine (Phase F stage 5) is only the **emitter wrapper** — `frontend/gen_types.rs`, which wrapped `fold_to_field_defs` output into the v1 `RuntimeSchemaDescriptor` (`schema.runtime.json`) and templated `env.db.ts` (a `const schema = { … t.string() … } as const` of `@zeroship/db` builder calls + the `declare module "zeroship"` augmentation), plus its `--check` diff gate. That deleted file is recoverable from git history (`git show 79a1f45e~1:crates/zeroship-migrate/src/frontend/gen_types.rs`) and is the port reference.
 
-The build integration is a **library**, not a spawned CLI. The vite plugin (and any other host) links the toolchain in-process and calls it directly. The current subprocess machinery in `sdks/vite-plugin/src/migrations.ts` — `recordViaCli`, `genTypesViaCli`, `resolveGenTypesCli`, the `zeroship-migrate-js` PATH lookup, and the "CLI absent → `status: skipped` + committed `env.db.ts` used as-is" fallback (`migrations.ts:254-262`) — is **deleted**. Linking the addon means "binary absent" is a hard dependency error at install time, not a silent skip at build time. Deleting that arm is what closes the drift vector called out in §1(2).
+**Why the emitter is Rust, not JS.** An earlier draft (and a first trace) proposed napi return the physical `SchemaSnapshot` and have a JS emitter invert it (physical `data_type` → logical type, `nullable` → `required`, re-derive `encrypted`/`mask`/`idPrefix` from sentinels). That is a **lossy physical→logical inversion re-implemented in JS** — exactly the second-implementation-of-the-schema hazard the `Checksum::of_ir` discipline exists to prevent. It is unnecessary: `fold_to_field_defs` already produces the *logical* view directly from the ops (the ops are logical), and the runtime `RuntimeSchemaDescriptor` (§3) already carries the full `FieldDef` vocabulary (`ref`/`enum`/nested/facets). So the emitter stays in Rust, consumes the logical fold, and there is no inversion.
 
-Two libraries, both consumed in-process by the vite plugin's own Node process:
+**The napi verb.** Phase 1 adds one entrypoint to `zero-migrate-node`, returning the two artifact *strings* Rust already knows how to render:
 
-- **`zero-migrate` (pure-JS DSL package)** — the recorder (evaluate a `.ts` migration → IR envelope) *and* the manual-declaration evaluator (`schema(...)` literal → snapshot). Both are plain JS builder calls; they run in the vite plugin's Node engine, no V8 subprocess, no `zeroship-runtime` authoring vector.
-- **`zero-migrate-node` (napi addon)** — exposes the **authoritative fold** as a new entrypoint, `foldSnapshot(envelopes) → SchemaSnapshot`, reusing the engine's `render::fold` / `schema::replay`. Folding stays in Rust for the same reason `Checksum::of_ir` does: the snapshot must match what `applyIr` produces, so it cannot be a second JS re-implementation of replay. This entrypoint **does not exist yet** — `zero-migrate-node` currently exports only the apply-side verbs (`applyIr`, `status`, `history`, `loadVerify`, `irVersion`); Phase 1 adds `foldSnapshot`.
+```
+genArtifacts(source) → { envDbTs: string, runtimeJson: string }
+```
 
-The snapshot is the shared JS-object contract (`CollectionDescriptor` / `FieldDescriptor` / `IndexDescriptor` + options). One command, source-detected:
+`zero-migrate-node` today exports only the apply-side verbs (`applyIr`, `status`, `history`, `loadVerify`, `irVersion`); this is the one addition. Both sources funnel through it, so generated and manual output are **byte-identical by construction** (one renderer, not two):
 
-| Detected input | Snapshot built by |
-| --- | --- |
-| `op.*` migrations present | recorder (JS) → `foldSnapshot` (napi) |
-| a declared schema file present | evaluate the literal (JS) → snapshot directly |
-| `--from-db <dsn>` | introspect once → write declaration (then manual) |
+| Source | JS front-end produces | Rust verb path |
+| --- | --- | --- |
+| `op.*` migrations | recorder → IR envelopes (ops) | ops → `fold_to_field_defs` → descriptor + `env.db.ts` |
+| declared `schema.ts` | evaluate `@zeroship/db` → `CollectionDescriptor`s | `descriptors_to_create_ops` → ops → same tail |
+| `--from-db <dsn>` (Phase 2) | introspect → declaration once | then the declared path |
 
-In all cases the tail is identical: the shared **pure-JS emitter `emit(snapshot) → { envDbTs, runtimeJson }`** (in `@zeroship/schema-emit`) writes both files. Only the generated path crosses into napi (for the fold); the manual path is JS end-to-end; the emitter is shared JS, so the two projections are provably a function of one snapshot regardless of source.
+**The two in-process libraries** the vite plugin links (no subprocess, no `zeroship-runtime` authoring vector):
 
-**CI enforcement of co-emission.** The co-emission *invariant* (§3) is not self-enforcing — a stale committed `env.db.ts` could ship if nobody regenerates. The enforcement mechanism is **`gen-types --check`**: regenerate from the source into a temp dir and fail the build if the committed `env.db.ts` / `schema.runtime.json` differ. The current CLI already has a `--check` flag (`migrations.ts:270`), but its value is undermined by the `skipped`-when-CLI-absent arm (`migrations.ts:254-262`) — if the binary is missing, `--check` silently passes. Moving to a linked library makes `--check` a **hard gate**: no binary to be absent, so drift is always caught.
+- **`zero-migrate` (pure-JS DSL package)** — the recorder (evaluate a `.ts` migration → IR envelope) and the manual evaluator (`schema.ts` → `@zeroship/db` descriptors). Plain JS builder calls in the plugin's own Node engine.
+- **`zero-migrate-node` (napi addon)** — the `genArtifacts` verb above.
+
+**`@zeroship/schema-emit`** is therefore a *thin orchestrator*, not the emitter: it detects the source, calls the JS front-end, invokes `genArtifacts`, and writes the two files. The rendering — the correctness-critical part — is the Rust verb.
+
+**Deleting the CLI seam.** The current subprocess machinery in `sdks/vite-plugin/src/migrations.ts` — `recordViaCli`, `genTypesViaCli`, `resolveGenTypesCli`, the `zeroship-migrate-js` PATH lookup, and the "CLI absent → `status: skipped` + committed `env.db.ts` used as-is" fallback (`migrations.ts:254-262`) — is **deleted**. That binary no longer exists post-Phase-F (the authoring path is currently *broken*, not merely indirect), so this is a repair. Linking the addon makes "binary absent" a hard install-time dependency error, not a silent build-time skip.
+
+**CI enforcement of co-emission.** The co-emission *invariant* (§3) is not self-enforcing — a stale committed `env.db.ts` could ship if nobody regenerates. The mechanism is **`--check`** (already in the recovered `gen_types.rs`: regenerate in memory, diff against the committed artifacts, no DB write). The old `--check` was undermined by the `skipped`-when-CLI-absent arm (`migrations.ts:254-262`); linking the addon makes it a **hard gate** — no binary to be absent, so drift is always caught.
 
 ---
 
@@ -168,13 +176,13 @@ DDL against a *real* (non-dev) database is already out of the deploy path. This 
 
 ## 9. Implementation phases
 
-**Phase 1 — Build the in-process library emitter + manual source.** *No worker-runtime changes.*
-- Standalone repo (`/home/ruiyang/Projects/zero-migrate`): add the `foldSnapshot(envelopes) → SchemaSnapshot` napi entrypoint to `zero-migrate-node` (reuse `render::fold` / `schema::replay`); publish. (Does not exist today.)
-- **Author** the shared pure-JS emitter `emit(snapshot) → { envDbTs, runtimeJson }` in a new toolchain JS package (`@zeroship/schema-emit`). This is fresh code — the old in-tree emitter was deleted in Phase F stage 5 and has no standalone-repo equivalent.
-- Rewire `sdks/vite-plugin/src/migrations.ts` to link `zero-migrate` (recorder + declaration evaluator) and `zero-migrate-node` (`foldSnapshot`) + `@zeroship/schema-emit` as **libraries**; delete `recordViaCli` / `genTypesViaCli` / `resolveGenTypesCli` / the CLI PATH-resolution + `status: "skipped"` warn-when-absent fallback (`migrations.ts:254-262`). Repair the dangling `RUNTIME_DESCRIPTOR_FILE` reference (`migrations.ts:163`) — the constant moves into `@zeroship/schema-emit`.
-- Two front-ends wired: recorder→`foldSnapshot` (existing generated flow, now in-process) and declared-literal evaluate (new manual flow).
-- Make `gen-types --check` a hard CI gate (no CLI to be absent; drift always caught).
-- Proof: a manually-declared schema yields the same `schema.runtime.json` shape + a type-checking `env.db.ts` as the generated path for an equivalent schema. A golden app builds from a hand-written declaration with zero migrations, no subprocess spawned by the build, and `--check` fails on injected drift.
+**Phase 1 — Rust emitter verb + in-process library rewire + manual source.** *No worker-runtime changes.*
+- Standalone repo (`/home/ruiyang/Projects/zero-migrate`): **port the deleted emitter wrapper** into the engine (recover `frontend/gen_types.rs` from appbase history at `79a1f45e~1`, adapt its `render_artifacts` + `--check` to the standalone's already-present `fold_to_field_defs` / `descriptors_to_create_ops` — `lib.rs:199-200`). Expose one napi verb on `zero-migrate-node`: `genArtifacts(source) → { envDbTs, runtimeJson }`, accepting either IR envelopes (generated) or `CollectionDescriptor`s (manual, via `descriptors_to_create_ops`). Publish. Reuse the existing `gen_types_mask_roundtrip` test; add a descriptors→artifacts test.
+- **Author** `@zeroship/schema-emit` as a thin JS orchestrator (source-detect → JS front-end → `genArtifacts` → write files + `--check`). It does **not** contain the emitter logic — that is the Rust verb.
+- Rewire `sdks/vite-plugin/src/migrations.ts` to link `zero-migrate` (recorder + `schema.ts` evaluator) + `zero-migrate-node` (`genArtifacts`) + `@zeroship/schema-emit` as **libraries**; delete `recordViaCli` / `genTypesViaCli` / `resolveGenTypesCli` / the `status: "skipped"` warn-when-absent fallback (`migrations.ts:254-262`); repair the dangling `RUNTIME_DESCRIPTOR_FILE` comment (`migrations.ts:161-166`).
+- Manual front-end: evaluate `schema.ts` (`@zeroship/db`) → `CollectionDescriptor`s → `genArtifacts`. `env.db.ts` for the manual case reduces to the module augmentation over the author's `schema.ts` (§11.3).
+- Make `--check` a hard CI gate (no CLI to be absent; drift always caught).
+- Proof: (a) a manually-declared `schema.ts` and an equivalent `op.*` migration set produce **byte-identical `schema.runtime.json`** (one Rust renderer); (b) the `env.db.ts` type-checks and its `Db<typeof schema>` resolves; (c) a golden app builds from a hand-written `schema.ts` with zero migrations, no subprocess spawned; (d) `--check` fails on injected drift.
 
 **Phase 2 — Introspection bootstrap + gated sync + drift check.**
 - `gen-types --from-db <dsn>` → declaration (reusing `introspect_schema`).
