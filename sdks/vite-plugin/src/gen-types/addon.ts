@@ -18,8 +18,9 @@
  */
 
 import { createRequire } from "node:module";
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 
@@ -133,23 +134,92 @@ export function loadMigrateAddon(): MigrateAddon {
 
 /**
  * Locate the standalone repo's prebuilt `*.node` binary. napi-rs names it
- * `zero-migrate-node.<platform>-<arch>[-<abi>].node` next to the addon's
- * `index.js`. We resolve the addon package dir via its `package.json` and scan
- * for the platform binary. Returns `null` when none is found (published install,
- * where the bare require already succeeded).
+ * `zero-migrate-node.<platform>-<arch>[-<abi>].node`. Returns the first such file
+ * found, or `null` when none is found (published install, where the bare require
+ * already succeeded).
+ *
+ * Two candidate dirs are scanned, in order:
+ *  1. The RESOLVED addon package dir (`require.resolve("zero-migrate-node/…")`) —
+ *     where a published/packed install ships the binary next to `index.js`.
+ *  2. The `file:` dep TARGET dir — the standalone repo's
+ *     `crates/zero-migrate-node`, where a dev `napi build` leaves the freshly-built
+ *     `.node` **in place**. pnpm packs `file:` deps by their `files` list and the
+ *     `.node` is gitignored/absent from that pack, so the store copy (dir 1) has no
+ *     binary; the real one lives here. We recover this path by reading the
+ *     consuming package's `package.json` `zero-migrate-node` `file:` spec (an
+ *     absolute path in this monorepo's dev setup).
  */
 function findStandaloneBinding(): string | null {
-  let pkgJson: string;
+  for (const dir of standaloneBindingDirs()) {
+    const hit = scanForBinding(dir);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Scan one dir for a `zero-migrate-node.*.node` file; return its path or null. */
+function scanForBinding(dir: string | null): string | null {
+  if (!dir || !existsSync(dir)) return null;
+  let names: string[];
   try {
-    pkgJson = require.resolve("zero-migrate-node/package.json");
+    names = readdirSync(dir);
   } catch {
     return null;
   }
-  const pkgDir = dirname(pkgJson);
-  const candidates = readdirSync(pkgDir).filter(
+  const hit = names.find(
     (f) => f.startsWith("zero-migrate-node.") && f.endsWith(".node"),
   );
-  if (candidates.length > 0) return join(pkgDir, candidates[0]);
+  return hit ? join(dir, hit) : null;
+}
+
+/** The ordered candidate dirs {@link findStandaloneBinding} scans (see its doc). */
+function standaloneBindingDirs(): (string | null)[] {
+  return [resolvedAddonDir(), fileDepTargetDir()];
+}
+
+/** Dir 1: the resolved `zero-migrate-node` package dir (the store copy in dev). */
+function resolvedAddonDir(): string | null {
+  try {
+    return dirname(require.resolve("zero-migrate-node/package.json"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dir 2: the `file:` dep target. Walk up from this module to the first
+ * `package.json` that declares a `zero-migrate-node` dependency spelled
+ * `file:<path>`, and return that `<path>` (resolved absolute). This is the
+ * standalone repo's `crates/zero-migrate-node`, where the dev `napi build` leaves
+ * the fresh `.node` in place.
+ */
+function fileDepTargetDir(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 8; i++) {
+    const pkgPath = join(dir, "package.json");
+    if (existsSync(pkgPath)) {
+      const spec = readFileDepSpec(pkgPath);
+      if (spec) {
+        return isAbsolute(spec) ? spec : resolve(dir, spec);
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** Read a `zero-migrate-node: file:<path>` dep spec from a package.json, or null. */
+function readFileDepSpec(pkgPath: string): string | null {
+  let json: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  try {
+    json = JSON.parse(readFileSync(pkgPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const dep = json.dependencies?.["zero-migrate-node"] ?? json.devDependencies?.["zero-migrate-node"];
+  if (dep && dep.startsWith("file:")) return dep.slice("file:".length);
   return null;
 }
 
