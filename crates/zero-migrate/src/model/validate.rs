@@ -5752,8 +5752,11 @@ mod tests {
             }"#,
         )]);
         let confined = PolicyProfile::confined();
-        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
-            .expect("confined table-shape resolution succeeds");
+        let resolved = crate::model::table_shape::resolve_create_table_policy(
+            &raw,
+            &crate::model::table_shape::zeroship_confined_ceiling(),
+        )
+        .expect("confined table-shape resolution succeeds");
 
         validate_ir_scoped(&resolved, Dialect::Postgres, &[], None, &confined)
             .expect("resolved confined system shape remains valid");
@@ -6067,7 +6070,7 @@ mod tests {
         }]);
         let ir = crate::model::table_shape::resolve_create_table_policy(
             &ir,
-            &crate::model::profile::PolicyProfile::confined(),
+            &crate::model::table_shape::zeroship_confined_ceiling(),
         )
         .expect("resolve confined table shape");
         assert!(

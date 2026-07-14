@@ -6456,8 +6456,11 @@ mod tests {
         };
         let confined = crate::model::profile::PolicyProfile::confined();
         let platform = platform_profile();
-        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
-            .expect("confined createTable resolves to explicit system shape");
+        let resolved = crate::model::table_shape::resolve_create_table_policy(
+            &raw,
+            &crate::model::table_shape::zeroship_confined_ceiling(),
+        )
+        .expect("confined createTable resolves to explicit system shape");
         let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let confined_sql = author

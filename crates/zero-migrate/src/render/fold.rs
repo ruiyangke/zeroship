@@ -3012,6 +3012,7 @@ fn facet_check_constraints(
 /// would silently drop the facet.
 pub fn descriptors_to_create_ops(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
+    effective: &zero_migrate_policy::EffectivePolicy,
 ) -> Result<Vec<Op>, ProduceError> {
     let mut ops = Vec::with_capacity(descriptors.len());
     for d in descriptors {
@@ -3104,14 +3105,11 @@ pub fn descriptors_to_create_ops(
             preconditions: Vec::new(),
             checksum: None,
         };
-        let resolved = crate::model::table_shape::resolve_create_table_policy(
-            &ir,
-            &crate::model::profile::PolicyProfile::confined(),
-        )
-        .map_err(|source| ProduceError::TableShape {
-            table: d.name.clone(),
-            message: source.to_string(),
-        })?;
+        let resolved = crate::model::table_shape::resolve_create_table_policy(&ir, effective)
+            .map_err(|source| ProduceError::TableShape {
+                table: d.name.clone(),
+                message: source.to_string(),
+            })?;
         ops.push(
             resolved
                 .ops
@@ -3233,7 +3231,7 @@ mod tests {
     };
     use crate::model::policy::SchemaScope;
     use crate::model::profile::PolicyProfile;
-    use crate::model::table_shape::resolve_create_table_policy;
+    use crate::model::table_shape::{resolve_create_table_policy, zeroship_confined_ceiling};
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
@@ -3325,7 +3323,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        resolve_create_table_policy(&ir, &PolicyProfile::confined())
+        resolve_create_table_policy(&ir, &zeroship_confined_ceiling())
             .expect("test createTable resolves")
             .ops
             .into_iter()
@@ -5583,7 +5581,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("expected a createTable")
         };
@@ -5631,7 +5629,7 @@ mod tests {
                 },
             ],
         );
-        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { constraints, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -5685,7 +5683,7 @@ mod tests {
                 },
             ],
         );
-        let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let ops = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable {
             columns,
             primary_key,
@@ -5753,7 +5751,7 @@ mod tests {
                 ..Default::default()
             }],
         );
-        let err = descriptors_to_create_ops(&[d]).unwrap_err();
+        let err = descriptors_to_create_ops(&[d], &zeroship_confined_ceiling()).unwrap_err();
         assert!(
             matches!(err, ProduceError::UnknownType { .. }),
             "unmappable token fails closed"

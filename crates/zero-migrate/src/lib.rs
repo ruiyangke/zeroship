@@ -195,7 +195,13 @@ pub use model::profile::{
     SealedPosture, SealedProfile, TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy,
     CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
-pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
+pub use model::table_shape::{
+    effective_policy_from_ceiling_toml, resolve_create_table_policy, TableShapeError,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use model::table_shape::{
+    zeroship_confined_ceiling, zeroship_no_inject_ceiling, ZEROSHIP_CONFINED_CEILING_TOML,
+};
 pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
     ProduceError, RecoveredCheck,
