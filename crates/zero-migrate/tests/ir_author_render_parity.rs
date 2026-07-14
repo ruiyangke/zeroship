@@ -24,7 +24,7 @@ use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     resolve_create_table_policy, CollectionDescriptor, DeclarativeAuthor, DesiredSchema,
-    FieldDescriptor, IndexDescriptor, LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot,
+    FieldDescriptor, IndexDescriptor, LiveSchema, SchemaSnapshot, TableSnapshot,
 };
 
 /// A live `TableSnapshot` placeholder for an FK target — only its presence as a
@@ -102,7 +102,7 @@ fn ir_pairs_for(
         checksum: None,
     };
     let ir =
-        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("parity IR resolves");
+        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("parity IR resolves");
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
     let migs = author
         .lower(&ir, &LiveSchema::from(live))

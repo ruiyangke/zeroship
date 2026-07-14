@@ -30,7 +30,8 @@ fn raw_ir(op: Op) -> MigrationIr {
 
 fn ir(op: Op) -> MigrationIr {
     let ir = raw_ir(op);
-    resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves")
+    resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
+        .expect("test IR resolves")
 }
 
 // Platform-resolved IR: author owns the table shape (author PK allowed, no forced
@@ -38,7 +39,7 @@ fn ir(op: Op) -> MigrationIr {
 // needed to exercise column-facet validation that the confined shape gate pre-empts.
 fn ir_platform(op: Op) -> MigrationIr {
     let ir = raw_ir(op);
-    resolve_create_table_policy(&ir, &PolicyProfile::platform())
+    resolve_create_table_policy(&ir, &zero_migrate::zeroship_no_inject_ceiling())
         .expect("test IR resolves under platform")
 }
 

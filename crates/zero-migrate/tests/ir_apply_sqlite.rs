@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr, PolicyProfile,
+    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr,
     SqlDialect, SqliteBackend,
 };
 
@@ -56,7 +56,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
-        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
