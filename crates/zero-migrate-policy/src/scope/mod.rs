@@ -26,9 +26,10 @@ mod oracle;
 
 use std::collections::BTreeSet;
 
-pub use pattern::normalize_pg_identifier;
+pub use glob::SegGlob;
+pub use pattern::{normalize_pg_identifier, Pattern};
 
-use pattern::{intersect_pattern, pattern_covers, ObjectName, Pattern};
+use pattern::{intersect_pattern, pattern_covers, ObjectName};
 
 /// A name scope: `Nothing` (⊥), `All` (⊤), or a proper `Of{include, exclude}`.
 ///
