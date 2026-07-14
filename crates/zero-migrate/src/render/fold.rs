@@ -49,8 +49,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
-    RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    ColType, CommentTarget, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
+    IrIndex, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
@@ -3082,12 +3082,18 @@ pub fn descriptors_to_create_ops(
             }
             constraints.extend(facet_check_constraints(&d.name, f)?);
         }
+        // Carry the author-declared named indexes onto the produced createTable so the
+        // round-trip (descriptors → ops → fold) keeps them. `resolve_create_table_policy`
+        // EXTENDS this vec with the platform system indexes (deleted_at/updated_at/
+        // created_by) — it never replaces it — so author + system indexes both survive.
+        // An empty `_indexes` yields `Vec::new()`, byte-identical to the pre-index shape.
+        let indexes = d.indexes.iter().map(index_descriptor_to_ir).collect();
         let op = Op::CreateTable {
             name: d.name.clone(),
             columns,
             primary_key: None,
             constraints,
-            indexes: Vec::new(),
+            indexes,
             partition_by: None,
             runtime_options: Some(d.runtime_options.clone()),
             schema: None,
@@ -3121,6 +3127,40 @@ pub fn descriptors_to_create_ops(
         );
     }
     Ok(ops)
+}
+
+/// Map a declared [`IndexDescriptor`](crate::render::declarative::IndexDescriptor)
+/// (the SDK `_indexes` entry: `{ name, columns, unique }`) onto the closed
+/// [`IrIndex`] the `createTable` op carries. Each column becomes a plain
+/// [`IndexElement::Column`] (default order / no opclass / no collation — the
+/// author-declared index surface is column-name + uniqueness only); every other
+/// `IrIndex` facet (`using`/`where`/`include`/…) stays `None`, byte-identical to a
+/// hand-authored plain named index. `unique == false` maps to `None` (the SQL
+/// default), not `Some(false)`, so a non-unique index serializes identically to the
+/// pre-index wire shape.
+fn index_descriptor_to_ir(
+    d: &crate::render::declarative::IndexDescriptor,
+) -> IrIndex {
+    IrIndex {
+        name: Some(d.name.clone()),
+        columns: d
+            .columns
+            .iter()
+            .map(|name| IndexElement::Column {
+                name: name.clone(),
+                order: None,
+                opclass: None,
+                collation: None,
+            })
+            .collect(),
+        unique: if d.unique { Some(true) } else { None },
+        using: None,
+        r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+    }
 }
 
 /// Parse a descriptor FK-action token (`cascade`/`restrict`/`setNull`/`setDefault`/
@@ -5740,6 +5780,91 @@ mod tests {
                 "mid"
             ],
             "resolved system prefix is carried and declared order is preserved, not sorted"
+        );
+    }
+
+    #[test]
+    fn producer_carries_author_declared_indexes_alongside_system_indexes() {
+        use crate::render::declarative::IndexDescriptor;
+        // WALL 2 regression: a `CollectionDescriptor` carrying author-declared named
+        // indexes (a plain one AND a unique one) must have BOTH survive into the
+        // produced `createTable` op — alongside the 3 injected confined system indexes
+        // — and NOT be dropped. Pre-fix `descriptors_to_create_ops` hardcoded
+        // `indexes: Vec::new()`, so the author indexes vanished.
+        let mut d = descriptor(
+            "articles",
+            vec![
+                FieldDescriptor {
+                    name: "slug".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+                FieldDescriptor {
+                    name: "author".into(),
+                    ty: "string".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        d.indexes = vec![
+            IndexDescriptor {
+                name: "articles_author_idx".into(),
+                columns: vec!["author".into()],
+                unique: false,
+            },
+            IndexDescriptor {
+                name: "articles_slug_key".into(),
+                columns: vec!["slug".into()],
+                unique: true,
+            },
+        ];
+
+        let ops = descriptors_to_create_ops(&[d.clone()]).unwrap();
+        let Op::CreateTable { indexes, .. } = &ops[0] else {
+            panic!("createTable")
+        };
+        // 2 author indexes + 3 confined system indexes.
+        assert_eq!(
+            indexes.len(),
+            5,
+            "author indexes are carried alongside the 3 resolved system indexes: {indexes:?}"
+        );
+        let author_idx = indexes
+            .iter()
+            .find(|i| i.name.as_deref() == Some("articles_author_idx"))
+            .expect("the plain author index survives production");
+        assert_eq!(author_idx.unique, None, "a non-unique index is `None`, not Some(false)");
+        assert_eq!(
+            author_idx.columns,
+            vec![IndexElement::Column {
+                name: "author".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+        );
+        let unique_idx = indexes
+            .iter()
+            .find(|i| i.name.as_deref() == Some("articles_slug_key"))
+            .expect("the UNIQUE author index survives production");
+        assert_eq!(unique_idx.unique, Some(true), "the unique flag is preserved");
+
+        // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
+        let artifacts = crate::render_artifacts_from_descriptors(&[d], SCHEMA).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
+        let idx_names: Vec<String> = v["collections"]["articles"]["indexes"]
+            .as_array()
+            .expect("indexes array present")
+            .iter()
+            .filter_map(|i| i["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            idx_names.iter().any(|n| n == "articles_author_idx"),
+            "the plain author index is emitted into schema.runtime.json, not dropped: {idx_names:?}"
+        );
+        assert!(
+            idx_names.iter().any(|n| n == "articles_slug_key"),
+            "the UNIQUE author index is emitted into schema.runtime.json: {idx_names:?}"
         );
     }
 
