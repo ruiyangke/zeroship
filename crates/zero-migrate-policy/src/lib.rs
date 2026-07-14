@@ -40,6 +40,7 @@ pub mod knob;
 pub mod registry;
 pub mod rule;
 pub mod scope;
+pub mod value_order;
 
 pub use document::{LoadContext, LoadError, LoadWarning, PolicyDoc, SUPPORTED_POLICY_VERSION};
 pub use knob::{
@@ -57,3 +58,4 @@ pub use scope::{
     pattern::{ObjectName, Pattern},
     Difference, Scope, ScopeError,
 };
+pub use value_order::{join_value, leq_value, meet_value, ValueOrderError};
