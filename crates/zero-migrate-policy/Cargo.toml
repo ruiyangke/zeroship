@@ -6,6 +6,12 @@ license.workspace = true
 description = "The zero-migrate Policy Decision Point (PDP): the mechanism half of the policy system. Phase 1a ships the SCOPE LATTICE — Scope { Nothing | All | Of{include, exclude} } over one/two-segment identifier globs, with normalize / subset (⊑) / meet (⊓) / join (⊔) / difference (∖), verified exhaustively by a brute-force oracle. A true LEAF: pure data + algebra, zero I/O, NO SQL deps, no dependency on the engine."
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 

@@ -60,13 +60,45 @@ impl Pattern {
     /// Returns `None` if the text has more than two dot-segments or a bad glob.
     ///
     /// NOTE: this is the blunt phase-1a parser over the alphabet the oracle uses;
-    /// full PG identifier normalization/quoting (II.2.7) is a later phase.
+    /// it splits on EVERY `.` and applies no identifier folding. The oracle proves
+    /// the lattice over globs built by this parser, so it stays byte-exact — do not
+    /// route it through [`normalize_pg_identifier`]. The document loader uses
+    /// [`Pattern::parse_normalized`] for the II.2.7 quote/fold semantics.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.split('.').collect();
         match parts.as_slice() {
             [schema] => Some(Self::schema(SegGlob::parse(schema)?)),
             [schema, table] => Some(Self::table(SegGlob::parse(schema)?, SegGlob::parse(table)?)),
+            _ => None,
+        }
+    }
+
+    /// Parse + NORMALIZE a scope pattern per PostgreSQL identifier semantics
+    /// (II.2.7) — the constructor the document loader (the PDP) MUST use so that a
+    /// pattern literal and a concrete op name fold to the same canonical bytes.
+    ///
+    /// Segmenting: the text is split into segments on **unquoted dots only**. A
+    /// double-quoted run `"…"` is one *quoted* segment whose inner dots (and glob
+    /// `*`) are literal — `"a.b"` is a single segment (a table literally named
+    /// `a.b`), NOT `a`-schema/`b`-table. `""` inside a quoted run is an escaped
+    /// quote (PG doubling). At most two segments (schema[.table]).
+    ///
+    /// Per-segment folding: an **unquoted** segment folds to ASCII-lowercase (PG
+    /// downcases unquoted identifiers) and its single `*` is a glob metacharacter;
+    /// a **quoted** segment is preserved byte-verbatim and is a pure literal (a `*`
+    /// inside quotes is the literal byte `*`, never a glob).
+    ///
+    /// Returns `None` on: more than one `*` in an unquoted segment (illegal glob),
+    /// more than two segments, an unterminated quote, or an empty segment.
+    #[must_use]
+    pub fn parse_normalized(s: &str) -> Option<Self> {
+        let segs = split_normalize_segments(s)?;
+        match segs.as_slice() {
+            [schema] => Some(Self::schema(seg_from_normalized(schema)?)),
+            [schema, table] => {
+                Some(Self::table(seg_from_normalized(schema)?, seg_from_normalized(table)?))
+            }
             _ => None,
         }
     }
@@ -100,6 +132,119 @@ impl Pattern {
             // table, never the schema object itself.
             None => self.table.is_star(),
         }
+    }
+}
+
+/// One segment of a normalized scope pattern: its post-fold bytes and whether it
+/// was authored QUOTED (a pure literal — `*` is not a glob) or UNQUOTED (glob).
+struct NormalizedSegment {
+    bytes: Vec<u8>,
+    quoted: bool,
+}
+
+/// Split `s` into 1–2 segments on **unquoted dots only** and fold each per II.2.7.
+///
+/// A double-quoted run `"…"` is a single quoted segment; its inner bytes are taken
+/// verbatim with `""` collapsing to one `"` (PG quote-doubling). Dots and `*`
+/// inside quotes are literal. Returns `None` on an unterminated quote, an empty
+/// segment, quoted-and-unquoted mixing within a single segment, or more than two
+/// segments.
+fn split_normalize_segments(s: &str) -> Option<Vec<NormalizedSegment>> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<NormalizedSegment> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    // Track whether the current segment has seen a quoted run and/or unquoted
+    // bytes; a segment must be wholly one or the other (no `a"b"` frankenidents).
+    let mut cur_quoted = false;
+    let mut cur_unquoted = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Begin a quoted run; consume to the closing quote, honoring `""`.
+                cur_quoted = true;
+                i += 1;
+                loop {
+                    if i >= bytes.len() {
+                        return None; // unterminated quote
+                    }
+                    if bytes[i] == b'"' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                            cur.push(b'"'); // escaped quote
+                            i += 2;
+                            continue;
+                        }
+                        i += 1; // closing quote
+                        break;
+                    }
+                    cur.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b'.' => {
+                // Unquoted dot: segment boundary.
+                out.push(finish_segment(&cur, cur_quoted, cur_unquoted)?);
+                cur.clear();
+                cur_quoted = false;
+                cur_unquoted = false;
+                i += 1;
+            }
+            c => {
+                cur_unquoted = true;
+                // Unquoted byte: ASCII-lowercase fold (PG downcases unquoted idents).
+                cur.push(c.to_ascii_lowercase());
+                i += 1;
+            }
+        }
+        if out.len() > 2 {
+            return None;
+        }
+    }
+    out.push(finish_segment(&cur, cur_quoted, cur_unquoted)?);
+    if out.is_empty() || out.len() > 2 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Finalize one accumulated segment: reject the empty segment and the mixed
+/// quoted+unquoted case (`a"b"` — never a real identifier and never safe to fold).
+fn finish_segment(bytes: &[u8], quoted: bool, unquoted: bool) -> Option<NormalizedSegment> {
+    if bytes.is_empty() {
+        return None; // empty segment (e.g. `a.`, `.b`, ``)
+    }
+    if quoted && unquoted {
+        return None; // `a"b"` mixing — reject fail-closed
+    }
+    Some(NormalizedSegment { bytes: bytes.to_vec(), quoted })
+}
+
+/// Build a [`SegGlob`] from a normalized segment: a quoted segment is a pure
+/// literal (its `*` is a literal byte); an unquoted segment's single `*` is a glob.
+fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
+    if seg.quoted {
+        // Verbatim literal — even a `*` is the byte `*`, never a glob.
+        Some(SegGlob::literal(seg.bytes.clone()))
+    } else {
+        // Reuse the single-`*` glob parser over the already-folded bytes.
+        let text = String::from_utf8_lossy(&seg.bytes);
+        SegGlob::parse(&text)
+    }
+}
+
+/// Normalize a CONCRETE object name (schema or `schema.table`) per II.2.7 for
+/// enforcement-time / predicate matching — the same fold [`Pattern::parse_normalized`]
+/// applies to pattern literals. A concrete name carries no globs, so an unquoted
+/// `*` would be a nonsensical identifier byte; we fold it verbatim (lowercased)
+/// rather than treating it as a glob (a name never globs). Returns `None` on the
+/// same structural rejects as the pattern parser.
+#[must_use]
+pub fn normalize_pg_identifier(s: &str) -> Option<ObjectName> {
+    let segs = split_normalize_segments(s)?;
+    match segs.as_slice() {
+        [schema] => Some(ObjectName::schema(schema.bytes.clone())),
+        [schema, table] => Some(ObjectName::table(schema.bytes.clone(), table.bytes.clone())),
+        _ => None,
     }
 }
 
@@ -156,6 +301,59 @@ mod tests {
         assert!(!p.matches(&ObjectName::schema(b"app_x".to_vec())));
         assert!(p.matches(&ObjectName::table(b"app_x".to_vec(), b"events".to_vec())));
         assert!(!p.matches(&ObjectName::table(b"app_x".to_vec(), b"other".to_vec())));
+    }
+
+    #[test]
+    fn normalize_unquoted_folds_lowercase() {
+        // `App_*` → glob `app_*` (schema), matches the folded catalog name `app_x`.
+        let p = Pattern::parse_normalized("App_*").unwrap();
+        assert_eq!(p, Pattern::parse("app_*").unwrap());
+        assert!(p.matches(&ObjectName::schema(b"app_x".to_vec())));
+    }
+
+    #[test]
+    fn normalize_quoted_verbatim_not_matched_by_unquoted_pattern() {
+        // A quoted pattern `"App_x"` is a byte-exact literal, distinct from `app_x`.
+        let quoted = Pattern::parse_normalized("\"App_x\"").unwrap();
+        assert!(quoted.matches(&ObjectName::schema(b"App_x".to_vec())));
+        assert!(!quoted.matches(&ObjectName::schema(b"app_x".to_vec())));
+        // And an unquoted `app_*` pattern does not match the quoted concrete name.
+        let unq = Pattern::parse_normalized("app_*").unwrap();
+        let quoted_name = normalize_pg_identifier("\"App_x\"").unwrap();
+        assert!(!unq.matches(&quoted_name));
+        // But it does match the unquoted `App_x`, which folds to `app_x`.
+        let folded_name = normalize_pg_identifier("App_x").unwrap();
+        assert!(unq.matches(&folded_name));
+    }
+
+    #[test]
+    fn normalize_quoted_dot_is_one_segment() {
+        // `"a.b"` is ONE segment (a table `a.b` in the default schema), not a.b.
+        let p = Pattern::parse_normalized("\"a.b\"").unwrap();
+        // As a schema-only pattern its schema glob is the literal `a.b`.
+        assert_eq!(p, Pattern::schema(SegGlob::literal(b"a.b".to_vec())));
+        // The schema pattern `a` must NOT match the object named `a.b`.
+        let schema_a = Pattern::parse_normalized("a").unwrap();
+        let obj = normalize_pg_identifier("\"a.b\"").unwrap();
+        assert!(!schema_a.matches(&obj));
+    }
+
+    #[test]
+    fn normalize_quoted_star_is_literal_not_glob() {
+        // A `*` inside quotes is the literal byte, not a wildcard.
+        let p = Pattern::parse_normalized("\"a*b\"").unwrap();
+        assert_eq!(p, Pattern::schema(SegGlob::literal(b"a*b".to_vec())));
+        assert!(p.matches(&ObjectName::schema(b"a*b".to_vec())));
+        assert!(!p.matches(&ObjectName::schema(b"axb".to_vec())));
+    }
+
+    #[test]
+    fn normalize_rejects_bad_shapes() {
+        assert!(Pattern::parse_normalized("a.b.c").is_none()); // 3 segments
+        assert!(Pattern::parse_normalized("a.").is_none()); // empty trailing seg
+        assert!(Pattern::parse_normalized(".b").is_none()); // empty leading seg
+        assert!(Pattern::parse_normalized("\"unterminated").is_none());
+        assert!(Pattern::parse_normalized("a*b*c").is_none()); // two stars unquoted
     }
 
     #[test]
