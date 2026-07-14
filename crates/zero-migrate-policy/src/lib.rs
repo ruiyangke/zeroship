@@ -35,6 +35,7 @@
 //! Composition (`compose_strict`/`compose_clamp`), `EffectivePolicy`, and seal
 //! verification are Phase 1b-ii — NOT in this cut.
 
+pub mod compose;
 pub mod document;
 pub mod knob;
 pub mod registry;
@@ -59,3 +60,7 @@ pub use scope::{
     Difference, Scope, ScopeError,
 };
 pub use value_order::{join_value, leq_value, meet_value, ValueOrderError};
+pub use compose::{
+    compose_clamp, compose_strict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy,
+    RootCeiling, ShapeElement,
+};
