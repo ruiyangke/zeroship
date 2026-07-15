@@ -118,6 +118,7 @@ mod tests {
             enforcement: Enforcement::Enforced,
             object_model: om,
             requires_db_privilege: priv_backed,
+            inherit: true,
             docs: String::new(),
         }
     }

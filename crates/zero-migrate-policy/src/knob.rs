@@ -212,6 +212,15 @@ pub struct KnobDef {
     /// the least-privilege backing check, II.10.5). Enforcement-affecting → part of
     /// the sealed registry digest.
     pub requires_db_privilege: bool,
+    /// Whether a SILENT draft INHERITS this knob's grant from the ceiling at
+    /// `admit` (the default, `true`), or is instead pinned to the knob's DEFAULT
+    /// (`false`). A `false` marks a POWER GRANT that must never be conferred by
+    /// omission: a silent creator draft gets the tightest (default) value, not the
+    /// ceiling's. It changes ONLY the inheritance of a draft that is *silent* on the
+    /// knob — a draft that EXPLICITLY grants it is still bounded by the ordinary
+    /// `draft ⊑ ceiling` escalation check. Enforcement-affecting → part of the sealed
+    /// registry digest.
+    pub inherit: bool,
     /// Human-facing documentation for the knob.
     pub docs: String,
 }
@@ -220,7 +229,7 @@ impl KnobDef {
     /// The CANONICAL byte encoding of this def — the stable input the registry
     /// digest (II.2.1 / II.7) hashes. It covers EVERY enforcement-affecting field
     /// (key, kind, polarity, default, enforcement, object_model,
-    /// requires_db_privilege) but NOT `docs` (prose, non-enforcing). The encoding
+    /// requires_db_privilege, inherit) but NOT `docs` (prose, non-enforcing). The encoding
     /// is a length-prefixed, field-tagged byte stream so no two distinct defs can
     /// collide and no field boundary is ambiguous.
     ///
@@ -285,6 +294,10 @@ impl KnobDef {
         // requires_db_privilege
         b.push(0x07);
         b.push(u8::from(self.requires_db_privilege));
+
+        // inherit
+        b.push(0x08);
+        b.push(u8::from(self.inherit));
 
         b
     }
@@ -378,6 +391,7 @@ mod tests {
             enforcement: Enforcement::DeclaredOnly,
             object_model: ObjectModel::PerTable,
             requires_db_privilege: false,
+            inherit: true,
             docs: String::new(),
         };
         let mut host = base.clone();
@@ -402,6 +416,7 @@ mod tests {
             enforcement: Enforcement::Enforced,
             object_model: ObjectModel::Global,
             requires_db_privilege: true,
+            inherit: true,
             docs: "one thing".into(),
         };
         // docs does NOT affect the encoding.
@@ -418,5 +433,10 @@ mod tests {
         let mut om = base.clone();
         om.object_model = ObjectModel::PerTable;
         assert_ne!(base.canonical_encoding(), om.canonical_encoding());
+
+        // inherit DOES (a power-grant flag is enforcement-affecting).
+        let mut inh = base.clone();
+        inh.inherit = false;
+        assert_ne!(base.canonical_encoding(), inh.canonical_encoding());
     }
 }

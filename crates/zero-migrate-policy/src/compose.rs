@@ -52,7 +52,7 @@ use crate::{LoadContext, LoadError, PolicyDoc};
 /// The knob key of the scoped creation-gating grant that anchors mandatory injects
 /// (II.2.6a). The creatable-scope lint requires this grant's scope `⊑` every
 /// mandatory ceiling inject's scope.
-pub(crate) const CREATE_TABLE_KEY: &str = "core.create_table";
+pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TrustedDoc — provenance newtype (H-1)
@@ -429,6 +429,31 @@ impl Layer {
             validates: rules_of(&doc.rules, |k| matches!(k, RuleKind::Validate { .. })),
         })
     }
+}
+
+/// Pin `key` in `layer` so a SILENT region gets the knob DEFAULT, not an inherited
+/// ceiling value — by appending a synthetic default-valued grant rule over the whole
+/// universe (`Scope::All`) to the layer's grant map for `key`. Presence-override
+/// (II.3.2) then makes this layer WIN the top-down grant fall-through EVERYWHERE for
+/// `key`: at an object the draft covered with an EXPLICIT rule, the loosest-covering
+/// join within the layer keeps the draft's own (higher) value; at an object the draft
+/// left silent, only the synthetic default-valued rule covers, so the value is the
+/// knob default — the ceiling's grant below is never seen. Used by
+/// [`admit`](crate::boundary::admit) to realize a `KnobDef.inherit == false` power
+/// grant: it is conferred only where the draft ASKED, never by inheritance-by-omission.
+/// `pub(crate)`: the boundary module is its sole caller.
+pub(crate) fn pin_layer_key_to_default(
+    layer: &mut Layer,
+    key: &KnobKey,
+    kind: &KnobKind,
+    default: &KnobValue,
+) {
+    let entry = layer.grants.keys.entry(key.clone()).or_insert_with(|| GrantKeyMap {
+        kind: kind.clone(),
+        default: default.clone(),
+        rules: Vec::new(),
+    });
+    entry.rules.push(GrantRule { scope: Scope::All, value: default.clone() });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

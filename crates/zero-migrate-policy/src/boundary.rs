@@ -26,8 +26,8 @@
 
 use crate::compose::{
     check_inject_collisions, check_validate_vs_inject, layered_nondefault_grant_rules,
-    layered_value_at, render_scope, rules_of, witness_of, AdmitCeiling, ComposeError,
-    EffectivePolicy, GrantModel, Layer, LayerTag,
+    layered_value_at, pin_layer_key_to_default, render_scope, rules_of, witness_of, AdmitCeiling,
+    ComposeError, EffectivePolicy, GrantModel, Layer, LayerTag,
 };
 use crate::knob::KnobKey;
 use crate::registry::PolicyRegistry;
@@ -84,7 +84,27 @@ pub fn admit(
     check_validate_vs_inject(&ceiling_injects, &draft_validates)?;
 
     // ── build the layered result: [draft] over [ceiling layers] (H-4) ───────────
-    let draft_layer = Layer::from_doc(LayerTag::Draft, draft, registry)?;
+    let mut draft_layer = Layer::from_doc(LayerTag::Draft, draft, registry)?;
+
+    // ── non-inheritable POWER GRANTS (KnobDef.inherit == false) ─────────────────
+    // A knob marked `inherit = false` must NOT flow to a SILENT draft from the
+    // ceiling: "override the platform's injected columns" is a grant a creator earns
+    // only by asking for it EXPLICITLY, never by inheritance-by-omission. Since the
+    // layered grant query falls through the draft layer to the ceiling, we realize the
+    // pin by giving the draft layer a synthetic DEFAULT-valued grant rule over the
+    // whole universe (`Scope::All`) for every `inherit = false` key. Presence-override
+    // (II.3.2) then makes the draft layer WIN the fall-through EVERYWHERE for that key:
+    // where the draft EXPLICITLY granted it (already bounded ⊑ the ceiling by the check
+    // above), the loosest-covering join within the draft layer keeps the draft's own
+    // value; where the draft is SILENT, only the synthetic default rule covers, so the
+    // value is the knob default — never the inherited ceiling value.
+    for def in registry.iter() {
+        if def.inherit {
+            continue;
+        }
+        pin_layer_key_to_default(&mut draft_layer, &def.key, &def.kind, &def.default);
+    }
+
     let mut layers = Vec::with_capacity(ceiling_layers.len() + 1);
     layers.push(draft_layer); // TOP (innermost) first
     layers.extend(ceiling_layers);
