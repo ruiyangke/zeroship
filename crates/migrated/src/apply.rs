@@ -629,7 +629,7 @@ async fn apply_ir_documents_with_policy(
     };
 
     // The effective policy is the same whether or not the migration needed approval —
-    // approval is the separate sealed `sec.require_approval` obligation the host
+    // approval is the separate sealed `safety.require_approval` obligation the host
     // enforces via the state machine, NOT a destructive-posture value the apply
     // projects. Both authorization paths apply under the composed policy verbatim.
     let apply_policy = policy.clone();
@@ -1220,7 +1220,7 @@ async fn preflight_ir_documents(
 
 /// Build the per-app confined guard, tightened with the managed posture (extension
 /// allowlist + data-security). `GuardConfig::confined(schema)` pins the app schema
-/// (`core.cross_schema`); the managed posture layers on the extension allowlist and
+/// (`schema.cross_schema`); the managed posture layers on the extension allowlist and
 /// the RLS/destructive obligations — byte-identical to the old profile-driven builder.
 fn guard_config_for_managed(schema: &str, managed: &ManagedPosture) -> GuardConfig {
     GuardConfig::confined(schema.to_string())
@@ -1229,7 +1229,7 @@ fn guard_config_for_managed(schema: &str, managed: &ManagedPosture) -> GuardConf
 }
 
 /// The versions of a migration set that require operator approval, folding the SEALED
-/// `sec.require_approval` obligation over the engine's own per-migration gating.
+/// `safety.require_approval` obligation over the engine's own per-migration gating.
 ///
 /// - `report.gated_versions` are the versions the ENGINE already flags (destructive
 ///   ops, `flags.requires_approval`, unclassified data-security) — these always gate.

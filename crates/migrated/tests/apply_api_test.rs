@@ -427,37 +427,37 @@ fn with_policy(mut request: Value, body: &str) -> Value {
 
 // The creator policy draft is now a `zero-migrate-policy` `PolicyDoc` (grant rules
 // against the operator ceiling), not the old `PolicyProfile` TOML. A draft may only
-// TIGHTEN: `sec.destructive_ops` composes forbid ⊑ warn ⊑ allow, and `op.lock_timeout_ms`
+// TIGHTEN: `safety.destructive_ops` composes forbid ⊑ warn ⊑ allow, and `runtime.lock_timeout_ms`
 // is a UintCeiling (a draft value ≤ the ceiling's 30000ms).
 fn tighter_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkey = \"op.lock_timeout_ms\"\nvalue = 1000\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"runtime.lock_timeout_ms\"\nvalue = 1000\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
-// Approval is now the SEALED `sec.require_approval` obligation the engine declares and
+// Approval is now the SEALED `safety.require_approval` obligation the engine declares and
 // the host enforces. A draft authors it as a normal `[[require]]` — `always` gates
 // EVERY migration for operator approval (destructive or not), the successor to the old
 // managed-only `require_approval = true` overlay. The draft also RE-STATES the
-// `sec.destructive_ops = allow` grant it wants kept (compose_strict resolves grants
+// `safety.destructive_ops = allow` grant it wants kept (admit resolves grants
 // from the draft layer, so a draft that only tightens one knob must re-state the
 // ceiling grants it relies on — here, keeping destructive ops classifiable-not-denied
 // so the approval gate can hold the DROP for review instead of the guard forbidding it).
 fn require_approval_policy() -> &'static str {
-    "policy_version = 1\n\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
 }
 
 fn second_tighter_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkey = \"op.lock_timeout_ms\"\nvalue = 500\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"runtime.lock_timeout_ms\"\nvalue = 500\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
-// A draft that grants a capability the confined ceiling does not (`core.raw_sql`):
-// `compose_strict` REJECTS it (escalation), never clamps.
+// A draft that grants a capability the confined ceiling does not (`sql.raw`):
+// `admit` REJECTS it (escalation), never clamps.
 fn escalating_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkey = \"core.raw_sql\"\nvalue = true\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n"
 }
 
 // A malformed draft: `kez` is not a known key (`deny_unknown_fields` → parse error).
 fn malformed_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkez = \"core.raw_sql\"\nvalue = true\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkez = \"sql.raw\"\nvalue = true\nscope = \"all\"\n"
 }
 
 fn policy_for(name: &str, actions: Vec<Action>) -> Policy {
@@ -739,7 +739,7 @@ async fn policy_api_rejects_escalating_draft_at_submit_pg() {
         body["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("core.raw_sql"),
+            .contains("sql.raw"),
         "escalation should identify the knob, got: {body}"
     );
     assert_eq!(stored_policy_count(&conn, &app_id).await, 0);
@@ -1027,10 +1027,10 @@ async fn destructive_apply_requires_operator_approval_then_applies_pg() {
     cleanup_user(&conn, &operator_id).await;
 }
 
-// A `sec.require_approval = "on_destructive"` draft gates ONLY destructive migrations:
+// A `safety.require_approval = "on_destructive"` draft gates ONLY destructive migrations:
 // an additive create applies without approval, a DROP is held `pending_approval`.
 fn on_destructive_policy() -> &'static str {
-    "policy_version = 1\n\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
 }
 
 #[ntex::test]
@@ -1845,7 +1845,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     assert_eq!(body["error"], "migration_policy_invalid");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("core.raw_sql") && detail.contains("GrantExceedsCeiling"),
+        detail.contains("sql.raw") && detail.contains("GrantExceedsCeiling"),
         "draft escalation should be rejected explicitly, got: {body}"
     );
 
