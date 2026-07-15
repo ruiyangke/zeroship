@@ -144,15 +144,39 @@ pub enum Polarity {
     },
 }
 
-/// Whether a knob actually reaches the guard/executor, or is metadata only (II.6).
+/// Whether a knob actually reaches the guard/executor, is metadata only, or is
+/// enforced by a HOST outside the engine (II.6).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Enforcement {
-    /// The knob flows into the guard/executor and does what it says.
+    /// The knob flows into the engine's own guard/executor and does what it says.
     Enforced,
-    /// The knob is declared metadata only; setting it to a non-default value in a
-    /// document composed toward an enforced path is rejected (II.6).
+    /// The knob is declared metadata ONLY: the engine neither enforces it NOR lets it
+    /// be sealed at a non-default value on an enforced path — setting it to a
+    /// non-default value in a document composed toward an enforced path is rejected
+    /// (II.6). It advertises no authority the engine lacks.
     DeclaredOnly,
+    /// The knob the ENGINE does not enforce, but a HOST (e.g. the migration service)
+    /// does — so it MAY be sealed at a non-default value, even though the engine's own
+    /// guard/apply ignores it (II.6, M-2). Distinct from `DeclaredOnly`: the II.6
+    /// "can't set non-default on an enforced path" restriction applies to
+    /// `DeclaredOnly` ONLY, never to `HostEnforced`. `sec.require_approval` is the
+    /// canonical `HostEnforced` knob — the host reads it via the sealed decision
+    /// query; the engine's guard/apply never gates on it.
+    HostEnforced,
+}
+
+impl Enforcement {
+    /// Whether the II.6 restriction "may NOT be set to a non-default value in a
+    /// document composed toward an enforced path" applies to this class. TRUE only for
+    /// [`Enforcement::DeclaredOnly`]: an `Enforced` knob does what it says (so a
+    /// non-default value is honored), and a `HostEnforced` knob is enforced by a host
+    /// (so a non-default value MUST be sealable — M-2). This is the sole predicate the
+    /// composer/sealer should consult for the II.6 gate.
+    #[must_use]
+    pub fn forbids_nondefault_on_enforced_path(self) -> bool {
+        matches!(self, Enforcement::DeclaredOnly)
+    }
 }
 
 /// The object granularity at which a knob's authority is meaningful (II.2.5).
@@ -247,6 +271,7 @@ impl KnobDef {
         b.push(match self.enforcement {
             Enforcement::Enforced => 0x00,
             Enforcement::DeclaredOnly => 0x01,
+            Enforcement::HostEnforced => 0x02,
         });
 
         // object_model
@@ -335,6 +360,36 @@ mod tests {
         let oe = KnobKind::OrderedEnum { variants: vec!["forbid".into(), "allow".into()] };
         assert!(KnobValue::Str("allow".into()).validate_for(&oe).is_ok());
         assert_eq!(KnobValue::Str("nope".into()).validate_for(&oe), Err(KnobValueError::UnknownVariant));
+    }
+
+    #[test]
+    fn host_enforced_is_distinct_and_seal_sensitive() {
+        // The II.6 non-default restriction applies to DeclaredOnly ONLY.
+        assert!(Enforcement::DeclaredOnly.forbids_nondefault_on_enforced_path());
+        assert!(!Enforcement::Enforced.forbids_nondefault_on_enforced_path());
+        assert!(!Enforcement::HostEnforced.forbids_nondefault_on_enforced_path());
+
+        // HostEnforced has a distinct canonical encoding → a distinct registry digest.
+        let base = KnobDef {
+            key: KnobKey::parse("sec.require_approval").unwrap(),
+            kind: KnobKind::OrderedEnum { variants: vec!["never".into(), "always".into()] },
+            polarity: Polarity::Require,
+            default: KnobValue::Str("never".into()),
+            enforcement: Enforcement::DeclaredOnly,
+            object_model: ObjectModel::PerTable,
+            requires_db_privilege: false,
+            docs: String::new(),
+        };
+        let mut host = base.clone();
+        host.enforcement = Enforcement::HostEnforced;
+        assert_ne!(
+            base.canonical_encoding(),
+            host.canonical_encoding(),
+            "DeclaredOnly vs HostEnforced must encode differently (seal-affecting)"
+        );
+        let mut enf = base;
+        enf.enforcement = Enforcement::Enforced;
+        assert_ne!(host.canonical_encoding(), enf.canonical_encoding());
     }
 
     #[test]

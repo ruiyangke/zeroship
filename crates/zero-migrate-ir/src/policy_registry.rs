@@ -129,8 +129,10 @@ pub const KEY_SEC_NO_HARD_DELETE: &str = "sec.no_hard_delete";
 pub const KEY_SEC_DESTRUCTIVE_OPS: &str = "sec.destructive_ops";
 /// Data-security approval OBLIGATION: `never` ⊑ `on_destructive` ⊑ `always`
 /// (OrderedEnum, `Require` polarity — composes UP, un-lowerable). This is a SEALED
-/// obligation the engine only DECLARES: it is `Enforcement::DeclaredOnly`, so the
-/// engine's own guard/apply never gate on it. The HOST (`migrated`) reads it via
+/// obligation the engine does not enforce but a HOST does: it is
+/// `Enforcement::HostEnforced`, so the engine's own guard/apply never gate on it, YET
+/// — unlike a `DeclaredOnly` knob — it MAY be sealed at a non-default value (M-2,
+/// II.6). The HOST (`migrated`) reads it via
 /// [`crate::policy_approval::migration_requires_approval`] and enforces approval as a
 /// state machine — the engine `apply` stays dumb. Object-scoped like every other
 /// knob (the level resolves per target object; the host ORs across a migration's ops).
@@ -248,9 +250,16 @@ fn posture_grant(key: &str, docs: &str) -> KnobDef {
 }
 
 /// The `sec.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
-/// OrderedEnum, `Require` polarity (composes UP), `DeclaredOnly` enforcement (the
-/// engine never gates on it — the HOST does), default `never` (no obligation).
-/// Object-scoped so an operator can require approval on exactly the objects it names.
+/// OrderedEnum, `Require` polarity (composes UP), **`HostEnforced`** enforcement,
+/// default `never` (no obligation). Object-scoped so an operator can require approval
+/// on exactly the objects it names.
+///
+/// It is `HostEnforced`, NOT `DeclaredOnly`: the engine's own guard/apply never gate
+/// on it (the HOST — `migrated` — reads it via the sealed decision query and enforces
+/// approval as a state machine), but — unlike a `DeclaredOnly` knob — it MAY be sealed
+/// at a NON-DEFAULT value, because a host enforces it (M-2, II.6). The II.6 "can't set
+/// non-default on an enforced path" restriction scopes to `DeclaredOnly` only, so a
+/// sealed `sec.require_approval = always` obligation is legal.
 fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
@@ -259,7 +268,7 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
         },
         polarity: Polarity::Require,
         default: KnobValue::Str("never".to_string()),
-        enforcement: Enforcement::DeclaredOnly,
+        enforcement: Enforcement::HostEnforced,
         object_model: ObjectModel::PerTable,
         requires_db_privilege: false,
         docs: docs.to_string(),
@@ -428,15 +437,19 @@ mod tests {
     }
 
     #[test]
-    fn require_approval_is_a_declared_only_require_obligation() {
+    fn require_approval_is_a_host_enforced_require_obligation() {
         let reg = builtin_registry();
         let def = reg
             .get(&KnobKey::parse(KEY_SEC_REQUIRE_APPROVAL).unwrap())
             .expect("sec.require_approval is registered");
         // Require polarity (composes UP — operator raises, creator cannot lower).
         assert_eq!(def.polarity, Polarity::Require);
-        // DeclaredOnly — the engine never enforces it (the host does).
-        assert_eq!(def.enforcement, Enforcement::DeclaredOnly);
+        // HostEnforced — the engine never enforces it (the host does), but — unlike a
+        // DeclaredOnly knob — it MAY be sealed at a non-default value (M-2, II.6).
+        assert_eq!(def.enforcement, Enforcement::HostEnforced);
+        // The II.6 "can't set non-default on an enforced path" restriction does NOT
+        // apply to a HostEnforced knob (only DeclaredOnly).
+        assert!(!def.enforcement.forbids_nondefault_on_enforced_path());
         // Object-scoped like the other knobs.
         assert_eq!(def.object_model, ObjectModel::PerTable);
         // Default is the tightest variant, `never` (no obligation).

@@ -1,8 +1,9 @@
 //! The `sec.require_approval` decision query — the host-facing side of the SEALED
 //! approval obligation.
 //!
-//! Approval is a **sealed policy obligation the engine only DECLARES**
-//! ([`crate::policy_registry::KEY_SEC_REQUIRE_APPROVAL`], `Enforcement::DeclaredOnly`).
+//! Approval is a **sealed policy obligation the engine does not enforce but a HOST
+//! does** ([`crate::policy_registry::KEY_SEC_REQUIRE_APPROVAL`],
+//! `Enforcement::HostEnforced` — so it may be sealed at a non-default value, M-2).
 //! The engine `apply` stays a dumb executor; it never gates on this knob. Instead the
 //! HOST (`migrated`) composes the effective policy, asks
 //! [`migration_requires_approval`] whether the migration's ops require approval, and
