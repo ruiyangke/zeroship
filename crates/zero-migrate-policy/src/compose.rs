@@ -23,20 +23,20 @@
 //! ```
 //!
 //! and `grantedScope(P,k) = ⊔ { r.scope : r ∈ grants(k), r.value ≠ default }`. We
-//! never enumerate objects: the `compose_strict` grant check partitions the draft's
+//! never enumerate objects: the `admit` grant check partitions the draft's
 //! granted scope by the ceiling's covering rules (via `⊓`) and compares values on
 //! each region, plus the uncovered region via `∖` (where the ceiling value is
-//! `default`). See [`compose_strict`].
+//! `default`). See [`crate::boundary::admit`].
 //!
-//! # `compose_strict` vs `compose_clamp`
+//! # `admit` vs `restrict`
 //!
-//! - [`compose_strict`] ingests an UNTRUSTED draft against a trusted ceiling: grants
-//!   must be pointwise `⊑`; require/inject/validate union-up; collisions blamed on
-//!   the draft; the creatable-scope lint runs. NO clipping — strict reject.
-//! - [`compose_clamp`] meets two TRUSTED ceilings (host→org→project): grants meet
+//! - [`crate::boundary::admit`] ingests an UNTRUSTED draft against a trusted ceiling:
+//!   grants must be pointwise `⊑`; require/inject/validate union-up; collisions blamed
+//!   on the draft; the creatable-scope lint runs. NO clipping — strict reject.
+//! - [`restrict`] meets two TRUSTED ceilings (host→org→project): grants meet
 //!   pointwise; rule-sets union; ceiling-vs-ceiling collisions are a loud operator
-//!   error. Associative + total. Chains compose with clamp; the final untrusted
-//!   draft lands via `compose_strict`.
+//!   error. Associative + total. Chains compose with `restrict`; the final untrusted
+//!   draft lands via `admit`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -52,20 +52,97 @@ use crate::{LoadContext, LoadError, PolicyDoc};
 /// The knob key of the scoped creation-gating grant that anchors mandatory injects
 /// (II.2.6a). The creatable-scope lint requires this grant's scope `⊑` every
 /// mandatory ceiling inject's scope.
-const CREATE_TABLE_KEY: &str = "core.create_table";
+pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TrustedDoc — provenance newtype (H-1)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// A policy document of HOST provenance (H-1). Constructible ONLY inside this crate,
+/// from a host-injected source — the [`RootCeiling`] and catalog entries registered
+/// at engine construction. There is **no** `PolicyDoc -> TrustedDoc` conversion and
+/// **no** public constructor: a creator-supplied `PolicyDoc` (a *draft*) can never
+/// become a `TrustedDoc`.
+///
+/// This is the type-level encoding that keeps [`overlay`](crate::compose::overlay) /
+/// [`restrict`] from ever seeing an untrusted operand: both accept only `TrustedDoc`.
+/// The `extends`-laundering hole (a draft inheriting a trusted base into `overlay`)
+/// is closed by construction, not by a runtime provenance check.
+///
+/// The single public mint site outside `RootCeiling::parse_*` is
+/// [`TrustedDoc::register_catalog_entry`] — the `ProfileCatalog`-registration wrapper
+/// a host uses to turn a document IT authored into a catalog `TrustedDoc`. Passing a
+/// creator-editable file here would defeat H-1; that is construction-site discipline
+/// (the doc IS host-authored) the type cannot police, but the mint site is named so
+/// no one wires an untrusted source into it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TrustedDoc(PolicyDoc);
+
+impl TrustedDoc {
+    /// Mint a catalog-entry `TrustedDoc` from a document the HOST authored
+    /// (`ProfileCatalog` registration, II.5). Parses + validates as a NON-root layer
+    /// (a catalog `env` fragment may not carry `mandatory = true` injects — that is
+    /// `RootCeiling`-only, M-5). The caller MUST supply a host-authored source; a
+    /// creator-editable document wired here would launder untrusted content into the
+    /// trusted combinators (H-1 guidance).
+    pub fn register_catalog_entry(
+        src: &str,
+        registry: &PolicyRegistry,
+    ) -> Result<Self, LoadError> {
+        Ok(Self(PolicyDoc::parse_toml(src, registry, LoadContext::TrustedCatalogEntry)?))
+    }
+
+    /// Mint a catalog-entry `TrustedDoc` from a host-authored JSON document.
+    pub fn register_catalog_entry_json(
+        src: &str,
+        registry: &PolicyRegistry,
+    ) -> Result<Self, LoadError> {
+        Ok(Self(PolicyDoc::parse_json(src, registry, LoadContext::TrustedCatalogEntry)?))
+    }
+
+    /// Mint a catalog-entry `TrustedDoc` that may `extends` a base, resolving it
+    /// against the trusted `catalog` (II.7, H-1).
+    pub fn register_catalog_entry_with_catalog(
+        src: &str,
+        registry: &PolicyRegistry,
+        catalog: &dyn crate::document::ProfileCatalog,
+    ) -> Result<Self, LoadError> {
+        Ok(Self(PolicyDoc::parse_toml_with_catalog(
+            src,
+            registry,
+            LoadContext::TrustedCatalogEntry,
+            catalog,
+        )?))
+    }
+
+    /// Crate-internal mint from an already-validated document (the `RootCeiling`
+    /// constructors, extends-resolution). No provenance is conferred by this call —
+    /// the caller is responsible for the document being host-authored.
+    pub(crate) fn from_validated(doc: PolicyDoc) -> Self {
+        Self(doc)
+    }
+
+    /// The underlying validated document (crate-internal; the composer reads it).
+    pub(crate) fn doc(&self) -> &PolicyDoc {
+        &self.0
+    }
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // RootCeiling — the ONLY trust anchor
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// The host's ROOT CEILING — the single trust anchor of the whole policy system
-/// (II.5). Constructed only from a [`PolicyDoc`] loaded with
-/// [`LoadContext::RootCeiling`] (the only layer allowed `mandatory = true` injects).
-/// Every [`EffectivePolicy`] descends from a `RootCeiling` through
-/// [`compose_strict`]/[`compose_clamp`]; there is no other way in.
+/// (II.5), and the outermost layer of every assembled ceiling (M-5). Wraps a
+/// [`TrustedDoc`] loaded with [`LoadContext::RootCeiling`] (the only layer allowed
+/// `mandatory = true` injects). Every [`EffectivePolicy`] descends from a
+/// `RootCeiling` through the finalized-[`Ceiling`] path into [`admit`](crate::boundary::admit);
+/// there is no other way in. A `RootCeiling` is itself a valid finalized ceiling (a
+/// single trusted layer whose conflicts are caught at load), so it implements
+/// [`AdmitCeiling`] and may be `admit`'s ceiling directly.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RootCeiling {
-    doc: PolicyDoc,
+    doc: TrustedDoc,
 }
 
 impl RootCeiling {
@@ -73,17 +150,42 @@ impl RootCeiling {
     /// wrapper over [`PolicyDoc::parse_toml`] pinned to [`LoadContext::RootCeiling`]
     /// — the only context under which a `mandatory` inject rule loads.
     pub fn parse_toml(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
-        Ok(Self { doc: PolicyDoc::parse_toml(src, registry, LoadContext::RootCeiling)? })
+        let doc = PolicyDoc::parse_toml(src, registry, LoadContext::RootCeiling)?;
+        Ok(Self { doc: TrustedDoc::from_validated(doc) })
     }
 
     /// Parse + validate a root-ceiling policy document from JSON.
     pub fn parse_json(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
-        Ok(Self { doc: PolicyDoc::parse_json(src, registry, LoadContext::RootCeiling)? })
+        let doc = PolicyDoc::parse_json(src, registry, LoadContext::RootCeiling)?;
+        Ok(Self { doc: TrustedDoc::from_validated(doc) })
+    }
+
+    /// Parse + validate a root ceiling that may `extends` a trusted catalog base
+    /// (II.7, H-1), resolving the base chain against `catalog` with cycle detection.
+    pub fn parse_toml_with_catalog(
+        src: &str,
+        registry: &PolicyRegistry,
+        catalog: &dyn crate::document::ProfileCatalog,
+    ) -> Result<Self, LoadError> {
+        let doc = PolicyDoc::parse_toml_with_catalog(
+            src,
+            registry,
+            LoadContext::RootCeiling,
+            catalog,
+        )?;
+        Ok(Self { doc: TrustedDoc::from_validated(doc) })
     }
 
     /// The underlying validated document (for the composer).
     #[must_use]
     pub fn doc(&self) -> &PolicyDoc {
+        self.doc.doc()
+    }
+
+    /// This root as a [`TrustedDoc`] — so it may be an `overlay`/`restrict` operand
+    /// (the root is `base`, the outermost layer, M-5).
+    #[must_use]
+    pub fn as_trusted(&self) -> &TrustedDoc {
         &self.doc
     }
 }
@@ -92,8 +194,8 @@ impl RootCeiling {
 // Composition errors
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// A `compose_strict` / `compose_clamp` failure. `compose_strict` errors blame the
-/// UNTRUSTED draft; `compose_clamp` errors are loud OPERATOR misconfigurations of
+/// A `admit` / `restrict` failure. `admit` errors blame the
+/// UNTRUSTED draft; `restrict` errors are loud OPERATOR misconfigurations of
 /// two trusted ceilings.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ComposeError {
@@ -135,7 +237,7 @@ pub enum ComposeError {
         inject_scope: String,
     },
     /// Two TRUSTED ceilings inject conflicting shape on overlapping scope — a loud
-    /// operator misconfiguration surfaced at `compose_clamp` (II.4.4).
+    /// operator misconfiguration surfaced at `restrict` (II.4.4).
     CeilingInjectCollision {
         /// What collided across the two ceilings.
         detail: String,
@@ -164,9 +266,9 @@ impl From<ValueOrderError> for ComposeError {
 /// is NOT assumed here (the loader keeps default-valued and dead rules); the
 /// `granted_scope`/`value_at` accessors filter appropriately.
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct GrantRule {
-    scope: Scope,
-    value: KnobValue,
+pub(crate) struct GrantRule {
+    pub(crate) scope: Scope,
+    pub(crate) value: KnobValue,
 }
 
 /// The pointwise grant model for ONE key (II.3.2): the symbolic set of covering
@@ -175,14 +277,14 @@ struct GrantRule {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
 pub struct GrantKeyMap {
-    kind: KnobKind,
-    default: KnobValue,
-    rules: Vec<GrantRule>,
+    pub(crate) kind: KnobKind,
+    pub(crate) default: KnobValue,
+    pub(crate) rules: Vec<GrantRule>,
 }
 
 impl GrantKeyMap {
     /// `value(P, k, o)` — the LOOSEST covering rule's value, else the default.
-    fn value_at(&self, o: &ObjectName) -> Result<KnobValue, ComposeError> {
+    pub(crate) fn value_at(&self, o: &ObjectName) -> Result<KnobValue, ComposeError> {
         let mut acc = self.default.clone();
         for r in &self.rules {
             if r.scope.objects_membership(o) {
@@ -195,7 +297,7 @@ impl GrantKeyMap {
     /// `grantedScope(P, k)` — the `⊔` of the scopes of exactly the rules that raise
     /// the value ABOVE default (a default-valued rule contributes nothing). This is
     /// precisely the region where `value ≠ default` (II.3.2).
-    fn granted_scope(&self) -> Result<Scope, ComposeError> {
+    pub(crate) fn granted_scope(&self) -> Result<Scope, ComposeError> {
         let mut acc = Scope::Nothing;
         for r in &self.rules {
             // A rule whose value equals default does not raise the grant.
@@ -208,6 +310,24 @@ impl GrantKeyMap {
         }
         Ok(acc)
     }
+
+    /// `coveredScope(P, k)` — the `⊔` of the scopes of ALL grant rules on this key,
+    /// regardless of value (presence, incl. default-valued rules) (II.3.2 (a)). This
+    /// is the OVERRIDE/MASKING set: where this layer's value WINS over an inherited
+    /// one, even when it narrows the knob DOWN to its default.
+    pub(crate) fn covered_scope(&self) -> Scope {
+        let mut acc = Scope::Nothing;
+        for r in &self.rules {
+            acc = acc.join(&r.scope);
+        }
+        acc
+    }
+
+    /// `P.covers(k, o)` — does ANY grant rule on this key cover `o` (presence, any
+    /// value)? The masking test: a layer's value WINS at `o` iff it covers `o`.
+    pub(crate) fn covers(&self, o: &ObjectName) -> bool {
+        self.rules.iter().any(|r| r.scope.objects_membership(o))
+    }
 }
 
 /// The full pointwise grant model: one [`GrantKeyMap`] per key that has grant rules.
@@ -218,12 +338,12 @@ impl GrantKeyMap {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
 pub struct GrantModel {
-    keys: BTreeMap<KnobKey, GrantKeyMap>,
+    pub(crate) keys: BTreeMap<KnobKey, GrantKeyMap>,
 }
 
 impl GrantModel {
     /// Build the pointwise grant model from a rule list against the registry.
-    fn build(rules: &[Rule], registry: &PolicyRegistry) -> Result<Self, ComposeError> {
+    pub(crate) fn build(rules: &[Rule], registry: &PolicyRegistry) -> Result<Self, ComposeError> {
         let mut keys: BTreeMap<KnobKey, GrantKeyMap> = BTreeMap::new();
         for rule in rules {
             let RuleKind::Grant { key, value } = &rule.kind else { continue };
@@ -239,12 +359,101 @@ impl GrantModel {
     }
 
     /// The keys present in either model (for iterating both ceiling and draft).
-    fn key_union<'a>(&'a self, other: &'a GrantModel) -> Vec<&'a KnobKey> {
+    pub(crate) fn key_union<'a>(&'a self, other: &'a GrantModel) -> Vec<&'a KnobKey> {
         let mut out: Vec<&KnobKey> = self.keys.keys().chain(other.keys.keys()).collect();
         out.sort();
         out.dedup();
         out
     }
+
+    /// The keys that have grant rules in this model (key-sorted).
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &KnobKey> {
+        self.keys.keys()
+    }
+
+    /// The per-key grant map for `key`, if any.
+    pub(crate) fn get(&self, key: &KnobKey) -> Option<&GrantKeyMap> {
+        self.keys.get(key)
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Layer — one resolved policy layer (H-4: the layered ceiling / effective policy)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Which layer a resolved rule set occupies in a composed stack (H-4). The tag is
+/// bound into the seal (II.7) so two stacks with the same *flattened* rule set — but
+/// different layer boundaries — encode differently and a re-flatten fails the MAC.
+///
+/// The cross-layer order, outermost → innermost, is `Base → Env → Draft`. `restrict`
+/// flattens a trusted meet into ONE `Base` layer; `overlay` produces `[Env] over
+/// [Base]`; `admit` places the untrusted `[Draft]` innermost over the ceiling layers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LayerTag {
+    /// The outermost trusted layer — a `RootCeiling`/`restrict`-meet/`overlay` base.
+    Base,
+    /// A trusted `env` overlay layer (from [`overlay`]`(base, env)`), inside `Base`.
+    Env,
+    /// The innermost, UNTRUSTED creator draft layer (`admit`).
+    Draft,
+}
+
+/// One resolved policy layer: its tag + the four resolved rule collections. A
+/// [`Ceiling`]/[`AssembledCeiling`]/[`EffectivePolicy`] is a STACK of these, queried
+/// top-first (innermost-first) with fall-through (II.3.2 / H-4).
+///
+/// Exposed (hidden) because the sealed [`AdmitCeiling`] trait returns it; not part of
+/// the stable API — construct/inspect only through the composition entry points.
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[doc(hidden)]
+pub struct Layer {
+    pub(crate) tag: LayerTag,
+    pub(crate) grants: GrantModel,
+    pub(crate) requires: Vec<Rule>,
+    pub(crate) injects: Vec<Rule>,
+    pub(crate) validates: Vec<Rule>,
+}
+
+impl Layer {
+    /// Build a layer from a validated document's rule list.
+    pub(crate) fn from_doc(
+        tag: LayerTag,
+        doc: &PolicyDoc,
+        registry: &PolicyRegistry,
+    ) -> Result<Self, ComposeError> {
+        Ok(Self {
+            tag,
+            grants: GrantModel::build(&doc.rules, registry)?,
+            requires: rules_of(&doc.rules, |k| matches!(k, RuleKind::Require { .. })),
+            injects: rules_of(&doc.rules, |k| matches!(k, RuleKind::Inject { .. })),
+            validates: rules_of(&doc.rules, |k| matches!(k, RuleKind::Validate { .. })),
+        })
+    }
+}
+
+/// Pin `key` in `layer` so a SILENT region gets the knob DEFAULT, not an inherited
+/// ceiling value — by appending a synthetic default-valued grant rule over the whole
+/// universe (`Scope::All`) to the layer's grant map for `key`. Presence-override
+/// (II.3.2) then makes this layer WIN the top-down grant fall-through EVERYWHERE for
+/// `key`: at an object the draft covered with an EXPLICIT rule, the loosest-covering
+/// join within the layer keeps the draft's own (higher) value; at an object the draft
+/// left silent, only the synthetic default-valued rule covers, so the value is the
+/// knob default — the ceiling's grant below is never seen. Used by
+/// [`admit`](crate::boundary::admit) to realize a `KnobDef.inherit == false` power
+/// grant: it is conferred only where the draft ASKED, never by inheritance-by-omission.
+/// `pub(crate)`: the boundary module is its sole caller.
+pub(crate) fn pin_layer_key_to_default(
+    layer: &mut Layer,
+    key: &KnobKey,
+    kind: &KnobKind,
+    default: &KnobValue,
+) {
+    let entry = layer.grants.keys.entry(key.clone()).or_insert_with(|| GrantKeyMap {
+        kind: kind.clone(),
+        default: default.clone(),
+        rules: Vec::new(),
+    });
+    entry.rules.push(GrantRule { scope: Scope::All, value: default.clone() });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -253,7 +462,7 @@ impl GrantModel {
 
 /// The composed, UNFORGEABLE effective policy — the PDP surface the guard/engine
 /// query (II.3.2). Its fields are PRIVATE, it has NO `Deserialize` and NO public
-/// constructor: the ONLY ways to obtain one are [`compose_strict`] / [`compose_clamp`]
+/// constructor: the ONLY ways to obtain one are [`admit`] / [`restrict`]
 /// from a [`RootCeiling`] (or [`EffectivePolicy::deny_all`], the engine-derived
 /// floor). Holding one is proof it was composed under the host's root ceiling — this
 /// is the type-level boundary that replaces the old forgeable `OperatorCapability`
@@ -270,13 +479,11 @@ impl GrantModel {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectivePolicy {
     registry: PolicyRegistry,
-    grants: GrantModel,
-    /// Require rules (obligations), each at its resolved scope, in composition order.
-    requires: Vec<Rule>,
-    /// Inject rules in the sealed total order (outermost-first, doc-order).
-    injects: Vec<Rule>,
-    /// Validate rules, each at its resolved scope, in composition order.
-    validates: Vec<Rule>,
+    /// The layer stack, TOP (innermost) first — `[draft]` over the ceiling layers
+    /// (`[env] over [base]` or a single flattened `restrict`/root `base`) (H-4). The
+    /// grant query falls through top→down; obligations/injects/validates union across
+    /// ALL layers (union-up). The seal binds the layer boundaries (II.7).
+    layers: Vec<Layer>,
 }
 
 impl EffectivePolicy {
@@ -287,29 +494,40 @@ impl EffectivePolicy {
     /// an all-default policy, never an escalated one).
     #[must_use]
     pub fn deny_all(registry: &PolicyRegistry) -> Self {
-        Self {
-            registry: registry.clone(),
-            grants: GrantModel { keys: BTreeMap::new() },
-            requires: Vec::new(),
-            injects: Vec::new(),
-            validates: Vec::new(),
-        }
+        Self { registry: registry.clone(), layers: Vec::new() }
+    }
+
+    /// Crate-internal constructor from a LAYER STACK (top-first). Used by the
+    /// `boundary::admit` trust-crossing to mint the layered `[draft] over [ceiling]`
+    /// [`EffectivePolicy`] (H-4). Not public: an `EffectivePolicy` is only obtainable
+    /// through the composition entry points (unforgeability, E6).
+    #[must_use]
+    pub(crate) fn from_layers(registry: PolicyRegistry, layers: Vec<Layer>) -> Self {
+        Self { registry, layers }
     }
 
     // ── decision-query API (the PDP surface the guard/engine call) ─────────────
 
-    /// `grants(key, object)` — the effective (loosest covering) grant value at
-    /// `object`, or `None` if the key is unknown to the registry. For a key with no
-    /// covering grant rule this returns the knob's default (the tightest value), NOT
-    /// `None`: `None` means "no such knob", a default value means "granted nothing
-    /// above deny here". All scope resolution happens inside.
+    /// `grants(key, object)` — the effective grant value at `object`, or `None` if the
+    /// key is unknown to the registry. LAYERED (H-4): query the TOP layer's covering
+    /// rules first (loosest-covering WITHIN that layer); if the top layer has ANY grant
+    /// rule on `key` covering `object` (presence — even one at the default), its value
+    /// WINS; otherwise fall through to the next layer down. The knob default (tightest)
+    /// if no layer covers `object`. `None` means "no such knob"; a default value means
+    /// "granted nothing above deny here". All scope resolution happens inside.
     #[must_use]
     pub fn grants(&self, key: &KnobKey, object: &ObjectName) -> Option<KnobValue> {
-        match self.grants.keys.get(key) {
-            Some(km) => km.value_at(object).ok(),
-            // Key not in the grant model: fall back to the registry default (deny).
-            None => self.registry.get(key).map(|d| d.default.clone()),
+        // Fall through the layer stack top→down; the first layer that COVERS `object`
+        // for `key` (presence) decides the value (its loosest-covering value there).
+        for layer in &self.layers {
+            if let Some(km) = layer.grants.keys.get(key) {
+                if km.covers(object) {
+                    return km.value_at(object).ok();
+                }
+            }
         }
+        // No layer covers `object` for `key`: the registry default (deny).
+        self.registry.get(key).map(|d| d.default.clone())
     }
 
     /// `grant_is_top(key)` — is `key` granted (above its default) over the WHOLE
@@ -324,59 +542,98 @@ impl EffectivePolicy {
         matches!(self.grant_region(key), GrantRegion::Top)
     }
 
-    /// `grant_region(key)` — the shape of the region where `key` is granted above its
-    /// default: `Ungranted` (nowhere / unknown key), `Top` (the whole universe, ⊤),
-    /// or `Scoped` (a proper, strictly-narrower-than-⊤ region). This is the three-way
-    /// distinction the guard's II.2.5 scoped-raw-SQL rules turn on: unqualified names /
-    /// `SET search_path` / opaque bodies are admitted under a `Top` `core.raw_sql`
-    /// grant, DENIED under a `Scoped` one, and simply not raw-SQL-gated at all when
-    /// `Ungranted`.
+    /// `grant_region(key)` — the shape of the EFFECTIVE region where `key` is granted
+    /// above its default: `Ungranted` (nowhere / unknown key), `Top` (the whole
+    /// universe, ⊤), or `Scoped` (a proper, strictly-narrower-than-⊤ region). This is
+    /// the three-way distinction the guard's II.2.5 scoped-raw-SQL rules turn on:
+    /// unqualified names / `SET search_path` / opaque bodies are admitted under a `Top`
+    /// `core.raw_sql` grant, DENIED under a `Scoped` one, and simply not raw-SQL-gated
+    /// at all when `Ungranted`.
+    ///
+    /// The effective granted region is derived from the LAYERED value (H-4): it is
+    /// `All` only when the effective value is above default over the whole universe.
+    /// Because `grants` falls through, an effective grant can differ from any single
+    /// layer's — a narrow-to-default draft over a ⊤ ceiling grant narrows the region.
+    /// We compute it as the join of each layer's effective-above-default contribution,
+    /// masked by the layers above (presence-override), which is a `⊒`-conservative
+    /// estimate — sound for the ⊤ test (a false `Top` cannot arise: `Top` is only
+    /// reported when the effective grant truly covers the universe).
     #[must_use]
     pub fn grant_region(&self, key: &KnobKey) -> GrantRegion {
-        match self.grants.keys.get(key) {
-            Some(km) => match km.granted_scope() {
-                Ok(Scope::All) => GrantRegion::Top,
-                Ok(Scope::Nothing) => GrantRegion::Ungranted,
-                Ok(Scope::Of { .. }) => GrantRegion::Scoped,
-                Err(_) => GrantRegion::Ungranted,
-            },
-            None => GrantRegion::Ungranted,
+        match self.effective_granted_scope(key) {
+            Ok(Scope::All) => GrantRegion::Top,
+            Ok(Scope::Nothing) => GrantRegion::Ungranted,
+            Ok(Scope::Of { .. }) => GrantRegion::Scoped,
+            Err(_) => GrantRegion::Ungranted,
         }
     }
 
-    /// Return the literal schema names included by non-default grant rules for
-    /// `key`, when that granted region is representable as a finite set of
+    /// The EFFECTIVE granted scope for `key` across the layer stack (the object set
+    /// where the effective, fall-through value is above default). Computed
+    /// layer-by-layer: an upper layer's granted region is its own `grantedScope`; a
+    /// lower layer contributes its `grantedScope` MINUS the region already COVERED
+    /// (presence) by any layer above it — a lower grant only shows through where no
+    /// upper layer masks it. Joins (⊒-conservative) the per-layer contributions.
+    fn effective_granted_scope(&self, key: &KnobKey) -> Result<Scope, ComposeError> {
+        let mut acc = Scope::Nothing;
+        // The union of all higher layers' COVERED scope on this key (presence mask).
+        let mut masked_above = Scope::Nothing;
+        for layer in &self.layers {
+            if let Some(km) = layer.grants.keys.get(key) {
+                let granted = km.granted_scope()?;
+                // This layer's grant shows through only where no higher layer covers.
+                let visible = match granted.difference(&masked_above) {
+                    Difference::Scope(s) => s,
+                    // Not cleanly representable: fall back to the raw granted region
+                    // (⊒-conservative — only widens the estimate, safe for the ⊤ test).
+                    Difference::NotRepresentable => granted.clone(),
+                };
+                acc = acc.join(&visible);
+                masked_above = masked_above.join(&km.covered_scope());
+            }
+        }
+        Ok(acc)
+    }
+
+    /// Return the literal schema names included by non-default EFFECTIVE grant rules
+    /// for `key`, when that granted region is representable as a finite set of
     /// schema-only literal includes with no excludes.
     ///
-    /// This is intentionally narrow policy introspection for engine plumbing
-    /// that still needs a schema pin/search path during the policy redesign. It
-    /// returns `None` for an unknown key, an ungranted key, a top grant, globbed
-    /// schemas, table-granular scopes, or excludes.
+    /// This is intentionally narrow policy introspection for engine plumbing that
+    /// still needs a schema pin/search path during the policy redesign. It gathers the
+    /// non-default grant rules across ALL layers (a superset estimate: it does not
+    /// subtract higher-layer masking, since the consumer only needs the candidate
+    /// schema set). Returns `None` for an unknown key, an ungranted key, a top grant,
+    /// globbed schemas, table-granular scopes, or excludes.
     #[must_use]
     pub fn grant_literal_schema_includes(&self, key: &KnobKey) -> Option<Vec<String>> {
-        let km = self.grants.keys.get(key)?;
         let mut out = BTreeSet::new();
-        for r in &km.rules {
-            if leq_value(&km.kind, &r.value, &km.default).ok()? {
-                continue;
-            }
-            match &r.scope {
-                Scope::Nothing => {}
-                Scope::All => return None,
-                Scope::Of { include, exclude } => {
-                    if !exclude.is_empty() {
-                        return None;
-                    }
-                    for pattern in include {
-                        if !pattern.table.is_star() || !pattern.schema.is_literal() {
+        let mut seen_key = false;
+        for layer in &self.layers {
+            let Some(km) = layer.grants.keys.get(key) else { continue };
+            seen_key = true;
+            for r in &km.rules {
+                if leq_value(&km.kind, &r.value, &km.default).ok()? {
+                    continue;
+                }
+                match &r.scope {
+                    Scope::Nothing => {}
+                    Scope::All => return None,
+                    Scope::Of { include, exclude } => {
+                        if !exclude.is_empty() {
                             return None;
                         }
-                        out.insert(pattern.schema.render());
+                        for pattern in include {
+                            if !pattern.table.is_star() || !pattern.schema.is_literal() {
+                                return None;
+                            }
+                            out.insert(pattern.schema.render());
+                        }
                     }
                 }
             }
         }
-        if out.is_empty() {
+        if !seen_key || out.is_empty() {
             None
         } else {
             Some(out.into_iter().collect())
@@ -384,11 +641,13 @@ impl EffectivePolicy {
     }
 
     /// `obligations(object)` — every covering require rule's `(key, value)` at
-    /// `object`, in composition order. The guard unions valued requires per object.
+    /// `object`, across ALL layers (union-up, II.3.2). The guard unions valued requires
+    /// per object. Ceiling obligations are never masked by the draft — they accumulate.
     #[must_use]
     pub fn obligations(&self, object: &ObjectName) -> Vec<(KnobKey, KnobValue)> {
-        self.requires
+        self.layers
             .iter()
+            .flat_map(|l| l.requires.iter())
             .filter(|r| r.scope.objects_membership(object))
             .filter_map(|r| match &r.kind {
                 RuleKind::Require { key, value } => Some((key.clone(), value.clone())),
@@ -398,11 +657,15 @@ impl EffectivePolicy {
     }
 
     /// `injects_for(object)` — every covering inject rule's [`InjectSpec`] at
-    /// `object`, in the SEALED cross-layer inject total order (II.4.4).
+    /// `object`, across ALL layers in the SEALED cross-layer inject total order
+    /// (outermost/base first, innermost/draft last — union-up, II.4.4).
     #[must_use]
     pub fn injects_for(&self, object: &ObjectName) -> Vec<&InjectSpec> {
-        self.injects
+        // Outermost-first order: the stack is top(=innermost)-first, so reverse.
+        self.layers
             .iter()
+            .rev()
+            .flat_map(|l| l.injects.iter())
             .filter(|r| r.scope.objects_membership(object))
             .filter_map(|r| match &r.kind {
                 RuleKind::Inject { spec } => Some(spec),
@@ -411,12 +674,14 @@ impl EffectivePolicy {
             .collect()
     }
 
-    /// `validates_for(object)` — every covering validate predicate at `object`, in
-    /// composition order.
+    /// `validates_for(object)` — every covering validate predicate at `object`, across
+    /// ALL layers (union-up). A draft can add but never drop a ceiling predicate.
     #[must_use]
     pub fn validates_for(&self, object: &ObjectName) -> Vec<&ValidatePredicate> {
-        self.validates
+        self.layers
             .iter()
+            .rev()
+            .flat_map(|l| l.validates.iter())
             .filter(|r| r.scope.objects_membership(object))
             .filter_map(|r| match &r.kind {
                 RuleKind::Validate { pred } => Some(pred),
@@ -465,37 +730,107 @@ impl EffectivePolicy {
     }
 
     // ── seal support (crate-internal; consumed by the seal module) ─────────────
-    // These expose the canonical resolved rule set the seal MACs. Kept here (not in
-    // the seal module) because they read private fields; the seal cut is their sole
-    // consumer.
+    // These expose the canonical resolved rule set WITH ITS LAYER BOUNDARIES (H-4)
+    // for the seal MAC. Kept here (not in the seal module) because they read private
+    // fields; the seal cut is their sole consumer. The layer tag is bound into the
+    // MAC so two stacks with the same flattened rule set but different layer
+    // boundaries encode differently — a re-flatten fails the MAC (II.7).
 
-    /// The require rules in composition order (seal payload).
-    pub(crate) fn require_rules(&self) -> &[Rule] {
-        &self.requires
+    /// The seal payload: for each layer (in stack order, TOP/innermost first), its
+    /// [`LayerTag`] paired with its four canonical rule collections. The seal encodes
+    /// the layer boundaries so a re-flatten changes the MAC.
+    pub(crate) fn seal_layers(&self) -> Vec<SealLayer<'_>> {
+        self.layers
+            .iter()
+            .map(|l| SealLayer {
+                tag: l.tag,
+                grants: {
+                    let mut out = Vec::new();
+                    for (key, km) in &l.grants.keys {
+                        for r in &km.rules {
+                            out.push((key, &r.scope, &r.value));
+                        }
+                    }
+                    out
+                },
+                requires: &l.requires,
+                injects: &l.injects,
+                validates: &l.validates,
+            })
+            .collect()
     }
+}
 
-    /// The inject rules in the sealed total order (seal payload).
-    pub(crate) fn inject_rules(&self) -> &[Rule] {
-        &self.injects
+/// One layer's seal payload (crate-internal): its tag + canonical rule views. The
+/// seal MACs this in stack order so layer boundaries are bound (H-4 / II.7).
+pub(crate) struct SealLayer<'a> {
+    pub(crate) tag: LayerTag,
+    /// Grant rules flattened `(key, scope, value)`, key-sorted then rule-ordered.
+    pub(crate) grants: Vec<(&'a KnobKey, &'a Scope, &'a KnobValue)>,
+    pub(crate) requires: &'a [Rule],
+    pub(crate) injects: &'a [Rule],
+    pub(crate) validates: &'a [Rule],
+}
+
+impl LayerTag {
+    /// A stable 1-byte discriminant for the seal encoding.
+    pub(crate) fn seal_byte(self) -> u8 {
+        match self {
+            LayerTag::Base => 0x00,
+            LayerTag::Env => 0x01,
+            LayerTag::Draft => 0x02,
+        }
     }
+}
 
-    /// The validate rules in composition order (seal payload).
-    pub(crate) fn validate_rules(&self) -> &[Rule] {
-        &self.validates
-    }
+// ── layered ceiling grant queries (crate-internal; consumed by boundary::admit) ──
 
-    /// The grant rules flattened to `(key, scope, value)` in key-sorted, then
-    /// rule-order, form (seal payload). Key order is deterministic (BTreeMap); within
-    /// a key, rules keep composition order.
-    pub(crate) fn grant_rules_canonical(&self) -> Vec<(&KnobKey, &Scope, &KnobValue)> {
-        let mut out = Vec::new();
-        for (key, km) in &self.grants.keys {
-            for r in &km.rules {
-                out.push((key, &r.scope, &r.value));
+/// `value(layers, k, o)` — the EFFECTIVE (top-down fall-through) grant value of a
+/// LAYER STACK at `o` (H-4). The first layer (top/innermost first) that COVERS `o`
+/// for `k` (presence) decides; else the knob default. Used by `admit` to read a
+/// (possibly multi-layer) ceiling's effective value at a witness object.
+pub(crate) fn layered_value_at(
+    layers: &[Layer],
+    default: &KnobValue,
+    key: &KnobKey,
+    o: &ObjectName,
+) -> Result<KnobValue, ComposeError> {
+    for layer in layers {
+        if let Some(km) = layer.grants.keys.get(key) {
+            if km.covers(o) {
+                return km.value_at(o);
             }
         }
-        out
     }
+    Ok(default.clone())
+}
+
+/// The NON-DEFAULT grant rules of a LAYER STACK for `key` (H-4), each at its own
+/// `effective_scope` (excludes intact). These are the ceiling-side grant rules the
+/// `admit` escalation check subtracts, ONE AT A TIME (iterated per-rule `∖` — NEVER a
+/// `⊔`-materialized ceiling side, C-1). A default-valued rule grants nothing and is
+/// dropped. Masking (an upper layer narrowing a lower grant to default) is handled
+/// NOT here but by the caller's covered-region value comparison against the ceiling's
+/// LAYERED effective value ([`layered_value_at`]): in a masked region the effective
+/// value is `default`, so a non-default draft value there rejects on the value check
+/// even though the region was subtracted from the uncovered set. The two checks
+/// together are sound (fail-closed).
+pub(crate) fn layered_nondefault_grant_rules<'a>(
+    layers: &'a [Layer],
+    key: &KnobKey,
+) -> Result<Vec<&'a Scope>, ComposeError> {
+    let mut out: Vec<&Scope> = Vec::new();
+    for layer in layers {
+        if let Some(km) = layer.grants.keys.get(key) {
+            for r in &km.rules {
+                if leq_value(&km.kind, &r.value, &km.default)? {
+                    continue; // default-valued rule grants nothing.
+                }
+                out.push(&r.scope);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The shape of the region where a grant key is above its default (II.2.5). The
@@ -523,262 +858,306 @@ pub enum ShapeElement<'a> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// compose_strict — UNTRUSTED draft against a trusted ceiling
+// AdmitCeiling — the FINALIZED ceilings a draft may be admitted against
 // ══════════════════════════════════════════════════════════════════════════════
 
 mod sealed {
-    /// Seals [`super::Ceiling`]: only the two in-crate types implement it, so no
-    /// external crate can forge a ceiling by implementing the trait.
+    /// Seals [`super::AdmitCeiling`]: only the finalized in-crate ceiling types
+    /// implement it, so no external crate can forge a ceiling — and, crucially, an
+    /// [`super::AssembledCeiling`] does NOT implement it, so an un-finalized ceiling
+    /// cannot reach `admit` at the type level (MED).
     pub trait Sealed {}
     impl Sealed for super::RootCeiling {}
+    impl Sealed for super::Ceiling {}
     impl Sealed for super::EffectivePolicy {}
 }
 
-/// A trusted ceiling: either a [`RootCeiling`] or an already-composed
-/// [`EffectivePolicy`] (the output of a `compose_clamp` chain). Both expose the same
-/// resolved rule set + grant model to `compose_strict`. SEALED — the only ceilings
-/// are the two trust-anchored types this crate defines; no external impl can forge
-/// one. The methods are hidden implementation detail.
-pub trait Ceiling: sealed::Sealed {
-    #[doc(hidden)]
-    fn grant_model(&self, registry: &PolicyRegistry) -> Result<GrantModel, ComposeError>;
-    #[doc(hidden)]
-    fn ceiling_requires(&self) -> Vec<Rule>;
-    #[doc(hidden)]
-    fn ceiling_injects(&self) -> Vec<Rule>;
-    #[doc(hidden)]
-    fn ceiling_validates(&self) -> Vec<Rule>;
-}
-
-impl Ceiling for RootCeiling {
-    fn grant_model(&self, registry: &PolicyRegistry) -> Result<GrantModel, ComposeError> {
-        GrantModel::build(&self.doc.rules, registry)
-    }
-    fn ceiling_requires(&self) -> Vec<Rule> {
-        rules_of(&self.doc.rules, |k| matches!(k, RuleKind::Require { .. }))
-    }
-    fn ceiling_injects(&self) -> Vec<Rule> {
-        rules_of(&self.doc.rules, |k| matches!(k, RuleKind::Inject { .. }))
-    }
-    fn ceiling_validates(&self) -> Vec<Rule> {
-        rules_of(&self.doc.rules, |k| matches!(k, RuleKind::Validate { .. }))
-    }
-}
-
-impl Ceiling for EffectivePolicy {
-    fn grant_model(&self, _registry: &PolicyRegistry) -> Result<GrantModel, ComposeError> {
-        Ok(self.grants.clone())
-    }
-    fn ceiling_requires(&self) -> Vec<Rule> {
-        self.requires.clone()
-    }
-    fn ceiling_injects(&self) -> Vec<Rule> {
-        self.injects.clone()
-    }
-    fn ceiling_validates(&self) -> Vec<Rule> {
-        self.validates.clone()
-    }
-}
-
-/// Ingress of an UNTRUSTED `draft` against a trusted `ceiling` (II.3.2). Returns an
-/// [`EffectivePolicy`] iff the draft escalates nowhere; otherwise a [`ComposeError`]
-/// blaming the draft. NO clipping — strict reject only.
+/// A FINALIZED ceiling a creator draft may be admitted against
+/// (`boundary::admit`): a [`RootCeiling`] (a single trusted layer, finalized by
+/// load), a [`Ceiling`] (the output of [`finalize_ceiling`]), or an already-composed
+/// [`EffectivePolicy`] used as a ceiling. Each yields its LAYER STACK (top/innermost
+/// first) to `admit`, which prepends the untrusted draft over it (H-4).
 ///
-/// The algorithm, pointwise per (key, object) but decided SYMBOLICALLY:
-/// - **Grants:** for each key, the draft is admissible iff at every object in the
-///   draft's granted scope the draft value is `⊑` the ceiling value. Decided by
-///   (1) partitioning the draft's granted scope by each ceiling grant rule's scope
-///   (via `⊓`) and comparing loosest values on the overlap; and (2) computing the
-///   UNCOVERED region `grantedScope(draft,k) ∖ grantedScope(ceiling,k)` — where the
-///   ceiling value is `default` (tightest), so any non-default draft value there
-///   rejects; a not-representable `∖` fails closed.
-/// - **Require/Inject/Validate:** union-up (ceiling rules ∪ draft rules), each at its
-///   own scope; a ceiling rule is never dropped or narrowed. Injects keep the sealed
-///   total order: ceiling injects first (outermost), then draft injects.
-/// - **Collisions:** a draft inject colliding with a ceiling inject, or a draft
-///   validate contradicting a ceiling inject, rejects at compose time.
-/// - **Creation-gating lint:** the draft's `core.create_table` granted scope must be
-///   `⊑` every MANDATORY ceiling inject's scope.
-pub fn compose_strict(
-    ceiling: &impl Ceiling,
-    draft: &PolicyDoc,
-    registry: &PolicyRegistry,
-) -> Result<EffectivePolicy, ComposeError> {
-    let ceiling_grants = ceiling.grant_model(registry)?;
-    let draft_grants = GrantModel::build(&draft.rules, registry)?;
-
-    // ── grant check: pointwise draft ⊑ ceiling, per key ────────────────────────
-    for key in draft_grants.key_union(&ceiling_grants) {
-        check_grant_key(key, &draft_grants, &ceiling_grants)?;
-    }
-
-    // ── require/inject/validate union-up (ceiling ∪ draft) ─────────────────────
-    let ceiling_injects = ceiling.ceiling_injects();
-    let draft_injects = rules_of(&draft.rules, |k| matches!(k, RuleKind::Inject { .. }));
-
-    // Compose-time collision blame: draft inject vs ceiling inject.
-    check_inject_collisions(&ceiling_injects, &draft_injects, false)?;
-    // Draft validate contradicting a ceiling inject.
-    let draft_validates = rules_of(&draft.rules, |k| matches!(k, RuleKind::Validate { .. }));
-    check_validate_vs_inject(&ceiling_injects, &draft_validates)?;
-
-    // Sealed inject total order: ceiling (outermost) first, then draft (inward).
-    let mut injects = ceiling_injects.clone();
-    injects.extend(draft_injects);
-
-    let mut requires = ceiling.ceiling_requires();
-    requires.extend(rules_of(&draft.rules, |k| matches!(k, RuleKind::Require { .. })));
-
-    let mut validates = ceiling.ceiling_validates();
-    validates.extend(draft_validates);
-
-    // ── creation-gating lint: draft creatable ⊑ every mandatory ceiling inject ──
-    check_creatable_lint(&draft_grants, &ceiling_grants, &ceiling_injects)?;
-
-    Ok(EffectivePolicy { registry: registry.clone(), grants: draft_grants, requires, injects, validates })
+/// SEALED. An [`AssembledCeiling`] — the un-finalized output of [`overlay`] /
+/// [`restrict`] — deliberately does **not** implement this trait: it must pass
+/// [`finalize_ceiling`] first, so "un-finalized ceiling reaches admit" is a TYPE
+/// ERROR, not a runtime hazard (MED).
+pub trait AdmitCeiling: sealed::Sealed {
+    /// The ceiling's layer stack (top/innermost first), for `admit` to build
+    /// `[draft] over [these layers]` (H-4).
+    #[doc(hidden)]
+    fn ceiling_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError>;
 }
 
-/// The per-key grant admissibility check (II.3.2): draft value `⊑` ceiling value at
-/// every object in the draft's granted scope.
-fn check_grant_key(
-    key: &KnobKey,
-    draft: &GrantModel,
-    ceiling: &GrantModel,
-) -> Result<(), ComposeError> {
-    let Some(dk) = draft.keys.get(key) else {
-        return Ok(()); // draft grants nothing on this key → nothing to check.
-    };
-    let draft_granted = dk.granted_scope()?;
-    if matches!(draft_granted, Scope::Nothing) {
-        return Ok(()); // draft raises nothing above default → admissible.
+impl AdmitCeiling for RootCeiling {
+    fn ceiling_layers(&self, registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+        // A root ceiling is a single `Base` layer.
+        Ok(vec![Layer::from_doc(LayerTag::Base, self.doc(), registry)?])
     }
+}
 
-    // The ceiling's model for this key (may be absent → everywhere default).
-    let ceiling_km = ceiling.keys.get(key);
-    let ceiling_granted = match ceiling_km {
-        Some(ck) => ck.granted_scope()?,
-        None => Scope::Nothing,
-    };
+impl AdmitCeiling for Ceiling {
+    fn ceiling_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+        Ok(self.layers.clone())
+    }
+}
 
-    // (1) UNCOVERED region: draft grants where the ceiling grants only default.
-    //     Any non-default draft value there escalates → reject (unless it computes
-    //     empty). `∖` over-approximates-or-rejects (fail-closed).
-    match draft_granted.difference(&ceiling_granted) {
-        Difference::NotRepresentable => {
-            return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
-        }
-        Difference::Scope(uncovered) => {
-            if !matches!(uncovered, Scope::Nothing) {
-                // The ceiling value on the uncovered region is `default` (tightest).
-                // The draft's granted-scope is exactly where its value ≠ default, so
-                // any non-empty uncovered region carries a draft value ⋣ default =
-                // escalation. (There is no draft_value ⊑ default case here: a rule in
-                // granted_scope() has value strictly above default by construction.)
-                return Err(ComposeError::GrantExceedsCeiling {
-                    key: key.clone(),
-                    offending_pattern: render_scope(&uncovered),
-                });
+impl AdmitCeiling for EffectivePolicy {
+    fn ceiling_layers(&self, _registry: &PolicyRegistry) -> Result<Vec<Layer>, ComposeError> {
+        Ok(self.layers.clone())
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AssembledCeiling / Ceiling — un-finalized vs finalized trusted ceilings (H-3)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// An UN-FINALIZED trusted ceiling — the output of the total trusted combinators
+/// [`overlay`] and [`restrict`] (II.3.2). It is a LAYER STACK (top/innermost first)
+/// that has NOT yet passed the conflict lints, so it deliberately does **not**
+/// implement [`AdmitCeiling`]: it cannot be `admit`'s ceiling until it clears
+/// [`finalize_ceiling`], which returns a [`Ceiling`] (MED — the un-finalized/finalized
+/// split is type-encoded). `overlay`/`restrict` are TOTAL (never reject); every
+/// ceiling *misconfiguration* (colliding injects, PK conflicts, creatable-escape)
+/// surfaces at the explicit `finalize_ceiling` gate (H-3).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AssembledCeiling {
+    registry: PolicyRegistry,
+    layers: Vec<Layer>,
+}
+
+/// A FINALIZED trusted ceiling — an [`AssembledCeiling`] (or a `RootCeiling`) that has
+/// PASSED [`finalize_ceiling`]'s conflict lints (H-3). It implements [`AdmitCeiling`],
+/// so it — and only it, never an [`AssembledCeiling`] — may be `admit`'s ceiling
+/// argument. It carries the same layer stack, now proven collision-free.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ceiling {
+    registry: PolicyRegistry,
+    layers: Vec<Layer>,
+}
+
+impl Ceiling {
+    /// The registry this ceiling was composed under.
+    #[must_use]
+    pub fn registry(&self) -> &PolicyRegistry {
+        &self.registry
+    }
+}
+
+/// The `finalize_ceiling` conflict-lint failure (H-3) — a loud TRUSTED-SIDE operator
+/// misconfiguration of an assembled ceiling (NOT a trust crossing). Distinct from
+/// [`ComposeError`] (the draft-blame / admit errors) so the two failure classes never
+/// mix.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FinalizeError {
+    /// Two ceiling inject rules add a column of the same normalized name (with a
+    /// divergent shape) on overlapping scope.
+    CeilingInjectColumnConflict {
+        /// What collided (the column name + detail).
+        detail: String,
+    },
+    /// Two ceiling inject rules pin different primary keys, or conflicting
+    /// `author_primary_key` policy, on overlapping scope.
+    CeilingPrimaryKeyConflict {
+        /// The conflicting PK detail.
+        detail: String,
+    },
+    /// Two ceiling inject rules use the same index name (with divergent columns) on
+    /// overlapping scope.
+    CeilingIndexNameConflict {
+        /// The conflicting index detail.
+        detail: String,
+    },
+    /// A ceiling `Validate` (`ForbiddenColumns`) contradicts a ceiling `Inject` (an
+    /// injected column can never satisfy the predicate) on overlapping scope.
+    CeilingInjectValidateContradiction {
+        /// The contradiction detail.
+        detail: String,
+    },
+    /// The ceiling's own `core.create_table` granted scope is NOT `⊑` a mandatory
+    /// ceiling inject's scope — the ceiling would let an in-scope table be created
+    /// escaping the mandatory injection (II.2.6a). Surfaced here (ceiling-side) so the
+    /// misconfiguration is caught before any draft (MED).
+    CreatableEscapesMandatoryInject {
+        /// A render of the mandatory inject scope the creatable grant escaped.
+        inject_scope: String,
+    },
+}
+
+/// The ceiling-conflict gate (H-3). `overlay`/`restrict` are TOTAL so the algebra
+/// stays lawful; a trusted ceiling they assemble can still contain a
+/// *misconfiguration* (colliding injects, PK conflicts, a duplicate index name, an
+/// inject-vs-validate self-contradiction, OR a creatable-escape). Those must surface
+/// **loudly** before enforcement — so they live here, in one explicit, fallible step,
+/// not inside the total combinators.
+///
+/// Every [`AssembledCeiling`] MUST pass `finalize_ceiling` before it may be `admit`'s
+/// `ceiling` argument — and because `admit`'s ceiling type is the finalized
+/// [`Ceiling`] (or a `RootCeiling`), the type system discharges the "already
+/// collision-free" assumption. `finalize_ceiling` is idempotent and, being a pure
+/// lint pass, does not change the rule set on success.
+pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, FinalizeError> {
+    // Collect the ceiling's injects/validates/grants across all its layers. The lints
+    // are over the WHOLE assembled rule set (all layer boundaries flattened for the
+    // conflict scan; the layer boundaries are preserved for the query/seal).
+    let injects: Vec<&Rule> = assembled
+        .layers
+        .iter()
+        .flat_map(|l| l.injects.iter())
+        .collect();
+    let validates: Vec<&Rule> = assembled
+        .layers
+        .iter()
+        .flat_map(|l| l.validates.iter())
+        .collect();
+
+    // (1) overlapping-scope inject/inject conflicts (column shape, PK pin, index name).
+    for (i, a) in injects.iter().enumerate() {
+        let RuleKind::Inject { spec: sa } = &a.kind else { continue };
+        for b in injects.iter().skip(i + 1) {
+            let RuleKind::Inject { spec: sb } = &b.kind else { continue };
+            if matches!(a.scope.meet(&b.scope), Scope::Nothing) {
+                continue;
+            }
+            if let Some(detail) = inject_column_conflict(sa, sb) {
+                return Err(FinalizeError::CeilingInjectColumnConflict { detail });
+            }
+            if let Some(detail) = inject_pk_conflict(sa, sb) {
+                return Err(FinalizeError::CeilingPrimaryKeyConflict { detail });
+            }
+            if let Some(detail) = inject_index_conflict(sa, sb) {
+                return Err(FinalizeError::CeilingIndexNameConflict { detail });
             }
         }
     }
 
-    // (2) COVERED region: partition the draft's granted scope by each ceiling grant
-    //     rule's scope (via ⊓) and compare loosest values on the overlap. We compare
-    //     value(draft, k, ·) ⊑ value(ceiling, k, ·) at a WITNESS of each region.
-    //
-    // Because the grant maps are symbolic, we check the value relation over the meet
-    // of the draft's granted scope with each ceiling rule's scope, at a canonical
-    // witness object of that non-empty meet. This is sound: value() is CONSTANT
-    // across a region carved by the ⊓ of all covering rule scopes (any two objects a
-    // region-meet contains are covered by exactly the same set of rules → same
-    // loosest value), and the oracle exhaustively confirms the region check against
-    // pointwise ground truth.
-    let Some(ck) = ceiling_km else {
-        // Ceiling grants nothing above default anywhere, yet the draft's granted
-        // scope is entirely inside ceiling_granted (Nothing) — impossible unless
-        // draft_granted is Nothing, handled above. If we reach here the uncovered
-        // check already accounted for the whole draft_granted; nothing covered.
-        return Ok(());
-    };
-    // The regions to compare: draft granted ⊓ (each ceiling grant rule's scope).
-    for crule in &ck.rules {
-        let region = draft_granted.meet(&crule.scope);
-        if matches!(region, Scope::Nothing) {
-            continue;
-        }
-        let Some(witness) = witness_of(&region) else {
-            // A non-empty region we cannot witness concretely: fail closed.
-            return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
-        };
-        let dv = dk.value_at(&witness)?;
-        let cv = ck.value_at(&witness)?;
-        if !leq_value(&dk.kind, &dv, &cv)? {
-            return Err(ComposeError::GrantExceedsCeiling {
-                key: key.clone(),
-                offending_pattern: render_scope(&region),
-            });
+    // (2) inject-vs-validate contradiction across the merged layers.
+    for inj in &injects {
+        let RuleKind::Inject { spec } = &inj.kind else { continue };
+        for val in &validates {
+            let RuleKind::Validate { pred } = &val.kind else { continue };
+            if matches!(inj.scope.meet(&val.scope), Scope::Nothing) {
+                continue;
+            }
+            if let ValidatePredicate::ForbiddenColumns { names } = pred {
+                for col in &spec.columns {
+                    for forbidden in names {
+                        if names_match(&col.name, forbidden) {
+                            return Err(FinalizeError::CeilingInjectValidateContradiction {
+                                detail: format!(
+                                    "ceiling forbids column `{}` a ceiling inject contributes",
+                                    col.name
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
-    Ok(())
+
+    // (3) creatable-escape: the ceiling's own create_table granted scope must be ⊑
+    //     every MANDATORY ceiling inject's scope (MED — moved here from admit). Because
+    //     admit later proves draft.create_table ⊑ ceiling.create_table, this ceiling-
+    //     side bound transitively bounds every admitted draft's creatable region.
+    check_ceiling_creatable_lint(&assembled)?;
+
+    Ok(Ceiling { registry: assembled.registry, layers: assembled.layers })
 }
 
-/// The creatable-scope lint (II.2.6a): the draft-composed `core.create_table`
-/// granted scope must be `⊑` every MANDATORY ceiling inject's scope. Only the ceiling
-/// carries mandatory injects (loader-enforced), so we read them from the ceiling.
-fn check_creatable_lint(
-    draft: &GrantModel,
-    _ceiling: &GrantModel,
-    ceiling_injects: &[Rule],
-) -> Result<(), ComposeError> {
-    let create_key = KnobKey::parse(CREATE_TABLE_KEY).ok();
-    let Some(create_key) = create_key else { return Ok(()) };
-    // The effective creatable scope is the DRAFT's granted scope for create_table
-    // (grants compose downward; the draft is the tightest layer for its own grants,
-    // and compose_strict already proved draft ⊑ ceiling on this key).
-    let creatable = match draft.keys.get(&create_key) {
-        Some(km) => km.granted_scope()?,
-        None => Scope::Nothing,
-    };
+/// The ceiling-side creatable-escape lint (II.2.6a, run at finalize). The ceiling's
+/// EFFECTIVE `core.create_table` granted scope (across its layers) must be `⊑` every
+/// mandatory ceiling inject's scope.
+fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), FinalizeError> {
+    let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else { return Ok(()) };
+    // The ceiling's effective creatable scope: the ⊒-conservative join of each layer's
+    // granted create_table scope (over-approx is the fail-closed direction for a ⊑
+    // containment check — it can only turn a pass into a reject).
+    let mut creatable = Scope::Nothing;
+    for layer in &assembled.layers {
+        if let Some(km) = layer.grants.keys.get(&create_key) {
+            let g = km.granted_scope().map_err(|_| FinalizeError::CreatableEscapesMandatoryInject {
+                inject_scope: "<unrepresentable creatable scope>".to_string(),
+            })?;
+            creatable = creatable.join(&g);
+        }
+    }
     if matches!(creatable, Scope::Nothing) {
-        return Ok(()); // creates nothing → cannot escape any inject.
+        return Ok(());
     }
-    for rule in ceiling_injects {
-        let RuleKind::Inject { spec } = &rule.kind else { continue };
-        if !spec.mandatory {
-            continue;
-        }
-        // creatable ⊑ scope(I). `⊑` is sound (a false only conservative-rejects).
-        if !creatable.subset(&rule.scope) {
-            return Err(ComposeError::CreatableEscapesMandatoryInject {
-                inject_scope: render_scope(&rule.scope),
-            });
+    for layer in &assembled.layers {
+        for rule in &layer.injects {
+            let RuleKind::Inject { spec } = &rule.kind else { continue };
+            if !spec.mandatory {
+                continue;
+            }
+            if !creatable.subset(&rule.scope) {
+                return Err(FinalizeError::CreatableEscapesMandatoryInject {
+                    inject_scope: render_scope(&rule.scope),
+                });
+            }
         }
     }
     Ok(())
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// compose_clamp — meet of two TRUSTED ceilings
+// overlay — trusted config cascade (last-wins), TOTAL (H-1: TrustedDoc operands)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// A clamped ceiling — the meet of two TRUSTED ceilings (II.3.2). It is an
-/// [`EffectivePolicy`] (the same resolved shape), obtained only through
-/// [`compose_clamp`]; the alias documents intent at chain sites (host→org→project).
-pub type ClampedCeiling = EffectivePolicy;
-
-/// Meet two TRUSTED ceilings pointwise (II.3.2), associative + total. Grants meet
-/// pointwise (per key: scope `⊓`, value `⊓_value` at overlap); require/inject/validate
-/// rule-sets UNION (each at its own scope); a ceiling-vs-ceiling inject collision is a
-/// loud operator error. The inject total order is `outer` first (outermost), then
-/// `inner` — concatenation, which is associative so re-chaining is order-stable
-/// (II.4.4).
-pub fn compose_clamp(
-    outer: &impl Ceiling,
-    inner: &impl Ceiling,
+/// Assemble ONE operator's own ceiling from co-authored profile fragments
+/// (`base + env`, II.5) into an [`AssembledCeiling`]. Both operands are [`TrustedDoc`]
+/// (H-1: a creator draft cannot be an `overlay` operand — the type forbids it), so
+/// `overlay` is **total** and **never rejects**.
+///
+/// Semantics: **presence-based last-wins** for scalar grant/obligation values (where
+/// `over` has ANY covering rule on a key at an object, `over` wins — it may loosen OR
+/// tighten, and may narrow to default), and **rule-list accumulation** (base-then-over)
+/// for inject/validate. This is realized by producing a 2-layer stack `[Env=over] over
+/// [Base=base]` (H-4): the query falls through top→down, so `over`'s presence masks
+/// `base` exactly where `over` covers, and inherits `base` elsewhere; inject/validate
+/// lists union with `Base` (outermost) first, then `Env` — the M-3 base-then-over order.
+///
+/// Ceiling misconfigurations (colliding injects across `base`/`env`, PK conflicts) are
+/// NOT rejected here (that would break totality); they surface at [`finalize_ceiling`]
+/// (H-3), which every assembled ceiling passes before it may be `admit`'s ceiling.
+pub fn overlay(
+    base: &TrustedDoc,
+    over: &TrustedDoc,
     registry: &PolicyRegistry,
-) -> Result<ClampedCeiling, ComposeError> {
-    let og = outer.grant_model(registry)?;
-    let ig = inner.grant_model(registry)?;
+) -> Result<AssembledCeiling, ComposeError> {
+    let base_layer = Layer::from_doc(LayerTag::Base, base.doc(), registry)?;
+    let over_layer = Layer::from_doc(LayerTag::Env, over.doc(), registry)?;
+    // Stack: TOP (innermost query-precedence) first → `[Env=over] over [Base=base]`.
+    Ok(AssembledCeiling {
+        registry: registry.clone(),
+        layers: vec![over_layer, base_layer],
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// restrict — meet of two TRUSTED docs (H-1: TrustedDoc operands, TOTAL)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Meet two TRUSTED documents pointwise into an [`AssembledCeiling`] (II.3.2) — the
+/// trusted tightening gradient (host ⊒ org ⊒ project). Both operands are
+/// [`TrustedDoc`] (H-1: an untrusted draft cannot be a `restrict` operand — the type
+/// forbids it), so `restrict` is **total** and **never rejects**. It is a genuine
+/// lattice MEET (⊓): grants meet pointwise (per key: scope `⊓`, value `⊓_value` at
+/// overlap); require/inject/validate rule-sets UNION (each at its own scope).
+///
+/// The result is a SINGLE flattened `Base` layer — `restrict` flattens a trusted meet
+/// into one meet-layer (H-4). Ceiling-vs-ceiling inject/PK/index collisions are NOT
+/// rejected here (that would break the meet's associativity); they surface at
+/// [`finalize_ceiling`] (H-3), which every assembled ceiling passes before it can be
+/// `admit`'s ceiling.
+pub fn restrict(
+    outer: &TrustedDoc,
+    inner: &TrustedDoc,
+    registry: &PolicyRegistry,
+) -> Result<AssembledCeiling, ComposeError> {
+    let og = GrantModel::build(&outer.doc().rules, registry)?;
+    let ig = GrantModel::build(&inner.doc().rules, registry)?;
 
     // ── grants: pointwise meet, represented as rule-scope ⊓ products ───────────
     let mut clamped_grants = GrantModel { keys: BTreeMap::new() };
@@ -789,26 +1168,17 @@ pub fn compose_clamp(
         }
     }
 
-    // ── inject collision (ceiling vs ceiling) → loud operator error ────────────
-    let outer_injects = outer.ceiling_injects();
-    let inner_injects = inner.ceiling_injects();
-    check_inject_collisions(&outer_injects, &inner_injects, true)?;
+    // ── require/inject/validate: UNION, each at its own scope (outer first) ──────
+    let mut injects = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Inject { .. }));
+    injects.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Inject { .. })));
+    let mut requires = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Require { .. }));
+    requires.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Require { .. })));
+    let mut validates = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Validate { .. }));
+    validates.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Validate { .. })));
 
-    // ── require/inject/validate: UNION, each at its own scope ───────────────────
-    let mut injects = outer_injects;
-    injects.extend(inner_injects);
-    let mut requires = outer.ceiling_requires();
-    requires.extend(inner.ceiling_requires());
-    let mut validates = outer.ceiling_validates();
-    validates.extend(inner.ceiling_validates());
-
-    Ok(EffectivePolicy {
-        registry: registry.clone(),
-        grants: clamped_grants,
-        requires,
-        injects,
-        validates,
-    })
+    // A single flattened `Base` layer (the meet is one meet-layer, H-4).
+    let layer = Layer { tag: LayerTag::Base, grants: clamped_grants, requires, injects, validates };
+    Ok(AssembledCeiling { registry: registry.clone(), layers: vec![layer] })
 }
 
 /// Per-key grant clamp (II.3.2): the pointwise meet, materialized as the finite set of
@@ -849,30 +1219,26 @@ fn clamp_grant_key(
 // collision detection (compose-time blame)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Compose-time inject-collision check. A left (ceiling/outer) inject colliding with a
-/// right (draft/inner) inject on scope-overlapping objects — same column name,
-/// conflicting `primary_key` pin, `author_primary_key` Allow-vs-Forbid, or same index
-/// name — is a collision. `ceiling_vs_ceiling` selects the error variant (loud
-/// operator error vs draft blame).
-fn check_inject_collisions(
-    left: &[Rule],
-    right: &[Rule],
-    ceiling_vs_ceiling: bool,
+/// Compose-time DRAFT-vs-CEILING inject-collision check (`admit`). A ceiling inject
+/// colliding with a draft inject on scope-overlapping objects — same column name with
+/// divergent shape, conflicting `primary_key` pin, `author_primary_key`
+/// Allow-vs-Forbid, or same index name with divergent columns — is blamed on the
+/// draft. (Ceiling-vs-ceiling collisions are NOT checked here — they surface at
+/// [`finalize_ceiling`], H-3.)
+pub(crate) fn check_inject_collisions(
+    ceiling_injects: &[Rule],
+    draft_injects: &[Rule],
 ) -> Result<(), ComposeError> {
-    for l in left {
+    for l in ceiling_injects {
         let RuleKind::Inject { spec: ls } = &l.kind else { continue };
-        for r in right {
+        for r in draft_injects {
             let RuleKind::Inject { spec: rs } = &r.kind else { continue };
             // Only overlapping scopes can collide.
             if matches!(l.scope.meet(&r.scope), Scope::Nothing) {
                 continue;
             }
             if let Some(detail) = inject_specs_collide(ls, rs) {
-                return Err(if ceiling_vs_ceiling {
-                    ComposeError::CeilingInjectCollision { detail }
-                } else {
-                    ComposeError::DraftInjectCollidesCeiling { detail }
-                });
+                return Err(ComposeError::DraftInjectCollidesCeiling { detail });
             }
         }
     }
@@ -922,13 +1288,56 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     None
 }
 
+// The three split conflict predicates the FINALIZE gate uses (they classify a
+// ceiling-vs-ceiling inject collision into its precise `FinalizeError` variant).
+
+/// Two injects share a column name with a DIVERGENT shape (type/nullable/default)?
+fn inject_column_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
+    for ca in &a.columns {
+        for cb in &b.columns {
+            if names_match(&ca.name, &cb.name)
+                && (ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default)
+            {
+                return Some(format!("column `{}` injected with divergent shape", ca.name));
+            }
+        }
+    }
+    None
+}
+
+/// Two injects pin divergent primary keys, or the same PK with divergent
+/// `author_primary_key` policy?
+fn inject_pk_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
+    if let (Some(pa), Some(pb)) = (&a.primary_key, &b.primary_key) {
+        if pa != pb {
+            return Some(format!("primary key pinned to divergent columns {pa:?} vs {pb:?}"));
+        }
+        if a.author_primary_key != b.author_primary_key {
+            return Some("primary key pinned with divergent author_primary_key policy".to_string());
+        }
+    }
+    None
+}
+
+/// Two injects share an index name with a DIVERGENT column list?
+fn inject_index_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
+    for ia in &a.indexes {
+        for ib in &b.indexes {
+            if names_match(&ia.name, &ib.name) && ia.columns != ib.columns {
+                return Some(format!("index `{}` injected with divergent columns", ia.name));
+            }
+        }
+    }
+    None
+}
+
 /// A draft `Validate` (`ForbiddenColumns` / `TableNameForbidden`) contradicting a
 /// ceiling `Inject` on overlapping scope (II.4.4): a forbidden column naming an
 /// injected column, or a forbidden table-name pattern matching would make the
 /// ceiling-injected table unsatisfiable. We flag the concrete column contradiction
 /// (name-match); table-name contradiction is left to resolve time (injects carry no
 /// table name here), matching the loader's single-doc gate.
-fn check_validate_vs_inject(
+pub(crate) fn check_validate_vs_inject(
     ceiling_injects: &[Rule],
     draft_validates: &[Rule],
 ) -> Result<(), ComposeError> {
@@ -963,21 +1372,21 @@ fn check_validate_vs_inject(
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Look up a knob def, mapping a miss to a fail-closed compose error.
-fn lookup<'r>(registry: &'r PolicyRegistry, key: &KnobKey) -> Result<&'r KnobDef, ComposeError> {
+pub(crate) fn lookup<'r>(registry: &'r PolicyRegistry, key: &KnobKey) -> Result<&'r KnobDef, ComposeError> {
     registry
         .get(key)
         .ok_or_else(|| ComposeError::RegistryOrValueMismatch { detail: format!("unknown knob {key}") })
 }
 
 /// Clone the rules matching a kind predicate, preserving document order.
-fn rules_of(rules: &[Rule], pred: impl Fn(&RuleKind) -> bool) -> Vec<Rule> {
+pub(crate) fn rules_of(rules: &[Rule], pred: impl Fn(&RuleKind) -> bool) -> Vec<Rule> {
     rules.iter().filter(|r| pred(&r.kind)).cloned().collect()
 }
 
 /// Name-match two identifiers under the II.2.7 fold: normalize both to canonical
 /// bytes and compare. Used for inject/validate/injected-shape name matching so a
 /// case-fold or quoted-dot trick cannot slip a name past the check.
-fn names_match(a: &str, b: &str) -> bool {
+pub(crate) fn names_match(a: &str, b: &str) -> bool {
     fold(a) == fold(b)
 }
 
@@ -990,7 +1399,7 @@ fn fold(s: &str) -> Vec<u8> {
 }
 
 /// Render a scope for diagnostics (a stable, human-readable form of the pattern set).
-fn render_scope(s: &Scope) -> String {
+pub(crate) fn render_scope(s: &Scope) -> String {
     match s {
         Scope::Nothing => "∅".to_string(),
         Scope::All => "*.*".to_string(),
@@ -1014,7 +1423,7 @@ fn render_pattern(p: &crate::Pattern) -> String {
 /// denotes. Used by the covered-region value comparison — value() is constant across
 /// a region carved by ⊓, so one witness decides the whole region. Returns `None` for
 /// `Nothing` (or an un-witnessable proper scope, treated fail-closed by the caller).
-fn witness_of(s: &Scope) -> Option<ObjectName> {
+pub(crate) fn witness_of(s: &Scope) -> Option<ObjectName> {
     match s {
         Scope::Nothing => None,
         Scope::All => Some(ObjectName::schema(b"a".to_vec())),

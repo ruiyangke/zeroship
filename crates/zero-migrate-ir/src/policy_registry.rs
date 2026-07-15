@@ -8,6 +8,25 @@
 //! index/table-rewrite postures, and the data-security obligations — as a builtin
 //! [`PolicyRegistry`], and maps the guard's statement classes onto those keys.
 //!
+//! # The six knob DOMAINS
+//!
+//! One axis is the namespace: the DOMAIN the knob governs (what it protects), never a
+//! dialect or a category/polarity bucket. Everything else — polarity, kind, object
+//! model, enforcement, default, inherit — is a declared [`KnobDef`] field.
+//!
+//! - **`sql`** — the raw-text escape hatch.
+//! - **`schema`** — structural DDL (tables, schemas, columns, partitions, renames).
+//! - **`access`** — access control (roles, grants, RLS, policies).
+//! - **`code`** — programmable / installed objects (functions, matviews, extensions).
+//! - **`runtime`** — execution & resource behavior (timeouts, index creation, rewrite).
+//! - **`safety`** — data protection (limits AND obligations; polarity is the field).
+//!
+//! Two of the old operator-posture toggles do NOT live here anymore. "Skip the static
+//! guard belt" is a host/root POSTURE (`GuardMode`), not a composable per-app grant —
+//! it is the single most dangerous switch, quarantined OUT of the composable registry.
+//! The raw-island role-needle relaxation is an INTERNAL guard vendor-lower rule keyed
+//! off the posture, not an operator-authorable knob. Both moved to the guard crate.
+//!
 //! This is the Step-0 prep for moving the guard's capability gate onto the PDP: the
 //! guard, given an [`EffectivePolicy`] composed over [`builtin_registry`], queries
 //! `grants(key, object)` for the statement's capability key instead of reading a
@@ -18,20 +37,21 @@
 //!
 //! Each knob's [`ObjectModel`] mirrors the granularity at which today's guard makes
 //! the decision:
-//! - **Global** — `pg.role`/`pg.grant`/`pg.extension`/`core.raw_sql` (+ the other
-//!   whole-DB vendor caps): today's guard reads a single `allow_*` bit with no
+//! - **Global** — `access.role`/`access.grant`/`code.extension`/`code.function` (+ the
+//!   other whole-DB vendor caps): today's guard reads a single `allow_*` bit with no
 //!   object attribution, so the grant is database-global.
-//! - **PerSchema** — `pg.schema`/`core.create_schema`: schema creation is attributed
-//!   to the schema being created.
-//! - **PerTable** — `pg.rls`/`pg.policy`: RLS enable/force + row-security policies are
-//!   attributed to the table they protect.
+//! - **PerSchema** — `schema.create_schema`/`schema.cross_schema`: schema creation /
+//!   reference is attributed to the schema.
+//! - **PerTable** — `access.rls`/`access.policy`: RLS enable/force + row-security
+//!   policies are attributed to the table they protect.
 //!
 //! # Polarities
 //!
 //! Vendor capabilities + op ceilings + the index/table-rewrite postures are
-//! `Grant` (compose DOWN, deny-by-default). The `sec.require_rls`/`sec.no_hard_delete`
-//! obligations are `Require` (compose UP, un-droppable). `sec.destructive_ops` is a
-//! rank-ordered `Grant` (forbid ⊑ warn ⊑ allow — the tighter posture is the default).
+//! `Grant` (compose DOWN, deny-by-default). The `safety.require_rls`/
+//! `safety.no_hard_delete` obligations are `Require` (compose UP, un-droppable).
+//! `safety.destructive_ops` is a rank-ordered `Grant` (forbid ⊑ warn ⊑ allow — the
+//! tighter posture is the default).
 
 use zero_migrate_policy::{
     Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity, PolicyRegistry,
@@ -43,103 +63,108 @@ use crate::capability::VendorCapability;
 // Knob-key constants — the stable identifiers the guard/validator query by.
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// `CREATE/ALTER/DROP ROLE` / `DROP OWNED BY` (Global Bool grant).
-pub const KEY_PG_ROLE: &str = "pg.role";
-/// `GRANT`/`REVOKE`/`ALTER DEFAULT PRIVILEGES` (Global Bool grant).
-pub const KEY_PG_GRANT: &str = "pg.grant";
-/// `CREATE EXTENSION` capability toggle (Global Bool grant). The concrete
-/// per-name allowlist rides on [`KEY_PG_EXTENSIONS`]; `FORBIDDEN_EXTENSIONS` is a
-/// non-grant hard deny in the guard regardless.
-pub const KEY_PG_EXTENSION: &str = "pg.extension";
-/// The `CREATE EXTENSION` name allowlist (Global StrSet grant) — the `StrSet` value
-/// carries the permitted extension names.
-pub const KEY_PG_EXTENSIONS: &str = "pg.extensions";
-/// `CREATE SCHEMA` (PerSchema Bool grant), Postgres spelling.
-pub const KEY_PG_SCHEMA: &str = "pg.schema";
-/// `CREATE SCHEMA` (PerSchema Bool grant), engine-neutral spelling — the same
-/// capability under the `core.` namespace the portable op vocabulary uses.
-pub const KEY_CORE_CREATE_SCHEMA: &str = "core.create_schema";
+// ── sql — the raw-text escape hatch ─────────────────────────────────────────────
+
+/// The gated raw-statement escape (`pgRaw`) (object-scoped Bool grant; still
+/// deny-list-guarded). Object set = all referenced objects (II.2.5).
+pub const KEY_SQL_RAW: &str = "sql.raw";
+/// The gated raw view-body SELECT escape (Global Bool grant).
+pub const KEY_SQL_RAW_VIEW_BODY: &str = "sql.raw_view_body";
+
+// ── schema — structural DDL ─────────────────────────────────────────────────────
+
 /// Namespace-authority: may CREATE a table matching this scope (PerTable Bool
 /// grant, default-deny). The per-op anchor of the II.2.6a creation-gating: an
 /// object comes into existence ONLY where this grants (structured `createTable`
 /// AND a classified raw `CREATE TABLE` both check it). The compose-time
 /// `creatable ⊑ mandatory-inject` lint lives in the policy crate; the guard
 /// enforces the per-op grant.
-pub const KEY_CORE_CREATE_TABLE: &str = "core.create_table";
+pub const KEY_SCHEMA_CREATE_TABLE: &str = "schema.create_table";
+/// `CREATE SCHEMA` (PerSchema Bool grant). Absorbs the former Postgres-spelled and
+/// engine-neutral schema-create capabilities into one engine-neutral key.
+pub const KEY_SCHEMA_CREATE_SCHEMA: &str = "schema.create_schema";
 /// Namespace-authority: may name/move a table INTO this scope — the TARGET of a
 /// `RENAME` / `SET SCHEMA` / create-as (PerTable Bool grant, default-deny,
 /// II.2.6a). Closes the rename-TOCTOU: a cross-scope move needs this grant on the
-/// target scope.
-pub const KEY_CORE_RENAME_INTO: &str = "core.rename_into";
-/// Namespace-authority: may `ALTER`/`DROP`/`RENAME` an INJECTED shape element
-/// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny,
-/// II.2.6b). Injected shape is the operator's floor and immutable by default; only
-/// this grant waves the injected-shape-immutability denial.
-pub const KEY_CORE_ALTER_INJECTED_COLUMN: &str = "core.alter_injected_column";
-/// `CREATE/DROP POLICY` — row-security policy (PerTable Bool grant).
-pub const KEY_PG_POLICY: &str = "pg.policy";
-/// RLS `ENABLE/FORCE/DISABLE/NO FORCE` (PerTable Bool grant).
-pub const KEY_PG_RLS: &str = "pg.rls";
-/// `ALTER TABLE ATTACH/DETACH PARTITION` (Global Bool grant).
-pub const KEY_PG_PARTITION: &str = "pg.partition";
-/// `CREATE/DROP FUNCTION` (Global Bool grant).
-pub const KEY_PG_FUNCTION: &str = "pg.function";
-/// The gated raw-statement escape (`pgRaw`) (Global Bool grant).
-pub const KEY_CORE_RAW_SQL: &str = "core.raw_sql";
-/// The gated raw view-body SELECT escape (Global Bool grant).
-pub const KEY_CORE_RAW_VIEW_BODY: &str = "core.raw_view_body";
-/// `PostgreSQL` materialized views (Global Bool grant).
-pub const KEY_PG_MATERIALIZED_VIEW: &str = "pg.materialized_view";
+/// target scope. (The namespace-authority CHECK — rename-into-inject-scope — stays a
+/// guard rule.)
+pub const KEY_SCHEMA_RENAME: &str = "schema.rename";
 /// Which schemas this migration may reference (PerSchema Bool grant, default-deny)
 /// — the capability-model replacement for the schema-scope confinement. A reference
-/// to schema `s` is admitted iff `grants(core.cross_schema, s)` is `Bool(true)`; the
+/// to schema `s` is admitted iff `grants(schema.cross_schema, s)` is `Bool(true)`; the
 /// project schema(s) a confined/platform posture owns are granted here, everything
 /// else is a `CrossSchema` violation. Object-scoped so the grant can name exactly
 /// the permitted schemas (an `include: ["app1"]` grant permits only `app1`).
-pub const KEY_CORE_CROSS_SCHEMA: &str = "core.cross_schema";
-/// Operator-posture relaxation: raw-island (`pgRaw` / `createFunction.body`) bodies
-/// may carry role-management + `search_path` needles that the confined body-token
-/// backstop denies (Global Bool grant, default-deny). The platform posture grants
-/// it (its bootstrap DO-blocks legitimately `CREATE ROLE` / `ALTER ROLE … SET
-/// search_path`); confined and trusted omit it (trusted skips the belt entirely via
-/// [`KEY_CORE_SKIP_STATIC_GUARD`], and its raw-island backstop still denies these
-/// needles — a behaviour the vendor-lower matrix locks).
-pub const KEY_CORE_RAW_ISLAND_ROLE: &str = "core.raw_island_role";
-/// Operator-posture relaxation: skip the static parse-time guard belt ENTIRELY (the
-/// deny-list, cross-schema confinement, and body walks) — the public dbmate-like
-/// Trusted posture where the operator owns the DB (Global Bool grant, default-deny).
-/// Only the Trusted posture grants it; confined/platform run the full belt.
-pub const KEY_CORE_SKIP_STATIC_GUARD: &str = "core.skip_static_guard";
+pub const KEY_SCHEMA_CROSS_SCHEMA: &str = "schema.cross_schema";
+/// `ALTER TABLE ATTACH/DETACH PARTITION` (Global Bool grant).
+pub const KEY_SCHEMA_PARTITION: &str = "schema.partition";
+/// Namespace-authority: may `ALTER`/`DROP`/`RENAME` an INJECTED shape element
+/// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny,
+/// II.2.6b). Injected shape is the operator's floor and immutable by default; only
+/// this grant waves the injected-shape-immutability denial. **`inherit = false`** —
+/// this is a POWER GRANT: a SILENT creator draft must NOT inherit "override the
+/// platform's injected columns"; it gets the default (deny) unless it asks explicitly.
+pub const KEY_SCHEMA_ALTER_INJECTED: &str = "schema.alter_injected";
+
+// ── access — access control ─────────────────────────────────────────────────────
+
+/// `CREATE/ALTER/DROP ROLE` / `DROP OWNED BY` (Global Bool grant). SUPERUSER stays a
+/// hard-deny regardless of grant.
+pub const KEY_ACCESS_ROLE: &str = "access.role";
+/// `GRANT`/`REVOKE`/`ALTER DEFAULT PRIVILEGES` (Global Bool grant).
+pub const KEY_ACCESS_GRANT: &str = "access.grant";
+/// RLS `ENABLE/FORCE/DISABLE/NO FORCE` (PerTable Bool grant).
+pub const KEY_ACCESS_RLS: &str = "access.rls";
+/// `CREATE/DROP POLICY` — row-security policy (PerTable Bool grant).
+pub const KEY_ACCESS_POLICY: &str = "access.policy";
+
+// ── code — programmable / installed objects ─────────────────────────────────────
+
+/// The `CREATE EXTENSION` name allowlist (Global **StrSet** grant) — the `StrSet`
+/// value carries the permitted extension names. The allowlist IS the capability:
+/// empty = deny all. `FORBIDDEN_EXTENSIONS` is a non-grant hard deny in the guard
+/// regardless. (Merged from the former extension bool toggle + name allowlist.)
+pub const KEY_CODE_EXTENSION: &str = "code.extension";
+/// `CREATE/DROP FUNCTION` / `PROCEDURE` (Global Bool grant).
+pub const KEY_CODE_FUNCTION: &str = "code.function";
+/// `PostgreSQL` materialized views (Global Bool grant).
+pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
+
+// ── runtime — execution & resource behavior ─────────────────────────────────────
 
 /// Per-op `lock_timeout` ceiling in ms (UintCeiling, hard floor 1 — the
 /// no-indefinite-lock invariant, II.5).
-pub const KEY_OP_LOCK_TIMEOUT_MS: &str = "op.lock_timeout_ms";
+pub const KEY_RUNTIME_LOCK_TIMEOUT_MS: &str = "runtime.lock_timeout_ms";
 /// Per-op `statement_timeout` ceiling in ms (UintCeiling, hard floor 1).
-pub const KEY_OP_STATEMENT_TIMEOUT_MS: &str = "op.statement_timeout_ms";
+pub const KEY_RUNTIME_STATEMENT_TIMEOUT_MS: &str = "runtime.statement_timeout_ms";
 /// Index-creation posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
-pub const KEY_OP_INDEX_CREATION: &str = "op.index_creation";
+pub const KEY_RUNTIME_INDEX_CREATION: &str = "runtime.index_creation";
 /// Table-rewrite posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
-pub const KEY_OP_TABLE_REWRITE: &str = "op.table_rewrite";
+pub const KEY_RUNTIME_TABLE_REWRITE: &str = "runtime.table_rewrite";
 
-/// Data-security: every created table must end RLS-enabled (Require Bool obligation).
-pub const KEY_SEC_REQUIRE_RLS: &str = "sec.require_rls";
-/// Data-security: no hard `DELETE`/`TRUNCATE`/`DROP` (Require Bool obligation).
-pub const KEY_SEC_NO_HARD_DELETE: &str = "sec.no_hard_delete";
+// ── safety — data protection (limits AND obligations) ───────────────────────────
+
 /// Data-security destructive posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
-pub const KEY_SEC_DESTRUCTIVE_OPS: &str = "sec.destructive_ops";
+pub const KEY_SAFETY_DESTRUCTIVE_OPS: &str = "safety.destructive_ops";
+/// Data-security: every created table must end RLS-enabled (Require Bool obligation).
+pub const KEY_SAFETY_REQUIRE_RLS: &str = "safety.require_rls";
+/// Data-security: no hard `DELETE`/`TRUNCATE`/`DROP` (Require Bool obligation).
+pub const KEY_SAFETY_NO_HARD_DELETE: &str = "safety.no_hard_delete";
 /// Data-security approval OBLIGATION: `never` ⊑ `on_destructive` ⊑ `always`
 /// (OrderedEnum, `Require` polarity — composes UP, un-lowerable). This is a SEALED
-/// obligation the engine only DECLARES: it is `Enforcement::DeclaredOnly`, so the
-/// engine's own guard/apply never gate on it. The HOST (`migrated`) reads it via
+/// obligation the engine does not enforce but a HOST does: it is
+/// `Enforcement::HostEnforced`, so the engine's own guard/apply never gate on it, YET
+/// — unlike a `DeclaredOnly` knob — it MAY be sealed at a non-default value (M-2,
+/// II.6). The HOST (`migrated`) reads it via
 /// [`crate::policy_approval::migration_requires_approval`] and enforces approval as a
 /// state machine — the engine `apply` stays dumb. Object-scoped like every other
 /// knob (the level resolves per target object; the host ORs across a migration's ops).
-pub const KEY_SEC_REQUIRE_APPROVAL: &str = "sec.require_approval";
+pub const KEY_SAFETY_REQUIRE_APPROVAL: &str = "safety.require_approval";
 
 /// The tightest→loosest variant order shared by the posture OrderedEnum knobs.
 const POSTURE_VARIANTS: &[&str] = &["forbid", "warn", "allow"];
 
-/// The tightest→loosest variant order for the `sec.require_approval` obligation:
+/// The tightest→loosest variant order for the `safety.require_approval` obligation:
 /// `never` ⊑ `on_destructive` ⊑ `always`. `never` is the tightest (no obligation);
 /// composition UNIONS up toward `always` (the operator raises, the creator cannot
 /// lower). This is the value order the OrderedEnum kind imposes.
@@ -152,24 +177,20 @@ pub const REQUIRE_APPROVAL_VARIANTS: &[&str] = &["never", "on_destructive", "alw
 /// The knob key each closed [`VendorCapability`] gates on. This reproduces today's
 /// gate: the guard reads `caps.grants(cap)`; the PDP path reads `grants(key, object)`
 /// for `key = knob_key_for_capability(cap)`.
-///
-/// `Schema` maps to the Postgres spelling ([`KEY_PG_SCHEMA`]); the engine-neutral
-/// [`KEY_CORE_CREATE_SCHEMA`] is a sibling key for the portable op vocabulary and is
-/// registered too (a schema-create op may carry either spelling).
 #[must_use]
 pub const fn knob_key_for_capability(cap: VendorCapability) -> &'static str {
     match cap {
-        VendorCapability::Extension => KEY_PG_EXTENSION,
-        VendorCapability::Schema => KEY_PG_SCHEMA,
-        VendorCapability::Role => KEY_PG_ROLE,
-        VendorCapability::Grant => KEY_PG_GRANT,
-        VendorCapability::Rls => KEY_PG_RLS,
-        VendorCapability::Partition => KEY_PG_PARTITION,
-        VendorCapability::Policy => KEY_PG_POLICY,
-        VendorCapability::Function => KEY_PG_FUNCTION,
-        VendorCapability::RawSql => KEY_CORE_RAW_SQL,
-        VendorCapability::RawViewBody => KEY_CORE_RAW_VIEW_BODY,
-        VendorCapability::MaterializedView => KEY_PG_MATERIALIZED_VIEW,
+        VendorCapability::Extension => KEY_CODE_EXTENSION,
+        VendorCapability::Schema => KEY_SCHEMA_CREATE_SCHEMA,
+        VendorCapability::Role => KEY_ACCESS_ROLE,
+        VendorCapability::Grant => KEY_ACCESS_GRANT,
+        VendorCapability::Rls => KEY_ACCESS_RLS,
+        VendorCapability::Partition => KEY_SCHEMA_PARTITION,
+        VendorCapability::Policy => KEY_ACCESS_POLICY,
+        VendorCapability::Function => KEY_CODE_FUNCTION,
+        VendorCapability::RawSql => KEY_SQL_RAW,
+        VendorCapability::RawViewBody => KEY_SQL_RAW_VIEW_BODY,
+        VendorCapability::MaterializedView => KEY_CODE_MATERIALIZED_VIEW,
     }
 }
 
@@ -195,6 +216,7 @@ fn bool_grant(key: &str, object_model: ObjectModel, requires_db_privilege: bool,
         enforcement: Enforcement::Enforced,
         object_model,
         requires_db_privilege,
+        inherit: true,
         docs: docs.to_string(),
     }
 }
@@ -209,6 +231,7 @@ fn bool_require(key: &str, object_model: ObjectModel, docs: &str) -> KnobDef {
         enforcement: Enforcement::Enforced,
         object_model,
         requires_db_privilege: false,
+        inherit: true,
         docs: docs.to_string(),
     }
 }
@@ -226,6 +249,7 @@ fn uint_ceiling(key: &str, docs: &str) -> KnobDef {
         enforcement: Enforcement::Enforced,
         object_model: ObjectModel::Global,
         requires_db_privilege: false,
+        inherit: true,
         docs: docs.to_string(),
     }
 }
@@ -243,14 +267,22 @@ fn posture_grant(key: &str, docs: &str) -> KnobDef {
         enforcement: Enforcement::Enforced,
         object_model: ObjectModel::Global,
         requires_db_privilege: false,
+        inherit: true,
         docs: docs.to_string(),
     }
 }
 
-/// The `sec.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
-/// OrderedEnum, `Require` polarity (composes UP), `DeclaredOnly` enforcement (the
-/// engine never gates on it — the HOST does), default `never` (no obligation).
-/// Object-scoped so an operator can require approval on exactly the objects it names.
+/// The `safety.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
+/// OrderedEnum, `Require` polarity (composes UP), **`HostEnforced`** enforcement,
+/// default `never` (no obligation). Object-scoped so an operator can require approval
+/// on exactly the objects it names.
+///
+/// It is `HostEnforced`, NOT `DeclaredOnly`: the engine's own guard/apply never gate
+/// on it (the HOST — `migrated` — reads it via the sealed decision query and enforces
+/// approval as a state machine), but — unlike a `DeclaredOnly` knob — it MAY be sealed
+/// at a NON-DEFAULT value, because a host enforces it (M-2, II.6). The II.6 "can't set
+/// non-default on an enforced path" restriction scopes to `DeclaredOnly` only, so a
+/// sealed `safety.require_approval = always` obligation is legal.
 fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
@@ -259,9 +291,10 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
         },
         polarity: Polarity::Require,
         default: KnobValue::Str("never".to_string()),
-        enforcement: Enforcement::DeclaredOnly,
+        enforcement: Enforcement::HostEnforced,
         object_model: ObjectModel::PerTable,
         requires_db_privilege: false,
+        inherit: true,
         docs: docs.to_string(),
     }
 }
@@ -278,58 +311,68 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
 pub fn builtin_registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            // ── vendor capabilities (Global unless object-attributed) ──────────
-            bool_grant(KEY_PG_ROLE, ObjectModel::Global, true, "CREATE/ALTER/DROP ROLE, DROP OWNED BY."),
-            bool_grant(KEY_PG_GRANT, ObjectModel::Global, true, "GRANT/REVOKE, ALTER DEFAULT PRIVILEGES."),
-            bool_grant(KEY_PG_EXTENSION, ObjectModel::Global, true, "CREATE EXTENSION (per-name allowlist on pg.extensions)."),
-            bool_grant(KEY_PG_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (Postgres spelling)."),
-            bool_grant(KEY_CORE_CREATE_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (engine-neutral spelling)."),
-            // ── namespace-authority creation/movement/immutability grants (II.2.6) ─
-            bool_grant(KEY_CORE_CREATE_TABLE, ObjectModel::PerTable, false, "May CREATE a table matching this scope (default-deny namespace anchor)."),
-            bool_grant(KEY_CORE_RENAME_INTO, ObjectModel::PerTable, false, "May name/move a table INTO this scope (RENAME / SET SCHEMA target)."),
-            bool_grant(KEY_CORE_ALTER_INJECTED_COLUMN, ObjectModel::PerTable, false, "May ALTER/DROP/RENAME an injected shape element (column, pinned PK, index)."),
-            bool_grant(KEY_PG_POLICY, ObjectModel::PerTable, true, "CREATE/DROP POLICY (row-security policy)."),
-            bool_grant(KEY_PG_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
-            bool_grant(KEY_PG_PARTITION, ObjectModel::Global, false, "ALTER TABLE ATTACH/DETACH PARTITION."),
-            bool_grant(KEY_PG_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
-            // `core.raw_sql` is OBJECT-scoped (II.2.5): "raw_sql only in staging" is a
-            // statement-level referenced-object containment guarantee, and the guard's
-            // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
-            // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
-            bool_grant(KEY_CORE_RAW_SQL, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
-            bool_grant(KEY_CORE_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
-            bool_grant(KEY_PG_MATERIALIZED_VIEW, ObjectModel::Global, false, "PostgreSQL materialized views."),
-            // `core.cross_schema` is PerSchema (the grant names exactly the permitted
+            // ── access — access control (Global unless object-attributed) ───────
+            bool_grant(KEY_ACCESS_ROLE, ObjectModel::Global, true, "CREATE/ALTER/DROP ROLE, DROP OWNED BY."),
+            bool_grant(KEY_ACCESS_GRANT, ObjectModel::Global, true, "GRANT/REVOKE, ALTER DEFAULT PRIVILEGES."),
+            bool_grant(KEY_ACCESS_POLICY, ObjectModel::PerTable, true, "CREATE/DROP POLICY (row-security policy)."),
+            bool_grant(KEY_ACCESS_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
+            // ── schema — structural DDL ─────────────────────────────────────────
+            bool_grant(KEY_SCHEMA_CREATE_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (engine-neutral)."),
+            // namespace-authority creation/movement/immutability grants (II.2.6)
+            bool_grant(KEY_SCHEMA_CREATE_TABLE, ObjectModel::PerTable, false, "May CREATE a table matching this scope (default-deny namespace anchor)."),
+            bool_grant(KEY_SCHEMA_RENAME, ObjectModel::PerTable, false, "May name/move a table INTO this scope (RENAME / SET SCHEMA target)."),
+            // `schema.alter_injected` is a POWER GRANT — inherit = false.
+            KnobDef {
+                key: KnobKey::parse(KEY_SCHEMA_ALTER_INJECTED).expect("well-formed"),
+                kind: KnobKind::Bool,
+                polarity: Polarity::Grant,
+                default: KnobValue::Bool(false),
+                enforcement: Enforcement::Enforced,
+                object_model: ObjectModel::PerTable,
+                requires_db_privilege: false,
+                inherit: false,
+                docs: "May ALTER/DROP/RENAME an injected shape element (column, pinned PK, index). Power grant: a silent draft does not inherit it.".to_string(),
+            },
+            bool_grant(KEY_SCHEMA_PARTITION, ObjectModel::Global, false, "ALTER TABLE ATTACH/DETACH PARTITION."),
+            // `schema.cross_schema` is PerSchema (the grant names exactly the permitted
             // schemas); a reference to a schema it does not grant is a CrossSchema
             // violation.
-            bool_grant(KEY_CORE_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
-            // Operator-posture relaxations (Global; only the platform/trusted ceilings grant them).
-            bool_grant(KEY_CORE_RAW_ISLAND_ROLE, ObjectModel::Global, false, "Raw-island bodies may carry role/search_path needles (platform posture)."),
-            bool_grant(KEY_CORE_SKIP_STATIC_GUARD, ObjectModel::Global, false, "Skip the static parse-time guard belt entirely (trusted dbmate-like posture)."),
-            // ── the CREATE EXTENSION name allowlist (StrSet, Global) ───────────
+            bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
+            // ── code — programmable / installed objects ─────────────────────────
+            bool_grant(KEY_CODE_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
+            bool_grant(KEY_CODE_MATERIALIZED_VIEW, ObjectModel::Global, false, "PostgreSQL materialized views."),
+            // the CREATE EXTENSION name allowlist (StrSet, Global) — the allowlist IS
+            // the knob (empty = deny all); FORBIDDEN_EXTENSIONS still overrides.
             KnobDef {
-                key: KnobKey::parse(KEY_PG_EXTENSIONS).expect("well-formed"),
+                key: KnobKey::parse(KEY_CODE_EXTENSION).expect("well-formed"),
                 kind: KnobKind::StrSet,
                 polarity: Polarity::Grant,
                 default: KnobValue::StrSet(Vec::new()),
                 enforcement: Enforcement::Enforced,
                 object_model: ObjectModel::Global,
                 requires_db_privilege: true,
-                docs: "The permitted CREATE EXTENSION names (FORBIDDEN_EXTENSIONS still override).".to_string(),
+                inherit: true,
+                docs: "The permitted CREATE EXTENSION names (empty = deny all; FORBIDDEN_EXTENSIONS still override).".to_string(),
             },
-            // ── op-timeout ceilings ────────────────────────────────────────────
-            uint_ceiling(KEY_OP_LOCK_TIMEOUT_MS, "Per-op lock_timeout ceiling (ms; no indefinite lock)."),
-            uint_ceiling(KEY_OP_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout ceiling (ms)."),
-            // ── index / table-rewrite postures ─────────────────────────────────
-            posture_grant(KEY_OP_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow."),
-            posture_grant(KEY_OP_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow."),
-            // ── data-security obligations ───────────────────────────────────────
-            bool_require(KEY_SEC_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled."),
-            bool_require(KEY_SEC_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP."),
-            posture_grant(KEY_SEC_DESTRUCTIVE_OPS, "Destructive-op posture: forbid ⊑ warn ⊑ allow."),
+            // ── sql — the raw-text escape hatch ─────────────────────────────────
+            // `sql.raw` is OBJECT-scoped (II.2.5): "raw only in staging" is a
+            // statement-level referenced-object containment guarantee, and the guard's
+            // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
+            // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
+            bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
+            bool_grant(KEY_SQL_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
+            // ── runtime — op-timeout ceilings + index/rewrite postures ──────────
+            uint_ceiling(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout ceiling (ms; no indefinite lock)."),
+            uint_ceiling(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout ceiling (ms)."),
+            posture_grant(KEY_RUNTIME_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow."),
+            posture_grant(KEY_RUNTIME_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow."),
+            // ── safety — data protection (limits AND obligations) ───────────────
+            bool_require(KEY_SAFETY_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled."),
+            bool_require(KEY_SAFETY_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP."),
+            posture_grant(KEY_SAFETY_DESTRUCTIVE_OPS, "Destructive-op posture: forbid ⊑ warn ⊑ allow."),
             // The approval obligation — DECLARED by the engine, ENFORCED by the host.
             require_approval_knob(
-                KEY_SEC_REQUIRE_APPROVAL,
+                KEY_SAFETY_REQUIRE_APPROVAL,
                 "Approval obligation: never ⊑ on_destructive ⊑ always (host-enforced state machine).",
             ),
         ])
@@ -366,21 +409,21 @@ mod tests {
         let reg = builtin_registry();
         let om = |k: &str| reg.get(&KnobKey::parse(k).unwrap()).unwrap().object_model;
         // Global: whole-DB capability bits.
-        assert_eq!(om(KEY_PG_ROLE), ObjectModel::Global);
-        assert_eq!(om(KEY_PG_GRANT), ObjectModel::Global);
-        assert_eq!(om(KEY_PG_EXTENSION), ObjectModel::Global);
-        // `core.raw_sql` is object-scoped (II.2.5): "raw_sql only in staging".
-        assert_eq!(om(KEY_CORE_RAW_SQL), ObjectModel::PerTable);
-        // PerSchema: schema creation.
-        assert_eq!(om(KEY_PG_SCHEMA), ObjectModel::PerSchema);
-        assert_eq!(om(KEY_CORE_CREATE_SCHEMA), ObjectModel::PerSchema);
+        assert_eq!(om(KEY_ACCESS_ROLE), ObjectModel::Global);
+        assert_eq!(om(KEY_ACCESS_GRANT), ObjectModel::Global);
+        assert_eq!(om(KEY_CODE_EXTENSION), ObjectModel::Global);
+        // `sql.raw` is object-scoped (II.2.5): "raw only in staging".
+        assert_eq!(om(KEY_SQL_RAW), ObjectModel::PerTable);
+        // PerSchema: schema creation + cross-schema reference.
+        assert_eq!(om(KEY_SCHEMA_CREATE_SCHEMA), ObjectModel::PerSchema);
+        assert_eq!(om(KEY_SCHEMA_CROSS_SCHEMA), ObjectModel::PerSchema);
         // PerTable: RLS + policy.
-        assert_eq!(om(KEY_PG_RLS), ObjectModel::PerTable);
-        assert_eq!(om(KEY_PG_POLICY), ObjectModel::PerTable);
+        assert_eq!(om(KEY_ACCESS_RLS), ObjectModel::PerTable);
+        assert_eq!(om(KEY_ACCESS_POLICY), ObjectModel::PerTable);
         // PerTable: the namespace-authority creation/movement/immutability anchors.
-        assert_eq!(om(KEY_CORE_CREATE_TABLE), ObjectModel::PerTable);
-        assert_eq!(om(KEY_CORE_RENAME_INTO), ObjectModel::PerTable);
-        assert_eq!(om(KEY_CORE_ALTER_INJECTED_COLUMN), ObjectModel::PerTable);
+        assert_eq!(om(KEY_SCHEMA_CREATE_TABLE), ObjectModel::PerTable);
+        assert_eq!(om(KEY_SCHEMA_RENAME), ObjectModel::PerTable);
+        assert_eq!(om(KEY_SCHEMA_ALTER_INJECTED), ObjectModel::PerTable);
     }
 
     #[test]
@@ -390,9 +433,9 @@ mod tests {
         // granted (II.2.6).
         let reg = builtin_registry();
         for k in [
-            KEY_CORE_CREATE_TABLE,
-            KEY_CORE_RENAME_INTO,
-            KEY_CORE_ALTER_INJECTED_COLUMN,
+            KEY_SCHEMA_CREATE_TABLE,
+            KEY_SCHEMA_RENAME,
+            KEY_SCHEMA_ALTER_INJECTED,
         ] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.polarity, Polarity::Grant, "{k} is a Grant");
@@ -401,9 +444,25 @@ mod tests {
     }
 
     #[test]
+    fn alter_injected_is_a_non_inheritable_power_grant() {
+        // `schema.alter_injected` is a POWER GRANT: `inherit = false`, so a silent
+        // creator draft never inherits "override the platform's injected columns".
+        let reg = builtin_registry();
+        let def = reg.get(&KnobKey::parse(KEY_SCHEMA_ALTER_INJECTED).unwrap()).unwrap();
+        assert!(!def.inherit, "schema.alter_injected must be inherit = false");
+        // Every OTHER builtin knob inherits by default (only this one opts out).
+        for def in reg.iter() {
+            if def.key.as_str() == KEY_SCHEMA_ALTER_INJECTED {
+                continue;
+            }
+            assert!(def.inherit, "{} should be inherit = true", def.key);
+        }
+    }
+
+    #[test]
     fn timeout_ceilings_forbid_the_indefinite_lock_value() {
         let reg = builtin_registry();
-        for k in [KEY_OP_LOCK_TIMEOUT_MS, KEY_OP_STATEMENT_TIMEOUT_MS] {
+        for k in [KEY_RUNTIME_LOCK_TIMEOUT_MS, KEY_RUNTIME_STATEMENT_TIMEOUT_MS] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.kind, KnobKind::UintCeiling { hard_floor: 1 });
             // The default is itself legal for the kind.
@@ -415,12 +474,12 @@ mod tests {
     fn posture_and_obligation_defaults_are_the_tightest_value() {
         let reg = builtin_registry();
         // OrderedEnum postures default to the tightest variant, `forbid`.
-        for k in [KEY_OP_INDEX_CREATION, KEY_OP_TABLE_REWRITE, KEY_SEC_DESTRUCTIVE_OPS] {
+        for k in [KEY_RUNTIME_INDEX_CREATION, KEY_RUNTIME_TABLE_REWRITE, KEY_SAFETY_DESTRUCTIVE_OPS] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.default, KnobValue::Str("forbid".to_string()));
         }
         // Require obligations default off (deny-by-default is "no obligation").
-        for k in [KEY_SEC_REQUIRE_RLS, KEY_SEC_NO_HARD_DELETE] {
+        for k in [KEY_SAFETY_REQUIRE_RLS, KEY_SAFETY_NO_HARD_DELETE] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.polarity, Polarity::Require);
             assert_eq!(def.default, KnobValue::Bool(false));
@@ -428,15 +487,19 @@ mod tests {
     }
 
     #[test]
-    fn require_approval_is_a_declared_only_require_obligation() {
+    fn require_approval_is_a_host_enforced_require_obligation() {
         let reg = builtin_registry();
         let def = reg
-            .get(&KnobKey::parse(KEY_SEC_REQUIRE_APPROVAL).unwrap())
-            .expect("sec.require_approval is registered");
+            .get(&KnobKey::parse(KEY_SAFETY_REQUIRE_APPROVAL).unwrap())
+            .expect("safety.require_approval is registered");
         // Require polarity (composes UP — operator raises, creator cannot lower).
         assert_eq!(def.polarity, Polarity::Require);
-        // DeclaredOnly — the engine never enforces it (the host does).
-        assert_eq!(def.enforcement, Enforcement::DeclaredOnly);
+        // HostEnforced — the engine never enforces it (the host does), but — unlike a
+        // DeclaredOnly knob — it MAY be sealed at a non-default value (M-2, II.6).
+        assert_eq!(def.enforcement, Enforcement::HostEnforced);
+        // The II.6 "can't set non-default on an enforced path" restriction does NOT
+        // apply to a HostEnforced knob (only DeclaredOnly).
+        assert!(!def.enforcement.forbids_nondefault_on_enforced_path());
         // Object-scoped like the other knobs.
         assert_eq!(def.object_model, ObjectModel::PerTable);
         // Default is the tightest variant, `never` (no obligation).

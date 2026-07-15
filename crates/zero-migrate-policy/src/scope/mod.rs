@@ -173,7 +173,7 @@ impl Scope {
     /// `self ⊑ other` — is every object `self` denotes also denoted by `other`?
     ///
     /// SOUND: a `true` result guarantees containment; a `false` may be a
-    /// conservative reject (the sanctioned direction for `compose_strict`). The
+    /// conservative reject (the sanctioned direction for `admit`). The
     /// exclude-aware decision procedure (II.3.1) is:
     ///   1. every `self` include-region (minus self's excludes) is covered by some
     ///      single `other` include pattern, AND

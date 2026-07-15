@@ -225,66 +225,80 @@ fn mac_tag(
     mac.finalize().into_bytes().into()
 }
 
-/// The CANONICAL byte encoding of the resolved rule set: grants (key-sorted, each
-/// rule's scope+value), then requires, then injects in the sealed total order, then
-/// validates — each rule length-prefixed and field-tagged so no two distinct rule
-/// sets collide and no boundary is ambiguous (the 1b-i discipline).
+/// The CANONICAL byte encoding of the resolved rule set WITH ITS LAYER BOUNDARIES
+/// (H-4): each layer, in stack order (TOP/innermost first), is emitted with its
+/// [`LayerTag`] byte, then its grants (key-sorted, each rule's scope+value), requires,
+/// injects (sealed doc order), and validates — each rule length-prefixed and
+/// field-tagged so no two distinct rule sets collide and no boundary is ambiguous (the
+/// 1b-i discipline). Because the layer boundaries are ENCODED, two stacks with the same
+/// flattened rule set but different layering produce different bytes — a re-flatten
+/// (or reorder) tamper fails the MAC (II.7).
 fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
     let mut b = Vec::new();
 
-    // ── grants ── (already key-sorted then rule-ordered by grant_rules_canonical)
-    b.push(0x10);
-    let grants = policy.grant_rules_canonical();
-    b.extend_from_slice(&(grants.len() as u32).to_be_bytes());
-    for (key, scope, value) in grants {
-        write_str(&mut b, key.as_str());
-        write_scope(&mut b, scope);
-        write_value(&mut b, value);
-    }
+    let layers = policy.seal_layers();
+    // Layer count, so an empty policy and a single-empty-layer policy differ.
+    b.push(0x0f);
+    b.extend_from_slice(&(layers.len() as u32).to_be_bytes());
 
-    // ── requires ── (composition order)
-    b.push(0x11);
-    let reqs: Vec<&Rule> = policy
-        .require_rules()
-        .iter()
-        .filter(|r| matches!(r.kind, RuleKind::Require { .. }))
-        .collect();
-    b.extend_from_slice(&(reqs.len() as u32).to_be_bytes());
-    for r in reqs {
-        if let RuleKind::Require { key, value } = &r.kind {
+    for layer in &layers {
+        // ── layer tag (binds the layer boundary) ──
+        b.push(0x0e);
+        b.push(layer.tag.seal_byte());
+
+        // ── grants ── (key-sorted then rule-ordered)
+        b.push(0x10);
+        b.extend_from_slice(&(layer.grants.len() as u32).to_be_bytes());
+        for (key, scope, value) in &layer.grants {
             write_str(&mut b, key.as_str());
-            write_scope(&mut b, &r.scope);
+            write_scope(&mut b, scope);
             write_value(&mut b, value);
         }
-    }
 
-    // ── injects ── (SEALED total order: outermost-first, doc-order)
-    b.push(0x12);
-    let injs: Vec<&Rule> = policy
-        .inject_rules()
-        .iter()
-        .filter(|r| matches!(r.kind, RuleKind::Inject { .. }))
-        .collect();
-    b.extend_from_slice(&(injs.len() as u32).to_be_bytes());
-    for r in injs {
-        if let RuleKind::Inject { spec } = &r.kind {
-            write_scope(&mut b, &r.scope);
-            write_inject(&mut b, spec);
+        // ── requires ── (composition order)
+        b.push(0x11);
+        let reqs: Vec<&Rule> = layer
+            .requires
+            .iter()
+            .filter(|r| matches!(r.kind, RuleKind::Require { .. }))
+            .collect();
+        b.extend_from_slice(&(reqs.len() as u32).to_be_bytes());
+        for r in reqs {
+            if let RuleKind::Require { key, value } = &r.kind {
+                write_str(&mut b, key.as_str());
+                write_scope(&mut b, &r.scope);
+                write_value(&mut b, value);
+            }
         }
-    }
 
-    // ── validates ── (composition order)
-    b.push(0x13);
-    let vals: Vec<&Rule> = policy
-        .validate_rules()
-        .iter()
-        .filter(|r| matches!(r.kind, RuleKind::Validate { .. }))
-        .collect();
-    b.extend_from_slice(&(vals.len() as u32).to_be_bytes());
-    for r in vals {
-        if let RuleKind::Validate { pred } = &r.kind {
-            write_scope(&mut b, &r.scope);
-            write_predicate(&mut b, pred);
+        // ── injects ── (sealed doc order within the layer)
+        b.push(0x12);
+        let injs: Vec<&Rule> = layer
+            .injects
+            .iter()
+            .filter(|r| matches!(r.kind, RuleKind::Inject { .. }))
+            .collect();
+        b.extend_from_slice(&(injs.len() as u32).to_be_bytes());
+        for r in injs {
+            if let RuleKind::Inject { spec } = &r.kind {
+                write_scope(&mut b, &r.scope);
+                write_inject(&mut b, spec);
+            }
+        }
+
+        // ── validates ── (composition order)
+        b.push(0x13);
+        let vals: Vec<&Rule> = layer
+            .validates
+            .iter()
+            .filter(|r| matches!(r.kind, RuleKind::Validate { .. }))
+            .collect();
+        b.extend_from_slice(&(vals.len() as u32).to_be_bytes());
+        for r in vals {
+            if let RuleKind::Validate { pred } = &r.kind {
+                write_scope(&mut b, &r.scope);
+                write_predicate(&mut b, pred);
+            }
         }
     }
 

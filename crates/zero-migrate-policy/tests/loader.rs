@@ -26,6 +26,7 @@ fn def(
         enforcement: Enforcement::Enforced,
         object_model: om,
         requires_db_privilege,
+        inherit: true,
         docs: String::new(),
     }
 }
@@ -34,13 +35,13 @@ fn def(
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def("pg.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true),
-            def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
-            def("core.create_table", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
-            def("core.create_schema", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false),
-            def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false),
+            def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true),
+            def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
+            def("schema.create_table", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
+            def("schema.create_schema", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false),
+            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false),
             def(
-                "op.lock_timeout_ms",
+                "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
@@ -81,7 +82,7 @@ fn known_key_accepts() {
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#,
@@ -122,11 +123,11 @@ scope = "all"
 
 #[test]
 fn grant_of_grant_polarity_accepts() {
-    // core.create_table is Grant-polarity → legal under [[grant]].
+    // schema.create_table is Grant-polarity → legal under [[grant]].
     assert!(load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -136,11 +137,11 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn grant_of_require_polarity_rejects() {
-    // sec.require_rls is Require-polarity → illegal under [[grant]].
+    // safety.require_rls is Require-polarity → illegal under [[grant]].
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["tenant_*"] }
 "#,
@@ -149,7 +150,7 @@ scope = { include = ["tenant_*"] }
     assert!(matches!(
         e,
         LoadError::SectionPolarityMismatch { ref key, expected: Polarity::Grant, found: Polarity::Require }
-            if key == "sec.require_rls"
+            if key == "safety.require_rls"
     ));
 }
 
@@ -158,7 +159,7 @@ fn require_of_grant_polarity_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[require]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -177,7 +178,7 @@ fn valid_uint_ceiling_accepts() {
     assert!(load_root(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 3000
 scope = { include = ["app_*"] }
 "#,
@@ -190,13 +191,13 @@ fn value_below_hard_floor_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 0
 scope = { include = ["app_*"] }
 "#,
     )
     .unwrap_err();
-    assert!(matches!(e, LoadError::InvalidKnobValue { ref key, .. } if key == "op.lock_timeout_ms"));
+    assert!(matches!(e, LoadError::InvalidKnobValue { ref key, .. } if key == "runtime.lock_timeout_ms"));
 }
 
 #[test]
@@ -205,7 +206,7 @@ fn value_wrong_type_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -221,7 +222,7 @@ fn global_knob_scope_all_accepts() {
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "pg.extension"
+key = "code.extension"
 value = true
 scope = "all"
 "#,
@@ -237,13 +238,13 @@ fn global_knob_narrow_scope_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "pg.extension"
+key = "code.extension"
 value = true
 scope = { include = ["app_*"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "pg.extension".into() });
+    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
 }
 
 #[test]
@@ -253,13 +254,13 @@ fn global_knob_of_star_scope_rejects_syntactically() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "pg.extension"
+key = "code.extension"
 value = true
 scope = { include = ["*"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "pg.extension".into() });
+    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
 }
 
 #[test]
@@ -270,24 +271,24 @@ fn global_knob_omitted_scope_rejects() {
 [default_scope]
 include = ["app_*"]
 [[grant]]
-key = "pg.extension"
+key = "code.extension"
 value = true
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "pg.extension".into() });
+    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
 }
 
 #[test]
 fn global_knob_exempt_from_default_meet() {
-    // The doc's own example: default_scope = app_* + pg.extension scope = all is
+    // The doc's own example: default_scope = app_* + code.extension scope = all is
     // LEGAL, and the Global rule's effective scope stays All, NOT app_*.
     let doc = load_root(
         r#"policy_version = 1
 [default_scope]
 include = ["app_*"]
 [[grant]]
-key = "pg.extension"
+key = "code.extension"
 value = true
 scope = "all"
 "#,
@@ -304,7 +305,7 @@ fn per_schema_knob_schema_scope_accepts() {
     assert!(load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.create_schema"
+key = "schema.create_schema"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -317,13 +318,13 @@ fn per_schema_knob_table_scope_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.create_schema"
+key = "schema.create_schema"
 value = true
 scope = { include = ["app_main.events"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeTooGranularForKnob { key: "core.create_schema".into() });
+    assert_eq!(e, LoadError::ScopeTooGranularForKnob { key: "schema.create_schema".into() });
 }
 
 // ── gate: grant scope unbounded (A3) ─────────────────────────────────────────────
@@ -336,7 +337,7 @@ fn grant_with_default_scope_accepts() {
 [default_scope]
 include = ["app_*"]
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 "#,
     )
@@ -351,12 +352,12 @@ fn grant_without_scope_or_default_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::GrantScopeUnbounded { key: "core.raw_sql".into() });
+    assert_eq!(e, LoadError::GrantScopeUnbounded { key: "sql.raw".into() });
 }
 
 // ── gate: mandatory inject on non-root layer ─────────────────────────────────────
@@ -474,7 +475,7 @@ fn empty_include_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = [] }
 "#,
@@ -488,7 +489,7 @@ fn malformed_scope_pattern_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["a.b.c"] }
 "#,
@@ -504,7 +505,7 @@ fn unknown_field_rejects() {
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = "all"
 bogus = 3
@@ -524,7 +525,7 @@ fn dead_rule_warns_not_errors() {
 [default_scope]
 include = ["app_*"]
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#,
@@ -539,9 +540,9 @@ scope = { include = ["staging"] }
 
 #[test]
 fn registry_digest_is_shuffle_stable() {
-    let a = def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
-    let b = def("pg.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
-    let c = def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false);
+    let a = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
+    let b = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
+    let c = def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false);
     let r1 = PolicyRegistry::empty().with([a.clone(), b.clone(), c.clone()]).unwrap();
     let r2 = PolicyRegistry::empty().with([c, b, a]).unwrap();
     assert_eq!(r1.digest(), r2.digest());
@@ -550,8 +551,8 @@ fn registry_digest_is_shuffle_stable() {
 
 #[test]
 fn registry_digest_changes_on_requires_db_privilege() {
-    let d1 = def("pg.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
-    let d2 = def("pg.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, false);
+    let d1 = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
+    let d2 = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, false);
     let r1 = PolicyRegistry::empty().with([d1]).unwrap();
     let r2 = PolicyRegistry::empty().with([d2]).unwrap();
     assert_ne!(r1.digest(), r2.digest());
@@ -559,8 +560,8 @@ fn registry_digest_changes_on_requires_db_privilege() {
 
 #[test]
 fn registry_digest_changes_on_object_model() {
-    let d1 = def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
-    let d2 = def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false);
+    let d1 = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
+    let d2 = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false);
     let r1 = PolicyRegistry::empty().with([d1]).unwrap();
     let r2 = PolicyRegistry::empty().with([d2]).unwrap();
     assert_ne!(r1.digest(), r2.digest());
@@ -576,22 +577,22 @@ fn doc_example_loads_as_root_ceiling() {
 include = ["app_*"]
 
 [[grant]]
-key   = "pg.extension"
+key   = "code.extension"
 value = true
 scope = "all"
 
 [[grant]]
-key   = "core.raw_sql"
+key   = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 
 [[grant]]
-key   = "core.create_table"
+key   = "schema.create_table"
 value = true
 scope = { include = ["app_*"] }
 
 [[require]]
-key   = "sec.require_rls"
+key   = "safety.require_rls"
 value = true
 scope = { include = ["tenant_*"] }
 
@@ -612,11 +613,11 @@ predicate = { kind = "has_primary_key" }
     // 3 grants + 1 require + 1 inject + 2 validates = 7 rules.
     assert_eq!(doc.rules.len(), 7);
 
-    // The Global pg.extension grant stays All despite default_scope = app_*.
+    // The Global code.extension grant stays All despite default_scope = app_*.
     let pg = doc
         .rules
         .iter()
-        .find(|r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "pg.extension"))
+        .find(|r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "code.extension"))
         .unwrap();
     assert_eq!(pg.scope, Scope::All);
 
@@ -626,7 +627,7 @@ predicate = { kind = "has_primary_key" }
     let raw = doc
         .rules
         .iter()
-        .find(|r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "core.raw_sql"))
+        .find(|r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "sql.raw"))
         .unwrap();
     assert_eq!(raw.scope, Scope::Nothing);
     assert!(!doc.warnings.is_empty());
@@ -645,7 +646,7 @@ fn json_front_end_loads() {
     let json = r#"{
         "policy_version": 1,
         "default_scope": { "include": ["app_*"] },
-        "grant": [ { "key": "core.raw_sql", "value": true, "scope": { "include": ["app_main"] } } ],
+        "grant": [ { "key": "sql.raw", "value": true, "scope": { "include": ["app_main"] } } ],
         "validate": [ { "scope": { "include": ["app_*"] }, "predicate": { "kind": "has_primary_key" } } ]
     }"#;
     let doc = PolicyDoc::parse_json(json, &registry(), LoadContext::RootCeiling).unwrap();
@@ -660,7 +661,7 @@ fn normalization_unquoted_folds_lowercase() {
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["App_*"] }
 "#,
@@ -681,7 +682,7 @@ fn normalization_quoted_verbatim() {
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["\"App_x\""] }
 "#,
@@ -703,7 +704,7 @@ fn normalization_quoted_dot_is_one_segment() {
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["\"a.b\""] }
 "#,
@@ -719,4 +720,113 @@ scope = { include = ["\"a.b\""] }
         }
         other => panic!("expected Of, got {other:?}"),
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// extends (II.7, H-1): draft-forbid + trusted catalog resolution + cycle detection
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// A trivial in-memory trusted catalog for the extends tests.
+struct MapCatalog(std::collections::BTreeMap<String, String>);
+
+impl zero_migrate_policy::ProfileCatalog for MapCatalog {
+    fn get_source(&self, name: &str) -> Option<String> {
+        self.0.get(name).cloned()
+    }
+}
+
+fn catalog(entries: &[(&str, &str)]) -> MapCatalog {
+    MapCatalog(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+}
+
+#[test]
+fn extends_in_untrusted_draft_is_hard_error() {
+    // A creator draft (NonRootLayer) carrying `extends` is rejected outright (H-1).
+    let err = PolicyDoc::parse_toml(
+        "policy_version = 1\nextends = \"base\"\n",
+        &registry(),
+        LoadContext::NonRootLayer,
+    )
+    .unwrap_err();
+    assert_eq!(err, LoadError::ExtendsForbiddenInDraft);
+}
+
+#[test]
+fn extends_trusted_resolves_against_catalog() {
+    // A trusted catalog entry inherits `base`'s rules under its own.
+    let cat = catalog(&[(
+        "base",
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+"#,
+    )]);
+    let doc = PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[grant]]
+key = "runtime.lock_timeout_ms"
+value = 5000
+scope = { include = ["app_*"] }
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap();
+    // Both the base's raw_sql grant and this doc's timeout grant are present.
+    let keys: Vec<&str> = doc
+        .rules
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RuleKind::Grant { key, .. } => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(keys.contains(&"sql.raw"), "base rule not inherited: {keys:?}");
+    assert!(keys.contains(&"runtime.lock_timeout_ms"), "own rule missing: {keys:?}");
+}
+
+#[test]
+fn extends_unknown_base_is_error() {
+    let cat = catalog(&[]);
+    let err = PolicyDoc::parse_toml_with_catalog(
+        "policy_version = 1\nextends = \"nope\"\n",
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert_eq!(err, LoadError::ExtendsUnknownBase { base: "nope".into() });
+}
+
+#[test]
+fn extends_cycle_is_detected() {
+    // a extends b, b extends a → cycle.
+    let cat = catalog(&[
+        ("a", "policy_version = 1\nextends = \"b\"\n"),
+        ("b", "policy_version = 1\nextends = \"a\"\n"),
+    ]);
+    let err = PolicyDoc::parse_toml_with_catalog(
+        "policy_version = 1\nextends = \"a\"\n",
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert!(matches!(err, LoadError::ExtendsCycle { .. }), "expected cycle, got {err:?}");
+}
+
+#[test]
+fn extends_without_catalog_is_unknown_base() {
+    // A trusted doc with `extends` but no catalog (plain parse_toml) fails closed.
+    let err = PolicyDoc::parse_toml(
+        "policy_version = 1\nextends = \"base\"\n",
+        &registry(),
+        LoadContext::RootCeiling,
+    )
+    .unwrap_err();
+    assert!(matches!(err, LoadError::ExtendsUnknownBase { .. }), "expected unknown base, got {err:?}");
 }

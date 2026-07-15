@@ -82,7 +82,7 @@ pub enum TableShapeError {
 /// Column order is the sealed inject total order (outermost inject first, each
 /// spec's columns in document order); indexes likewise. The primary key is the
 /// FIRST covering spec that pins one (the outermost ceiling wins — a draft cannot
-/// override a ceiling PK, which `compose_strict`'s collision blame already
+/// override a ceiling PK, which `admit`'s collision blame already
 /// guarantees is non-conflicting). `author_primary_key` is `Forbid` if ANY covering
 /// spec forbids (obligations union up).
 struct ResolvedInject {
@@ -476,22 +476,22 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
 pub const ZEROSHIP_CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
@@ -520,7 +520,7 @@ indexes = [
 /// is parsed against the engine's builtin registry, then composes against a
 /// grant-only draft extracted from the same ceiling. Inject/require/validate
 /// rules survive from the root ceiling; grants become effective through the draft
-/// side of `compose_strict` after proving they do not exceed the root ceiling.
+/// side of `admit` after proving they do not exceed the root ceiling.
 /// Inject-only ceilings still compose because the extracted draft is empty.
 ///
 /// This is the engine-side constructor the production authoring verb
@@ -541,7 +541,7 @@ pub fn effective_policy_from_ceiling_toml(ceiling_toml: &str) -> Result<Effectiv
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
-    zero_migrate_policy::compose_strict(&ceiling, &draft, &registry)
+    zero_migrate_policy::admit(&ceiling, &draft, &registry)
         .map_err(|e| format!("policy composition failed: {e:?}"))
 }
 
@@ -597,24 +597,24 @@ pub fn confined_no_inject_policy(project_schema: &str) -> Result<EffectivePolicy
     let scope = schema_scope_value(&schemas);
     let grant_rules = vec![
         // Cross-schema confinement: a confined migration may reference only its own
-        // project schema. This is the guard's `grants(core.cross_schema, s)` source.
+        // project schema. This is the guard's `grants(schema.cross_schema, s)` source.
         grant_rule(
-            policy_registry::KEY_CORE_CROSS_SCHEMA,
+            policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
             toml::Value::Boolean(true),
             scope.clone(),
         ),
         grant_rule(
-            policy_registry::KEY_CORE_CREATE_TABLE,
+            policy_registry::KEY_SCHEMA_CREATE_TABLE,
             toml::Value::Boolean(true),
             scope.clone(),
         ),
         grant_rule(
-            policy_registry::KEY_CORE_RENAME_INTO,
+            policy_registry::KEY_SCHEMA_RENAME,
             toml::Value::Boolean(true),
             scope,
         ),
         grant_rule(
-            policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+            policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS,
             toml::Value::String("allow".to_string()),
             toml::Value::String("all".to_string()),
         ),
@@ -630,71 +630,61 @@ pub fn operator_no_inject_policy(
     schemas: &[String],
     extensions: &[String],
 ) -> Result<EffectivePolicy, String> {
-    operator_policy_inner(schemas, extensions, false)
+    operator_policy_inner(schemas, extensions)
 }
 
-/// The **trusted** (dbmate-like) no-inject policy: the operator capability set plus
-/// the `core.skip_static_guard` belt-skip and ⊤ cross-schema (no confinement). The
-/// belt-skip is the policy grant the guard's [`skips_denylist_belt`] reads.
+/// The **trusted** (dbmate-like) no-inject policy: the operator capability set + ⊤
+/// cross-schema (no confinement). The belt-skip is NOT a policy grant anymore — it is
+/// the root/host-set [`GuardMode::Off`] the [`ExecutorConfig::trusted`] /
+/// [`GuardConfig::trusted`] constructors stamp. This policy is therefore the SAME
+/// content as the operator policy (over ⊤); the Trusted-vs-Platform difference is the
+/// `GuardMode`, carried on the config, not in the composed policy.
 ///
-/// [`skips_denylist_belt`]: crate::guard::GuardConfig::skips_denylist_belt
+/// [`GuardMode::Off`]: crate::guard::GuardMode::Off
+/// [`GuardConfig::trusted`]: crate::guard::GuardConfig::trusted
+/// [`ExecutorConfig::trusted`]: crate::conn::ExecutorConfig::trusted
 pub fn trusted_no_inject_policy() -> Result<EffectivePolicy, String> {
-    operator_policy_inner(&[], &[], true)
+    operator_policy_inner(&[], &[])
 }
 
 fn operator_policy_inner(
     schemas: &[String],
     extensions: &[String],
-    skip_static_guard: bool,
 ) -> Result<EffectivePolicy, String> {
     let mut grant_rules = Vec::new();
     let all = toml::Value::String("all".to_string());
-    // Whole-DB vendor capabilities (Global ⊤).
+    // Whole-DB Bool vendor capabilities (Global ⊤). NOTE `code.extension` is NOT here
+    // — it is a StrSet allowlist (the allowlist IS the capability), emitted below.
     for key in [
-        policy_registry::KEY_PG_ROLE,
-        policy_registry::KEY_PG_GRANT,
-        policy_registry::KEY_PG_EXTENSION,
-        policy_registry::KEY_PG_SCHEMA,
-        policy_registry::KEY_CORE_CREATE_SCHEMA,
-        policy_registry::KEY_PG_POLICY,
-        policy_registry::KEY_PG_RLS,
-        policy_registry::KEY_PG_PARTITION,
-        policy_registry::KEY_PG_FUNCTION,
-        policy_registry::KEY_CORE_RAW_SQL,
-        policy_registry::KEY_CORE_RAW_VIEW_BODY,
-        policy_registry::KEY_PG_MATERIALIZED_VIEW,
+        policy_registry::KEY_ACCESS_ROLE,
+        policy_registry::KEY_ACCESS_GRANT,
+        policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
+        policy_registry::KEY_ACCESS_POLICY,
+        policy_registry::KEY_ACCESS_RLS,
+        policy_registry::KEY_SCHEMA_PARTITION,
+        policy_registry::KEY_CODE_FUNCTION,
+        policy_registry::KEY_SQL_RAW,
+        policy_registry::KEY_SQL_RAW_VIEW_BODY,
+        policy_registry::KEY_CODE_MATERIALIZED_VIEW,
     ] {
         grant_rules.push(grant_rule(key, toml::Value::Boolean(true), all.clone()));
     }
     // Cross-schema + creation/rename, scoped to the owned schema allowlist (⊤ when
-    // empty — the trusted posture, which skips the belt anyway).
+    // empty — the trusted posture, which skips the belt via GuardMode anyway).
     let creation_scope = schema_scope_value(schemas);
     for key in [
-        policy_registry::KEY_CORE_CROSS_SCHEMA,
-        policy_registry::KEY_CORE_CREATE_TABLE,
-        policy_registry::KEY_CORE_RENAME_INTO,
+        policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
+        policy_registry::KEY_SCHEMA_CREATE_TABLE,
+        policy_registry::KEY_SCHEMA_RENAME,
     ] {
         grant_rules.push(grant_rule(key, toml::Value::Boolean(true), creation_scope.clone()));
     }
-    // Platform posture relaxes the raw-island role/search_path needles; trusted does
-    // NOT (its raw-island backstop still denies them). Trusted instead skips the
-    // whole static belt via `core.skip_static_guard`.
-    if skip_static_guard {
-        grant_rules.push(grant_rule(
-            policy_registry::KEY_CORE_SKIP_STATIC_GUARD,
-            toml::Value::Boolean(true),
-            all.clone(),
-        ));
-    } else {
-        grant_rules.push(grant_rule(
-            policy_registry::KEY_CORE_RAW_ISLAND_ROLE,
-            toml::Value::Boolean(true),
-            all.clone(),
-        ));
-    }
+    // The CREATE EXTENSION allowlist (StrSet) IS the extension capability (empty = deny
+    // all). The raw-island role/search_path needle relaxation is now the guard's
+    // INTERNAL vendor-lower rule (GuardMode::Enforced + access.role) — no grant here.
     if !extensions.is_empty() {
         grant_rules.push(grant_rule(
-            policy_registry::KEY_PG_EXTENSIONS,
+            policy_registry::KEY_CODE_EXTENSION,
             toml::Value::Array(
                 extensions
                     .iter()
@@ -705,7 +695,7 @@ fn operator_policy_inner(
         ));
     }
     grant_rules.push(grant_rule(
-        policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+        policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS,
         toml::Value::String("allow".to_string()),
         all,
     ));

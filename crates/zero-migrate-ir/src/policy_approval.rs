@@ -1,8 +1,9 @@
-//! The `sec.require_approval` decision query — the host-facing side of the SEALED
+//! The `safety.require_approval` decision query — the host-facing side of the SEALED
 //! approval obligation.
 //!
-//! Approval is a **sealed policy obligation the engine only DECLARES**
-//! ([`crate::policy_registry::KEY_SEC_REQUIRE_APPROVAL`], `Enforcement::DeclaredOnly`).
+//! Approval is a **sealed policy obligation the engine does not enforce but a HOST
+//! does** ([`crate::policy_registry::KEY_SAFETY_REQUIRE_APPROVAL`],
+//! `Enforcement::HostEnforced` — so it may be sealed at a non-default value, M-2).
 //! The engine `apply` stays a dumb executor; it never gates on this knob. Instead the
 //! HOST (`migrated`) composes the effective policy, asks
 //! [`migration_requires_approval`] whether the migration's ops require approval, and
@@ -10,7 +11,7 @@
 //!
 //! This module is the bridge between the two crates that must both be in scope for the
 //! query — the PDP [`EffectivePolicy`] (from `zero-migrate-policy`) and the [`Op`]
-//! vocabulary (from this crate). It resolves the `sec.require_approval` LEVEL per
+//! vocabulary (from this crate). It resolves the `safety.require_approval` LEVEL per
 //! target object (the knob is object-scoped) and ORs the per-op requirement across the
 //! whole migration:
 //!
@@ -22,9 +23,9 @@
 use zero_migrate_policy::{normalize_pg_identifier, EffectivePolicy, KnobKey, KnobValue, ObjectName};
 
 use crate::ir::Op;
-use crate::policy_registry::{KEY_SEC_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
+use crate::policy_registry::{KEY_SAFETY_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
 
-/// The resolved `sec.require_approval` obligation level at one object, tightest→
+/// The resolved `safety.require_approval` obligation level at one object, tightest→
 /// loosest: `never` ⊑ `on_destructive` ⊑ `always`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalLevel {
@@ -37,7 +38,7 @@ pub enum ApprovalLevel {
 }
 
 impl ApprovalLevel {
-    /// Parse one `sec.require_approval` variant string. An unknown variant fails
+    /// Parse one `safety.require_approval` variant string. An unknown variant fails
     /// CLOSED to the safest interpretation for an obligation — `Always` (require
     /// approval) — so a policy shape the host does not understand never silently
     /// un-gates a migration.
@@ -93,7 +94,7 @@ fn object_for_op(op: &Op, default_schema: &str) -> ObjectName {
     normalize_pg_identifier(schema).unwrap_or_else(fallback)
 }
 
-/// Resolve the effective `sec.require_approval` level at `object`: the LOOSEST
+/// Resolve the effective `safety.require_approval` level at `object`: the LOOSEST
 /// (highest-obligation) covering require rule's value, or [`ApprovalLevel::Never`]
 /// when no rule covers it (the knob default). This mirrors the PDP obligation
 /// union-up: [`EffectivePolicy::obligations`] returns every covering require rule at
@@ -115,7 +116,7 @@ pub fn require_approval_level(effective: &EffectivePolicy, object: &ObjectName) 
 /// Does the given migration (its `ops`, targeting `default_schema`) require operator
 /// approval under the composed `effective` policy?
 ///
-/// The per-op requirement is the object-scoped `sec.require_approval` level resolved
+/// The per-op requirement is the object-scoped `safety.require_approval` level resolved
 /// at the op's target object, applied to the op's destructiveness:
 /// `never`→false, `always`→true, `on_destructive`→[`Op::is_destructive`]. The
 /// migration requires approval iff ANY op does (OR across ops). Empty ops → false.
@@ -136,11 +137,11 @@ pub fn migration_requires_approval(
 }
 
 fn approval_key() -> KnobKey {
-    KnobKey::parse(KEY_SEC_REQUIRE_APPROVAL)
-        .expect("sec.require_approval builtin knob key is well-formed")
+    KnobKey::parse(KEY_SAFETY_REQUIRE_APPROVAL)
+        .expect("safety.require_approval builtin knob key is well-formed")
 }
 
-/// The `sec.require_approval` variant strings, re-exported for hosts that author the
+/// The `safety.require_approval` variant strings, re-exported for hosts that author the
 /// obligation (kept in lockstep with [`ApprovalLevel`] via a compile-time check).
 #[must_use]
 pub const fn variants() -> &'static [&'static str] {
@@ -151,7 +152,7 @@ pub const fn variants() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::policy_registry::builtin_registry;
-    use zero_migrate_policy::{compose_strict, LoadContext, PolicyDoc, RootCeiling};
+    use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCeiling};
 
     /// Compose an [`EffectivePolicy`] over the builtin registry from a ceiling TOML
     /// (the operator obligation) against an empty creator draft.
@@ -161,7 +162,7 @@ mod tests {
         let empty_draft =
             PolicyDoc::parse_toml("policy_version = 1\n", &reg, LoadContext::NonRootLayer)
                 .expect("empty draft parses");
-        compose_strict(&root, &empty_draft, &reg).expect("composes")
+        admit(&root, &empty_draft, &reg).expect("composes")
     }
 
     fn drop_table(schema: &str, table: &str) -> Op {
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn always_requires_approval_for_any_op() {
         let ep = effective_from_ceiling(
-            "policy_version = 1\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
         );
         // Even a purely additive op requires approval under `always`.
         assert!(migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
@@ -213,7 +214,7 @@ mod tests {
     #[test]
     fn on_destructive_gates_only_destructive_ops() {
         let ep = effective_from_ceiling(
-            "policy_version = 1\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n",
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n",
         );
         // Additive-only migration → no approval.
         assert!(!migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
@@ -229,7 +230,7 @@ mod tests {
     fn level_resolves_per_object_scope() {
         // `always` scoped ONLY to app_secret.*; app_main is left at the default `never`.
         let ep = effective_from_ceiling(
-            "policy_version = 1\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
         );
         // An additive op on the unscoped schema → no approval.
         assert!(!migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
@@ -240,7 +241,7 @@ mod tests {
     #[test]
     fn empty_ops_never_require_approval() {
         let ep = effective_from_ceiling(
-            "policy_version = 1\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
+            "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
         );
         assert!(!migration_requires_approval(&ep, &[], "app_main"));
     }

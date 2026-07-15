@@ -10,7 +10,7 @@
 
 use zero_migrate_guard::guard::{namespace_rule, GuardConfig, GuardError, SqlGuard};
 use zero_migrate_ir::policy_registry::builtin_registry;
-use zero_migrate_policy::{compose_strict, EffectivePolicy, LoadContext, PolicyDoc, RootCeiling};
+use zero_migrate_policy::{admit, EffectivePolicy, LoadContext, PolicyDoc, RootCeiling};
 
 /// Compose an [`EffectivePolicy`] over the ENGINE builtin registry from a root-ceiling
 /// TOML (grants + inject/require rules).
@@ -29,7 +29,7 @@ fn policy(ceiling_toml: &str) -> EffectivePolicy {
     let draft_toml = grants_only(ceiling_toml);
     let draft = PolicyDoc::parse_toml(&draft_toml, &reg, LoadContext::NonRootLayer)
         .expect("grants-only draft");
-    compose_strict(&ceiling, &draft, &reg).expect("composition")
+    admit(&ceiling, &draft, &reg).expect("composition")
 }
 
 /// Extract only the `[[grant]]` array-of-tables blocks from a ceiling TOML, so the

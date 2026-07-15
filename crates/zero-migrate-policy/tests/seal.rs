@@ -9,8 +9,8 @@
 //! present.
 
 use zero_migrate_policy::{
-    compose_strict, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, PolicyDoc,
-    PolicyRegistry, Polarity, RootCeiling, SealError,
+    admit, finalize_ceiling, overlay, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue,
+    PolicyDoc, PolicyRegistry, Polarity, RootCeiling, SealError, TrustedDoc,
 };
 
 const MAC_KEY: &[u8] = b"a-shared-fleet-mac-key-32-bytes!!";
@@ -27,6 +27,7 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
         enforcement: Enforcement::Enforced,
         object_model: zero_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
+        inherit: true,
         docs: String::new(),
     }
 }
@@ -34,14 +35,14 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
             def(
-                "op.lock_timeout_ms",
+                "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
         ])
         .unwrap()
 }
@@ -52,32 +53,32 @@ fn registry_flipped_privilege() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
             {
-                let mut d = def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false));
+                let mut d = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false));
                 d.requires_db_privilege = true;
                 d
             },
             def(
-                "op.lock_timeout_ms",
+                "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
         ])
         .unwrap()
 }
 
 const ROOT_TOML: &str = r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"] }
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 600
 scope = { include = ["app_*"] }
 [[require]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["app_*"] }
 [[inject]]
@@ -98,7 +99,7 @@ fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolic
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    compose_strict(&root, &draft, reg).unwrap()
+    admit(&root, &draft, reg).unwrap()
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -146,7 +147,7 @@ fn tampered_grant_value_fails() {
     let draft_600 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 600
 scope = { include = ["app_*"] }
 "#,
@@ -154,14 +155,14 @@ scope = { include = ["app_*"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let policy_600 = compose_strict(&root, &draft_600, &reg).unwrap();
+    let policy_600 = admit(&root, &draft_600, &reg).unwrap();
     let sealed = seal(&policy_600, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CEILING_VER);
 
     // A tightened tamper: draft 60 @ app_* — a DIFFERENT effective grant map.
     let draft_60 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 60
 scope = { include = ["app_*"] }
 "#,
@@ -169,7 +170,7 @@ scope = { include = ["app_*"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft_60, &reg).unwrap();
+    let tampered = admit(&root, &draft_60, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -198,7 +199,7 @@ fn tampered_scope_fails() {
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft, &reg).unwrap();
+    let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -220,7 +221,7 @@ fn tampered_inject_column_fails() {
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft, &reg).unwrap();
+    let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -324,8 +325,8 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
 
-    let pa = compose_strict(&RootCeiling::parse_toml(a_toml, &reg).unwrap(), &empty, &reg).unwrap();
-    let pb = compose_strict(&RootCeiling::parse_toml(b_toml, &reg).unwrap(), &empty, &reg).unwrap();
+    let pa = admit(&RootCeiling::parse_toml(a_toml, &reg).unwrap(), &empty, &reg).unwrap();
+    let pb = admit(&RootCeiling::parse_toml(b_toml, &reg).unwrap(), &empty, &reg).unwrap();
 
     let sa = seal(&pa, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CEILING_VER);
     // The seal minted over order-A must NOT verify against order-B's policy.
@@ -333,4 +334,83 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
         sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
         Err(SealError::TagMismatch)
     );
+}
+
+/// **The seal binds LAYER BOUNDARIES (H-4 / II.7).** Two policies with the SAME
+/// flattened grant set but DIFFERENT layer stacks encode differently, so a re-flatten
+/// tamper fails the MAC. Policy A is a 2-layer ceiling `overlay(base, env)` (env grants
+/// raw_sql@staging, base grants raw_sql@app_*) admitted with an empty draft → a stack
+/// `[draft(empty)] over [env] over [base]`. Policy B is a SINGLE-layer root ceiling
+/// carrying the SAME two grant rules flattened into one layer → `[draft(empty)] over
+/// [base(both rules)]`. Their flattened grant sets are identical; only the layering
+/// differs. The seal from A must NOT verify against B.
+#[test]
+fn layer_reflatten_changes_tag() {
+    let reg = registry();
+
+    // Policy A: overlay(base, env) — two trusted layers.
+    let base = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+    let env = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["staging"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+    let ceiling_a = finalize_ceiling(overlay(&base, &env, &reg).unwrap()).unwrap();
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let pa = admit(&ceiling_a, &empty, &reg).unwrap();
+
+    // Policy B: a SINGLE root layer carrying BOTH grant rules — same flattened set.
+    let flat_root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["staging"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+    let pb = admit(&flat_root, &empty, &reg).unwrap();
+
+    // The two denote the SAME effective grants (sanity), but different layer stacks.
+    let staging_t = zero_migrate_policy::ObjectName::table(b"staging".to_vec(), b"t".to_vec());
+    let app_t = zero_migrate_policy::ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let rk = KnobKey::parse("sql.raw").unwrap();
+    assert_eq!(pa.grants(&rk, &staging_t), pb.grants(&rk, &staging_t));
+    assert_eq!(pa.grants(&rk, &app_t), pb.grants(&rk, &app_t));
+
+    // But the seal binds the layer boundaries: A's seal must NOT verify against B.
+    let sa = seal(&pa, MAC_KEY, [3u8; 16], DIALECT, MATCHER, CEILING_VER);
+    assert_eq!(
+        sa.verify(MAC_KEY, &pb, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        Err(SealError::TagMismatch),
+        "a re-flattened layer stack must FAIL the MAC (layer boundaries are bound)"
+    );
+    // A verifies against itself (round-trip sanity).
+    assert!(sa
+        .verify(MAC_KEY, &pa, &reg.digest(), DIALECT, MATCHER, CEILING_VER)
+        .is_ok());
 }

@@ -3299,7 +3299,7 @@ impl IrAuthor {
         guard: &dyn MigrationGuard,
         raw_island_guard: &SqlGuard,
         // The Trusted (dbmate-like) posture skips the static parse-time belt — the
-        // `core.skip_static_guard` grant. When set, raw islands still run the
+        // the root/host-set `GuardMode::Off` grant. When set, raw islands still run the
         // deny-list backstop so embedded arbitrary SQL cannot host-reach.
         skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
