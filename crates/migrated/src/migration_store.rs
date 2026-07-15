@@ -18,18 +18,25 @@ impl MigrationStore {
         Self { dsn: dsn.into() }
     }
 
-    pub async fn insert_submitted(
+    /// Plan transition — the migration needs NO approval: insert AUTO-`approved`,
+    /// stamping the resolved content checksum as `approved_checksum` so the apply gate
+    /// can detect drift the same way it does for operator-approved migrations.
+    pub async fn insert_auto_approved(
         &self,
         input: StoreMigrationInput<'_>,
+        approved_checksum: &str,
     ) -> Result<(), MigrationStoreError> {
-        self.insert_migration(input, MigrationStatus::Submitted).await
+        self.insert_migration(input, MigrationStatus::Approved, Some(approved_checksum))
+            .await
     }
 
+    /// Plan transition — the migration REQUIRES approval: insert `pending_approval`
+    /// (no `approved_checksum` yet; it is stamped at `approve()`).
     pub async fn insert_pending(
         &self,
         input: StoreMigrationInput<'_>,
     ) -> Result<(), MigrationStoreError> {
-        self.insert_migration(input, MigrationStatus::PendingApproval)
+        self.insert_migration(input, MigrationStatus::PendingApproval, None)
             .await
     }
 
@@ -37,6 +44,7 @@ impl MigrationStore {
         &self,
         input: StoreMigrationInput<'_>,
         status: MigrationStatus,
+        approved_checksum: Option<&str>,
     ) -> Result<(), MigrationStoreError> {
         let ceiling_version =
             i64::try_from(input.ceiling_version).map_err(|_| {
@@ -50,8 +58,9 @@ impl MigrationStore {
             .execute(
                 "INSERT INTO zeroship.migrated_migrations \
                     (app_id, migration_id, status, request_body, effective_profile, \
-                     ceiling_id, ceiling_version, gated_versions, submitted_by) \
-                 VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::jsonb, $9)",
+                     ceiling_id, ceiling_version, gated_versions, submitted_by, \
+                     approved_checksum) \
+                 VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::jsonb, $9, $10)",
                 &[
                     &input.app_id,
                     &input.migration_id,
@@ -62,6 +71,7 @@ impl MigrationStore {
                     &ceiling_version,
                     &gated_versions,
                     &input.principal_id,
+                    &approved_checksum,
                 ],
             )
             .await
@@ -81,7 +91,7 @@ impl MigrationStore {
                         ceiling_id, ceiling_version, gated_versions, submitted_by, \
                         submitted_at::text AS submitted_at, approved_by, \
                         approved_at::text AS approved_at, applied_at::text AS applied_at, \
-                        last_error \
+                        approved_checksum, last_error \
                    FROM zeroship.migrated_migrations \
                   WHERE app_id = $1 AND migration_id = $2 AND status = 'pending_approval'",
                 &[&app_id, &migration_id],
@@ -91,25 +101,57 @@ impl MigrationStore {
         rows.first().map(StoredMigration::from_row).transpose()
     }
 
+    /// APPROVE transition: `pending_approval` → `approved`, stamping `approved_by`,
+    /// `approved_at`, and `approved_checksum = X` (the content checksum the operator
+    /// reviewed). The apply gate later re-resolves the migration to X' and proceeds
+    /// only if `X' == approved_checksum` — so this checksum closes the approve/apply
+    /// TOCTOU. The write is guarded on the current status so a double-approve or an
+    /// approve of an already-applied/rejected row is a no-op ([`Self::NotPending`]).
     pub async fn mark_approved(
         &self,
         app_id: Uuid,
         migration_id: Uuid,
         approved_by: Uuid,
+        approved_checksum: &str,
     ) -> Result<(), MigrationStoreError> {
         let client = self.connect().await?;
         let updated = client
             .execute(
                 "UPDATE zeroship.migrated_migrations \
-                    SET status = 'approved', approved_by = $3, approved_at = NOW(), last_error = NULL \
+                    SET status = 'approved', approved_by = $3, approved_at = NOW(), \
+                        approved_checksum = $4, last_error = NULL \
                   WHERE app_id = $1 AND migration_id = $2 AND status = 'pending_approval'",
-                &[&app_id, &migration_id, &approved_by],
+                &[&app_id, &migration_id, &approved_by, &approved_checksum],
             )
             .await
             .map_err(MigrationStoreError::Query)?;
         if updated == 0 {
             return Err(MigrationStoreError::NotPending);
         }
+        Ok(())
+    }
+
+    /// Apply-gate DRIFT transition: an `approved` migration whose re-resolved content
+    /// checksum X' NO LONGER matches the `approved_checksum` reverts to
+    /// `pending_approval` (clearing the stale approval) — it must be re-reviewed. This
+    /// is the fail-closed arm of the TOCTOU gate.
+    pub async fn revert_to_pending(
+        &self,
+        app_id: Uuid,
+        migration_id: Uuid,
+        message: &str,
+    ) -> Result<(), MigrationStoreError> {
+        let client = self.connect().await?;
+        client
+            .execute(
+                "UPDATE zeroship.migrated_migrations \
+                    SET status = 'pending_approval', approved_by = NULL, approved_at = NULL, \
+                        approved_checksum = NULL, last_error = $3 \
+                  WHERE app_id = $1 AND migration_id = $2",
+                &[&app_id, &migration_id, &message],
+            )
+            .await
+            .map_err(MigrationStoreError::Query)?;
         Ok(())
     }
 
@@ -131,7 +173,9 @@ impl MigrationStore {
         Ok(())
     }
 
-    pub async fn mark_failed(
+    /// REJECT transition: a migration that failed preflight / drifted-and-abandoned /
+    /// errored moves to `rejected` (terminal) with the failure message.
+    pub async fn mark_rejected(
         &self,
         app_id: Uuid,
         migration_id: Uuid,
@@ -141,7 +185,7 @@ impl MigrationStore {
         client
             .execute(
                 "UPDATE zeroship.migrated_migrations \
-                    SET status = 'failed', last_error = $3 \
+                    SET status = 'rejected', last_error = $3 \
                   WHERE app_id = $1 AND migration_id = $2",
                 &[&app_id, &migration_id, &message],
             )
@@ -245,17 +289,37 @@ impl AuditAction {
     }
 }
 
+/// The migration-record lifecycle status. The state machine:
+/// `planned` → (`pending_approval` → `approved` | `approved`) → `applied`, with
+/// `rejected` as the terminal failure arm. A drifted `approved` reverts to
+/// `pending_approval` (see [`MigrationStore::revert_to_pending`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MigrationStatus {
-    Submitted,
+    /// Composed + resolved, decision not yet taken (transient in-request state; the
+    /// store lands the row directly in `approved`/`pending_approval`).
+    #[allow(dead_code)]
+    Planned,
+    /// Requires operator approval; awaiting `approve()`.
     PendingApproval,
+    /// Approved (operator-approved OR auto-approved because no approval was needed);
+    /// carries `approved_checksum`.
+    Approved,
+    /// Successfully applied (terminal).
+    #[allow(dead_code)]
+    Applied,
+    /// Rejected / failed (terminal).
+    #[allow(dead_code)]
+    Rejected,
 }
 
 impl MigrationStatus {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Submitted => "submitted",
+            Self::Planned => "planned",
             Self::PendingApproval => "pending_approval",
+            Self::Approved => "approved",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
         }
     }
 }
@@ -275,6 +339,9 @@ pub struct StoredMigration {
     pub approved_by: Option<Uuid>,
     pub approved_at: Option<String>,
     pub applied_at: Option<String>,
+    /// The content checksum the operator reviewed at `approve()` — the TOCTOU pin the
+    /// apply gate re-verifies against the freshly re-resolved migration set.
+    pub approved_checksum: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -296,6 +363,7 @@ impl StoredMigration {
             approved_by: row.get("approved_by"),
             approved_at: row.get("approved_at"),
             applied_at: row.get("applied_at"),
+            approved_checksum: row.get("approved_checksum"),
             last_error: row.get("last_error"),
         })
     }

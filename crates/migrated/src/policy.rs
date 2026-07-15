@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 use zero_migrate::{effective_policy_from_ceiling_toml, seal, DestructiveOps, SealError, SealedPolicy};
+use zero_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zero_migrate_ir::policy_registry::{
     builtin_registry, KEY_PG_EXTENSIONS, KEY_SEC_DESTRUCTIVE_OPS, KEY_SEC_REQUIRE_RLS,
 };
@@ -76,14 +77,12 @@ impl ManagedPolicyConfig {
     }
 
     /// Parse an untrusted creator draft into a [`ParsedDraft`]: the non-root
-    /// [`PolicyDoc`] (grant/inject/require/validate rules, composed by the engine PDP)
-    /// plus the MANAGED-ONLY `require_approval` directive.
+    /// [`PolicyDoc`] of grant/inject/require/validate rules, composed by the engine PDP.
     ///
-    /// `require_approval` has NO engine-knob equivalent — the PDP `sec.destructive_ops`
-    /// enum is `forbid`/`warn`/`allow` only. It is a managed-server posture: "gate
-    /// EVERY migration for operator approval, destructive or not". We strip it from the
-    /// draft TOML before handing the remainder to the `deny_unknown_fields` PDP loader,
-    /// then overlay it onto the composed policy's [`ManagedPosture`].
+    /// Approval is a NORMAL sealed obligation now — a creator (or the operator ceiling)
+    /// authors `[[require]] key = "sec.require_approval"` like any other knob; there is
+    /// no managed-only overlay to strip. The engine's `deny_unknown_fields` loader
+    /// validates the whole draft.
     pub fn parse_draft(&self, draft: &CreatorPolicyDraft<'_>) -> Result<ParsedDraft, ManagedPolicyError> {
         if draft.filename != MIGRATE_POLICY_FILENAME {
             return Err(ManagedPolicyError::InvalidDraftFilename {
@@ -103,19 +102,15 @@ impl ManagedPolicyConfig {
         draft: Option<&ParsedDraft>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(app_id, tier);
-        let (policy, require_approval) = match draft {
-            Some(draft) => (
-                compose_strict(ceiling.root(), &draft.doc, &builtin_registry())
-                    .map_err(ManagedPolicyError::Compose)?,
-                draft.require_approval,
-            ),
-            None => (ceiling.effective()?, false),
+        let policy = match draft {
+            Some(draft) => compose_strict(ceiling.root(), &draft.doc, &builtin_registry())
+                .map_err(ManagedPolicyError::Compose)?,
+            None => ceiling.effective()?,
         };
         Ok(EffectivePolicy::new(
             ceiling.id.clone(),
             ceiling.ceiling_version,
             policy,
-            require_approval,
         ))
     }
 
@@ -191,36 +186,19 @@ pub struct EffectivePolicy {
 }
 
 impl EffectivePolicy {
-    fn new(
-        ceiling_id: String,
-        ceiling_version: u64,
-        policy: PdpPolicy,
-        require_approval: bool,
-    ) -> Self {
-        let mut managed = ManagedPosture::from_policy(&policy);
-        // The managed-only `require_approval` directive overlays the composed
-        // destructive posture: it forces the tightest managed value `RequireApproval`,
-        // which gates EVERY migration (the engine PDP has no such grant).
-        if require_approval {
-            managed.destructive_ops = DestructiveOps::RequireApproval;
-        }
+    fn new(ceiling_id: String, ceiling_version: u64, policy: PdpPolicy) -> Self {
+        let managed = ManagedPosture::from_policy(&policy);
         Self { ceiling_id, ceiling_version, policy, managed }
     }
 
+    /// The effective `sec.require_approval` obligation level for this app's schema —
+    /// the SEALED approval obligation (`never`/`on_destructive`/`always`) the engine
+    /// only DECLARES. Resolved at the object the app owns (`app_schema`); the host
+    /// enforces it as the state machine. Replaces the deleted `require_approval`
+    /// overlay bool.
     #[must_use]
-    pub fn requires_operator_approval(&self) -> bool {
-        self.managed.destructive_ops == DestructiveOps::RequireApproval
-    }
-
-    /// Project for an approved apply: `RequireApproval` → `Allow` (the operator has
-    /// approved, so destructive ops proceed).
-    #[must_use]
-    pub fn project_for_approved_apply(&self) -> Self {
-        let mut projected = self.clone();
-        if projected.managed.destructive_ops == DestructiveOps::RequireApproval {
-            projected.managed.destructive_ops = DestructiveOps::Allow;
-        }
-        projected
+    pub fn approval_level(&self, app_schema: &str) -> ApprovalLevel {
+        require_approval_level(&self.policy, &schema_object(app_schema))
     }
 
     /// Project for preflight: anything other than `Forbid` → `Warn` (preflight surfaces
@@ -236,9 +214,9 @@ impl EffectivePolicy {
 }
 
 /// The managed knobs the confined per-app guard is tightened with. Read out of the
-/// composed engine policy so there is a single source of truth (except
-/// `destructive_ops`, which carries the managed-only `RequireApproval` overlay the
-/// engine PDP cannot express — see [`ManagedPosture::from_policy`]).
+/// composed engine policy so there is a single source of truth. Approval is NOT one of
+/// these — it is the separate sealed `sec.require_approval` obligation the host
+/// enforces (see [`EffectivePolicy::approval_level`]), never a `destructive_ops` state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedPosture {
     pub require_rls: bool,
@@ -250,10 +228,9 @@ impl ManagedPosture {
     /// Derive the managed posture from the composed engine policy's decision queries.
     ///
     /// `destructive_ops` maps the engine's `sec.destructive_ops` OrderedEnum
-    /// (`forbid`/`warn`/`allow`) back onto [`DestructiveOps`]. The managed-only
-    /// `RequireApproval` value has NO engine-knob equivalent (the PDP enum omits it),
-    /// so a composed policy can only surface `forbid`/`warn`/`allow`; a ceiling that
-    /// wants approval-gating expresses it as a tier concern, not a composed grant.
+    /// (`forbid`/`warn`/`allow`) back onto [`DestructiveOps`]. Approval is composed
+    /// SEPARATELY as the `sec.require_approval` obligation (see
+    /// [`EffectivePolicy::approval_level`]) — it is not folded into this posture.
     fn from_policy(policy: &PdpPolicy) -> Self {
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
         let destructive_ops = match policy
@@ -387,63 +364,26 @@ pub struct CreatorPolicyDraft<'a> {
     pub body: &'a str,
 }
 
-/// A parsed creator draft: the PDP [`PolicyDoc`] (composed by the engine) plus the
-/// MANAGED-ONLY directives the engine PDP cannot express.
+/// A parsed creator draft: the PDP [`PolicyDoc`] the engine composes. Approval rides
+/// inside it as a normal `sec.require_approval` obligation — there are no managed-only
+/// out-of-band directives.
 #[derive(Debug, Clone)]
 pub struct ParsedDraft {
     /// The grant/inject/require/validate rules, validated against the builtin registry.
     pub doc: PolicyDoc,
-    /// The managed `require_approval` directive: gate EVERY migration for operator
-    /// approval (not just destructive ops). No engine-knob equivalent.
-    pub require_approval: bool,
 }
 
 /// Parse a creator draft TOML body (filename already validated) into a [`ParsedDraft`].
 /// Shared by the ingress (`ManagedPolicyConfig::parse_draft`) and the stored-policy
-/// re-hydration (`AppPolicyRecord::parsed_policy_draft`) so both split the managed
-/// directives + validate the PDP body identically.
+/// re-hydration (`AppPolicyRecord::parsed_policy_draft`). The whole body is a PDP
+/// document — the engine `deny_unknown_fields` loader validates it directly.
 pub fn parse_draft_body(body: &str, filename: &str) -> Result<ParsedDraft, ManagedPolicyError> {
-    let (stripped, require_approval) = split_managed_directives(body, filename)?;
-    let doc = PolicyDoc::parse_toml(&stripped, &builtin_registry(), LoadContext::NonRootLayer)
+    let doc = PolicyDoc::parse_toml(body, &builtin_registry(), LoadContext::NonRootLayer)
         .map_err(|source| ManagedPolicyError::MalformedDraft {
             filename: filename.to_string(),
             message: format!("{source:?}"),
         })?;
-    Ok(ParsedDraft { doc, require_approval })
-}
-
-/// Split a creator draft TOML into (grant-only PDP body, `require_approval`). The
-/// managed server owns a small set of TOP-LEVEL managed directives that the PDP loader
-/// (which is `deny_unknown_fields`) would otherwise reject; we strip them here and
-/// leave the grant/inject/require/validate sections for `PolicyDoc::parse_toml`.
-///
-/// Today the only managed directive is `require_approval = <bool>`.
-fn split_managed_directives(
-    body: &str,
-    filename: &str,
-) -> Result<(String, bool), ManagedPolicyError> {
-    let mut value: toml::Value = toml::from_str(body).map_err(|err| {
-        ManagedPolicyError::MalformedDraft {
-            filename: filename.to_string(),
-            message: format!("parse draft toml: {err}"),
-        }
-    })?;
-    let mut require_approval = false;
-    if let Some(table) = value.as_table_mut() {
-        if let Some(directive) = table.remove("require_approval") {
-            require_approval = directive.as_bool().ok_or_else(|| {
-                ManagedPolicyError::MalformedDraft {
-                    filename: filename.to_string(),
-                    message: "require_approval must be a boolean".to_string(),
-                }
-            })?;
-        }
-    }
-    let stripped = toml::to_string(&value).map_err(|err| ManagedPolicyError::MalformedDraft {
-        filename: filename.to_string(),
-        message: format!("re-serialize draft: {err}"),
-    })?;
-    Ok((stripped, require_approval))
+    Ok(ParsedDraft { doc })
 }
 
 /// A verifier for a [`SealedPolicy`]: the MAC key + the registry digest + ceiling
@@ -535,7 +475,34 @@ mod tests {
         // The default confined ceiling grants destructive `allow` and injects the
         // system shape.
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
-        assert!(!effective.requires_operator_approval());
+        // No `sec.require_approval` obligation on the default confined ceiling.
+        assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
+    }
+
+    #[test]
+    fn require_approval_obligation_is_read_from_the_composed_policy() {
+        let cfg = config();
+        let app_id = Uuid::new_v4();
+        // A creator draft that authors the sealed approval obligation as a normal
+        // `[[require]]` — `always`, scoped to the whole DB.
+        let draft_toml = r#"policy_version = 1
+
+[[require]]
+key = "sec.require_approval"
+value = "always"
+scope = "all"
+"#;
+        let draft = cfg
+            .parse_draft(&CreatorPolicyDraft { filename: MIGRATE_POLICY_FILENAME, body: draft_toml })
+            .expect("approval obligation draft parses");
+        let effective = cfg
+            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .expect("obligation draft composes (composes UP)");
+        assert_eq!(
+            effective.approval_level(&app_id.to_string()),
+            ApprovalLevel::Always,
+            "the composed policy must surface the sealed require_approval obligation"
+        );
     }
 
     #[test]
