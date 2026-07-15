@@ -186,15 +186,12 @@ pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
-pub use model::policy::{SchemaScope, TrustProfile};
-pub use model::profile::{
-    seal_effective_profile, AuthorPrimaryKeyPolicy, DataSecurityConfig, DestructiveOps,
-    IndexCreation, InjectedSystemColumnPolicy, InjectedSystemIndexPolicy, OperationalConfig,
-    PolicyCapabilities, PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile,
-    PrimaryKeyAuthorPolicy, RoleAttribute, RoleCapabilityConfig, SealError, SealVerifier,
-    SealedPosture, SealedProfile, TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy,
-    CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
-};
+pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
+// The policy PDP seal primitives (Phase 2 Step 3 — the `PolicyProfile`-era seal
+// machinery `seal_effective_profile`/`SealedProfile`/`SealVerifier`/`SealedPosture`
+// is deleted; the surviving seal is the `zero-migrate-policy` HMAC over a composed
+// `EffectivePolicy`).
+pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 pub use model::table_shape::{
     effective_policy_from_ceiling_toml, resolve_create_table_policy, TableShapeError,
 };

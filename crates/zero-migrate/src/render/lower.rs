@@ -6115,10 +6115,6 @@ mod tests {
         }
     }
 
-    fn platform_profile() -> crate::model::profile::PolicyProfile {
-        crate::model::profile::PolicyProfile::platform()
-    }
-
     fn platform_guard() -> GuardConfig {
         let cap = crate::model::capability::OperatorCapability::for_test();
         GuardConfig::platform(&cap, vec!["zero_migrate".into(), "public".into()], vec![])
@@ -6451,8 +6447,6 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let _confined = crate::model::profile::PolicyProfile::confined();
-        let _platform = platform_profile();
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
             &crate::model::table_shape::zeroship_confined_ceiling(),
@@ -8310,7 +8304,6 @@ mod tests {
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let _profile = platform_profile();
         let migs = author
             .load_and_lower(
                 bytes,
@@ -8364,7 +8357,6 @@ mod tests {
             {"op":"createTable","name":"widgets","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let _profile = platform_profile();
         // Guard confined to "other" — the rendered `"app".…` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg = GuardConfig::confined("other".to_string());
@@ -8400,7 +8392,6 @@ mod tests {
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
-        let _profile = platform_profile();
         let out = author
             .load_and_lower_guarded(
                 bytes,
@@ -8455,7 +8446,6 @@ mod tests {
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]}"#;
         let guard = platform_guard();
-        let _profile = platform_profile();
         let out = platform_author("platform", &guard)
             .load_and_lower_guarded(
                 bytes,
@@ -8507,7 +8497,6 @@ mod tests {
             ],"primaryKey":null,"constraints":[],"indexes":[]}
         ]}"#;
         let guard = platform_guard();
-        let _profile = platform_profile();
         let out = platform_author("platform", &guard)
             .load_and_lower_guarded(
                 bytes,
@@ -8550,7 +8539,6 @@ mod tests {
                 "name":"platform_registry"},"comment":"Platform route registry"}
         ]}"#;
         let guard = platform_guard();
-        let _profile = platform_profile();
         let mut owners = registry(&[]);
         let first = platform_author("platform", &guard)
             .load_and_lower_guarded(

@@ -2664,17 +2664,32 @@ fn fold_create_column_to_field(
     field
 }
 
+/// The zeroship CONFINED system-column prefix — `(name, data_type, nullable)` — the
+/// shape the confined ceiling's inject rule contributes. `fold` recognises this exact
+/// prefix on a resolved createTable so it can strip the platform-owned system columns
+/// back to the author's declared fields. (Zeroship-specific; the real ceiling moves
+/// to the monorepo in Phase 3, but the fold recovery must still recognise the shape
+/// it produced — kept here as a fixed const so `fold` carries no `PolicyProfile`.)
+const CONFINED_SYSTEM_COLUMNS: &[(&str, &str, bool)] = &[
+    ("id", "text", false),
+    ("created_at", "timestamp with time zone", false),
+    ("updated_at", "timestamp with time zone", false),
+    ("created_by", "text", true),
+    ("updated_by", "text", true),
+    ("version", "integer", false),
+    ("deleted_at", "timestamp with time zone", true),
+];
+
 fn confined_resolved_system_prefix_len(columns: &[IrColumn]) -> usize {
-    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
-    if columns.len() < shape.columns.len() {
+    if columns.len() < CONFINED_SYSTEM_COLUMNS.len() {
         return 0;
     }
     let matches = columns
         .iter()
-        .zip(&shape.columns)
+        .zip(CONFINED_SYSTEM_COLUMNS)
         .all(|(actual, expected)| resolved_system_column_matches(actual, expected));
     if matches {
-        shape.columns.len()
+        CONFINED_SYSTEM_COLUMNS.len()
     } else {
         0
     }
@@ -2682,16 +2697,17 @@ fn confined_resolved_system_prefix_len(columns: &[IrColumn]) -> usize {
 
 fn resolved_system_column_matches(
     actual: &IrColumn,
-    expected: &crate::model::profile::InjectedSystemColumnPolicy,
+    expected: &(&str, &str, bool),
 ) -> bool {
-    if actual.name != expected.name {
+    let (name, data_type, nullable) = *expected;
+    if actual.name != name {
         return false;
     }
     if actual.name == "id" && actual.identity.is_some() {
         return matches!(actual.ty, ColType::Int | ColType::BigInt);
     }
-    actual.ty == system_column_type_token(&expected.data_type)
-        && actual.nullable == Some(expected.nullable)
+    actual.ty == system_column_type_token(data_type)
+        && actual.nullable == Some(nullable)
         && actual.default.is_none()
         && actual.unique.is_none()
         && actual.case_sensitive.is_none()

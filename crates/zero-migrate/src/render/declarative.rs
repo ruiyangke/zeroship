@@ -7265,25 +7265,26 @@ mod snapshot_builder_refactor_safety_tests {
     }
 
     fn system_prefix_fields() -> Vec<FieldDescriptor> {
-        crate::model::profile::PolicyProfile::confined()
-            .system_shape
-            .columns
-            .into_iter()
-            .map(|column| {
-                let ty = match column.data_type.as_str() {
-                    "text" => "string",
-                    "timestamp with time zone" => "date",
-                    "integer" => "int",
-                    other => panic!("unexpected confined system column type {other}"),
-                };
-                FieldDescriptor {
-                    name: column.name,
-                    ty: ty.into(),
-                    required: !column.nullable,
-                    ..Default::default()
-                }
-            })
-            .collect()
+        // The zeroship confined system columns (the shape the confined ceiling's
+        // inject rule contributes) as descriptor fields. `(name, descriptor-type,
+        // required)`; required = NOT NULL.
+        [
+            ("id", "string", true),
+            ("created_at", "date", true),
+            ("updated_at", "date", true),
+            ("created_by", "string", false),
+            ("updated_by", "string", false),
+            ("version", "int", true),
+            ("deleted_at", "date", false),
+        ]
+        .into_iter()
+        .map(|(name, ty, required)| FieldDescriptor {
+            name: name.into(),
+            ty: ty.into(),
+            required,
+            ..Default::default()
+        })
+        .collect()
     }
 
     fn resolved_descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {

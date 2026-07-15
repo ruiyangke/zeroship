@@ -4,10 +4,11 @@
 //! checker [`enforce_ir_ownership`], the checksum helpers, and the table-collection
 //! walkers — live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
 //! below. THIS module keeps [`load_ir_document`]: the full load chain, which
-//! threads a [`SchemaScope`](crate::model::policy::SchemaScope) /
-//! [`PolicyProfile`](crate::model::profile::PolicyProfile) into the POLICY
+//! threads a [`SchemaScope`](crate::model::policy::SchemaScope) into the POLICY
 //! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
-//! and therefore cannot live in the leaf.
+//! and therefore cannot live in the leaf. (Table-shape injection + author-PK
+//! conformance ride on the composed `EffectivePolicy` in
+//! `crate::model::table_shape::resolve_create_table_policy`, not a `PolicyProfile`.)
 
 use std::collections::BTreeMap;
 
@@ -104,10 +105,6 @@ mod tests {
             .collect()
     }
 
-    fn platform_profile() -> crate::model::profile::PolicyProfile {
-        crate::model::profile::PolicyProfile::platform()
-    }
-
     fn create_table(name: &str) -> Op {
         Op::CreateTable {
             name: name.into(),
@@ -160,7 +157,6 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}],"constraints":[{"kind":{"kind":"check","expr":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"ghost"}}}}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let _profile = platform_profile();
         let err = load_ir_document(
             &bytes,
             "app_a",
@@ -331,7 +327,6 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"fresh","columns":[{"name":"first","type":"text"}]},{"op":"addColumn","table":"fresh","column":"x","type":"int"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — not in the project registry
-        let _profile = platform_profile();
         let ir = load_ir_document(
             &bytes,
             "app_a",
@@ -375,7 +370,6 @@ mod tests {
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]);
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
-        let _profile = platform_profile();
         let ir = load_ir_document(
             &bytes,
             "platform",
@@ -393,7 +387,6 @@ mod tests {
             r#"[{"op":"setRls","table":"never_declared","schema":"zero_migrate","enabled":true}]"#;
         let bytes = envelope_json(ops, "");
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
-        let _profile = platform_profile();
         let err = load_ir_document(
             &bytes,
             "platform",
@@ -446,7 +439,6 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let _confined = crate::model::profile::PolicyProfile::confined();
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
             &crate::model::table_shape::zeroship_confined_ceiling(),
@@ -475,7 +467,6 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — declared later in THIS migration
-        let _profile = platform_profile();
         let ir = load_ir_document(
             &bytes,
             "app_a",
@@ -497,7 +488,6 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"users","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"users","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let _profile = platform_profile();
         let err = load_ir_document(
             &bytes,
             "app_intruder",
@@ -536,7 +526,6 @@ mod tests {
             r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let _profile = platform_profile();
         let err = load_ir_document(
             &bytes,
             "app_intruder",

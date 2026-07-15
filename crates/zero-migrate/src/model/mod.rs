@@ -6,7 +6,6 @@ pub mod load;
 // Engine-side dialect-support + vendor-capability computation for the closed `Op`
 // wire type (the logic that could not ride the `Op` type into the leaf crate).
 pub mod op_support;
-pub mod profile;
 pub mod snapshot;
 pub mod support;
 pub mod table_shape;

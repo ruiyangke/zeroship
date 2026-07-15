@@ -47,10 +47,11 @@
 //! structured-error envelope ([`AuthoringError`]), the `Dialect`/`UnsupportedKind`
 //! vocabulary, the `CODE_*` codes, [`TargetScope`], and [`validate_expr`] — now
 //! lives in the [`zero_migrate_ir::validate`] leaf crate. It carries no
-//! [`PolicyProfile`]/[`SchemaScope`](crate::model::policy::SchemaScope) dependency
-//! and no `pg_query`. THIS module keeps the policy-bound layer: the
-//! `SchemaScope`/`PolicyProfile`-threaded op/IR validators, the vendor-capability
-//! gate, the raw-view-body `pg_query` scan, and the primary-key policy check. The
+//! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
+//! THIS module keeps the policy-bound layer: the `SchemaScope`-threaded op/IR
+//! validators, the vendor-capability gate, the raw-view-body `pg_query` scan, and
+//! the pure primary-key validation. (Author-PK CONFORMANCE against the operator's
+//! injected shape is owned by the injection resolver, not this validator.) The
 //! structural surface is re-exported below so callers name it unchanged.
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
