@@ -424,24 +424,37 @@ fn with_policy(mut request: Value, body: &str) -> Value {
     request
 }
 
+// The creator policy draft is now a `zero-migrate-policy` `PolicyDoc` (grant rules
+// against the operator ceiling), not the old `PolicyProfile` TOML. A draft may only
+// TIGHTEN: `sec.destructive_ops` composes forbid ⊑ warn ⊑ allow, and `op.lock_timeout_ms`
+// is a UintCeiling (a draft value ≤ the ceiling's 30000ms).
 fn tighter_policy() -> &'static str {
-    "[operational]\nlock_timeout_ms = 1000\n\n[data_security]\ndestructive_ops = \"forbid\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"op.lock_timeout_ms\"\nvalue = 1000\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
+// The managed `require_approval` posture has no engine-knob equivalent (the PDP
+// `sec.destructive_ops` enum omits it). It is a MANAGED-SERVER directive carried as a
+// top-level `require_approval = true` key in the draft TOML, stripped before the PDP
+// loader and overlaid onto the managed posture: it gates EVERY migration for operator
+// approval (destructive or not) — the exact `PolicyProfile`-era `RequireApproval`
+// behaviour, preserved without an engine knob.
 fn require_approval_policy() -> &'static str {
-    "[data_security]\ndestructive_ops = \"require_approval\"\n"
+    "policy_version = 1\nrequire_approval = true\n"
 }
 
 fn second_tighter_policy() -> &'static str {
-    "[operational]\nlock_timeout_ms = 500\n\n[data_security]\ndestructive_ops = \"forbid\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"op.lock_timeout_ms\"\nvalue = 500\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
+// A draft that grants a capability the confined ceiling does not (`core.raw_sql`):
+// `compose_strict` REJECTS it (escalation), never clamps.
 fn escalating_policy() -> &'static str {
-    "[capabilities]\nraw_sql = true\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"core.raw_sql\"\nvalue = true\nscope = \"all\"\n"
 }
 
+// A malformed draft: `kez` is not a known key (`deny_unknown_fields` → parse error).
 fn malformed_policy() -> &'static str {
-    "[capabilities]\nraw_sq = true\n"
+    "policy_version = 1\n\n[[grant]]\nkez = \"core.raw_sql\"\nvalue = true\nscope = \"all\"\n"
 }
 
 fn policy_for(name: &str, actions: Vec<Action>) -> Policy {
@@ -640,10 +653,10 @@ async fn policy_api_submits_gets_and_lists_versioned_policy_pg() {
     assert_eq!(body["version"], 1);
     assert_eq!(body["ceiling_version"], 1);
     assert_eq!(body["raw_toml"], tighter_policy());
-    assert_eq!(
-        body["effective_profile"]["data_security"]["destructive_ops"],
-        "forbid"
-    );
+    // The stored `effective_profile` is now the managed-posture audit snapshot
+    // (`{require_rls, destructive_ops, extensions}`); `destructive_ops` renders the
+    // `DestructiveOps` Debug name.
+    assert_eq!(body["effective_profile"]["destructive_ops"], "Forbid");
 
     let req = test::TestRequest::get()
         .uri(&format!("/v1/apps/{app_id}/policy"))
@@ -723,7 +736,7 @@ async fn policy_api_rejects_escalating_draft_at_submit_pg() {
         body["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("capabilities.raw_sql"),
+            .contains("core.raw_sql"),
         "escalation should identify the knob, got: {body}"
     );
     assert_eq!(stored_policy_count(&conn, &app_id).await, 0);
@@ -1648,7 +1661,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(
             create_notes_request(),
-            "[capabilities]\nraw_sql = true\n",
+            escalating_policy(),
         ))
         .to_request();
     let resp = test::call_service(&svc, req).await;
@@ -1657,8 +1670,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     assert_eq!(body["error"], "migration_policy_invalid");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("capabilities.raw_sql")
-            && detail.contains("exceeds tier ceiling"),
+        detail.contains("core.raw_sql") && detail.contains("GrantExceedsCeiling"),
         "draft escalation should be rejected explicitly, got: {body}"
     );
 
@@ -1684,7 +1696,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(
             create_notes_request(),
-            "[capabilities]\nraw_sq = true\n",
+            malformed_policy(),
         ))
         .to_request();
     let resp = test::call_service(&svc, req).await;

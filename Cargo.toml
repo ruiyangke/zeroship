@@ -206,6 +206,14 @@ zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
 # workspace). The `zeroship-migrated` service consumes it (via the adapter) instead
 # of the in-tree `zeroship-migrate`.
 zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
+# The engine's Policy Decision Point (the knob/rule/document model + composition
+# algebra) and its IR-side builtin registry. The `zeroship-migrated` managed-policy
+# server composes the monorepo-owned confined/platform ceilings against untrusted
+# creator drafts through these directly (`compose_strict` + `RootCeiling` +
+# `builtin_registry`); the top-level `zero-migrate` facade re-exports only the seal +
+# `resolve_create_table_policy`, not the composition surface.
+zero-migrate-policy = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-policy" }
+zero-migrate-ir = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-ir" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

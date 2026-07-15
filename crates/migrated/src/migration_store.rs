@@ -4,7 +4,8 @@ use compio_postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zero_migrate::PolicyProfile;
+
+use crate::policy::ManagedPosture;
 
 #[derive(Debug, Clone)]
 pub struct MigrationStore {
@@ -41,8 +42,7 @@ impl MigrationStore {
             i64::try_from(input.ceiling_version).map_err(|_| {
                 MigrationStoreError::CeilingVersionOverflow(input.ceiling_version)
             })?;
-        let effective_profile = serde_json::to_value(input.effective_profile)
-            .map_err(|err| MigrationStoreError::EncodeProfile(err.to_string()))?;
+        let effective_profile = input.effective_profile.to_audit_json();
         let gated_versions = serde_json::to_value(input.gated_versions)
             .map_err(|err| MigrationStoreError::EncodeVersions(err.to_string()))?;
         let client = self.connect().await?;
@@ -155,8 +155,7 @@ impl MigrationStore {
             i64::try_from(input.ceiling_version).map_err(|_| {
                 MigrationStoreError::CeilingVersionOverflow(input.ceiling_version)
             })?;
-        let effective_profile = serde_json::to_value(input.effective_profile)
-            .map_err(|err| MigrationStoreError::EncodeProfile(err.to_string()))?;
+        let effective_profile = input.effective_profile.to_audit_json();
         let migration_versions = serde_json::to_value(input.migration_versions)
             .map_err(|err| MigrationStoreError::EncodeVersions(err.to_string()))?;
         let client = self.connect().await?;
@@ -206,7 +205,7 @@ pub struct StoreMigrationInput<'a> {
     pub migration_id: Uuid,
     pub principal_id: Uuid,
     pub request_body: Value,
-    pub effective_profile: &'a PolicyProfile,
+    pub effective_profile: &'a ManagedPosture,
     pub ceiling_id: &'a str,
     pub ceiling_version: u64,
     pub gated_versions: &'a [String],
@@ -220,7 +219,7 @@ pub struct AuditInput<'a> {
     pub migration_versions: &'a [String],
     pub action: AuditAction,
     pub outcome: &'a str,
-    pub effective_profile: &'a PolicyProfile,
+    pub effective_profile: &'a ManagedPosture,
     pub sealed_profile: Option<Value>,
     pub ceiling_id: &'a str,
     pub ceiling_version: u64,
@@ -301,10 +300,6 @@ impl StoredMigration {
         })
     }
 
-    pub fn effective_policy_profile(&self) -> Result<PolicyProfile, MigrationStoreError> {
-        serde_json::from_value(self.effective_profile.clone())
-            .map_err(|err| MigrationStoreError::DecodeProfile(err.to_string()))
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -333,17 +328,21 @@ impl Default for AuditAction {
     }
 }
 
+/// Audit view of a sealed managed policy. Records the seal's public BINDING fields
+/// (dialect, matcher version, ceiling version, registry digest) — the tamper-evidence
+/// identity boundary the seal HMAC binds. (The old `PolicyProfile`-era seal exposed a
+/// posture/issued-at/nonce; the surviving `zero-migrate-policy` seal binds these.)
 pub fn sealed_profile_audit_json(
-    posture: impl std::fmt::Debug,
+    dialect: &str,
+    matcher_version: u32,
     ceiling_version: u64,
-    issued_at: u64,
-    nonce: &[u8],
+    registry_digest: &[u8],
 ) -> Value {
     json!({
-        "posture": format!("{posture:?}"),
+        "dialect": dialect,
+        "matcher_version": matcher_version,
         "ceiling_version": ceiling_version,
-        "issued_at": issued_at,
-        "nonce_hex": hex_bytes(nonce),
+        "registry_digest_hex": hex_bytes(registry_digest),
     })
 }
 
