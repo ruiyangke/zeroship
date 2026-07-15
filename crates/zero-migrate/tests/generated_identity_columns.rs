@@ -2,7 +2,7 @@ use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, validate_ir, BinaryOp, ColType, Expr, GeneratedCol,
     IdentityCol, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError, IrScalar,
-    LiveSchema, MigrationIr, Op, PolicyProfile, SchemaScope, UnsupportedKind, ValidatorDialect,
+    LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind, ValidatorDialect,
     CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION,
 };
 
@@ -51,8 +51,7 @@ fn validate_platform(
         ir,
         dialect,
         &[],
-        Some(&SchemaScope::Unconfined),
-        &PolicyProfile::platform(),
+        Some(&SchemaScope::Unconfined)
     )
 }
 

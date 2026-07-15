@@ -138,7 +138,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("SQLite should lower createTable and skip absent dialectal leg");
     assert_eq!(
         migrations.len(),

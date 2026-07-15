@@ -3230,7 +3230,7 @@ mod tests {
         TableStrictness, CURRENT_IR_VERSION,
     };
     use crate::model::policy::SchemaScope;
-    use crate::model::profile::PolicyProfile;
+    
     use crate::model::table_shape::{resolve_create_table_policy, zeroship_confined_ceiling};
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
@@ -3256,8 +3256,7 @@ mod tests {
             &ir,
             dialect,
             &[],
-            Some(&SchemaScope::Unconfined),
-            &PolicyProfile::platform(),
+            Some(&SchemaScope::Unconfined)
         )
         .unwrap_err()
     }
@@ -3278,8 +3277,7 @@ mod tests {
             &ir,
             dialect,
             &[],
-            Some(&SchemaScope::Unconfined),
-            &PolicyProfile::platform(),
+            Some(&SchemaScope::Unconfined)
         )
         .expect("ops validate");
     }

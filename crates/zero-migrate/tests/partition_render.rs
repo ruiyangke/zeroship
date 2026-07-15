@@ -4,7 +4,7 @@ use zero_migrate::model::ir::{
 };
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
-    MigrationEngine, PolicyProfile, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationEngine, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
 };
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -290,7 +290,7 @@ fn render_partitioned_parent_create_table_pg() {
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     use zero_migrate::apply::backend::sqlite::Mode;
     use zero_migrate::model::validate::{validate_ir_scoped, Dialect};
-    use zero_migrate::PolicyProfile;
+    
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
@@ -298,8 +298,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         &migration_ir,
         Dialect::Sqlite,
         &[],
-        None,
-        &PolicyProfile::platform(),
+        None
     )
     .expect("collapse-affirmed partition recording validates on SQLite");
 
@@ -817,7 +816,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(200),
     ));
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-        let err = validate_ir_scoped(&migration, dialect, &[], None, &PolicyProfile::platform())
+        let err = validate_ir_scoped(&migration, dialect, &[], None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(
             matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),

@@ -460,106 +460,6 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Legacy profile-based conformance (guard/validate consumer — retired in Steps 2-3)
-// ══════════════════════════════════════════════════════════════════════════════
-//
-// The injection FLOW (above) now rides on `EffectivePolicy`. The guard/validate
-// path (`validate_create_table_primary_key_policy`) is still `PolicyProfile`-based
-// and is retired in a later cut. Until then it needs the profile-shaped
-// conformance check; it lives here (crate-private) so the injection rewrite does
-// not disturb the validate flow. DO NOT extend this — it is dead-code-in-waiting.
-
-/// Legacy `PolicyProfile`-shaped conformance check (retired in Steps 2-3). Consumed
-/// only by `validate_create_table_primary_key_policy`.
-pub(crate) fn resolved_create_table_matches_profile(
-    columns: &[IrColumn],
-    primary_key: &Option<Vec<String>>,
-    indexes: &[IrIndex],
-    profile: &crate::model::profile::PolicyProfile,
-) -> Result<bool, TableShapeError> {
-    use crate::model::profile::TablePrimaryKeyPolicy;
-    let shape = &profile.system_shape;
-    if shape.columns.is_empty() {
-        return Ok(false);
-    }
-    if columns.len() < shape.columns.len() || indexes.len() < shape.indexes.len() {
-        return Ok(false);
-    }
-    for (actual, expected) in columns.iter().zip(&shape.columns) {
-        let expected = legacy_system_column_to_ir(expected)?;
-        if expected.name == "id" && is_id_identity_replacement(actual) {
-            continue;
-        }
-        if !system_columns_match(actual, &expected) {
-            return Ok(false);
-        }
-    }
-    match &shape.primary_key {
-        TablePrimaryKeyPolicy::ExplicitColumns(pk) if primary_key.as_ref() != Some(pk) => {
-            return Ok(false);
-        }
-        _ => {}
-    }
-    let start = indexes.len() - shape.indexes.len();
-    for (actual, expected) in indexes[start..].iter().zip(&shape.indexes) {
-        let actual_cols = actual
-            .columns
-            .iter()
-            .map(|c| match c {
-                IndexElement::Column { name, .. } => Some(name.as_str()),
-                IndexElement::Expr { .. } => None,
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(actual_cols) = actual_cols else {
-            return Ok(false);
-        };
-        let expected_cols = expected
-            .columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        if actual_cols != expected_cols
-            || actual.unique.unwrap_or(false)
-            || actual.using.is_some()
-            || actual.r#where.is_some()
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Legacy profile-column → IR mapping (retired with the profile in Steps 2-3).
-fn legacy_system_column_to_ir(
-    column: &crate::model::profile::InjectedSystemColumnPolicy,
-) -> Result<IrColumn, TableShapeError> {
-    let ty = match column.data_type.as_str() {
-        "text" => ColType::Text,
-        "timestamp with time zone" => ColType::Timestamp,
-        "integer" => ColType::Int,
-        other => {
-            return Err(TableShapeError::UnsupportedSystemColumnType {
-                column: column.name.clone(),
-                data_type: other.to_string(),
-            })
-        }
-    };
-    Ok(IrColumn {
-        name: column.name.clone(),
-        ty,
-        nullable: Some(column.nullable),
-        default: None,
-        unique: None,
-        id_prefix: None,
-        case_sensitive: None,
-        vector_metric: None,
-        mask: None,
-        generated: None,
-        identity: None,
-    })
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Test-support: the GENERIC engine test ceiling
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -574,6 +474,11 @@ fn legacy_system_column_to_ir(
 /// constructs no default ceiling of its own.
 #[cfg(any(test, feature = "test-support"))]
 pub const ZEROSHIP_CONFINED_CEILING_TOML: &str = r#"policy_version = 1
+
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
 
 [[grant]]
 key = "core.create_table"

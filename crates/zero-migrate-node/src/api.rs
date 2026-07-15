@@ -71,7 +71,7 @@ pub fn load_verify(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    match load_ir_document(envelope_json, deploying_app, dialect, &registry, None, None) {
+    match load_ir_document(envelope_json, deploying_app, dialect, &registry, None) {
         Ok(ir) => LoadVerifyReply {
             ok: true,
             ir_version: Some(ir.ir_version),

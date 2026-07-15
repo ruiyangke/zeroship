@@ -29,7 +29,6 @@ use std::collections::BTreeMap;
 
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::migration::Migration;
-use zero_migrate::model::profile::PolicyProfile;
 use zero_migrate::model::table_shape::confined_no_inject_policy;
 use zero_migrate::{
     effective_policy_from_ceiling_toml, resolve_create_table_policy, GuardConfig, IrAuthor,
@@ -96,10 +95,8 @@ pub fn lower_envelope_to_migrations(
     // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
     // sees the system fields (they are platform-owned).
     //
-    // NOTE (validate — retired in Cut 3): `load_and_lower_guarded` below still
-    // takes the `PolicyProfile`-shaped confined profile as its validate input.
-    // Injection and guard now share this one composed `EffectivePolicy`.
-    let confined = PolicyProfile::confined();
+    // Injection and guard share this one composed `EffectivePolicy`; the load gate
+    // no longer takes a separate `PolicyProfile` (retired in Cut 3).
     let effective = match policy_ceiling_toml {
         Some(toml) => effective_policy_from_ceiling_toml(toml)?,
         // No ceiling supplied ⇒ inject nothing (author-owned shape). The engine
@@ -133,7 +130,6 @@ pub fn lower_envelope_to_migrations(
             &registry,
             &LiveSchema::default(),
             &guard_cfg,
-            Some(&confined),
         )
         .map(|artifact| artifact.migrations())
         .map_err(|e| e.to_string())

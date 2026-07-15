@@ -1278,7 +1278,6 @@ impl IrAuthor {
         deploying_app: &str,
         registry: &std::collections::BTreeMap<String, String>,
         live: &LiveSchema,
-        policy_profile: Option<&crate::model::profile::PolicyProfile>,
     ) -> Result<Vec<Migration>, LoadAndLowerError> {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
@@ -1296,7 +1295,6 @@ impl IrAuthor {
             target,
             registry,
             Some(&scope),
-            policy_profile,
         )
         .map_err(LoadAndLowerError::Load)?;
         self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
@@ -1328,7 +1326,6 @@ impl IrAuthor {
         registry: &std::collections::BTreeMap<String, String>,
         live: &LiveSchema,
         guard_cfg: &GuardConfig,
-        policy_profile: Option<&crate::model::profile::PolicyProfile>,
     ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
@@ -1347,7 +1344,6 @@ impl IrAuthor {
             target,
             registry,
             scope.as_ref(),
-            policy_profile,
         )
         .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
@@ -6145,7 +6141,6 @@ mod tests {
             dialect,
             &[],
             Some(&crate::model::policy::SchemaScope::Unconfined),
-            &platform_profile(),
         )
     }
 
@@ -6456,8 +6451,8 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let confined = crate::model::profile::PolicyProfile::confined();
-        let platform = platform_profile();
+        let _confined = crate::model::profile::PolicyProfile::confined();
+        let _platform = platform_profile();
         let resolved = crate::model::table_shape::resolve_create_table_policy(
             &raw,
             &crate::model::table_shape::zeroship_confined_ceiling(),
@@ -6470,8 +6465,7 @@ mod tests {
                 &bytes,
                 "app_a",
                 &registry(&[]),
-                &LiveSchema::default(),
-                Some(&confined),
+                &LiveSchema::default()
             )
             .expect("resolved confined IR validates and lowers under confined profile");
         let platform_sql = author
@@ -6479,8 +6473,7 @@ mod tests {
                 &bytes,
                 "app_a",
                 &registry(&[]),
-                &LiveSchema::default(),
-                Some(&platform),
+                &LiveSchema::default()
             )
             .expect("same resolved IR validates and lowers under platform profile");
         assert_eq!(
@@ -8317,14 +8310,13 @@ mod tests {
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let profile = platform_profile();
+        let _profile = platform_profile();
         let migs = author
             .load_and_lower(
                 bytes,
                 "app_a",
                 &registry(&[]),
-                &LiveSchema::default(),
-                Some(&profile),
+                &LiveSchema::default()
             )
             .expect("a fresh createTable by its declarer loads + lowers");
         assert!(
@@ -8348,8 +8340,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("victim", "app_victim")]),
-                &LiveSchema::default(),
-                None,
+                &LiveSchema::default()
             )
             .unwrap_err();
         match err {
@@ -8373,7 +8364,7 @@ mod tests {
             {"op":"createTable","name":"widgets","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let profile = platform_profile();
+        let _profile = platform_profile();
         // Guard confined to "other" — the rendered `"app".…` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg = GuardConfig::confined("other".to_string());
@@ -8383,8 +8374,7 @@ mod tests {
                 "app_a",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard_cfg,
-                Some(&profile),
+                &guard_cfg
             )
             .expect_err(
                 "a fragment outside the confined schema must be denied via the wired entry",
@@ -8410,15 +8400,14 @@ mod tests {
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
-        let profile = platform_profile();
+        let _profile = platform_profile();
         let out = author
             .load_and_lower_guarded(
                 bytes,
                 "app_a",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard_cfg,
-                Some(&profile),
+                &guard_cfg
             )
             .expect("a clean createTable loads + guarded-lowers");
         assert_eq!(
@@ -8466,15 +8455,14 @@ mod tests {
                 "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
         ]}"#;
         let guard = platform_guard();
-        let profile = platform_profile();
+        let _profile = platform_profile();
         let out = platform_author("platform", &guard)
             .load_and_lower_guarded(
                 bytes,
                 "platform",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard,
-                Some(&profile),
+                &guard
             )
             .expect("platform exact createTable attachments validate + guarded-lower");
         assert_eq!(
@@ -8519,15 +8507,14 @@ mod tests {
             ],"primaryKey":null,"constraints":[],"indexes":[]}
         ]}"#;
         let guard = platform_guard();
-        let profile = platform_profile();
+        let _profile = platform_profile();
         let out = platform_author("platform", &guard)
             .load_and_lower_guarded(
                 bytes,
                 "platform",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard,
-                Some(&profile),
+                &guard
             )
             .expect("platform exact createTable lowers");
         let migrations = out.migrations();
@@ -8563,7 +8550,7 @@ mod tests {
                 "name":"platform_registry"},"comment":"Platform route registry"}
         ]}"#;
         let guard = platform_guard();
-        let profile = platform_profile();
+        let _profile = platform_profile();
         let mut owners = registry(&[]);
         let first = platform_author("platform", &guard)
             .load_and_lower_guarded(
@@ -8571,8 +8558,7 @@ mod tests {
                 "platform",
                 &owners,
                 &LiveSchema::default(),
-                &guard,
-                Some(&profile),
+                &guard
             )
             .expect("first file creates the platform table");
         assert_eq!(first.created_tables, vec!["platform_registry".to_string()]);
@@ -8588,8 +8574,7 @@ mod tests {
                 "platform",
                 &owners,
                 &LiveSchema::default(),
-                &guard,
-                Some(&profile),
+                &guard
             )
             .expect("later-file structural attach passes after registry update");
     }
@@ -8784,8 +8769,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("users", "app_owner")]),
-                &LiveSchema::default(),
-                None,
+                &LiveSchema::default()
             )
             .unwrap_err();
         assert!(

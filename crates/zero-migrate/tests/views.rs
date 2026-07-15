@@ -12,7 +12,7 @@ use zero_migrate::model::validate::{
 };
 use zero_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
 use zero_migrate::schema::query::SqlDialect;
-use zero_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
+use zero_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
 
 const SCHEMA: &str = "app";
 
@@ -281,8 +281,7 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
         &ir(grouped_order_totals_view()),
         Dialect::Postgres,
         &[],
-        Some(&trusted),
-        &PolicyProfile::platform(),
+        Some(&trusted)
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
 }
@@ -301,8 +300,7 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
             &[],
-            Some(&trusted),
-            &PolicyProfile::platform(),
+            Some(&trusted)
         )
         .unwrap_err();
         assert_eq!(
@@ -330,8 +328,7 @@ fn structured_select_rejects_aggregate_group_by_item() {
         &ir(op),
         Dialect::Postgres,
         &[],
-        Some(&trusted),
-        &PolicyProfile::platform(),
+        Some(&trusted)
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
@@ -395,8 +392,7 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
         &ir(create_structured_view(None, Some(true))),
         Dialect::Sqlite,
         &[],
-        Some(&trusted),
-        &PolicyProfile::platform(),
+        Some(&trusted)
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -414,8 +410,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
         &ir(create_structured_view(Some(true), Some(true))),
         Dialect::Postgres,
         &[],
-        Some(&trusted),
-        &PolicyProfile::platform(),
+        Some(&trusted)
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -442,8 +437,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         &structured,
         Dialect::Postgres,
         &[],
-        Some(&confined),
-        &PolicyProfile::confined(),
+        Some(&confined)
     )
     .unwrap();
 
@@ -457,8 +451,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         &raw,
         Dialect::Postgres,
         &[],
-        Some(&confined),
-        &PolicyProfile::confined(),
+        Some(&confined)
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
@@ -479,8 +472,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         &raw,
         Dialect::Postgres,
         &[],
-        Some(&operator),
-        &PolicyProfile::platform(),
+        Some(&operator)
     )
     .unwrap();
     IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
@@ -497,8 +489,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
             &ir(raw_view(sql, None)),
             Dialect::Postgres,
             &[],
-            Some(&operator),
-            &PolicyProfile::platform(),
+            Some(&operator)
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -517,8 +508,7 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
         Dialect::Postgres,
         &[],
-        Some(&operator),
-        &PolicyProfile::platform(),
+        Some(&operator)
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);

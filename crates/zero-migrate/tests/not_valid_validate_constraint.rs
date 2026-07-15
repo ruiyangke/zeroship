@@ -18,7 +18,7 @@ use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, IrScalar, Migratio
 use zero_migrate::model::support::Dialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, PolicyProfile, SchemaScope, SqlDialect,
+    IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, SqlDialect,
     CURRENT_IR_VERSION,
 };
 
@@ -50,8 +50,7 @@ fn validates(op: Op, dialect: Dialect) -> bool {
         &ir(op),
         dialect,
         &[],
-        Some(&SchemaScope::Unconfined),
-        &PolicyProfile::platform(),
+        Some(&SchemaScope::Unconfined)
     )
     .is_ok()
 }
