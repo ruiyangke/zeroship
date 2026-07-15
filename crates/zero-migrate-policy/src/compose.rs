@@ -39,6 +39,7 @@
 //!   draft lands via `compose_strict`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::knob::{KnobDef, KnobKey, KnobKind, KnobValue};
 use crate::registry::PolicyRegistry;
@@ -340,6 +341,45 @@ impl EffectivePolicy {
                 Err(_) => GrantRegion::Ungranted,
             },
             None => GrantRegion::Ungranted,
+        }
+    }
+
+    /// Return the literal schema names included by non-default grant rules for
+    /// `key`, when that granted region is representable as a finite set of
+    /// schema-only literal includes with no excludes.
+    ///
+    /// This is intentionally narrow policy introspection for engine plumbing
+    /// that still needs a schema pin/search path during the policy redesign. It
+    /// returns `None` for an unknown key, an ungranted key, a top grant, globbed
+    /// schemas, table-granular scopes, or excludes.
+    #[must_use]
+    pub fn grant_literal_schema_includes(&self, key: &KnobKey) -> Option<Vec<String>> {
+        let km = self.grants.keys.get(key)?;
+        let mut out = BTreeSet::new();
+        for r in &km.rules {
+            if leq_value(&km.kind, &r.value, &km.default).ok()? {
+                continue;
+            }
+            match &r.scope {
+                Scope::Nothing => {}
+                Scope::All => return None,
+                Scope::Of { include, exclude } => {
+                    if !exclude.is_empty() {
+                        return None;
+                    }
+                    for pattern in include {
+                        if !pattern.table.is_star() || !pattern.schema.is_literal() {
+                            return None;
+                        }
+                        out.insert(pattern.schema.render());
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out.into_iter().collect())
         }
     }
 

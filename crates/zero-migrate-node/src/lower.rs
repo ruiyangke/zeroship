@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::model::profile::PolicyProfile;
+use zero_migrate::model::table_shape::confined_no_inject_policy;
 use zero_migrate::{
     effective_policy_from_ceiling_toml, resolve_create_table_policy, GuardConfig, IrAuthor,
     LiveSchema, SqlDialect,
@@ -95,16 +96,16 @@ pub fn lower_envelope_to_migrations(
     // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
     // sees the system fields (they are platform-owned).
     //
-    // NOTE (guard/validate — retired in a later cut): `load_and_lower_guarded` below
-    // still takes the `PolicyProfile`-shaped confined profile as its validate input.
-    // Only the INJECTION flow moves to the `EffectivePolicy` here; the guard/validate
-    // path is untouched until Steps 2-3.
+    // NOTE (validate — retired in Cut 3): `load_and_lower_guarded` below still
+    // takes the `PolicyProfile`-shaped confined profile as its validate input.
+    // Injection and guard now share this one composed `EffectivePolicy`.
     let confined = PolicyProfile::confined();
     let effective = match policy_ceiling_toml {
         Some(toml) => effective_policy_from_ceiling_toml(toml)?,
         // No ceiling supplied ⇒ inject nothing (author-owned shape). The engine
-        // constructs no default ceiling of its own.
-        None => effective_policy_from_ceiling_toml("policy_version = 1\n")?,
+        // constructs no default inject ceiling of its own, but still supplies the
+        // scoped confined namespace grants the guard requires.
+        None => confined_no_inject_policy(project_schema)?,
     };
     let raw_ir: MigrationIr = serde_json::from_str(envelope_json)
         .map_err(|e| format!("envelope is not a MigrationIr document: {e}"))?;
@@ -124,11 +125,7 @@ pub fn lower_envelope_to_migrations(
     // instead of the shared anchor — which diverges from the reference journal
     // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
     // checksum column is byte-identical to the reference path's.
-    let guard_cfg = match dialect {
-        SqlDialect::Postgres => GuardConfig::confined(project_schema.to_string()),
-        SqlDialect::Sqlite => GuardConfig::confined_sqlite(project_schema.to_string()),
-        SqlDialect::Mysql => GuardConfig::confined_mysql(project_schema.to_string()),
-    };
+    let guard_cfg = GuardConfig::from_policy(effective, dialect);
     author
         .load_and_lower_guarded(
             &resolved_bytes,

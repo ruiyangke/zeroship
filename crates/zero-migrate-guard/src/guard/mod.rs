@@ -194,7 +194,7 @@ impl GuardConfig {
     /// capability gate — that reads `effective`. (Step 3 collapses the redundancy
     /// when `PolicyProfile` is deleted.)
     #[must_use]
-    fn from_policy(
+    fn from_parts(
         effective: EffectivePolicy,
         dialect: SqlDialect,
         trust: TrustProfile,
@@ -218,6 +218,36 @@ impl GuardConfig {
         }
     }
 
+    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect.
+    ///
+    /// The effective policy is now the single PDP source for injection and guard
+    /// decisions. Transitional posture-shaped accessors derive their values from
+    /// the policy's builtin grants while older callers are retired.
+    #[must_use]
+    pub fn from_policy(effective: EffectivePolicy, dialect: SqlDialect) -> Self {
+        let schemas = schema_scope_from_effective(&effective);
+        let capabilities = capabilities_from_effective(&effective);
+        let extension_allowlist = extension_allowlist_from_effective(&effective);
+        let require_rls = require_rls_from_effective(&effective);
+        let destructive_ops = destructive_ops_from_effective(&effective);
+        let trust = match &schemas {
+            SchemaScope::Unconfined => TrustProfile::Trusted,
+            SchemaScope::Allowlist(_) => TrustProfile::Platform,
+            SchemaScope::Single(_) => TrustProfile::Confined,
+        };
+        Self::from_parts(
+            effective,
+            dialect,
+            trust,
+            capabilities,
+            false,
+            schemas,
+            extension_allowlist,
+            require_rls,
+            destructive_ops,
+        )
+    }
+
     /// Construct a **Confined** guard whose PDP is a caller-composed
     /// [`EffectivePolicy`] (Phase 2 Step 2b). Unlike [`GuardConfig::confined`] — whose
     /// effective policy is derived from the fixed confined [`VendorCapabilities`] and
@@ -238,7 +268,7 @@ impl GuardConfig {
         project_schema: impl Into<String>,
         effective: EffectivePolicy,
     ) -> Self {
-        Self::from_policy(
+        Self::from_parts(
             effective,
             SqlDialect::Postgres,
             TrustProfile::Confined,
@@ -258,7 +288,7 @@ impl GuardConfig {
     pub fn confined(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
         let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_policy(
+        Self::from_parts(
             effective_policy_from_caps(&capabilities, &[], &schemas),
             // Default to the PG line-1 guard — byte-identical to before PHASE 4.
             SqlDialect::Postgres,
@@ -284,7 +314,7 @@ impl GuardConfig {
     pub fn confined_sqlite(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
         let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_policy(
+        Self::from_parts(
             effective_policy_from_caps(&capabilities, &[], &schemas),
             SqlDialect::Sqlite,
             TrustProfile::Confined,
@@ -305,7 +335,7 @@ impl GuardConfig {
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
         let capabilities = VendorCapabilities::confined();
         let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_policy(
+        Self::from_parts(
             effective_policy_from_caps(&capabilities, &[], &schemas),
             SqlDialect::Mysql,
             TrustProfile::Confined,
@@ -416,7 +446,7 @@ impl GuardConfig {
         let mut capabilities = VendorCapabilities::operator();
         capabilities.schemas = schemas.clone();
         let schema_scope = SchemaScope::Allowlist(schemas);
-        Self::from_policy(
+        Self::from_parts(
             effective_policy_from_caps(&capabilities, &extension_allowlist, &schema_scope),
             // Platform is a PG-only posture (it fail-closes to Confined on SQLite
             // via `for_dialect`); the config itself is always PG.
@@ -449,7 +479,7 @@ impl GuardConfig {
         // grant, but Trusted skips the whole belt (no statement-kind gate), so the
         // grant is never consulted; kept uniform.
         let schema_scope = SchemaScope::Allowlist(Vec::new());
-        Self::from_policy(
+        Self::from_parts(
             effective_policy_from_caps(&capabilities, &[], &schema_scope),
             SqlDialect::Postgres,
             TrustProfile::Trusted,
@@ -491,6 +521,19 @@ impl GuardConfig {
     #[must_use]
     pub const fn skips_denylist_belt(&self) -> bool {
         self.skip_denylist_belt
+    }
+
+    /// Hidden seam for the legacy Trusted executor path while the policy redesign
+    /// removes posture constructors. Production creator paths do not expose a
+    /// caller to this method; it is used only by the engine's test-only Trusted
+    /// executor constructor.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_skip_denylist_belt_for_test(mut self) -> Self {
+        self.skip_denylist_belt = true;
+        self.trust = TrustProfile::Trusted;
+        self.schemas = SchemaScope::Unconfined;
+        self
     }
 
     /// The schema-confinement scope this guard config enforces, for the
@@ -676,6 +719,110 @@ impl Default for GuardConfig {
 /// (the value is irrelevant for a ⊤-scope / default grant).
 fn global_witness() -> ObjectName {
     ObjectName::schema(b"zsg".to_vec())
+}
+
+fn grant_bool_from_effective(effective: &EffectivePolicy, key: &str, object: &ObjectName) -> bool {
+    let Some(k) = KnobKey::parse(key).ok() else {
+        return false;
+    };
+    matches!(effective.grants(&k, object), Some(KnobValue::Bool(true)))
+}
+
+fn grant_str_set_from_effective(effective: &EffectivePolicy, key: &str) -> Vec<String> {
+    let Some(k) = KnobKey::parse(key).ok() else {
+        return Vec::new();
+    };
+    match effective.grants(&k, &global_witness()) {
+        Some(KnobValue::StrSet(names)) => names,
+        _ => Vec::new(),
+    }
+}
+
+fn schema_scope_from_effective(effective: &EffectivePolicy) -> SchemaScope {
+    let grants_cross_schema =
+        grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &global_witness());
+    for key in [
+        policy_registry::KEY_CORE_CREATE_TABLE,
+        policy_registry::KEY_CORE_RENAME_INTO,
+    ] {
+        let Some(k) = KnobKey::parse(key).ok() else {
+            continue;
+        };
+        if let Some(schemas) = effective.grant_literal_schema_includes(&k) {
+            if grants_cross_schema {
+                return SchemaScope::Allowlist(schemas);
+            }
+            return match schemas.as_slice() {
+                [schema] => SchemaScope::Single(schema.clone()),
+                _ => SchemaScope::Allowlist(schemas),
+            };
+        }
+    }
+    if grants_cross_schema {
+        SchemaScope::Unconfined
+    } else {
+        SchemaScope::Single(String::new())
+    }
+}
+
+fn capabilities_from_effective(effective: &EffectivePolicy) -> VendorCapabilities {
+    let witness = global_witness();
+    let mut caps = VendorCapabilities::confined();
+    caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_PG_ROLE, &witness);
+    caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_PG_GRANT, &witness);
+    caps.allow_extension =
+        grant_bool_from_effective(effective, policy_registry::KEY_PG_EXTENSION, &witness);
+    caps.allow_schema =
+        grant_bool_from_effective(effective, policy_registry::KEY_PG_SCHEMA, &witness)
+            || grant_bool_from_effective(effective, policy_registry::KEY_CORE_CREATE_SCHEMA, &witness);
+    caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_PG_POLICY, &witness);
+    caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_PG_RLS, &witness);
+    caps.allow_partition =
+        grant_bool_from_effective(effective, policy_registry::KEY_PG_PARTITION, &witness);
+    caps.allow_function =
+        grant_bool_from_effective(effective, policy_registry::KEY_PG_FUNCTION, &witness);
+    caps.allow_raw_sql =
+        grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_SQL, &witness);
+    caps.allow_raw_view_body =
+        grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_VIEW_BODY, &witness);
+    caps.allow_materialized_view =
+        grant_bool_from_effective(effective, policy_registry::KEY_PG_MATERIALIZED_VIEW, &witness);
+    caps.allow_cross_schema =
+        grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &witness);
+    caps.schemas = match schema_scope_from_effective(effective) {
+        SchemaScope::Allowlist(list) => list,
+        SchemaScope::Single(schema) if !schema.is_empty() => vec![schema],
+        SchemaScope::Single(_) | SchemaScope::Unconfined => Vec::new(),
+    };
+    caps
+}
+
+fn extension_allowlist_from_effective(effective: &EffectivePolicy) -> Vec<String> {
+    grant_str_set_from_effective(effective, policy_registry::KEY_PG_EXTENSIONS)
+}
+
+fn require_rls_from_effective(effective: &EffectivePolicy) -> bool {
+    let Some(want) = KnobKey::parse(policy_registry::KEY_SEC_REQUIRE_RLS).ok() else {
+        return false;
+    };
+    effective
+        .obligations(&global_witness())
+        .iter()
+        .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
+}
+
+fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps {
+    let Some(k) = KnobKey::parse(policy_registry::KEY_SEC_DESTRUCTIVE_OPS).ok() else {
+        return DestructiveOps::Forbid;
+    };
+    match effective.grants(&k, &global_witness()) {
+        Some(KnobValue::Str(s)) => match s.as_str() {
+            "allow" => DestructiveOps::Allow,
+            "warn" => DestructiveOps::Warn,
+            _ => DestructiveOps::Forbid,
+        },
+        _ => DestructiveOps::Forbid,
+    }
 }
 
 /// Build the [`EffectivePolicy`] the guard's capability gate queries, from a
@@ -2387,7 +2534,7 @@ pub fn check_raw_view_body_text(
         .cloned()
         .unwrap_or_else(|| SchemaScope::Allowlist(Vec::new()));
     let capabilities = VendorCapabilities::confined();
-    let guard = SqlGuard::new(GuardConfig::from_policy(
+    let guard = SqlGuard::new(GuardConfig::from_parts(
         effective_policy_from_caps(&capabilities, &[], &schemas),
         SqlDialect::Postgres,
         TrustProfile::Confined,

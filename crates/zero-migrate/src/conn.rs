@@ -159,33 +159,16 @@ pub struct ExecutorConfig {
     /// inert [`PgConfinement::new`] default and never consults this — its
     /// confinement is the runtime authorizer mode-flip.
     pub pg: PgConfinement,
-    /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
-    /// derives from. `Confined` for the creator path (set by
-    /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
-    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] when the standalone CLI
-    /// feature is enabled (both require an
-    /// [`OperatorCapability`] token). Not `pub`, so the control plane — outside
-    /// this crate — can neither name `Platform`/`Trusted` (the enum is
-    /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
-    /// executor into a privileged profile.
-    pub(crate) trust: crate::model::policy::TrustProfile,
-    /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
-    /// references to (e.g. `zero_migrate` / `public`). Empty for
-    /// Confined (the `project_schema` is the sole permitted schema there) and for
-    /// Trusted (no cross-schema confinement at all).
-    pub(crate) platform_schemas: Vec<String>,
-    /// PRIVATE (`pub(crate)`). The `CREATE EXTENSION` allowlist a Platform guard
-    /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
-    pub(crate) platform_exts: Vec<String>,
-    /// PRIVATE (`pub(crate)`). The OPERATOR capability token, present ONLY on a
-    /// config built via [`ExecutorConfig::platform`] or, in standalone CLI/test
-    /// builds, [`ExecutorConfig::trusted`].
-    /// It rides here so the executor-path guard builds
-    /// ([`ExecutorConfig::guard_config`]) can mint the privileged
-    /// [`GuardConfig`](crate::guard::GuardConfig) without a fresh out-of-band mint
-    /// — the holder already proved operator legitimacy when it constructed this
-    /// config. `None` for every Confined config.
-    pub(crate) operator_cap: Option<crate::model::capability::OperatorCapability>,
+    /// PRIVATE (`pub(crate)`). The composed policy every executor-path guard uses.
+    /// Confined configs carry a no-inject policy with project-scoped
+    /// create/rename grants; platform configs carry a caller-composed operator
+    /// policy. The guard is built from this single policy source.
+    pub(crate) effective: zero_migrate_policy::EffectivePolicy,
+    /// PRIVATE (`pub(crate)`). The legacy Trusted/test belt skip is not a policy
+    /// grant; it remains an explicit executor bit until the Trusted test seam is
+    /// retired.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(crate) skip_denylist_belt: bool,
 }
 
 impl ExecutorConfig {
@@ -199,16 +182,13 @@ impl ExecutorConfig {
         let meta_schema = format!("{project_schema}_migrations");
         Self {
             project_id: project_id.into(),
+            effective: crate::model::table_shape::confined_no_inject_policy(&project_schema)
+                .expect("confined no-inject policy composes"),
             project_schema,
             // The PG-specific confinement block (meta schema, timeouts, role,
             // extension-resolution schemas). Inert for a SQLite-backed config.
             pg: PgConfinement::new(meta_schema),
-            // Confined by default — the creator path. `Platform` is reachable
-            // ONLY via `ExecutorConfig::platform` (token-gated).
-            trust: crate::model::policy::TrustProfile::Confined,
-            platform_schemas: Vec::new(),
-            platform_exts: Vec::new(),
-            operator_cap: None,
+            skip_denylist_belt: false,
         }
     }
 
@@ -228,22 +208,13 @@ impl ExecutorConfig {
     /// `pub(crate)` ctors, which always stamp one) FAILS CLOSED to Confined.
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
-        match (self.trust, self.operator_cap.as_ref()) {
-            (crate::model::policy::TrustProfile::Platform, Some(cap)) => {
-                crate::guard::GuardConfig::platform(
-                    cap,
-                    self.platform_schemas.clone(),
-                    self.platform_exts.clone(),
-                )
-            }
-            #[cfg(test)]
-            (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
-                crate::guard::GuardConfig::trusted(cap)
-            }
-            // Confined, or a (never-constructed) privileged-without-token: fail
-            // closed to Confined.
-            _ => crate::guard::GuardConfig::confined(self.project_schema.clone()),
+        let cfg =
+            crate::guard::GuardConfig::from_policy(self.effective.clone(), crate::SqlDialect::Postgres);
+        #[cfg(any(test, feature = "test-support"))]
+        if self.skip_denylist_belt {
+            return cfg.with_skip_denylist_belt_for_test();
         }
+        cfg
     }
 
     /// Build a **Platform** executor config. REQUIRES a
@@ -275,17 +246,15 @@ impl ExecutorConfig {
     /// APPLY could not; both halves now share one token-gated public posture.
     #[must_use]
     pub fn platform(
-        cap: &crate::model::capability::OperatorCapability,
+        _cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
         schemas: Vec<String>,
         extensions: Vec<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        cfg.trust = crate::model::policy::TrustProfile::Platform;
-        cfg.platform_schemas = schemas;
-        cfg.platform_exts = extensions;
-        cfg.operator_cap = Some(cap.clone());
+        cfg.effective = crate::model::table_shape::operator_no_inject_policy(&schemas, &extensions)
+            .expect("operator no-inject policy composes");
         cfg
     }
 
@@ -317,15 +286,14 @@ impl ExecutorConfig {
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn trusted(
-        cap: &crate::model::capability::OperatorCapability,
+        _cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        cfg.trust = crate::model::policy::TrustProfile::Trusted;
-        // No schema allowlist, no extension allowlist — Trusted has no
-        // confinement and no deny-list; these stay inert/empty.
-        cfg.operator_cap = Some(cap.clone());
+        cfg.effective = crate::model::table_shape::operator_no_inject_policy(&[], &[])
+            .expect("trusted no-inject policy composes");
+        cfg.skip_denylist_belt = true;
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
         // connecting role, exactly like Platform's admin (no `SET ROLE`).
         cfg
@@ -375,31 +343,32 @@ impl ExecutorConfig {
     /// well-formed `ExecutorConfig`).
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
         let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
-        match self.trust {
-            crate::model::policy::TrustProfile::Platform if !self.platform_schemas.is_empty() => {
-                self.platform_schemas
+        if policy_grants_bool(&self.effective, zero_migrate_ir::policy_registry::KEY_PG_ROLE) {
+            if let Some(schemas) = policy_literal_schema_includes(
+                &self.effective,
+                zero_migrate_ir::policy_registry::KEY_CORE_CREATE_TABLE,
+            ) {
+                if !schemas.is_empty() {
+                    return schemas
                     .iter()
                     .map(|s| quote(s))
                     .collect::<Result<Vec<_>, _>>()
-                    .map(|parts| parts.join(", "))
-            }
-            // Confined / Trusted: the project schema is first (the sole writable
-            // resolution target — `CREATE TABLE foo` lands here, not in an
-            // extension schema), followed by the extension schema(s) so an
-            // UNQUALIFIED extension type (`vector(N)`, `geography(...)`) resolves.
-            // The extension schemas carry USAGE only (provisioned in
-            // `role::provision_migrator`), so this is resolution, not write reach.
-            _ => {
-                let mut parts = vec![quote(&self.project_schema)?];
-                for ext in &self.pg.extension_schemas {
-                    // Avoid duplicating the project schema if it (oddly) appears.
-                    if ext != &self.project_schema {
-                        parts.push(quote(ext)?);
-                    }
+                    .map(|parts| parts.join(", "));
                 }
-                Ok(parts.join(", "))
             }
         }
+        // Confined / Trusted: the project schema is first (the sole writable
+        // resolution target — `CREATE TABLE foo` lands here, not in an extension
+        // schema), followed by the extension schema(s) so an UNQUALIFIED extension
+        // type (`vector(N)`, `geography(...)`) resolves.
+        let mut parts = vec![quote(&self.project_schema)?];
+        for ext in &self.pg.extension_schemas {
+            // Avoid duplicating the project schema if it (oddly) appears.
+            if ext != &self.project_schema {
+                parts.push(quote(ext)?);
+            }
+        }
+        Ok(parts.join(", "))
     }
 
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).
@@ -413,4 +382,22 @@ impl ExecutorConfig {
     pub fn lock_timeout_ms(&self) -> u64 {
         u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
+}
+
+fn policy_grants_bool(effective: &zero_migrate_policy::EffectivePolicy, key: &str) -> bool {
+    let Some(key) = zero_migrate_policy::KnobKey::parse(key).ok() else {
+        return false;
+    };
+    matches!(
+        effective.grants(&key, &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())),
+        Some(zero_migrate_policy::KnobValue::Bool(true))
+    )
+}
+
+fn policy_literal_schema_includes(
+    effective: &zero_migrate_policy::EffectivePolicy,
+    key: &str,
+) -> Option<Vec<String>> {
+    let key = zero_migrate_policy::KnobKey::parse(key).ok()?;
+    effective.grant_literal_schema_includes(&key)
 }

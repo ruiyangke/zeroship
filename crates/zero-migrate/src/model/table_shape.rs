@@ -23,6 +23,7 @@ use zero_migrate_policy::{AuthorPkPolicy, EffectivePolicy, InjectColumn, InjectI
 
 use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op};
+use zero_migrate_ir::policy_registry;
 
 /// Error raised while applying the effective policy's table injection.
 #[derive(Debug, thiserror::Error)]
@@ -574,6 +575,21 @@ fn legacy_system_column_to_ir(
 #[cfg(any(test, feature = "test-support"))]
 pub const ZEROSHIP_CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
+[[grant]]
+key = "core.create_table"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "core.rename_into"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "sec.destructive_ops"
+value = "allow"
+scope = "all"
+
 [[inject]]
 scope = "all"
 mandatory = true
@@ -596,9 +612,11 @@ indexes = [
 "#;
 
 /// Build an [`EffectivePolicy`] from a `RootCeiling` document (TOML). The ceiling
-/// composes against an EMPTY draft — every ceiling inject/require/grant survives
-/// union-up and the draft escalates nothing. Inject rules reference no registry
-/// knobs, so an empty registry suffices for a pure inject/validate ceiling.
+/// is parsed against the engine's builtin registry, then composes against a
+/// grant-only draft extracted from the same ceiling. Inject/require/validate
+/// rules survive from the root ceiling; grants become effective through the draft
+/// side of `compose_strict` after proving they do not exceed the root ceiling.
+/// Inject-only ceilings still compose because the extracted draft is empty.
 ///
 /// This is the engine-side constructor the production authoring verb
 /// (`lower_envelope_to_migrations`) and the test ceiling both go through — the
@@ -608,17 +626,40 @@ indexes = [
 /// A human-readable message on: a malformed ceiling document, a malformed empty
 /// draft (unreachable), or a composition failure.
 pub fn effective_policy_from_ceiling_toml(ceiling_toml: &str) -> Result<EffectivePolicy, String> {
-    let registry = zero_migrate_policy::PolicyRegistry::empty();
+    let registry = policy_registry::builtin_registry();
     let ceiling = zero_migrate_policy::RootCeiling::parse_toml(ceiling_toml, &registry)
         .map_err(|e| format!("policy ceiling failed to load: {e:?}"))?;
+    let draft_toml = grant_only_draft_toml(ceiling_toml)?;
     let draft = zero_migrate_policy::PolicyDoc::parse_toml(
-        "policy_version = 1\n",
+        &draft_toml,
         &registry,
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
     zero_migrate_policy::compose_strict(&ceiling, &draft, &registry)
         .map_err(|e| format!("policy composition failed: {e:?}"))
+}
+
+fn grant_only_draft_toml(ceiling_toml: &str) -> Result<String, String> {
+    let parsed: toml::Value = toml::from_str(ceiling_toml)
+        .map_err(|e| format!("policy ceiling failed to parse as TOML: {e}"))?;
+    let Some(table) = parsed.as_table() else {
+        return Err("policy ceiling root must be a TOML table".to_string());
+    };
+
+    let mut draft = toml::map::Map::new();
+    let Some(version) = table.get("policy_version").cloned() else {
+        return Err("policy ceiling is missing policy_version".to_string());
+    };
+    draft.insert("policy_version".to_string(), version);
+    if let Some(default_scope) = table.get("default_scope").cloned() {
+        draft.insert("default_scope".to_string(), default_scope);
+    }
+    if let Some(grants) = table.get("grant").cloned() {
+        draft.insert("grant".to_string(), grants);
+    }
+    toml::to_string(&toml::Value::Table(draft))
+        .map_err(|e| format!("grant-only policy draft failed to serialize: {e}"))
 }
 
 /// The GENERIC engine test ceiling as a composed [`EffectivePolicy`]: the shared
@@ -640,7 +681,128 @@ pub fn zeroship_confined_ceiling() -> EffectivePolicy {
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn zeroship_no_inject_ceiling() -> EffectivePolicy {
-    EffectivePolicy::deny_all(&zero_migrate_policy::PolicyRegistry::empty())
+    confined_no_inject_policy("app").expect("embedded no-inject confined policy composes")
+}
+
+/// A no-inject confined policy for the named project schema. This is the
+/// author-owned path: table-shape resolution is a no-op, while the guard still
+/// receives the scoped namespace grants it needs for create/rename attribution.
+pub fn confined_no_inject_policy(project_schema: &str) -> Result<EffectivePolicy, String> {
+    let schemas = vec![project_schema.to_string()];
+    let scope = schema_scope_value(&schemas);
+    let grant_rules = vec![
+        grant_rule(
+            policy_registry::KEY_CORE_CREATE_TABLE,
+            toml::Value::Boolean(true),
+            scope.clone(),
+        ),
+        grant_rule(
+            policy_registry::KEY_CORE_RENAME_INTO,
+            toml::Value::Boolean(true),
+            scope,
+        ),
+        grant_rule(
+            policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+            toml::Value::String("allow".to_string()),
+            toml::Value::String("all".to_string()),
+        ),
+    ];
+
+    effective_policy_from_grant_rules(grant_rules)
+}
+
+/// A no-inject operator policy for platform-owned flows. It grants the builtin
+/// vendor capability set, scoped creation/rename grants for `schemas` (or `all`
+/// when the list is empty), and the extension name allowlist.
+pub fn operator_no_inject_policy(
+    schemas: &[String],
+    extensions: &[String],
+) -> Result<EffectivePolicy, String> {
+    let mut grant_rules = Vec::new();
+    let all = toml::Value::String("all".to_string());
+    for key in [
+        policy_registry::KEY_PG_ROLE,
+        policy_registry::KEY_PG_GRANT,
+        policy_registry::KEY_PG_EXTENSION,
+        policy_registry::KEY_PG_SCHEMA,
+        policy_registry::KEY_CORE_CREATE_SCHEMA,
+        policy_registry::KEY_PG_POLICY,
+        policy_registry::KEY_PG_RLS,
+        policy_registry::KEY_PG_PARTITION,
+        policy_registry::KEY_PG_FUNCTION,
+        policy_registry::KEY_CORE_RAW_SQL,
+        policy_registry::KEY_CORE_RAW_VIEW_BODY,
+        policy_registry::KEY_PG_MATERIALIZED_VIEW,
+        policy_registry::KEY_CORE_CROSS_SCHEMA,
+    ] {
+        grant_rules.push(grant_rule(key, toml::Value::Boolean(true), all.clone()));
+    }
+    let creation_scope = schema_scope_value(schemas);
+    for key in [
+        policy_registry::KEY_CORE_CREATE_TABLE,
+        policy_registry::KEY_CORE_RENAME_INTO,
+    ] {
+        grant_rules.push(grant_rule(key, toml::Value::Boolean(true), creation_scope.clone()));
+    }
+    if !extensions.is_empty() {
+        grant_rules.push(grant_rule(
+            policy_registry::KEY_PG_EXTENSIONS,
+            toml::Value::Array(
+                extensions
+                    .iter()
+                    .map(|s| toml::Value::String(s.clone()))
+                    .collect(),
+            ),
+            all.clone(),
+        ));
+    }
+    grant_rules.push(grant_rule(
+        policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+        toml::Value::String("allow".to_string()),
+        all,
+    ));
+
+    effective_policy_from_grant_rules(grant_rules)
+}
+
+fn schema_scope_value(schemas: &[String]) -> toml::Value {
+    if schemas.is_empty() {
+        toml::Value::String("all".to_string())
+    } else {
+        let mut scope = toml::map::Map::new();
+        scope.insert(
+            "include".to_string(),
+            toml::Value::Array(
+                schemas
+                    .iter()
+                    .map(|s| toml::Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+        toml::Value::Table(scope)
+    }
+}
+
+fn grant_rule(key: &str, value: toml::Value, scope: toml::Value) -> toml::Value {
+    let mut grant = toml::map::Map::new();
+    grant.insert("key".to_string(), toml::Value::String(key.to_string()));
+    grant.insert("value".to_string(), value);
+    grant.insert("scope".to_string(), scope);
+    toml::Value::Table(grant)
+}
+
+fn effective_policy_from_grant_rules(
+    grant_rules: Vec<toml::Value>,
+) -> Result<EffectivePolicy, String> {
+    let mut doc = toml::map::Map::new();
+    doc.insert(
+        "policy_version".to_string(),
+        toml::Value::Integer(i64::from(zero_migrate_policy::SUPPORTED_POLICY_VERSION)),
+    );
+    doc.insert("grant".to_string(), toml::Value::Array(grant_rules));
+    let toml = toml::to_string(&toml::Value::Table(doc))
+        .map_err(|e| format!("no-inject confined policy failed to serialize: {e}"))?;
+    effective_policy_from_ceiling_toml(&toml)
 }
 
 #[cfg(test)]
