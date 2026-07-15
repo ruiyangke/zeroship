@@ -36,7 +36,6 @@
     "@types/node": "catalog:",
     "@zeroship/rpc": "workspace:*",
     "acorn": "^8.16.0",
-    "esbuild": "^0.28.0",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:"
@@ -48,9 +47,13 @@
   "dependencies": {
     "@rollup/plugin-inject": "^5.0.5",
     "@zeroship/bootstrap": "workspace:*",
+    "@zeroship/db": "workspace:*",
+    "esbuild": "^0.28.0",
     "magic-string": "^0.30.21",
     "mime": "^3.0.0",
     "tar": "^7.5.13",
-    "unenv": "2.0.0-rc.24"
+    "unenv": "2.0.0-rc.24",
+    "zero-migrate": "file:/home/ruiyang/Projects/zero-migrate/sdks/migrate",
+    "zero-migrate-node": "file:/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-node"
   }
 }

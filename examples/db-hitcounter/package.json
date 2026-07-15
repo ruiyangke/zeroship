@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Minimal migration-first env.db hit counter used by the deployed DB end-to-end test.",
   "scripts": {
-    "gen-types": "zeroship-migrate-js gen-types --dir migrations --out generated/zeroship",
+    "gen-types": "vite build --mode development",
     "build": "vite build",
     "typecheck": "tsc --noEmit"
   },

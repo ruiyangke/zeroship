@@ -10,6 +10,7 @@ pub mod auth;
 pub mod migration_store;
 pub mod policy;
 pub mod policy_store;
+pub mod provisioning;
 
 use std::path::PathBuf;
 use std::sync::Arc;
