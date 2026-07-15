@@ -174,7 +174,7 @@ pub async fn put_policy(
 
     match state
         .policy_store
-        .insert_version(app_id, caller.principal_id, &body, &parsed, &effective)
+        .insert_version(app_id, caller.principal_id, &body, &effective)
         .await
     {
         Ok(record) => {

@@ -1760,26 +1760,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enumflags2"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
-dependencies = [
- "enumflags2_derive",
-]
-
-[[package]]
-name = "enumflags2_derive"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "env_filter"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2864,17 +2844,6 @@ checksum = "b5baa5e9ff84f1aefd264e6869907646538a52147a755d494517a8007fb48733"
 dependencies = [
  "regex-automata",
  "rustversion",
-]
-
-[[package]]
-name = "landlock"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "635839550ae8b90d9fd2571460a6645dc0aec070225956ca7a2831ed31d2795d"
-dependencies = [
- "enumflags2",
- "libc",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4735,15 +4704,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "seccompiler"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "security-framework"
@@ -6618,6 +6578,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "zero-migrate"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "flume 0.11.1",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "indexmap 2.14.0",
+ "pg_query",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "zero-migrate-guard",
+ "zero-migrate-ir",
+ "zero-migrate-policy",
+]
+
+[[package]]
+name = "zero-migrate-guard"
+version = "0.1.0"
+dependencies = [
+ "pg_query",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "zero-migrate-ir",
+ "zero-migrate-policy",
+]
+
+[[package]]
+name = "zero-migrate-ir"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "uuid",
+ "zero-migrate-policy",
+]
+
+[[package]]
+name = "zero-migrate-policy"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6950,39 +6975,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-migrate"
+name = "zeroship-migrate-adapter"
 version = "0.1.0"
 dependencies = [
- "base64",
- "clap",
  "compio",
  "compio-postgres",
- "flume 0.11.1",
- "futures",
- "hex",
- "hmac 0.12.1",
- "indexmap 2.14.0",
- "landlock",
- "libc",
- "pg_query",
- "rcgen",
- "rusqlite",
- "schemars 1.2.1",
- "seccompiler",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "toml 0.8.23",
  "tracing",
- "tracing-subscriber",
- "uuid",
  "v8",
- "zeroship-bundle",
- "zeroship-core",
+ "zero-migrate",
+ "zero-migrate-ir",
+ "zero-migrate-policy",
  "zeroship-runtime",
- "zeroship-schema",
 ]
 
 [[package]]
@@ -7000,12 +7005,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "tracing",
  "uuid",
+ "zero-migrate",
+ "zero-migrate-ir",
+ "zero-migrate-policy",
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-migrate",
+ "zeroship-migrate-adapter",
 ]
 
 [[package]]
@@ -7029,10 +7038,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "v8",
+ "zero-migrate",
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
- "zeroship-migrate",
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-schema",
@@ -7137,19 +7146,6 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
  "zeroship-core",
-]
-
-[[package]]
-name = "zeroship-schema-authority-e2e"
-version = "0.1.0"
-dependencies = [
- "base64",
- "compio",
- "compio-postgres",
- "serde_json",
- "uuid",
- "zeroship-migrate",
- "zeroship-plugin-db",
 ]
 
 [[package]]

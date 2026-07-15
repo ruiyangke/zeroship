@@ -4,9 +4,18 @@ use compio_postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_migrate::PolicyProfile;
 
-use crate::policy::EffectivePolicy;
+use crate::policy::{parse_draft_body, EffectivePolicy, ParsedDraft, MIGRATE_POLICY_FILENAME};
+
+/// Parse the draft TOML into a structured JSON value for the `parsed_profile` audit
+/// column (the draft is `deny_unknown_fields`-validated separately at ingress; here we
+/// only need a stable, queryable JSON snapshot of what was submitted).
+fn draft_toml_to_json(raw_toml: &str) -> Result<serde_json::Value, AppPolicyStoreError> {
+    let value: toml::Value = toml::from_str(raw_toml)
+        .map_err(|err| AppPolicyStoreError::EncodeProfile(format!("parse draft toml: {err}")))?;
+    serde_json::to_value(value)
+        .map_err(|err| AppPolicyStoreError::EncodeProfile(err.to_string()))
+}
 
 #[derive(Debug, Clone)]
 pub struct AppPolicyStore {
@@ -24,15 +33,16 @@ impl AppPolicyStore {
         app_id: Uuid,
         submitted_by: Uuid,
         raw_toml: &str,
-        parsed_profile: &PolicyProfile,
         effective: &EffectivePolicy,
     ) -> Result<AppPolicyRecord, AppPolicyStoreError> {
         let ceiling_version = i64::try_from(effective.ceiling_version)
             .map_err(|_| AppPolicyStoreError::CeilingVersionOverflow(effective.ceiling_version))?;
-        let parsed_json = serde_json::to_value(parsed_profile)
-            .map_err(|err| AppPolicyStoreError::EncodeProfile(err.to_string()))?;
-        let effective_json = serde_json::to_value(&effective.profile)
-            .map_err(|err| AppPolicyStoreError::EncodeProfile(err.to_string()))?;
+        // The draft is the source of truth: `raw_toml` carries it, and we ALSO persist
+        // its structured form for audit/query. The effective policy is not itself
+        // serde-serializable and is always re-derivable from the draft + ceiling, so
+        // its `*_profile` column holds a stable managed-posture audit snapshot.
+        let parsed_json = draft_toml_to_json(raw_toml)?;
+        let effective_json = effective.managed.to_audit_json();
         let client = self.connect().await?;
         client
             .batch_execute("BEGIN")
@@ -188,13 +198,10 @@ impl AppPolicyRecord {
         }
     }
 
-    pub fn parsed_policy_profile(&self) -> Result<PolicyProfile, AppPolicyStoreError> {
-        serde_json::from_value(self.parsed_profile.clone())
-            .map_err(|err| AppPolicyStoreError::DecodeProfile(err.to_string()))
-    }
-
-    pub fn effective_policy_profile(&self) -> Result<PolicyProfile, AppPolicyStoreError> {
-        serde_json::from_value(self.effective_profile.clone())
+    /// The stored creator draft, re-parsed from `raw_toml` (the source of truth). The
+    /// caller recomposes it against the current ceiling to obtain the effective policy.
+    pub fn parsed_policy_draft(&self) -> Result<ParsedDraft, AppPolicyStoreError> {
+        parse_draft_body(&self.raw_toml, MIGRATE_POLICY_FILENAME)
             .map_err(|err| AppPolicyStoreError::DecodeProfile(err.to_string()))
     }
 }

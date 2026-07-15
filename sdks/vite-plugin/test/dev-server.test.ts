@@ -18,6 +18,27 @@ import type { TransformState } from "../src/transform.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP_SHIM_PATH = resolve(__dirname, "../src/dev-bootstrap.js");
 
+/** A real op.* migration creating `<table>` with one text `<column>`. The
+ *  in-process recorder resolves `@zeroship/migrate` and the fold materialises
+ *  the collection + the injected platform system fields. */
+function migrationCreating(table: string, column: string): string {
+  return [
+    `import { table, t } from "@zeroship/migrate";`,
+    ``,
+    `export default {`,
+    `  name: "create_${table}",`,
+    `  up() {`,
+    `    table("${table}").create({`,
+    `      columns: {`,
+    `        ${column}: t.text().notNull(),`,
+    `      },`,
+    `    });`,
+    `  },`,
+    `};`,
+    ``,
+  ].join("\n");
+}
+
 let removeBootstrapShim = false;
 
 interface Harness {
@@ -236,61 +257,35 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
   });
 
-  test("injects the generated runtime descriptor into the spawned dev runtime", async () => {
-    const descriptor = JSON.stringify({
-      version: 1,
-      collections: {
-        todos: {
-          fields: { title: { type: "string" } },
-          options: { softDelete: false, versioning: false },
-          indexes: [],
-        },
-      },
-    });
+  test("injects the in-process generated runtime descriptor into the spawned dev runtime", async () => {
     const harness = await startHarness({
       devServerPort: 3904,
-      migrations: { descriptorJson: descriptor },
+      migrations: { migrationSource: migrationCreating("todos", "title") },
     });
     try {
       const runtime = await harness.runtimeLog();
-      assert.deepEqual(
-        JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null"),
-        JSON.parse(descriptor),
-      );
+      const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
+      // The in-process gen-types fold produced a valid v1 descriptor with the
+      // `todos` collection + its author field (plus injected system fields).
+      assert.equal(descriptor?.version, 1, "valid v1 descriptor injected");
+      assert.ok(descriptor.collections.todos, "todos collection folded");
+      assert.equal(descriptor.collections.todos.fields.title.type, "string", "author field folded");
+      assert.ok(descriptor.collections.todos.fields.id, "system id injected");
     } finally {
       await harness.close();
     }
   });
 
-  test("migration hot-update regenerates and re-injects the runtime descriptor", async () => {
-    const firstDescriptor = JSON.stringify({
-      version: 1,
-      collections: {
-        todos: {
-          fields: { title: { type: "string" } },
-          options: { softDelete: false, versioning: false },
-          indexes: [],
-        },
-      },
-    });
-    const secondDescriptor = JSON.stringify({
-      version: 1,
-      collections: {
-        notes: {
-          fields: { body: { type: "string" } },
-          options: { softDelete: true, versioning: false },
-          indexes: [],
-        },
-      },
-    });
+  test("migration hot-update regenerates and re-injects the runtime descriptor (in-process)", async () => {
     const harness = await startHarness({
       devServerPort: 3905,
-      migrations: { descriptorJson: firstDescriptor },
+      migrations: { migrationSource: migrationCreating("todos", "title") },
     });
     try {
-      const migrationFile = resolve(harness.root, "migrations/20240617123000_notes.ts");
-      process.env.ZSTUB_DESCRIPTOR = secondDescriptor;
-      await fs.writeFile(migrationFile, "export function up() { return 'changed'; }\n");
+      // A NEW migration (a second version) adds a `notes` collection. The
+      // in-process regen must re-fold and re-inject the updated descriptor.
+      const migrationFile = resolve(harness.root, "migrations/20240617123100_notes.ts");
+      await fs.writeFile(migrationFile, migrationCreating("notes", "body"));
       await harness.queueHmrChange(migrationFile);
 
       const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
@@ -303,10 +298,11 @@ describe("devServerPlugin", () => {
         payload.changed?.includes(migrationFile),
         `expected HMR payload to include ${migrationFile}`,
       );
-      assert.deepEqual(
-        JSON.parse(payload.runtimeDescriptorJson ?? "null"),
-        JSON.parse(secondDescriptor),
-      );
+      const descriptor = JSON.parse(payload.runtimeDescriptorJson ?? "null");
+      assert.equal(descriptor?.version, 1, "re-injected a valid v1 descriptor");
+      assert.ok(descriptor.collections.todos, "original todos collection retained");
+      assert.ok(descriptor.collections.notes, "new notes collection folded in");
+      assert.equal(descriptor.collections.notes.fields.body.type, "string", "new author field folded");
     } finally {
       await harness.close();
     }
@@ -355,7 +351,7 @@ async function startHarness(options: {
   parentDatabaseUrl?: string;
   devServerPort?: number;
   migrations?: {
-    descriptorJson: string;
+    migrationSource: string;
   };
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
@@ -364,9 +360,7 @@ async function startHarness(options: {
   const runtimeCountPath = resolve(root, ".zeroship-runtime.count");
   const runtimeStopPath = resolve(root, ".zeroship-runtime.stopped");
   const childScriptPath = resolve(root, "node_modules/.bin/zeroship");
-  const migrateCliPath = resolve(root, "node_modules/.bin/zeroship-migrate-js");
   const previousDatabaseUrl = process.env.DATABASE_URL;
-  const previousStubDescriptor = process.env.ZSTUB_DESCRIPTOR;
 
   await fs.mkdir(dirname(serverEntry), { recursive: true });
   await fs.mkdir(dirname(childScriptPath), { recursive: true });
@@ -392,27 +386,10 @@ async function startHarness(options: {
     await fs.writeFile(resolve(root, ".env"), options.dotenv);
   }
   if (options.migrations) {
-    process.env.ZSTUB_DESCRIPTOR = options.migrations.descriptorJson;
     await fs.mkdir(resolve(root, "migrations"), { recursive: true });
     await fs.writeFile(
       resolve(root, "migrations/20240617123000_notes.ts"),
-      "export function up() {}\n",
-    );
-    await fs.writeFile(
-      migrateCliPath,
-      [
-        "#!/usr/bin/env node",
-        "const fs = require('node:fs');",
-        "const path = require('node:path');",
-        "const args = process.argv.slice(2);",
-        "if (args[0] !== 'gen-types') { process.stderr.write('bad command'); process.exit(2); }",
-        "const out = args[args.indexOf('--out') + 1];",
-        "fs.mkdirSync(out, { recursive: true });",
-        "fs.writeFileSync(path.join(out, 'env.db.ts'), '// stub env.db.ts\\n');",
-        "fs.writeFileSync(path.join(out, 'schema.runtime.json'), process.env.ZSTUB_DESCRIPTOR + '\\n');",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
+      options.migrations.migrationSource,
     );
   }
   await fs.writeFile(
@@ -473,7 +450,6 @@ async function startHarness(options: {
       ...(options.migrations
         ? {
             migrations: {
-              cliPath: migrateCliPath,
               dir: "migrations",
               genTypesOut: "generated/zeroship",
             },
@@ -537,10 +513,10 @@ async function startHarness(options: {
           });
         }
         if (cleanup) {
-          await cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor);
+          await cleanupRoot(root, previousDatabaseUrl);
         }
       },
-      cleanup: async () => cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor),
+      cleanup: async () => cleanupRoot(root, previousDatabaseUrl),
       queueHmrChange: async (file = serverEntry) => {
         await devServerPluginImpl.hotUpdate!({ file } as any);
       },
@@ -549,7 +525,7 @@ async function startHarness(options: {
     if (server) {
       await server.close().catch(() => {});
     }
-    await cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor);
+    await cleanupRoot(root, previousDatabaseUrl);
     throw error;
   }
 }
@@ -557,17 +533,11 @@ async function startHarness(options: {
 async function cleanupRoot(
   root: string,
   previousDatabaseUrl: string | undefined,
-  previousStubDescriptor: string | undefined,
 ): Promise<void> {
   if (previousDatabaseUrl === undefined) {
     delete process.env.DATABASE_URL;
   } else {
     process.env.DATABASE_URL = previousDatabaseUrl;
-  }
-  if (previousStubDescriptor === undefined) {
-    delete process.env.ZSTUB_DESCRIPTOR;
-  } else {
-    process.env.ZSTUB_DESCRIPTOR = previousStubDescriptor;
   }
   await fs.rm(root, { recursive: true, force: true });
 }

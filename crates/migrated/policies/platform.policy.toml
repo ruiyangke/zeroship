@@ -1,0 +1,105 @@
+# The zeroship PLATFORM ceiling — the operator-internal posture (the monorepo-owned
+# successor to the engine's deleted `PolicyProfile::platform()`).
+#
+# Unlike the confined ceiling this is AUTHOR-OWNED: it injects NO mandatory system
+# shape (the platform's own `db/migrations-ts` author their tables verbatim), so
+# `resolve_create_table_policy` is a no-op over it. It grants the full privileged
+# vendor-capability set the platform bootstrap needs (roles, grants, extensions,
+# schemas, RLS, policies, functions, raw SQL, materialized views) plus the
+# `core.raw_island_role` relaxation the platform's bootstrap DO-blocks need
+# (CREATE ROLE / ALTER ROLE ... SET search_path inside raw islands).
+#
+# It does NOT grant `core.skip_static_guard` — that is the public dbmate-like
+# "trusted" posture, which the managed server never mints. Every grant is `scope =
+# "all"`; the platform is unconfined by design.
+
+policy_version = 1
+
+# ── privileged vendor capabilities (whole-DB) ──
+[[grant]]
+key = "pg.role"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.grant"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.extension"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.create_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.policy"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.rls"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.function"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.raw_view_body"
+value = true
+scope = "all"
+
+[[grant]]
+key = "pg.materialized_view"
+value = true
+scope = "all"
+
+# ── namespace authority (create / move tables anywhere) ──
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.rename_into"
+value = true
+scope = "all"
+
+# ── operator raw-island relaxation (role / search_path needles in raw bodies) ──
+[[grant]]
+key = "core.raw_island_role"
+value = true
+scope = "all"
+
+# ── destructive posture ──
+[[grant]]
+key = "sec.destructive_ops"
+value = "allow"
+scope = "all"

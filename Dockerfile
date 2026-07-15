@@ -2,10 +2,12 @@
 #
 # zeroship platform image — builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), zeroship-migrate (DB migration runner — the compose
-#   `migrate` service runs it under the Platform trust profile), and
-#   zeroship-migrate-recorder-child (sandboxed JS DSL recorder for platform
-#   `.ts` migrations).
+#   zeroship (CLI), and zeroship-platform-migrate (the platform DB migration
+#   one-shot — the compose `migrate` service runs it under the Platform trust
+#   profile). The migration path now runs on the published `zero-migrate` engine
+#   via the `zeroship-migrate-adapter` crate: it authors `db/migrations-ts/*.ts`
+#   in-process with zeroship-runtime's own V8 (no sandboxed recorder-child
+#   subprocess) and applies over the native compio-postgres `SqlSession` seam.
 #
 # NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
 # now lives in the standalone `zeroship-sandbox` project and is built/shipped
@@ -81,8 +83,8 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship \
-    -p zeroship-migrate --bins \
-    --features zeroship-migrate/standalone-cli
+    -p zeroship-migrate-adapter --bin zeroship-platform-migrate \
+    --features zeroship-migrate-adapter/platform-cli
 
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime image.
@@ -96,10 +98,10 @@ COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
-# The DB migration runner the compose `migrate` service invokes, plus the
-# recorder child it execs for platform JS DSL migrations.
-COPY --from=builder /build/target/release/zeroship-migrate /usr/local/bin/
-COPY --from=builder /build/target/release/zeroship-migrate-recorder-child /usr/local/bin/
+# The platform DB migration one-shot the compose `migrate` service invokes. It
+# authors `db/migrations-ts/*.ts` in-process via zeroship-runtime's V8 and applies
+# over the native compio-postgres seam — no recorder-child subprocess.
+COPY --from=builder /build/target/release/zeroship-platform-migrate /usr/local/bin/
 # The prebuilt console .zship (built in the `sdks` node stage). Control's
 # `--bootstrap-console --console-zship /opt/zeroship/console/app.zship` ingests
 # it at boot to seed the gateway-fronted console app.
