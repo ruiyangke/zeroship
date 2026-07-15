@@ -72,27 +72,27 @@ fn assert_namespace_denied(guard: &SqlGuard, sql: &str, want_rule: &str) {
 }
 
 // ── a ceiling that mandatorily injects over the whole app-schema universe ───────
-// `core.create_table` / `core.rename_into` are granted only inside `app` (creatable ⊑
+// `schema.create_table` / `schema.rename` are granted only inside `app` (creatable ⊑
 // injected). `deleted_at` is an injected column; the PK is pinned to `id`.
 const INJECT_APP_CEILING: &str = r#"policy_version = 1
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.alter_injected_column"
+key = "schema.alter_injected"
 value = false
 scope = { include = ["app"] }
 [[inject]]
@@ -141,7 +141,7 @@ fn raw_ctas_and_select_into_in_inject_scope_are_denied() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// 2. Structured/raw create OUTSIDE the core.create_table grant → denied
+// 2. Structured/raw create OUTSIDE the schema.create_table grant → denied
 // ════════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -150,11 +150,11 @@ fn create_outside_the_create_table_grant_is_denied() {
     // RawCreateInInjectScope) — a create in `staging` is not granted.
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["staging"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 "#;
@@ -176,7 +176,7 @@ scope = { include = ["app"] }
 fn drop_injected_column_is_immutable() {
     let g = guard_with(INJECT_APP_CEILING);
     // `deleted_at` (a covering-inject column) cannot be dropped without an explicit
-    // core.alter_injected_column grant (the ceiling grants it `false`).
+    // schema.alter_injected grant (the ceiling grants it `false`).
     assert_namespace_denied(
         &g,
         "ALTER TABLE app.t DROP COLUMN deleted_at",
@@ -205,26 +205,26 @@ fn drop_pinned_pk_constraint_is_immutable() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// 4. SET search_path / CREATE FUNCTION under a Scoped core.raw_sql grant → DENY
+// 4. SET search_path / CREATE FUNCTION under a Scoped sql.raw grant → DENY
 // ════════════════════════════════════════════════════════════════════════════════
 
-// A ceiling with `core.raw_sql` granted only in `app` (Scoped, non-⊤) + a ⊤ create
+// A ceiling with `sql.raw` granted only in `app` (Scoped, non-⊤) + a ⊤ create
 // grant so ordinary DDL is not incidentally denied by creation-gating.
 const SCOPED_RAW_SQL_CEILING: &str = r#"policy_version = 1
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = "all"
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = "all"
 "#;
@@ -268,24 +268,24 @@ fn unqualified_reference_under_scoped_raw_sql_is_denied() {
 #[test]
 fn rename_into_scope_without_rename_grant_is_denied() {
     // A same-schema `RENAME TO` that crosses an inject/rename sub-boundary within the
-    // pinned schema (so cross-schema confinement does NOT fire). `core.rename_into`
+    // pinned schema (so cross-schema confinement does NOT fire). `schema.rename`
     // is granted only over `app.keep_*`; renaming `app.t` → `app.other` lands outside
     // the rename grant and (no inject covers `app.other`) is denied for lack of it.
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = { include = ["app.keep_*"] }
 "#;
@@ -304,19 +304,19 @@ fn rename_into_inject_scope_is_denied_raw() {
     // is RawRenameIntoInjectScope. `app.t` (source) is injection-free.
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = "all"
 [[inject]]
@@ -342,11 +342,11 @@ fn granted_create_outside_any_inject_scope_is_allowed() {
     // create in `app` where create_table is granted AND no inject covers it.
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 "#;
@@ -365,11 +365,11 @@ fn dsl_path_injected_create_renders_and_passes() {
     // a create in `app` under a create grant with NO inject covering it passes.
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 [[inject]]
@@ -384,20 +384,20 @@ columns = [ { name = "id", type = "text", nullable = false } ]
 
 #[test]
 fn top_raw_sql_admits_search_path_and_opaque_body() {
-    // A ⊤-scoped core.raw_sql grant is the fully-trusted raw posture: SET search_path
+    // A ⊤-scoped sql.raw grant is the fully-trusted raw posture: SET search_path
     // and CREATE FUNCTION are admitted (the deny-list still runs, so use a benign
     // trusted-language body + a benign GUC).
     let ceiling = r#"policy_version = 1
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = "all"
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = "all"
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 "#;
