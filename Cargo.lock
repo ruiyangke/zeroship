@@ -6599,6 +6599,7 @@ dependencies = [
  "uuid",
  "zero-migrate-guard",
  "zero-migrate-ir",
+ "zero-migrate-policy",
 ]
 
 [[package]]
@@ -6610,6 +6611,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "zero-migrate-ir",
+ "zero-migrate-policy",
 ]
 
 [[package]]
@@ -6624,6 +6626,20 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "uuid",
+ "zero-migrate-policy",
+]
+
+[[package]]
+name = "zero-migrate-policy"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -6970,6 +6986,7 @@ dependencies = [
  "v8",
  "zero-migrate",
  "zero-migrate-ir",
+ "zero-migrate-policy",
  "zeroship-runtime",
 ]
 
@@ -6988,9 +7005,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "zero-migrate",
+ "zero-migrate-ir",
+ "zero-migrate-policy",
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",

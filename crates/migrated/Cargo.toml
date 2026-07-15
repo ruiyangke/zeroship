@@ -38,6 +38,14 @@ zeroship-core = { workspace = true }
 # concrete `CompioPgSession` producer; migrator-role + schema provisioning runs
 # inline over the wrapped raw compio `Client`.
 zero-migrate = { workspace = true }
+# The managed-policy server composes the monorepo-owned confined/platform ceilings
+# against untrusted creator drafts. That requires the engine's Policy Decision Point
+# directly (`compose_strict`, `RootCeiling`, `PolicyDoc`, `LoadContext`, the builtin
+# knob registry) — the `zero-migrate` facade re-exports only the seal +
+# `resolve_create_table_policy`, not the composition algebra.
+zero-migrate-policy = { workspace = true }
+zero-migrate-ir = { workspace = true }
+toml = { workspace = true }
 zeroship-migrate-adapter = { workspace = true }
 
 [dev-dependencies]

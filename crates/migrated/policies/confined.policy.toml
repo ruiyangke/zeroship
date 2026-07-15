@@ -1,0 +1,72 @@
+# The zeroship CONFINED ceiling — the managed-policy server's default operator
+# ceiling for a creator app (the monorepo-owned successor to the engine's deleted
+# `PolicyProfile::confined()`).
+#
+# This is a `RootCeiling` document (loaded `LoadContext::RootCeiling` — the only
+# layer allowed a `mandatory = true` inject). The managed server composes an
+# untrusted creator draft against it via `compose_strict`: the draft may only
+# TIGHTEN (a looser grant than this ceiling permits is rejected, not clamped).
+#
+# The grants are authored at `scope = "all"` because the per-app SCHEMA pin is the
+# guard's job (`GuardConfig::confined(app_schema)` derives the `core.cross_schema`
+# confinement from the app id); this ceiling governs the table-SHAPE injection +
+# the creation/destructive posture a confined app gets.
+#
+# Shape (mirrors the engine test ceiling `ZEROSHIP_CONFINED_CEILING_TOML`): the
+# seven system columns + three system indexes + `["id"]` PK + `author_primary_key =
+# "forbid"`, injected mandatorily into every created table.
+
+policy_version = 1
+
+# ── creation / movement authority (default-deny; the app may create + name tables) ──
+[[grant]]
+key = "core.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.rename_into"
+value = true
+scope = "all"
+
+# Destructive posture: the confined app may author destructive ops (the managed
+# server gates them behind operator approval at preflight, not at the policy floor).
+# A creator draft may tighten this to `warn` or `forbid`.
+[[grant]]
+key = "sec.destructive_ops"
+value = "allow"
+scope = "all"
+
+# Per-op timeout CEILINGS (ms). A `UintCeiling` composes DOWN: a creator draft may set
+# any value up to this ceiling (never above; the hard floor 1 forbids the indefinite
+# lock 0). 30s is a generous confined migration ceiling; a creator tightens within it.
+[[grant]]
+key = "op.lock_timeout_ms"
+value = 30000
+scope = "all"
+
+[[grant]]
+key = "op.statement_timeout_ms"
+value = 300000
+scope = "all"
+
+# ── the mandatory system table shape (II.2.6a) ──
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id",         type = "text",        nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false },
+  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_by", type = "text",        nullable = true  },
+  { name = "updated_by", type = "text",        nullable = true  },
+  { name = "version",    type = "integer",     nullable = false },
+  { name = "deleted_at", type = "timestamptz", nullable = true  },
+]
+indexes = [
+  { name = "ix_deleted_at", columns = ["deleted_at"] },
+  { name = "ix_updated_at", columns = ["updated_at"] },
+  { name = "ix_created_by", columns = ["created_by"] },
+]
