@@ -7,7 +7,7 @@
 #
 #   stack_up        ephemeral Postgres (docker) + the FULL platform migration
 #                   set from db/migrations-ts applied from scratch
-#                   via the `zeroship-migrate` bin (Platform profile), then
+#                   via the `zeroship-platform-migrate` bin (Platform profile), then
 #                   control + worker + gateway booted with --dev-insecure and
 #                   health-polled. Non-blocking: binaries run in the background;
 #                   the function returns once all three are health-green.
@@ -62,7 +62,7 @@ _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{t
 # --- preflight: required binaries + tooling ---------------------------------
 stack_preflight() {
   local b
-  for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
+  for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate; do
     [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b — run: cargo build --release"; return 2; }
   done
   [ -f "$E2E_JOSE_JS" ] || { _stk_bad "missing jose at $E2E_JOSE_JS"; return 2; }
@@ -102,14 +102,13 @@ stack_up() {
   fi
 
   local mig_log="$WORK/migrate.log"
-  if ZEROSHIP_RECORDER_CHILD="$E2E_BIN/zeroship-migrate-recorder-child" \
-      "$E2E_BIN/zeroship-migrate" migrate \
-      --dir "$E2E_ROOT/db/migrations-ts" \
+  if "$E2E_BIN/zeroship-platform-migrate" \
+      --migrations-dir "$E2E_ROOT/db/migrations-ts" \
       --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
-      --profile platform --yes > "$mig_log" 2>&1; then
-    _stk_ok "platform migrations applied cleanly from scratch (zeroship-migrate)"
+      --project-schema zeroship --project-id zeroship > "$mig_log" 2>&1; then
+    _stk_ok "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
   else
-    _stk_bad "zeroship-migrate FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
+    _stk_bad "zeroship-platform-migrate FAILED (see $mig_log)"; tail -20 "$mig_log"; return 1
   fi
 
   # --- signing key + free the ports ----------------------------------------

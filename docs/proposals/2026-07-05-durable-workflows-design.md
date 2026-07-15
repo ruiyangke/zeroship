@@ -1210,7 +1210,7 @@ Extends §5 steps 3–6. Only the frontier width and the commit cardinality chan
    sleep:       outcome = SUSPEND(kind=sleep, wake_at = now + duration)
    wait_signal: probe workflow_signals for a fresh matching unconsumed signal
                   present → COMPLETE(payload)  (mark signal consumed in commit)
-                  absent  → SUSPEND(kind=wait_signal, wake_at = now + timeout, signal_type, max_signal_age)
+                  absent  → SUSPEND(kind=wait_signal, wake_at = now + timeout, signal_type, max_signal_age_ms)
 
 5. BARRIER (generalized never-settling latch — "collect all settled frontier outcomes")
    await raceWithDeadline( settleAll(activeBatch), dispatch_deadline = claim_ts + wall_budget ).
@@ -1230,7 +1230,7 @@ Extends §5 steps 3–6. Only the frontier width and the commit cardinality chan
                      one deterministic re-dispatch. `NondeterministicError`/`StalledError` skip it and fail
                      closed directly (§9).
    RETRY_SCHEDULED → step row state=running, attempt++, wake_at set (a suspension)
-   SUSPEND         → step row kind=sleep|wait_signal, wake_at, signal_type/max_signal_age
+   SUSPEND         → step row kind=sleep|wait_signal, wake_at, signal_type/max_signal_age_ms
    UNSETTLED       → nothing (never journaled → re-discovered as a frontier candidate later)
 ```
 
@@ -1407,7 +1407,7 @@ CREATE TABLE zeroship.workflow_steps (
   output_content_type text,
   wake_at          timestamptz,                       -- sleep/wait_signal/retry suspension
   signal_type      text,                              -- wait_signal (and kind='child': the reserved '__zs.child:<ordinal>' join type, §20)
-  max_signal_age   interval,                          -- wait_signal
+  max_signal_age_ms bigint,                           -- wait_signal duration; cutoff is bound as timestamptz
   consumed_signal_id text,                            -- wait_signal / kind='child' → which signal satisfied it
   child_run_id     text,                              -- kind='child': the spawned child run (§20.2); read back on replay, never re-minted
   batch_id         text        NOT NULL,              -- wfd_… : the dispatch that committed this row (§14; wfd_ ≠ billing dsp_)
@@ -1444,6 +1444,11 @@ CREATE INDEX ON zeroship.workflow_steps (run_id, ordinal DESC)
 CREATE INDEX ON zeroship.workflow_steps (run_id, compensation_wake_at)
   WHERE compensation_state = 'running' AND compensation_wake_at IS NOT NULL;
 ```
+
+Workflow durations are stored as integer milliseconds. For a signal-age probe,
+the engine computes the cutoff instant from `max_signal_age_ms` and binds that
+timestamp in the `created_at` predicate; it does not store or construct a
+database-native duration value.
 
 `ordinal`-as-PK + `kind` are shared with the single-frontier baseline; `batch_id` (the dispatch typed id
 that grouped the atomically-committed concurrent rows) and `batch_width` are the concurrent-frontier
@@ -1537,7 +1542,7 @@ BEGIN;
   INSERT INTO zeroship.workflow_steps
       (run_id, ordinal, name, name_occurrence, kind, state, attempt, output, error,
        output_kind, output_hash, output_size, output_content_type,
-       wake_at, signal_type, max_signal_age, consumed_signal_id, batch_id, batch_width, finished_at,
+       wake_at, signal_type, max_signal_age_ms, consumed_signal_id, batch_id, batch_width, finished_at,
        compensation_state, compensation_max_attempts)   -- (§3.8): 'pending' + budget for a COMPLETEd compensable run; NULL otherwise
   VALUES  (…N rows…)
   ON CONFLICT (run_id, ordinal) DO NOTHING;      -- memoization is exactly-once even under a double-commit

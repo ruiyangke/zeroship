@@ -30,7 +30,7 @@ export function up() {
   domain("invoice_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["draft", "finalized", "void"]) });
   domain("metric_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["platform", "primitive", "custom"]) });
   domain("notification_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["pending", "sent"]) });
-  domain("reconciliation_finding_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["missed_invoice_payment", "invoice_status_drift", "refund_status_drift", "dispute_status_drift", "missing_dispute"]) });
+  domain("reconciliation_finding_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["missed_invoice_payment", "invoice_status_drift", "refund_status_drift", "dispute_status_drift", "missing_dispute", "provider_reject"]) });
   domain("reconciliation_finding_severity").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["low", "medium", "high"]) });
   domain("refund_destination").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["cash", "credit"]) });
   domain("refund_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["pending", "issued", "failed", "canceled"]) });

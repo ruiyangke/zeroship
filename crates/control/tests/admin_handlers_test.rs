@@ -21,10 +21,14 @@ mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -99,10 +103,9 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
         tax_provider: zeroship_control::tax::build_tax_provider(
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
@@ -200,10 +203,7 @@ fn valid_cedar_source() -> &'static str {
 
 #[compio::test]
 async fn non_admin_cannot_grant_platform_role() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "non-admin").await;
     // A NON-admin actor (a creator who is not a platform admin) — bearer is the
     // only principal path now, so the actor is a non-admin PAT.
@@ -245,10 +245,7 @@ async fn non_admin_cannot_grant_platform_role() {
 
 #[compio::test]
 async fn admin_can_grant_platform_role() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "grant").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let target = insert_user(&fx.state.control_pg, "grant-target").await;
@@ -279,10 +276,7 @@ async fn admin_can_grant_platform_role() {
 
 #[compio::test]
 async fn admin_can_revoke_platform_role() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "revoke").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let target = insert_user(&fx.state.control_pg, "revoke-target").await;
@@ -317,10 +311,7 @@ async fn admin_can_revoke_platform_role() {
 
 #[compio::test]
 async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "net-grants").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let owner = insert_user(&fx.state.control_pg, "net-grant-owner").await;
@@ -430,10 +421,7 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
 
 #[compio::test]
 async fn admin_can_audit_lock_app() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "audit-lock").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app_record = fx
@@ -469,10 +457,7 @@ async fn admin_can_audit_lock_app() {
 
 #[compio::test]
 async fn admin_can_suspend_app() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "suspend").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let app_record = fx
@@ -504,10 +489,7 @@ async fn admin_can_suspend_app() {
 
 #[compio::test]
 async fn admin_can_create_platform_policy_with_valid_cedar() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "policy-valid").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let policy_id = "lock_writes";
@@ -557,10 +539,7 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
 
 #[compio::test]
 async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_test_state(&db_url, "policy-invalid").await;
     let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let policy_id = "invalid_cedar";

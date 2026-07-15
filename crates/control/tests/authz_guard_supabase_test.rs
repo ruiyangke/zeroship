@@ -29,11 +29,15 @@ const SUPABASE_ISSUER: &str = "https://project.supabase.test/auth/v1";
 const SUPABASE_ANON_KEY: &str = "test-anon-key";
 const SUPABASE_JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("AUTH_DB_URL"))
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -91,12 +95,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(label: &str) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            eprintln!(
-                "[authz_guard_supabase_test] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping"
-            );
-            return None;
-        };
+        let db_url = db_url();
 
         let (control_pg_client, control_pg_conn) = match connect(&db_url, NoTls).await {
             Ok(pg) => pg,
@@ -175,10 +174,9 @@ impl Fixture {
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider,
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            metering_provider: zeroship_control::metering::provider::build_provider(
-                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-            )
-            .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )

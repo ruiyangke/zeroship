@@ -32,8 +32,8 @@ import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 import {
   GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
-  genTypesViaCli,
-} from "./migrations.js";
+  genTypesFromMigrations,
+} from "./gen-types/index.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,11 +45,10 @@ export interface DevServerOptions {
    * user; `false` disables. See `ZeroshipOptions.devAuth`.
    */
   devAuth?: DevAuthOption;
-  /** Migration-first gen-types (P3). See `ZeroshipOptions.migrations`. */
+  /** Migration-first gen-types. See `ZeroshipOptions.migrations`. */
   migrations?: {
     dir?: string;
     genTypesOut?: string;
-    cliPath?: string;
   };
 }
 
@@ -78,10 +77,10 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
 }
 
 /**
- * Migration-first gen-types (P3) — REGENERATE the typed `env.db` surface from
- * the migration set in DEV. Fire-and-forget: any failure is LOGGED, never
- * thrown (a bad migration must not crash the dev server). The graceful
- * binary-absence path (warn-once + no-op) lives in `genTypesViaCli`.
+ * Migration-first gen-types — REGENERATE the typed `env.db` surface from the
+ * migration set in DEV via the in-process gen-types library (no subprocess).
+ * Fire-and-forget: any failure is LOGGED, never thrown (a bad migration must not
+ * crash the dev server).
  *
  * Dev always WRITES (no `--check`; that is a CI/build generated-artifact concern).
  */
@@ -102,31 +101,17 @@ function readGeneratedRuntimeDescriptor(
   }
 }
 
-function regenTypesDev(
+async function regenTypesDev(
   root: string,
   migrations: DevServerOptions["migrations"],
-  warnedNoBinaryRef: { value: boolean }
-): string | undefined {
+): Promise<string | undefined> {
+  const migrationsDir = resolve(root, migrations?.dir ?? "migrations");
+  const outDir = resolve(root, migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
   try {
-    const result = genTypesViaCli({
-      root,
-      migrationsDir: migrations?.dir,
-      genTypesOut: migrations?.genTypesOut,
-      cliPath: migrations?.cliPath,
-      check: false,
-      requireBinary: false,
-    });
-    if (result.status === "skipped") {
-      // Warn only ONCE per dev-server lifetime — not on every keystroke.
-      if (!warnedNoBinaryRef.value) {
-        warnedNoBinaryRef.value = true;
-        console.warn(`[zeroship] gen-types skipped in dev — ${result.reason}`);
-      }
-    } else {
-      console.log(
-        "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
-      );
-    }
+    await genTypesFromMigrations(migrationsDir, outDir, { check: false });
+    console.log(
+      "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
+    );
   } catch (e) {
     // Dev: never throw — a malformed migration must not take down the server.
     console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
@@ -283,14 +268,16 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
 
-  // Migration-first gen-types (P3). The absolute migrations dir is resolved in
+  // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
-  // changed files against it. `warnedNoBinary` keeps the binary-absence warning
-  // to ONCE per dev-server lifetime.
+  // changed files against it.
   let migrationsAbs: string | null = null;
-  const warnedNoBinary = { value: false };
   let runtimeDescriptorJson: string | undefined;
   let pendingRuntimeDescriptorJson: string | null | undefined;
+  // The boot-time gen-types regen (async, in-process). `spawnRuntime` awaits it
+  // so the runtime is spawned WITH a fresh descriptor (the pre-in-process CLI
+  // path was synchronous; awaiting here preserves that ordering).
+  let bootRegenDone: Promise<unknown> = Promise.resolve();
 
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
@@ -333,19 +320,25 @@ export function devServerPlugin(
     configureServer(server: ViteDevServer) {
       if (!isDev) return;
 
-      // 0. Migration-first gen-types (P3) — ensure the migrations dir is
-      //    WATCHED so a change there fires `hotUpdate` (Vite only watches the
-      //    module graph + root by default; a migrations dir holding `.ts`
-      //    sources not imported by app code may not be covered). The
-      //    `hotUpdate` branch below regenerates `env.db.ts` on a change.
+      // 0. Migration-first gen-types — ensure the migrations dir is WATCHED so a
+      //    change there fires `hotUpdate` (Vite only watches the module graph +
+      //    root by default; a migrations dir holding `.ts` sources not imported
+      //    by app code may not be covered). The `hotUpdate` branch below
+      //    regenerates `env.db.ts` on a change.
       migrationsAbs = resolve(root, options.migrations?.dir ?? "migrations");
       if (existsSync(migrationsAbs)) {
         server.watcher.add(migrationsAbs);
-        // Initial regen on boot: migrations may have changed while the dev
-        // server was down (`hotUpdate` only fires on a *subsequent* change, so
-        // without this a fresh `pnpm dev` leaves env.db.ts stale). Fire-and-forget
-        // — `regenTypesDev` logs on error and NEVER throws.
-        runtimeDescriptorJson = regenTypesDev(root, options.migrations, warnedNoBinary);
+        // Seed the descriptor from the committed artifact so the very first
+        // request has it even before the async regen lands.
+        runtimeDescriptorJson = readGeneratedRuntimeDescriptor(root, options.migrations);
+        // Initial regen on boot: migrations may have changed while the dev server
+        // was down (`hotUpdate` only fires on a *subsequent* change, so without
+        // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
+        // `bootRegenDone` so the runtime is injected WITH the fresh descriptor.
+        // `regenTypesDev` logs on error and NEVER throws.
+        bootRegenDone = regenTypesDev(root, options.migrations).then((json) => {
+          runtimeDescriptorJson = json;
+        });
       }
 
       // 1. Module fetch endpoint ─────────────────────────────────────────
@@ -529,6 +522,11 @@ export function devServerPlugin(
         const spawnRuntime = async () => {
           if (tornDown) return;
 
+          // Wait for the boot-time gen-types regen so the child is spawned WITH a
+          // fresh runtime descriptor (the pre-in-process CLI path was synchronous).
+          await bootRegenDone;
+          if (tornDown) return;
+
           // Resolve the actual listening port from the HTTP server.
           const addr = server.httpServer?.address();
           const vitePort =
@@ -702,13 +700,15 @@ export function devServerPlugin(
       );
     },
 
-    hotUpdate({ file }: { file: string }) {
-      // Migration-first gen-types (P3): a change under the migrations dir
-      // regenerates the typed `env.db` surface. Fire-and-forget — the helper
-      // logs on error and NEVER throws (a bad migration must not crash dev).
+    async hotUpdate({ file }: { file: string }) {
+      // Migration-first gen-types: a change under the migrations dir regenerates
+      // the typed `env.db` surface. Awaited so the HMR poll that follows sees the
+      // re-injected descriptor. `regenTypesDev` logs on error and NEVER throws (a
+      // bad migration must not crash dev).
       if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        runtimeDescriptorJson = regenTypesDev(root, options.migrations, warnedNoBinary);
-        pendingRuntimeDescriptorJson = runtimeDescriptorJson ?? null;
+        const json = await regenTypesDev(root, options.migrations);
+        runtimeDescriptorJson = json;
+        pendingRuntimeDescriptorJson = json ?? null;
         // Don't return — a migration `.ts` is still a `.ts`; fall through to the
         // HMR-queue path below so the runtime re-fetches if it imported one.
       }

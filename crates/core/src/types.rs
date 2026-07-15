@@ -230,29 +230,6 @@ pub type VersionMap = HashMap<Uuid, AppVersionInfo>;
 /// Map of app id → route entry for fast lookup.
 pub type RouteMap = HashMap<Uuid, RouteEntry>;
 
-/// Usage counters reported by a worker to the control plane.
-///
-/// The producer (worker meter flush task) emits these at-least-once: a POST
-/// that times out is retried on the next flush tick, so the SAME report can
-/// arrive at control twice. Idempotent ingest is keyed on
-/// `(worker_id, sequence)`:
-///
-/// - `worker_id` identifies the emitting worker process.
-/// - `sequence` is a monotonic per-`worker_id` counter, bumped once per
-///   successfully-built report. Control dedups on `(worker_id, sequence)`
-///   via `zeroship.usage_reports_seen`, so a duplicate is a no-op.
-/// - `report_id` is a fresh uuidv7 per report — a human/trace-friendly id for
-///   logs and a tie-breaker; the dedup key proper is `(worker_id, sequence)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageReport {
-    pub worker_id: String,
-    /// Fresh uuidv7 per report (trace id / tie-breaker).
-    pub report_id: Uuid,
-    /// Monotonic per-`worker_id` sequence; the dedup key with `worker_id`.
-    pub sequence: u64,
-    pub counters: HashMap<Uuid, AppUsage>,
-}
-
 /// Per-application usage counters for a billing interval.
 ///
 /// The five fixed fields are the platform counters every app is billed on.

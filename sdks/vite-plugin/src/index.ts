@@ -83,10 +83,9 @@ export interface ZeroshipOptions {
    */
   devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
   /**
-   * Migration-first type generation. The plugin shells the EXISTING
-   * `zeroship-migrate-js gen-types` subcommand to record migration `.ts`
-   * sources transiently and fold them into the typed `env.db` surface (`env.db.ts` +
-   * `schema.runtime.json`):
+   * Migration-first type generation. The plugin records migration `.ts` sources
+   * in-process (via the `gen-types` library — no subprocess) and folds them into
+   * the typed `env.db` surface (`env.db.ts` + `schema.runtime.json`):
    *  - in dev, on any change under the migrations dir (fire-and-forget,
    *    log-on-error, never crashes the dev server);
    *  - at build, once in `buildStart`, with a `--check` generated-artifact check in
@@ -102,9 +101,6 @@ export interface ZeroshipOptions {
     dir?: string;
     /** gen-types output dir relative to root (default `generated/zeroship`). */
     genTypesOut?: string;
-    /** Explicit path to the `zeroship-migrate-js` CLI (default: resolved from
-     *  `ZEROSHIP_MIGRATE_JS_BIN` / `node_modules/.bin`). */
-    cliPath?: string;
   };
   /** RPC v2 (`docs/proposals/rpc.md` §1) — server-function discovery + emission. */
   rpc?: {

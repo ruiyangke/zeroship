@@ -52,25 +52,39 @@
 //! pattern PR5's `spend_reconcile` uses) so two control replicas don't
 //! double-bill.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, TimeZone, Utc};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::metering::provider::{
+    AdjustmentNote, AggregateQuery, BillingPeriod, CorrectionCapability, SubjectRef,
+};
 use crate::metering::{period_date, Metering};
 use crate::plan_catalog::PlanCatalog;
 use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
-use crate::pricing_store::PricingStore;
 use crate::registry::RegistryError;
 use crate::stripe_client::{Period, StripeApi, StripeClient};
 use crate::AppState;
 
 /// Default tick cadence in seconds (~hourly). The closed-period claim is
-/// idempotent, so a frequent tick is cheap: it no-ops once the previous month
-/// is billed. Hourly bounds the lag between month-close and invoicing.
+/// idempotent, so a frequent tick is cheap: it no-ops while the just-closed
+/// period settles, then again once the previous month is billed.
 pub const DEFAULT_TICK_SECS: u64 = 3600;
+
+/// Closed periods are not invoiced immediately at the UTC month boundary. The
+/// witness recompute must get one post-rollover cadence to rewrite the previous
+/// period, then providers get a small processing cushion before close.
+pub const DEFAULT_SETTLE_WINDOW_SECS: u64 = DEFAULT_TICK_SECS + 5 * 60;
+
+/// Default tick cadence in seconds for the §6.3 reconciliation safety net. This
+/// is a low-cost drift/late-adjustment backstop over already snapshotted period
+/// aggregates, so a few-minute cadence bounds correction lag without making it
+/// part of the request path.
+pub const DEFAULT_SAFETY_NET_TICK_SECS: u64 = 300;
 
 /// Stable `pg_advisory_lock` key for the billing-reconcile sweep. Distinct from
 /// the spend-sweep key. Two control instances racing this sweep would both try
@@ -80,8 +94,211 @@ pub const DEFAULT_TICK_SECS: u64 = 3600;
 /// Arbitrary FIXED 64-bit constant (derived from "zsbill01").
 const BILLING_SWEEP_ADVISORY_LOCK_KEY: i64 = 0x7a73_6269_6c6c_0001;
 
+/// Stable `pg_advisory_lock` key for the §6.3 reconciliation safety-net sweep.
+/// Distinct from the invoice close sweep above: the safety net may run on a
+/// tighter cadence and must not serialize invoice finalization behind read-back
+/// drift checks.
+const BILLING_SAFETY_NET_ADVISORY_LOCK_KEY: i64 = 0x7a73_6273_6166_0001;
+
 /// Currency for infra-cost invoices (v1: USD only).
 const BILLING_CURRENCY: &str = "usd";
+
+/// The S7 safety-net pass compares period quantities at this metric grain. The
+/// stream recompute slice feeds the same quantity into `usage_aggregates` in this
+/// worktree, so the reader below stays small and swappable.
+pub const DEFAULT_RECONCILE_METER: &str = "compute_units";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceOwnership {
+    OwnedInvoicer,
+    SelfInvoicing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionHistory {
+    pub correction_seq: u32,
+    pub corrected_quantity: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileFindingKind {
+    ProviderMeterDrift,
+    LatePeriodAdjustment,
+    ProviderReject,
+    /// A monetary correction (`InvoiceCredit`) is owed but its per-unit price
+    /// cannot be derived from a real invoiced basis — e.g. a self-invoicing
+    /// provider prices the meter itself and writes no local invoice lines. We
+    /// refuse to guess an amount (the old fallback silently priced at 1¢/unit);
+    /// the drift is flagged for operator/provider-authoritative repricing.
+    CorrectionUnpriceable,
+}
+
+impl ReconcileFindingKind {
+    fn as_db_kind(self) -> &'static str {
+        match self {
+            Self::ProviderMeterDrift => "provider_meter_drift",
+            Self::LatePeriodAdjustment => "late_period_adjustment",
+            Self::ProviderReject => "provider_reject",
+            Self::CorrectionUnpriceable => "correction_unpriceable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrectionActionKind {
+    AdjustmentNote,
+    Backfill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionAction {
+    pub kind: CorrectionActionKind,
+    pub correction_seq: u32,
+    pub corrected_quantity: i64,
+    pub quantity_delta: i64,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileDecision {
+    pub correction: Option<CorrectionAction>,
+    pub findings: Vec<ReconcileFindingKind>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileInputs<'a> {
+    pub ownership: InvoiceOwnership,
+    pub correction_capability: CorrectionCapability,
+    pub witness_quantity: i64,
+    pub invoiced_quantity: i64,
+    pub provider_quantity: Option<i64>,
+    pub tolerance: i64,
+    /// Per-unit price for a monetary correction, or `None` when it cannot be
+    /// derived from a real invoiced basis (see `ReconcileFindingKind::CorrectionUnpriceable`).
+    pub cents_per_unit: Option<i64>,
+    pub history: &'a [CorrectionHistory],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BillingSafetyNetSummary {
+    pub subjects_checked: usize,
+    pub corrections_issued: usize,
+    pub findings_recorded: usize,
+    pub provider_rejects: usize,
+}
+
+/// Return the next correction sequence for a changed corrected quantity. A prior
+/// correction to the same quantity means a re-run with the same numbers is a no-op.
+#[must_use]
+pub fn next_correction_seq(
+    history: &[CorrectionHistory],
+    corrected_quantity: i64,
+) -> Option<u32> {
+    if history
+        .iter()
+        .any(|h| h.corrected_quantity == corrected_quantity)
+    {
+        return None;
+    }
+    Some(
+        history
+            .iter()
+            .map(|h| h.correction_seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    )
+}
+
+#[must_use]
+pub fn reconcile_decision(input: ReconcileInputs<'_>) -> ReconcileDecision {
+    let tolerance = input.tolerance.max(0);
+    let mut findings = Vec::new();
+    if let Some(provider_quantity) = input.provider_quantity {
+        if outside_tolerance(input.witness_quantity - provider_quantity, tolerance) {
+            findings.push(ReconcileFindingKind::ProviderMeterDrift);
+        }
+    }
+
+    let basis_quantity = match input.ownership {
+        InvoiceOwnership::OwnedInvoicer => input.invoiced_quantity,
+        InvoiceOwnership::SelfInvoicing => match input.provider_quantity {
+            Some(provider_quantity) => provider_quantity,
+            None => {
+                return ReconcileDecision {
+                    correction: None,
+                    findings,
+                };
+            }
+        },
+    };
+    let quantity_delta = input.witness_quantity - basis_quantity;
+    if !outside_tolerance(quantity_delta, tolerance) {
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    }
+
+    let action_kind = match input.correction_capability {
+        CorrectionCapability::InvoiceCredit => Some(CorrectionActionKind::AdjustmentNote),
+        CorrectionCapability::Backfill { .. } => Some(CorrectionActionKind::Backfill),
+        CorrectionCapability::None => None,
+    };
+    let Some(kind) = action_kind else {
+        if !findings.contains(&ReconcileFindingKind::ProviderMeterDrift) {
+            findings.push(ReconcileFindingKind::ProviderMeterDrift);
+        }
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    };
+    // An `InvoiceCredit` posts a real monetary amount, so it MUST have a
+    // per-unit price. When the price cannot be derived from an invoiced basis
+    // (a self-invoicing provider prices the meter itself and writes no local
+    // lines), refuse to guess: flag the drift for repricing rather than emit a
+    // silently-mispriced credit. `Backfill` is quantity-only (the provider
+    // reprices), so a missing local price is informational there.
+    let amount_cents = match kind {
+        CorrectionActionKind::AdjustmentNote => {
+            let Some(unit_price) = input.cents_per_unit else {
+                findings.push(ReconcileFindingKind::CorrectionUnpriceable);
+                return ReconcileDecision {
+                    correction: None,
+                    findings,
+                };
+            };
+            quantity_delta.saturating_mul(unit_price)
+        }
+        CorrectionActionKind::Backfill => {
+            quantity_delta.saturating_mul(input.cents_per_unit.unwrap_or(1))
+        }
+    };
+    let Some(correction_seq) = next_correction_seq(input.history, input.witness_quantity) else {
+        return ReconcileDecision {
+            correction: None,
+            findings,
+        };
+    };
+    if !findings.contains(&ReconcileFindingKind::LatePeriodAdjustment) {
+        findings.push(ReconcileFindingKind::LatePeriodAdjustment);
+    }
+    ReconcileDecision {
+        correction: Some(CorrectionAction {
+            kind,
+            correction_seq,
+            corrected_quantity: input.witness_quantity,
+            quantity_delta,
+            amount_cents,
+        }),
+        findings,
+    }
+}
+
+fn outside_tolerance(delta: i64, tolerance: i64) -> bool {
+    delta.unsigned_abs() > tolerance as u64
+}
 
 /// Compute the unix-seconds start of the calendar month BEFORE the month
 /// containing `now_unix` (UTC). This is the CLOSED period the reconciler bills:
@@ -115,6 +332,20 @@ pub fn period_end_unix(period_start_unix: i64) -> i64 {
     Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
         .map_or(period_start_unix, |d| d.timestamp())
+}
+
+#[must_use]
+pub fn period_settled(
+    now_unix: i64,
+    period_start_unix: i64,
+    settle_window: Duration,
+) -> bool {
+    let Some(settled_at) = period_end_unix(period_start_unix)
+        .checked_add(i64::try_from(settle_window.as_secs()).unwrap_or(i64::MAX))
+    else {
+        return false;
+    };
+    now_unix >= settled_at
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-SEGMENT invoice-ITEM create.
@@ -187,6 +418,26 @@ pub async fn tick_with<S: StripeApi>(
     now_unix: i64,
 ) -> Result<usize, RegistryError> {
     let period_start = previous_period_start_unix(now_unix);
+    // The settle gate is wall-clock, not a per-period "witness recompute landed"
+    // marker, on purpose: DEFAULT_SETTLE_WINDOW_SECS is sized to be ≥ one recompute
+    // cadence past period_end (see its definition), so the closed period is
+    // re-derived into usage_aggregates before we bill. A recompute that is late
+    // beyond the window (an outage) is not lost billing — this same safety-net
+    // sweep re-derives the witness and issues an idempotent correction on the
+    // next tick. Time-based gate + correction spine together cover late data
+    // without an extra cross-cron coordination marker.
+    if !period_settled(
+        now_unix,
+        period_start,
+        Duration::from_secs(DEFAULT_SETTLE_WINDOW_SECS),
+    ) {
+        tracing::debug!(
+            period_start,
+            settle_window_secs = DEFAULT_SETTLE_WINDOW_SECS,
+            "billing_reconcile: closed period is still settling — skipping tick"
+        );
+        return Ok(0);
+    }
 
     // Multi-instance safety: single-flight the sweep fleet-wide. A loser skips
     // this tick (the per-period `invoices(creator_id, period)` UNIQUE claim still
@@ -223,7 +474,7 @@ pub async fn tick_with<S: StripeApi>(
 #[allow(clippy::future_not_send)]
 async fn sweep<S: StripeApi>(
     state: &AppState,
-    stripe: &S,
+    _stripe: &S,
     period_start: i64,
 ) -> Result<usize, RegistryError> {
     // Creator→apps via ownership (H1): app_members WHERE role='owner'. Apps with
@@ -275,27 +526,25 @@ async fn sweep<S: StripeApi>(
         apps_by_creator.entry(creator_id).or_default().push(app_id);
     }
 
-    let catalog = PlanCatalog::new(state.registry.clone());
-
-    // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
-    // default FX ONCE per tick (tiny global tables), then bill each app's
-    // closed-period usage as integer CU × the plan's effective FX. The invoice
-    // shape is UNCHANGED — one item per app = `charge_cents(...).total_cents`.
-    let pricing = PricingStore::new(state.registry.clone());
-    let weights = pricing.weights().await?;
-    let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-
     let mut billed = 0usize;
+    let billing_period = crate::metering::provider::BillingPeriod {
+        start: period_start,
+        end: period_end_unix(period_start),
+    };
+    let invoicer = state
+        .billing_stack
+        .invoicer
+        .as_invoicer()
+        .ok_or_else(|| RegistryError::Database("billing stack has no invoicer".to_string()))?;
 
-    for (creator_id, app_ids) in &apps_by_creator {
-        match bill_creator(
-            state, stripe, &catalog, &weights, default_fx, creator_id, app_ids,
-            period_start,
-        )
-        .await
+    for (creator_id, _app_ids) in &apps_by_creator {
+        let subject = crate::metering::provider::SubjectRef(creator_id.to_string());
+        match invoicer.close_period(&subject, billing_period).await.map_err(RegistryError::from)
         {
-            Ok(true) => billed += 1,
-            Ok(false) => { /* nothing to bill / already billed / no customer */ }
+            Ok(crate::metering::provider::InvoiceRef(Some(_))) => billed += 1,
+            Ok(crate::metering::provider::InvoiceRef(None)) => {
+                /* nothing to bill / already billed / no customer */
+            }
             // MAJOR-2: a missing global default FX means the platform cannot
             // price ANY inheriting plan — this is NOT a per-creator hiccup. Abort
             // the WHOLE sweep (bill no one) so we never emit a mix of correct and
@@ -322,6 +571,676 @@ async fn sweep<S: StripeApi>(
     Ok(billed)
 }
 
+/// Periodic §6.3 reconciliation/correction safety-net entry point. This is the
+/// scheduler around [`reconcile_pass`]; the pass itself remains the single owner
+/// of drift/correction decisions.
+#[allow(clippy::future_not_send)]
+pub async fn run_safety_net(state: Arc<AppState>, tick_secs: u64) {
+    tracing::info!(
+        tick_secs,
+        meter = state.billing_stack.meter_id(),
+        invoicer = state.billing_stack.invoicer_id(),
+        "control billing_reconcile safety-net cron starting"
+    );
+    loop {
+        match safety_net_tick(&state).await {
+            Ok(summary) => {
+                if summary.corrections_issued > 0
+                    || summary.findings_recorded > 0
+                    || summary.provider_rejects > 0
+                {
+                    tracing::warn!(
+                        subjects = summary.subjects_checked,
+                        corrections = summary.corrections_issued,
+                        findings = summary.findings_recorded,
+                        provider_rejects = summary.provider_rejects,
+                        "control billing_reconcile safety-net sweep recorded billing drift"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "control billing_reconcile safety-net tick failed");
+            }
+        }
+        compio::time::sleep(Duration::from_secs(tick_secs)).await;
+    }
+}
+
+/// Run one §6.3 safety-net sweep at the real wall-clock instant.
+#[allow(clippy::future_not_send)]
+pub async fn safety_net_tick(state: &AppState) -> Result<BillingSafetyNetSummary, RegistryError> {
+    safety_net_tick_at(state, Utc::now().timestamp()).await
+}
+
+/// Run one §6.3 safety-net sweep for the period set implied by the billing stack.
+/// The whole sweep is single-flighted under its own advisory lock.
+#[allow(clippy::future_not_send)]
+pub async fn safety_net_tick_at(
+    state: &AppState,
+    now_unix: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let lock_conn = state.registry.conn().await?;
+    let got = lock_conn
+        .query(
+            "SELECT pg_try_advisory_lock($1) AS locked",
+            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+        )
+        .await?;
+    let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
+    if !acquired {
+        tracing::debug!(
+            "billing_reconcile safety-net: advisory lock held by another instance — skipping tick"
+        );
+        return Ok(BillingSafetyNetSummary::default());
+    }
+
+    let result = safety_net_sweep(state, now_unix).await;
+
+    if let Err(e) = lock_conn
+        .execute(
+            "SELECT pg_advisory_unlock($1)",
+            &[&BILLING_SAFETY_NET_ADVISORY_LOCK_KEY],
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            "billing_reconcile safety-net: advisory unlock failed (frees on conn drop)"
+        );
+    }
+
+    result
+}
+
+#[allow(clippy::future_not_send)]
+async fn safety_net_sweep(
+    state: &AppState,
+    now_unix: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let mut total = BillingSafetyNetSummary::default();
+    for period in safety_net_periods(&state.billing_stack, now_unix) {
+        add_safety_net_summary(&mut total, reconcile_pass(state, period).await?);
+    }
+    Ok(total)
+}
+
+fn safety_net_periods(
+    stack: &crate::metering::provider::BillingStack,
+    now_unix: i64,
+) -> Vec<BillingPeriod> {
+    let previous_start = previous_period_start_unix(now_unix);
+    let previous = BillingPeriod {
+        start: previous_start,
+        end: period_end_unix(previous_start),
+    };
+    if !stack.self_invoicing() {
+        return vec![previous];
+    }
+
+    let current_start = crate::metering::period_start_unix(now_unix);
+    let current = BillingPeriod {
+        start: current_start,
+        end: period_end_unix(current_start),
+    };
+    vec![current, previous]
+}
+
+fn add_safety_net_summary(
+    total: &mut BillingSafetyNetSummary,
+    next: BillingSafetyNetSummary,
+) {
+    total.subjects_checked += next.subjects_checked;
+    total.corrections_issued += next.corrections_issued;
+    total.findings_recorded += next.findings_recorded;
+    total.provider_rejects += next.provider_rejects;
+}
+
+/// S7 bounded reconciliation/correction safety-net for one closed period.
+///
+/// The primary billing path has already finalized invoices. This pass only
+/// compares the independent local witness against the correct basis for the
+/// configured stack and emits idempotent corrections/findings.
+#[allow(clippy::future_not_send)]
+pub async fn reconcile_pass(
+    state: &AppState,
+    period: BillingPeriod,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let meters = reconcile_meters(state, period).await?;
+    let mut total = BillingSafetyNetSummary::default();
+    for meter in meters {
+        add_safety_net_summary(
+            &mut total,
+            reconcile_pass_for_meter(state, period, &meter, 0).await?,
+        );
+    }
+    Ok(total)
+}
+
+#[allow(clippy::future_not_send)]
+async fn reconcile_meters(
+    state: &AppState,
+    period: BillingPeriod,
+) -> Result<Vec<String>, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let period_date = period_date(period.start);
+    let mut meters = BTreeSet::new();
+    let local_rows = conn
+        .query(
+            "SELECT DISTINCT metric FROM zeroship.usage_aggregates WHERE period = $1::date",
+            &[&period_date],
+        )
+        .await?;
+    for row in &local_rows {
+        meters.insert(row.get::<_, String>("metric"));
+    }
+
+    let line_rows = conn
+        .query(
+            "SELECT l.usage_snapshot \
+             FROM zeroship.invoices i \
+             JOIN zeroship.invoice_lines l ON l.invoice_id = i.id \
+             WHERE i.period = $1::date AND i.status = 'finalized' \
+               AND COALESCE(l.line_kind, 'usage') = 'usage'",
+            &[&period_date],
+        )
+        .await?;
+    for row in &line_rows {
+        let usage: serde_json::Value = row.get("usage_snapshot");
+        if let serde_json::Value::Object(map) = usage {
+            for (metric, value) in map {
+                if value.as_i64().is_some() {
+                    meters.insert(metric);
+                }
+            }
+        }
+    }
+
+    if meters.is_empty() {
+        meters.insert(DEFAULT_RECONCILE_METER.to_string());
+    }
+    Ok(meters.into_iter().collect())
+}
+
+#[allow(clippy::future_not_send)]
+pub async fn reconcile_pass_for_meter(
+    state: &AppState,
+    period: BillingPeriod,
+    meter_name: &str,
+    tolerance: i64,
+) -> Result<BillingSafetyNetSummary, RegistryError> {
+    let conn = state.registry.conn().await?;
+    let period_date = period_date(period.start);
+    let ownership = if state.billing_stack.self_invoicing() {
+        InvoiceOwnership::SelfInvoicing
+    } else {
+        InvoiceOwnership::OwnedInvoicer
+    };
+
+    let mut subjects: HashMap<(Uuid, Uuid), SubjectPeriodTotals> = HashMap::new();
+    let local_rows = conn
+        .query(
+            "SELECT DISTINCT ON (u.app_id) m.user_id AS creator_id, u.app_id, \
+                    SUM(u.total)::bigint AS witness_quantity \
+             FROM zeroship.usage_aggregates u \
+             JOIN zeroship.app_members m ON m.app_id = u.app_id AND m.role = 'owner' \
+             WHERE u.period = $1::date AND u.metric = $2 \
+             GROUP BY u.app_id, m.user_id \
+             ORDER BY u.app_id, m.user_id",
+            &[&period_date, &meter_name],
+        )
+        .await?;
+    for row in &local_rows {
+        let creator_id: Uuid = row.get("creator_id");
+        let app_id: Uuid = row.get("app_id");
+        let witness_quantity: i64 = row.get("witness_quantity");
+        subjects
+            .entry((creator_id, app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name))
+            .witness_quantity = witness_quantity;
+    }
+
+    let line_rows = conn
+        .query(
+            "SELECT i.creator_id, l.app_id, l.amount_cents, l.usage_snapshot \
+             FROM zeroship.invoices i \
+             JOIN zeroship.invoice_lines l ON l.invoice_id = i.id \
+             WHERE i.period = $1::date AND i.status = 'finalized' \
+               AND COALESCE(l.line_kind, 'usage') = 'usage'",
+            &[&period_date],
+        )
+        .await?;
+    for row in &line_rows {
+        let creator_id: Uuid = row.get("creator_id");
+        let app_id: Uuid = row.get("app_id");
+        let usage: serde_json::Value = row.get("usage_snapshot");
+        let amount_cents: i64 = row.get("amount_cents");
+        let Some(quantity) = invoice_line_quantity_for_meter(&usage, meter_name) else {
+            continue;
+        };
+        let subject = subjects
+            .entry((creator_id, app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name));
+        subject.invoiced_quantity += quantity;
+        subject.invoiced_amount_cents += amount_cents;
+    }
+
+    let mut apps_by_creator: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+    for (creator_id, app_id) in subjects.keys() {
+        apps_by_creator
+            .entry(*creator_id)
+            .or_default()
+            .insert(*app_id);
+    }
+
+    let mut provider_cache: HashMap<Uuid, Option<i64>> = HashMap::new();
+    let mut summary = BillingSafetyNetSummary::default();
+    for totals in subjects.values() {
+        summary.subjects_checked += 1;
+        let provider_quantity = if apps_by_creator
+            .get(&totals.creator_id)
+            .is_some_and(|apps| apps.len() == 1)
+        {
+            provider_cache
+                .entry(totals.creator_id)
+                .or_insert_with(|| None)
+                .to_owned()
+        } else {
+            None
+        };
+        let provider_quantity = match provider_quantity {
+            Some(q) => Some(q),
+            None if apps_by_creator
+                .get(&totals.creator_id)
+                .is_some_and(|apps| apps.len() == 1) =>
+            {
+                let read = read_provider_quantity(state, totals.creator_id, period, meter_name).await?;
+                provider_cache.insert(totals.creator_id, read);
+                read
+            }
+            None => None,
+        };
+
+        let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+        let history = load_correction_history(&conn, &entity_id).await?;
+        let correction_capability = match ownership {
+            InvoiceOwnership::OwnedInvoicer => state.billing_stack.invoicer.correction(),
+            InvoiceOwnership::SelfInvoicing => state.billing_stack.meter.correction(),
+        };
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership,
+            correction_capability,
+            witness_quantity: totals.witness_quantity,
+            invoiced_quantity: totals.invoiced_quantity,
+            provider_quantity,
+            tolerance,
+            cents_per_unit: totals.cents_per_unit(),
+            history: &history,
+        });
+
+        if let Some(correction) = &decision.correction {
+            match apply_correction(
+                state,
+                &conn,
+                totals,
+                period,
+                provider_quantity,
+                correction,
+            )
+            .await
+            {
+                Ok(inserted_findings) => {
+                    summary.corrections_issued += 1;
+                    summary.findings_recorded += inserted_findings;
+                }
+                Err(err) => {
+                    summary.provider_rejects += 1;
+                    summary.findings_recorded += record_provider_reject_finding(
+                        &conn,
+                        totals,
+                        period,
+                        &err.to_string(),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        for finding in decision.findings {
+            if matches!(finding, ReconcileFindingKind::LatePeriodAdjustment)
+                && decision.correction.is_some()
+            {
+                continue;
+            }
+            summary.findings_recorded += record_safety_net_finding(
+                &conn,
+                finding,
+                "high",
+                &entity_id,
+                serde_json::json!({
+                    "witness_quantity": totals.witness_quantity,
+                    "invoiced_quantity": totals.invoiced_quantity,
+                    "meter": totals.meter,
+                    "app_id": totals.app_id,
+                    "period_start": period.start,
+                    "period_end": period.end,
+                }),
+                serde_json::json!({
+                    "provider_quantity": provider_quantity,
+                    "meter": meter_name,
+                }),
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(summary)
+}
+
+#[derive(Debug, Clone)]
+struct SubjectPeriodTotals {
+    creator_id: Uuid,
+    app_id: Uuid,
+    meter: String,
+    witness_quantity: i64,
+    invoiced_quantity: i64,
+    invoiced_amount_cents: i64,
+}
+
+impl SubjectPeriodTotals {
+    fn new(creator_id: Uuid, app_id: Uuid, meter: &str) -> Self {
+        Self {
+            creator_id,
+            app_id,
+            meter: meter.to_string(),
+            witness_quantity: 0,
+            invoiced_quantity: 0,
+            invoiced_amount_cents: 0,
+        }
+    }
+
+    /// The effective per-unit price implied by what was actually invoiced this
+    /// period, or `None` when no monetary basis exists (nothing finalized-and-
+    /// invoiced for this subject — the norm for a self-invoicing provider that
+    /// bills at the provider and writes no local lines). `None` makes a monetary
+    /// `InvoiceCredit` correction fail closed instead of pricing it at ~1¢/unit.
+    fn cents_per_unit(&self) -> Option<i64> {
+        if self.invoiced_quantity <= 0 || self.invoiced_amount_cents <= 0 {
+            return None;
+        }
+        Some((self.invoiced_amount_cents / self.invoiced_quantity).max(1))
+    }
+}
+
+#[allow(clippy::future_not_send)]
+async fn read_provider_quantity(
+    state: &AppState,
+    creator_id: Uuid,
+    period: BillingPeriod,
+    meter_name: &str,
+) -> Result<Option<i64>, RegistryError> {
+    let Some(meter) = state.billing_stack.meter.as_meter() else {
+        return Ok(None);
+    };
+    let quantity = meter
+        .read_aggregate(&AggregateQuery {
+            subject: SubjectRef(creator_id.to_string()),
+            meter: meter_name.to_string(),
+            period,
+        })
+        .await
+        .map_err(RegistryError::from)?;
+    i64::try_from(quantity)
+        .map(Some)
+        .map_err(|_| RegistryError::Database(format!("provider aggregate {quantity} exceeds i64")))
+}
+
+#[allow(clippy::future_not_send)]
+async fn apply_correction<C>(
+    state: &AppState,
+    conn: &C,
+    totals: &SubjectPeriodTotals,
+    period: BillingPeriod,
+    provider_quantity: Option<i64>,
+    correction: &CorrectionAction,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+    let dedup_key = correction_dedup_key(
+        totals.app_id,
+        &totals.meter,
+        period,
+        correction.correction_seq,
+    );
+    match correction.kind {
+        CorrectionActionKind::AdjustmentNote => {
+            let invoicer = state.billing_stack.invoicer.as_invoicer().ok_or_else(|| {
+                RegistryError::Database("billing stack has no invoicer".to_string())
+            })?;
+            let reason = if correction.quantity_delta > 0 {
+                "late usage under-bill"
+            } else {
+                "late usage over-bill"
+            };
+            invoicer
+                .adjustment_note(
+                    &SubjectRef(totals.creator_id.to_string()),
+                    &AdjustmentNote {
+                        period,
+                        app_id: Some(totals.app_id),
+                        meter: totals.meter.clone(),
+                        quantity_delta: correction.quantity_delta,
+                        correction_seq: correction.correction_seq,
+                        amount_cents: correction.amount_cents,
+                        reason: reason.to_string(),
+                        idempotency_key: dedup_key.clone(),
+                    },
+                )
+                .await
+                .map_err(RegistryError::from)?;
+        }
+        CorrectionActionKind::Backfill => {
+            let backfiller = state.billing_stack.meter.as_backfiller().ok_or_else(|| {
+                RegistryError::Database(format!(
+                    "provider '{}' declared Backfill but exposes no Backfiller",
+                    state.billing_stack.meter.id()
+                ))
+            })?;
+            let correct_total = u64::try_from(correction.corrected_quantity).map_err(|_| {
+                RegistryError::Database(format!(
+                    "negative corrected quantity {} cannot be backfilled",
+                    correction.corrected_quantity
+                ))
+            })?;
+            backfiller
+                .backfill(
+                    &SubjectRef(totals.creator_id.to_string()),
+                    &totals.meter,
+                    period,
+                    correct_total,
+                )
+                .await
+                .map_err(RegistryError::from)?;
+        }
+    }
+
+    record_safety_net_finding(
+        conn,
+        ReconcileFindingKind::LatePeriodAdjustment,
+        "high",
+        &entity_id,
+        serde_json::json!({
+            "app_id": totals.app_id,
+            "period_start": period.start,
+            "period_end": period.end,
+            "meter": totals.meter,
+            "witness_quantity": totals.witness_quantity,
+            "invoiced_quantity": totals.invoiced_quantity,
+            "provider_quantity": provider_quantity,
+            "corrected_quantity": correction.corrected_quantity,
+            "quantity_delta": correction.quantity_delta,
+            "amount_cents": correction.amount_cents,
+            "correction_seq": correction.correction_seq,
+        }),
+        serde_json::json!({
+            "provider": state.billing_stack.meter_id(),
+            "invoicer": state.billing_stack.invoicer_id(),
+        }),
+        Some(dedup_key),
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn load_correction_history<C>(
+    conn: &C,
+    entity_id: &str,
+) -> Result<Vec<CorrectionHistory>, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT our_value FROM zeroship.billing_reconciliation_findings \
+             WHERE kind = 'late_period_adjustment'::text::zeroship.reconciliation_finding_kind \
+               AND entity_id = $1",
+            &[&entity_id],
+        )
+        .await?;
+    let mut history = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let value: serde_json::Value = row.get("our_value");
+        let Some(seq) = value.get("correction_seq").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(quantity) = value
+            .get("corrected_quantity")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if let Ok(correction_seq) = u32::try_from(seq) {
+            history.push(CorrectionHistory {
+                correction_seq,
+                corrected_quantity: quantity,
+            });
+        }
+    }
+    Ok(history)
+}
+
+#[allow(clippy::future_not_send)]
+async fn record_provider_reject_finding<C>(
+    conn: &C,
+    totals: &SubjectPeriodTotals,
+    period: BillingPeriod,
+    reason: &str,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+    record_safety_net_finding(
+        conn,
+        ReconcileFindingKind::ProviderReject,
+        "high",
+        &entity_id,
+        serde_json::json!({
+            "app_id": totals.app_id,
+            "period_start": period.start,
+            "period_end": period.end,
+            "meter": totals.meter,
+            "witness_quantity": totals.witness_quantity,
+            "invoiced_quantity": totals.invoiced_quantity,
+        }),
+        serde_json::json!({
+            "provider_reject": reason,
+        }),
+        Some(format!(
+            "provider_reject:{}:{}:{}:{}",
+            totals.app_id, period.start, totals.meter, reason
+        )),
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn record_safety_net_finding<C>(
+    conn: &C,
+    kind: ReconcileFindingKind,
+    severity: &str,
+    entity_id: &str,
+    our_value: serde_json::Value,
+    provider_value: serde_json::Value,
+    dedup_key: Option<String>,
+) -> Result<usize, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let dedup_key = dedup_key
+        .unwrap_or_else(|| safety_net_finding_dedup_key(kind.as_db_kind(), entity_id, &our_value, &provider_value));
+    let id = zeroship_core::typed_id::new_reconcile_finding_id();
+    let inserted = conn
+        .query(
+            "INSERT INTO zeroship.billing_reconciliation_findings \
+               (id, kind, severity, entity_id, our_value, stripe_value, dedup_key) \
+             VALUES ($1, $2::text::zeroship.reconciliation_finding_kind, \
+                     $3::text::zeroship.reconciliation_finding_severity, $4, $5, $6, $7) \
+             ON CONFLICT (dedup_key) DO NOTHING \
+             RETURNING id",
+            &[
+                &id,
+                &kind.as_db_kind(),
+                &severity,
+                &entity_id,
+                &our_value,
+                &provider_value,
+                &dedup_key,
+            ],
+        )
+        .await?;
+    Ok(usize::from(!inserted.is_empty()))
+}
+
+fn safety_net_finding_dedup_key(
+    kind: &str,
+    entity_id: &str,
+    our_value: &serde_json::Value,
+    provider_value: &serde_json::Value,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(our_value.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(provider_value.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("{kind}:{entity_id}:{hex}")
+}
+
+fn correction_entity_id(app_id: Uuid, meter: &str, period: BillingPeriod) -> String {
+    format!("billing-correction:{app_id}:{meter}:{}", period.start)
+}
+
+fn correction_dedup_key(
+    app_id: Uuid,
+    meter: &str,
+    period: BillingPeriod,
+    correction_seq: u32,
+) -> String {
+    format!(
+        "billing_correction:{app_id}:{meter}:{}:{correction_seq}",
+        period.start
+    )
+}
+
+fn invoice_line_quantity_for_meter(usage: &serde_json::Value, meter: &str) -> Option<i64> {
+    match usage {
+        serde_json::Value::Object(map) => map.get(meter).and_then(serde_json::Value::as_i64),
+        _ => None,
+    }
+}
+
 /// Bill ONE creator for the closed period. Returns `Ok(true)` if a fresh invoice
 /// was finalized this call, `Ok(false)` for a no-op (zero charge, already billed,
 /// or no saved customer).
@@ -337,6 +1256,38 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
+    bill_creator_with_parts(
+        &state.registry,
+        &state.stripe_store,
+        state.tax_provider.as_ref(),
+        stripe,
+        catalog,
+        weights,
+        default_fx,
+        creator_id,
+        app_ids,
+        period_start,
+    )
+    .await
+}
+
+/// Dependency-injected form of [`bill_creator`]. The Lite/Stripe-invoice
+/// providers use this through `LiteStore`, keeping provider traits free of
+/// `&AppState` while preserving the existing reconciler body and money math.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::future_not_send)]
+pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
+    registry: &crate::registry::Registry,
+    stripe_store: &crate::stripe_store::StripeStore,
+    tax_provider: &dyn crate::tax::TaxProvider,
+    stripe: &S,
+    catalog: &PlanCatalog,
+    weights: &MetricWeights,
+    default_fx: Option<u64>,
+    creator_id: &Uuid,
+    app_ids: &[Uuid],
+    period_start: i64,
+) -> Result<bool, RegistryError> {
     // `period` is the first-of-month `billing_period` DATE (the claim key). Bound
     // via `$N::date` on every write (the domain param OID rejects a bare
     // NaiveDate); reads need no cast.
@@ -344,7 +1295,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
 
     // `mut` so the finalize→provider-ref pair can run in ONE `conn.transaction()`
     // (M1). Every read/UPSERT before that still borrows `&conn` immutably.
-    let mut conn = state.registry.conn().await?;
+    let mut conn = registry.conn().await?;
 
     // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
     // for (creator, period) means this period is fully billed — do no pricing
@@ -376,7 +1327,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     // Resolve the creator's Customer; a creator with no saved payment identity is
     // skipped. MAJOR-5: if such a creator HAS usage we will surface a warn below
     // (silent under-bill is revenue lost invisibly).
-    let customer = match state.stripe_store.get_customer(*creator_id).await {
+    let customer = match stripe_store.get_customer(*creator_id).await {
         Ok(Some(c)) => Some(c),
         Ok(None) => None,
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
@@ -940,8 +1891,7 @@ pub(crate) async fn bill_creator<S: StripeApi>(
     .await?;
     let credit_i64 = credit.applied_cents;
     let taxable_base_cents = (amount_i64 - credit_i64).max(0);
-    let tax = state
-        .tax_provider
+    let tax = tax_provider
         .compute_tax(&crate::tax::TaxContext {
             creator_id: *creator_id,
             taxable_base_cents,
@@ -1129,7 +2079,15 @@ pub(crate) async fn owned_app_ids(
     state: &AppState,
     creator_id: &Uuid,
 ) -> Result<Vec<Uuid>, RegistryError> {
-    let conn = state.registry.conn().await?;
+    owned_app_ids_for_registry(&state.registry, creator_id).await
+}
+
+#[allow(clippy::future_not_send)]
+pub(crate) async fn owned_app_ids_for_registry(
+    registry: &crate::registry::Registry,
+    creator_id: &Uuid,
+) -> Result<Vec<Uuid>, RegistryError> {
+    let conn = registry.conn().await?;
     let rows = conn
         .query(
             "SELECT DISTINCT ON (m.app_id) m.app_id \
@@ -1140,6 +2098,30 @@ pub(crate) async fn owned_app_ids(
         )
         .await?;
     Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
+}
+
+/// Read back the finalized Stripe provider invoice id persisted for
+/// `(creator, period)`.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn lookup_invoice_id_for_registry(
+    registry: &crate::registry::Registry,
+    creator_id: &Uuid,
+    period_start: i64,
+) -> Result<Option<String>, RegistryError> {
+    let period = crate::metering::period_date(period_start);
+    let conn = registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT r.external_id \
+             FROM zeroship.invoices i \
+             JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
+             WHERE i.creator_id = $1 AND i.period = $2::date \
+               AND i.status = 'finalized' \
+               AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
+            &[creator_id, &period],
+        )
+        .await?;
+    Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
 }
 
 /// Resolve an app's `plan_id` on a BORROWED connection (the caller already holds
@@ -1233,6 +2215,169 @@ mod tests {
         assert_eq!(DEFAULT_TICK_SECS, 3600);
     }
 
+    #[test]
+    fn safety_net_owned_invoicer_compares_local_final_to_invoiced_only() {
+        let provider_lag = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 100,
+            invoiced_quantity: 100,
+            provider_quantity: Some(80),
+            tolerance: 0,
+            cents_per_unit: Some(2),
+            history: &[],
+        });
+        assert_eq!(
+            provider_lag.correction, None,
+            "owned invoicer must not bill from provider-meter health drift"
+        );
+        assert_eq!(
+            provider_lag.findings,
+            vec![ReconcileFindingKind::ProviderMeterDrift]
+        );
+
+        let straggler = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 125,
+            invoiced_quantity: 100,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: Some(2),
+            history: &[],
+        });
+        assert_eq!(
+            straggler.correction,
+            Some(CorrectionAction {
+                kind: CorrectionActionKind::AdjustmentNote,
+                correction_seq: 1,
+                corrected_quantity: 125,
+                quantity_delta: 25,
+                amount_cents: 50,
+            })
+        );
+        assert!(straggler
+            .findings
+            .contains(&ReconcileFindingKind::LatePeriodAdjustment));
+    }
+
+    #[test]
+    fn safety_net_self_invoicer_compares_local_to_provider_meter() {
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 90,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: Some(3),
+            history: &[],
+        });
+        assert_eq!(
+            decision.correction,
+            Some(CorrectionAction {
+                kind: CorrectionActionKind::AdjustmentNote,
+                correction_seq: 1,
+                corrected_quantity: 120,
+                quantity_delta: 20,
+                amount_cents: 60,
+            })
+        );
+
+        let no_api = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::None,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(100),
+            tolerance: 0,
+            cents_per_unit: Some(3),
+            history: &[],
+        });
+        assert_eq!(no_api.correction, None);
+        assert_eq!(
+            no_api.findings,
+            vec![ReconcileFindingKind::ProviderMeterDrift]
+        );
+    }
+
+    #[test]
+    fn safety_net_unpriceable_invoice_credit_flags_instead_of_mispricing() {
+        // A self-invoicing provider writes no local invoice lines, so there is
+        // no monetary basis (`cents_per_unit == None`). The drift is real and
+        // the capability is InvoiceCredit, but we must NOT emit a credit priced
+        // at the old ~1¢/unit fallback — flag it for repricing instead.
+        let decision = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(90),
+            tolerance: 0,
+            cents_per_unit: None,
+            history: &[],
+        });
+        assert_eq!(
+            decision.correction, None,
+            "an unpriceable InvoiceCredit must not post a guessed amount"
+        );
+        assert!(
+            decision
+                .findings
+                .contains(&ReconcileFindingKind::CorrectionUnpriceable),
+            "the unpriceable drift must be flagged for operator repricing, got {:?}",
+            decision.findings
+        );
+
+        // Sanity: with a real per-unit basis the SAME drift DOES issue a credit
+        // (proves the guard is the price, not the drift).
+        let priced = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::SelfInvoicing,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 120,
+            invoiced_quantity: 0,
+            provider_quantity: Some(90),
+            tolerance: 0,
+            cents_per_unit: Some(4),
+            history: &[],
+        });
+        assert_eq!(
+            priced.correction.map(|c| c.amount_cents),
+            Some(120),
+            "30-unit delta × 4¢ = 120¢ once a real per-unit price exists"
+        );
+    }
+
+    #[test]
+    fn safety_net_correction_seq_changes_only_when_corrected_quantity_changes() {
+        let history = vec![CorrectionHistory {
+            correction_seq: 1,
+            corrected_quantity: 125,
+        }];
+        assert_eq!(
+            next_correction_seq(&history, 125),
+            None,
+            "same corrected quantity is a no-op"
+        );
+        assert_eq!(
+            next_correction_seq(&history, 130),
+            Some(2),
+            "changed corrected quantity advances the correction sequence"
+        );
+
+        let rerun = reconcile_decision(ReconcileInputs {
+            ownership: InvoiceOwnership::OwnedInvoicer,
+            correction_capability: CorrectionCapability::InvoiceCredit,
+            witness_quantity: 125,
+            invoiced_quantity: 100,
+            provider_quantity: Some(125),
+            tolerance: 0,
+            cents_per_unit: Some(1),
+            history: &history,
+        });
+        assert_eq!(rerun.correction, None);
+    }
+
     // -- injected-StripeApi unit (no PG): prove the trait seam records the
     //    invoice-item lines + the deterministic keys a sweep would emit, using a
     //    recording fake instead of the cyper client. (blueprint PR6 (d) unit.)
@@ -1248,7 +2393,7 @@ mod tests {
     /// CU/usage metadata) the line carries.
     #[derive(Clone)]
     struct RecordedItem {
-        customer: String,
+        _customer: String,
         amount: u64,
         idempotency_key: String,
         description: String,
@@ -1291,7 +2436,7 @@ mod tests {
             metadata: &[(String, String)],
         ) -> Result<String, StripeError> {
             self.items.borrow_mut().push(RecordedItem {
-                customer: customer.to_string(),
+                _customer: customer.to_string(),
                 amount: amount_cents,
                 idempotency_key: idempotency_key.to_string(),
                 description: description.to_string(),

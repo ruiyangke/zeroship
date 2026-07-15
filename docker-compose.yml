@@ -74,21 +74,22 @@ services:
       retries: 10
 
   # Platform schema migrations (control/auth/platform schemas). One-shot: runs
-  # the `zeroship-migrate` binary against the shared DB then exits 0.
+  # the `zeroship-platform-migrate` binary against the shared DB then exits 0.
   # control/auth gate on its successful completion, so they only ever boot
   # against a fully-migrated schema. Hand-authored JS DSL migrations live in
-  # db/migrations-ts/; the runner records them to transient IR and applies that
-  # plan under the Platform profile.
+  # db/migrations-ts/; the runner authors each `.ts` in-process (zeroship-runtime
+  # V8 + the published `zero-migrate` v1 recorder), lowers under the Platform
+  # guard, and applies over the native compio-postgres seam — no Node, no
+  # recorder-child subprocess.
   #
   # Runs the SAME `zeroship-platform:dev` image the native services use (the
-  # Dockerfile builds + installs the `zeroship-migrate` bin and recorder child),
-  # under the
-  # PLATFORM trust profile (the widened guard for the zeroship/public
-  # schemas). The `migrate` subcommand applies all pending platform JS DSL files
-  # once. `--yes` is required because the platform set contains reviewed
-  # in-place schema evolutions (DROP CONSTRAINT/COLUMN, etc.) the engine flags
-  # DESTRUCTIVE; passing it here is the operator's standing, in-repo
-  # confirmation that the committed migrations are the intended apply.
+  # Dockerfile builds + installs the `zeroship-platform-migrate` bin). The run
+  # applies all `db/migrations-ts/*.ts` under the PLATFORM trust profile (the
+  # widened guard for the zeroship/public schemas). The apply is idempotent: a
+  # re-run re-derives byte-identical journal versions and skips already-applied
+  # files. Destructive in-place evolutions (DROP CONSTRAINT/COLUMN, etc.) in the
+  # committed platform set are auto-approved by construction — this operator-side
+  # one-shot treats the committed migrations as the intended apply.
   migrate:
     build: .
     image: zeroship-platform:dev
@@ -98,15 +99,21 @@ services:
     volumes:
       - ./db/migrations-ts:/db/migrations-ts:ro
     command:
-      - zeroship-migrate
-      - migrate
-      - --dir=/db/migrations-ts
-      - --database-url=postgres://postgres:zeroship@postgres:5432/zeroship
-      - --profile=platform
-      - --yes
-    # zeroship-migrate is a compio/io_uring binary like every other service;
-    # io_uring_setup is blocked by Docker's default seccomp, so this one-shot
-    # needs the same unconfined profile the long-running services use.
+      # NB: the bin's parser takes space-separated flag/value pairs only
+      # (no `--flag=value` form) — keep each flag and its value as separate
+      # list items.
+      - zeroship-platform-migrate
+      - --migrations-dir
+      - /db/migrations-ts
+      - --database-url
+      - postgres://postgres:zeroship@postgres:5432/zeroship
+      - --project-schema
+      - zeroship
+      - --project-id
+      - zeroship
+    # zeroship-platform-migrate is a compio/io_uring binary like every other
+    # service; io_uring_setup is blocked by Docker's default seccomp, so this
+    # one-shot needs the same unconfined profile the long-running services use.
     security_opt:
       - seccomp:unconfined
     restart: on-failure
@@ -352,6 +359,43 @@ services:
     volumes:
       - redis-data:/data
 
+  # redpanda — Kafka-wire durable stream for the billing-provider platform.
+  # Host-side integration tests use:
+  #   REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-stream --test redpanda_roundtrip
+  # In-compose services should use REDPANDA_BROKERS=redpanda:9092 when S4/S5 wire
+  # the forwarder and worker producer.
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://127.0.0.1:19092
+      - --set
+      - redpanda.auto_create_topics_enabled=true
+    ports:
+      - "127.0.0.1:19092:19092"
+      - "127.0.0.1:9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --exit-when-healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   # zeroship-auth — native OIDC OP + UI. The gateway redirects
   # unauthenticated end users to it (gateway's
   # --auth-ui-url http://auth.zeroship.localhost). Binds loopback by default, so
@@ -451,4 +495,6 @@ volumes:
   app-storage:
   # Persisted redis dataset for the deployed-app env.kv store.
   redis-data:
+  # Persisted Redpanda log for billing stream development.
+  redpanda-data:
   verdaccio_storage:

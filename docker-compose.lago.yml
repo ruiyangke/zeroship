@@ -1,0 +1,76 @@
+# Minimal self-hosted Lago for the credential-free forwarder->Lago billing e2e
+# (tests/e2e_lago_billing.sh). API + worker + Postgres + Redis; no frontend.
+# Dedicated ports so it never collides with the platform compose or the e2e
+# harnesses. The org + API key are bootstrapped at runtime via GraphQL by the
+# e2e (fresh self-hosted Lago has no key until an organization is registered).
+services:
+  lago-db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: lago
+      POSTGRES_PASSWORD: lago
+      POSTGRES_DB: lago
+    ports:
+      - "127.0.0.1:5480:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  lago-redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6480:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  lago-api:
+    image: getlago/api:v1.35.0
+    depends_on:
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+    command: ["./scripts/start.api.sh"]
+    ports:
+      - "127.0.0.1:3480:3000"
+    environment:
+      RAILS_ENV: production
+      RAILS_LOG_TO_STDOUT: "true"
+      LAGO_API_URL: http://localhost:3480
+      LAGO_FRONT_URL: http://localhost:3481
+      DATABASE_URL: postgresql://lago:lago@lago-db:5432/lago
+      REDIS_URL: redis://lago-redis:6379
+      SECRET_KEY_BASE: ${LAGO_SECRET_KEY_BASE}
+      LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+      LAGO_ENCRYPTION_PRIMARY_KEY: ${LAGO_ENCRYPTION_PRIMARY_KEY}
+      LAGO_ENCRYPTION_DETERMINISTIC_KEY: ${LAGO_ENCRYPTION_DETERMINISTIC_KEY}
+      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT}
+      LAGO_DISABLE_SIGNUP: "false"
+      LAGO_CREATE_ORG: "true"
+      LAGO_ORG_NAME: zeroship-e2e
+      LAGO_ORG_USER_EMAIL: e2e@zeroship.test
+      LAGO_ORG_USER_PASSWORD: zeroship-e2e-pw-123
+      LAGO_ORG_API_KEY: ${LAGO_ORG_API_KEY}
+
+  lago-worker:
+    image: getlago/api:v1.35.0
+    depends_on:
+      lago-api:
+        condition: service_started
+    command: ["./scripts/start.worker.sh"]
+    environment:
+      RAILS_ENV: production
+      RAILS_LOG_TO_STDOUT: "true"
+      LAGO_API_URL: http://localhost:3480
+      DATABASE_URL: postgresql://lago:lago@lago-db:5432/lago
+      REDIS_URL: redis://lago-redis:6379
+      SECRET_KEY_BASE: ${LAGO_SECRET_KEY_BASE}
+      LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+      LAGO_ENCRYPTION_PRIMARY_KEY: ${LAGO_ENCRYPTION_PRIMARY_KEY}
+      LAGO_ENCRYPTION_DETERMINISTIC_KEY: ${LAGO_ENCRYPTION_DETERMINISTIC_KEY}
+      LAGO_ENCRYPTION_KEY_DERIVATION_SALT: ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT}

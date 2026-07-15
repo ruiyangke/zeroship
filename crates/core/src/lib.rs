@@ -5,6 +5,7 @@ pub mod auth;
 pub mod auth_provider;
 pub mod db_url;
 pub mod typed_id;
+pub mod usage_event;
 pub mod net_policy;
 pub mod crypto;
 pub mod config;

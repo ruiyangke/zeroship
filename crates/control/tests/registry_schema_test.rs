@@ -5,10 +5,14 @@
 use compio_postgres::{connect, Client, NoTls};
 use zeroship_control::Registry;
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 async fn pg(db_url: &str) -> Client {
@@ -22,10 +26,7 @@ async fn pg(db_url: &str) -> Client {
 
 #[compio::test]
 async fn registry_core_tables_live_in_zeroship_schema() {
-    let Some(url) = db_url() else {
-        eprintln!("[registry_schema_test] CONTROL_TEST_DB/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let url = db_url();
     Registry::new(&url).await.expect("registry");
     let pg = pg(&url).await;
 

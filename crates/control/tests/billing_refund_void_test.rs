@@ -26,6 +26,8 @@
 
 #![allow(clippy::future_not_send)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -39,17 +41,15 @@ use zeroship_authz::{
 };
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::metering::Metering;
 use zeroship_control::refund::{self, NativeRefundProvider, RefundDestination, RefundOutcome};
 use zeroship_control::stripe_client::{Period, StripeApi};
 use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// The reconciler single-flights fleet-wide via `pg_try_advisory_lock`; serialize the
@@ -233,6 +233,7 @@ impl Drop for Fixture {
 }
 
 async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    let mock = common::stripe_mock::start_mock_stripe().await;
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -246,6 +247,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
         zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
             .expect("workflow blob store"),
+    );
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
     );
 
     let (control_pg_client, control_pg_conn) =
@@ -263,7 +273,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -286,14 +296,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
-        tax_provider: zeroship_control::tax::build_tax_provider(
-            &zeroship_control::tax::TaxProviderConfig::native(),
-        )
-        .expect("native tax provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
+        tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
@@ -339,6 +345,7 @@ async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
 
 /// A plan charging 1 cent/request, no included CU (fx = 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -389,28 +396,20 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = std::collections::HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 /// A run-unique idempotency key. `refunds.idempotency_key` is GLOBALLY unique and the
@@ -539,10 +538,7 @@ async fn set_customer(state: &AppState, creator: Uuid) {
 
 #[compio::test]
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "launder").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -633,10 +629,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 /// real out-of-band-paid invoice has none → the refund 500s).
 #[compio::test]
 async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "refund-target").await;
     let creator = make_user(&fx.state, "refund-target").await;
     ensure_creator_billing(&fx.state, creator).await;
@@ -700,10 +693,7 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 
 #[compio::test]
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -818,10 +808,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 
 #[compio::test]
 async fn refund_replay_is_idempotent_exactly_one() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -892,10 +879,7 @@ async fn refund_replay_is_idempotent_exactly_one() {
 
 #[compio::test]
 async fn tax_split_refund_returns_proportional_tax() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "taxsplit").await;
 
     let creator = make_user(&fx.state, "taxsplit").await;
@@ -1033,10 +1017,7 @@ fn billing_self() -> Policy {
 
 #[compio::test]
 async fn refund_endpoint_operator_only_and_idempotency_conflict() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "endpoint").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1152,10 +1133,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
 
 #[compio::test]
 async fn void_reversal_conserves_credit_balance() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1223,10 +1201,7 @@ async fn void_reversal_conserves_credit_balance() {
 
 #[compio::test]
 async fn true_up_subtracts_already_issued_cash_refunds() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1324,10 +1299,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 
 #[compio::test]
 async fn true_up_recomputes_over_collection_under_the_lock() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "trueup-lock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -1464,10 +1436,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 
 #[compio::test]
 async fn one_active_invoice_per_period_void_releases_claim() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "claim").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1534,10 +1503,7 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 
 #[compio::test]
 async fn issue_refund_takes_per_creator_advisory_lock() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1620,10 +1586,7 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
 
 #[compio::test]
 async fn two_refunds_summing_over_cash_second_is_rejected() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1684,10 +1647,7 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 
 #[compio::test]
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1765,10 +1725,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 
 #[compio::test]
 async fn void_reissue_is_redrivable_after_phase1_crash() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1897,10 +1854,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 
 #[compio::test]
 async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap5-nonfinal").await;
 
     let creator = make_user(&fx.state, "gap5").await;
@@ -1981,10 +1935,7 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
 
 #[compio::test]
 async fn refund_on_nonexistent_invoice_is_invalid() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap6-missing").await;
 
     // An invoice id that was never inserted.
@@ -2030,10 +1981,7 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
 
 #[compio::test]
 async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap7-immut").await;
 
     let creator = make_user(&fx.state, "gap7").await;
@@ -2163,10 +2111,7 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 
 #[compio::test]
 async fn true_up_noop_when_over_collection_not_positive() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap23-noop").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -2277,10 +2222,7 @@ async fn true_up_noop_when_over_collection_not_positive() {
 
 #[compio::test]
 async fn true_up_redrive_converges_noop_after_issue() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap4-redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -2353,10 +2295,7 @@ async fn true_up_redrive_converges_noop_after_issue() {
 
 #[compio::test]
 async fn true_up_claim_key_conflict_on_moved_anchor() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "gap4-conflict").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 

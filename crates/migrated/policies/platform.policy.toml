@@ -1,0 +1,97 @@
+# The zeroship PLATFORM ceiling — the operator-internal posture (the monorepo-owned
+# successor to the engine's deleted `PolicyProfile::platform()`).
+#
+# Unlike the confined ceiling this is AUTHOR-OWNED: it injects NO mandatory system
+# shape (the platform's own `db/migrations-ts` author their tables verbatim), so
+# `resolve_create_table_policy` is a no-op over it. It grants the full privileged
+# vendor-capability set the platform bootstrap needs (roles, grants, extensions,
+# schemas, RLS, policies, functions, raw SQL, materialized views). The raw-island
+# role / search_path needle relaxation is no longer a distinct grant — the guard's
+# INTERNAL vendor-lower rule keys off `access.role` (GuardMode::Enforced + access.role),
+# which this posture satisfies by holding `access.role`.
+#
+# It does NOT set `GuardMode::Off` (the belt-skip) — that is the public dbmate-like
+# "trusted" posture, which the managed server never mints. Every grant is `scope =
+# "all"`; the platform is unconfined by design.
+
+policy_version = 1
+
+# ── privileged vendor capabilities (whole-DB) ──
+[[grant]]
+key = "access.role"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.grant"
+value = true
+scope = "all"
+
+# The CREATE EXTENSION allowlist (StrSet) IS the extension capability (empty = deny
+# all). The platform migrations rely on `citext` + `uuid-ossp`.
+[[grant]]
+key = "code.extension"
+value = ["citext", "uuid-ossp"]
+scope = "all"
+
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.policy"
+value = true
+scope = "all"
+
+[[grant]]
+key = "access.rls"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.partition"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sql.raw_view_body"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.materialized_view"
+value = true
+scope = "all"
+
+# ── namespace authority (create / move tables anywhere) ──
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+# ── destructive posture ──
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"

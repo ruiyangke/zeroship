@@ -19,7 +19,7 @@ import {
   zeroshipBootstrapResolverPlugin,
   zeroshipModulePlugin,
 } from "./zeroship-module.js";
-import { genTypesViaCli } from "./migrations.js";
+import { genTypesFromMigrations, GEN_TYPES_OUT_DEFAULT } from "./gen-types/index.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
@@ -27,7 +27,6 @@ const HERE = resolve(fileURLToPath(import.meta.url), "..");
 export interface BuildMigrationsOptions {
   dir?: string;
   genTypesOut?: string;
-  cliPath?: string;
 }
 
 export interface EmitMigrationsOptions {
@@ -312,11 +311,10 @@ export function buildPlugin(
     serverEntry?: string;
     /** "static" → skip the SSR sub-build entirely. */
     mode?: "full" | "static";
-    /** Migration-first gen-types (P3). See `ZeroshipOptions.migrations`. */
+    /** Migration-first gen-types. See `ZeroshipOptions.migrations`. */
     migrations?: {
       dir?: string;
       genTypesOut?: string;
-      cliPath?: string;
     };
   } = {}
 ): Plugin {
@@ -495,10 +493,10 @@ export function buildPlugin(
     name: "zeroship:build",
 
     /**
-     * Migration-first gen-types. Before the bundle is walked, fold the
-     * committed `.ts` migration set into the typed `env.db` surface
-     * (`env.db.ts` + `schema.runtime.json`) by shelling the EXISTING
-     * `zeroship-migrate-js gen-types` subcommand.
+     * Migration-first gen-types. Before the bundle is walked, fold the committed
+     * `.ts` migration set into the typed `env.db` surface (`env.db.ts` +
+     * `schema.runtime.json`) via the in-process `gen-types` library
+     * (`genTypesFromMigrations` — no subprocess).
      *
      * In production (`viteMode === "production"`) we run `--check`: a generated
      * artifact check that hard-fails the build when `env.db.ts` or
@@ -508,42 +506,30 @@ export function buildPlugin(
      *
      * Type activation is app-level: the emitted `env.db.ts` is committed under
      * `generated/zeroship/` by default and included by the app tsconfig. See
-     * `migrations.ts`.
+     * `gen-types/index.ts`.
      *
      * Skipped in dev (the dev-server's `hotUpdate` handles regeneration) and
      * when there is no migrations dir on disk.
      */
-    buildStart() {
+    async buildStart() {
       if (isDev) return;
       const migrationsRel = options.migrations?.dir ?? "migrations";
+      const migrationsAbs = resolve(root, migrationsRel);
       // No migrations dir → nothing to generate (an app may ship none).
-      if (!existsSync(resolve(root, migrationsRel))) return;
+      if (!existsSync(migrationsAbs)) return;
 
+      const outDir = resolve(root, options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT);
       const isProd = viteMode === "production";
       try {
-        const result = genTypesViaCli({
-          root,
-          migrationsDir: migrationsRel,
-          genTypesOut: options.migrations?.genTypesOut,
-          cliPath: options.migrations?.cliPath,
-          // Production: generated-artifact check. Non-production: regenerate (write).
-          check: isProd,
-          // The production check must not silently pass if the binary is missing.
-          requireBinary: isProd,
-        });
-        if (result.status === "skipped") {
-          console.warn(
-            `[zeroship] gen-types skipped — ${result.reason}`
-          );
-        } else if (isProd) {
-          console.log(
-            "[zeroship] gen-types --check: env.db.ts + schema.runtime.json track the migrations"
-          );
-        } else {
-          console.log(
-            "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
-          );
-        }
+        // Production: generated-artifact check (a HARD drift gate — no binary to be
+        // absent, so drift is always caught). Non-production: regenerate (write) so a
+        // local `vite build --mode development` refreshes the committed types.
+        await genTypesFromMigrations(migrationsAbs, outDir, { check: isProd });
+        console.log(
+          isProd
+            ? "[zeroship] gen-types --check: env.db.ts + schema.runtime.json track the migrations"
+            : "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations",
+        );
       } catch (e) {
         // A drift / load / fold failure is a real build error — surface it.
         console.error(`[zeroship] gen-types failed: ${(e as Error).message}`);

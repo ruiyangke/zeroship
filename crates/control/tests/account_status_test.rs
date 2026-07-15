@@ -17,14 +17,16 @@
 //! Gated on `CONTROL_TEST_DB`; silent skip otherwise. The DB must have changeset
 //! 0045 applied.
 
+mod common;
+
 use uuid::Uuid;
 
 use zeroship_control::account_status::{AccountStatusStore, DEFAULT_MAX_DUNNING_DAYS};
 use zeroship_control::Registry;
 use zeroship_core::types::AccountState;
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// A live registry + a side connection for seeding users and reading raw columns.
@@ -34,7 +36,7 @@ struct Fx {
 }
 
 async fn fx() -> Fx {
-    let url = db_url().expect("CONTROL_TEST_DB checked by caller");
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let (pg, conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
@@ -88,10 +90,7 @@ const T0: i64 = 1_777_000_000; // a fixed Stripe-style `event.created` baseline.
 
 #[compio::test]
 async fn payment_failed_moves_to_past_due() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
     let creator = make_creator(&f.pg).await;
@@ -128,10 +127,7 @@ async fn payment_failed_moves_to_past_due() {
 
 #[compio::test]
 async fn repeated_failure_is_idempotent() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
     let creator = make_creator(&f.pg).await;
@@ -189,10 +185,7 @@ async fn repeated_failure_is_idempotent() {
 
 #[compio::test]
 async fn dunning_exhaustion_suspends() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 
@@ -247,10 +240,7 @@ async fn dunning_exhaustion_suspends() {
 
 #[compio::test]
 async fn payment_success_reactivates() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
     let creator = make_creator(&f.pg).await;
@@ -315,10 +305,7 @@ async fn payment_success_reactivates() {
 /// `suspended` regardless of which owner row the planner would otherwise pick.
 #[compio::test]
 async fn get_routes_fanout_picks_most_restrictive_account_state() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 
@@ -400,10 +387,7 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
 /// high-water (stamped from `event.created`) makes the stale failure a no-op.
 #[compio::test]
 async fn out_of_order_paid_then_failed_does_not_resuspend() {
-    let Some(_) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
     let creator = make_creator(&f.pg).await;
@@ -488,10 +472,7 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
 
 #[compio::test]
 async fn payment_failed_creates_creator_billing_parent_first() {
-    let Some(_url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let _url = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 

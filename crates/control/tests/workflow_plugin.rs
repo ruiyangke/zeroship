@@ -167,10 +167,9 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
                 Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string()),
             ),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            metering_provider: zeroship_control::metering::provider::build_provider(
-                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-            )
-            .expect("native provider builds"),
+            provider_registry: zeroship_control::metering::provider::builtin_registry(),
+            billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+            billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )

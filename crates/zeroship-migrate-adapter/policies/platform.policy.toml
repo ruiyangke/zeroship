@@ -1,0 +1,25 @@
+# The platform (author-owned) ceiling for the adapter's platform-schema migrate path.
+#
+# Author-owned: it injects NO mandatory system shape, so `resolve_create_table_policy`
+# is a pass-through over it (the platform's `db/migrations-ts` author their tables
+# verbatim). The guard is built separately via `GuardConfig::platform` (which carries
+# the privileged vendor set + the raw-island relaxation); this ceiling only needs to
+# grant the namespace-authority (create / rename anywhere) so the composed
+# `EffectivePolicy` is a valid no-inject shape policy.
+
+policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"

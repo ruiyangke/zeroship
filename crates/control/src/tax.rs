@@ -11,7 +11,7 @@
 //! [`crate::refund::RefundProvider`]: an `#[async_trait(?Send)]` object-safe trait, a
 //! `Native` default that computes **0**, and an export/integration impl behind it. The
 //! provider is selected once at boot ([`build_tax_provider`], `--tax-provider native`,
-//! defaulting to native) and lives on [`crate::AppState`] exactly as `metering_provider`
+//! defaulting to native) and lives on [`crate::AppState`] as the configured tax
 //! does, so the reconciler reaches it through `&AppState`.
 //!
 //! ### Why Native computes 0 (the USD-launch default)
@@ -129,7 +129,7 @@ impl TaxProviderKind {
 
     /// Parse the `--tax-provider` flag value (case-insensitive). Returns the raw value
     /// in `Err` for an unknown kind so the caller can fail to boot with a clear message
-    /// (mirroring [`crate::metering::provider::MeteringProviderKind::parse`]).
+    /// (mirroring the metering provider registry's fail-fast unknown-id posture).
     ///
     /// # Errors
     /// Returns the unrecognized string for any value outside `{native}`.
@@ -144,7 +144,7 @@ impl TaxProviderKind {
 /// Per-deployment tax-provider configuration (parsed from CLI/env in `main.rs`). The
 /// `kind` selects the backend; future export-backend creds would carry in matching
 /// `Option` fields (none needed for Native). Mirrors
-/// [`crate::metering::provider::MeteringProviderConfig`].
+/// the metering provider stack config.
 #[derive(Debug, Clone)]
 pub struct TaxProviderConfig {
     pub kind: TaxProviderKind,
@@ -185,7 +185,7 @@ impl TaxProvider for NativeTaxProvider {
 
 /// Build the configured tax provider once at boot. `Native` is the default (and the
 /// only kind today). A future `StripeTaxProvider` arm would build here behind a creds
-/// check, mirroring [`crate::metering::provider::build_provider`].
+/// check, mirroring the metering provider registry factories.
 ///
 /// # Errors
 /// Returns [`ProviderError::Config`] for a future export backend selected without its

@@ -607,6 +607,17 @@ mod tests {
     use crate::GateState;
     use zeroship_bundle::{BlobError, BlobStore, PutOutcome};
 
+    fn usage_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: uuid::Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
+    }
+
     /// Build a disk cache rooted in a fresh tmpdir with a generous
     /// budget. Caller is responsible for cleanup (we keep tests
     /// self-contained — the OS will reclaim tmp on reboot if a panic
@@ -1270,16 +1281,14 @@ mod tests {
             let _ = compio::runtime::spawn(async {}).await;
         }
 
-        let snap = meter.drain();
-        let usage = snap
-            .get(&app_id)
-            .expect("the streamed-static drain records delivered egress");
-        let billed = usage
-            .custom
-            .get("gateway_egress_bytes")
-            .copied()
+        let events = meter.drain();
+        let billed = usage_value(&events, app_id, "gateway_egress_bytes")
             .expect("gateway_egress_bytes recorded by the drain");
-        assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
+        assert_eq!(
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
+            "the gateway never touches egress_bytes",
+        );
         // Must bill far less than the full file (the over-bill fix): allow the
         // delivered amount plus at most one extra in-flight chunk.
         assert!(
@@ -1326,14 +1335,17 @@ mod tests {
             let _ = compio::runtime::spawn(async {}).await;
         }
 
-        let snap = meter.drain();
-        let usage = snap.get(&app_id).expect("usage recorded");
+        let events = meter.drain();
         assert_eq!(
-            usage.custom.get("gateway_egress_bytes").copied(),
+            usage_value(&events, app_id, "gateway_egress_bytes"),
             Some(size as u64),
             "full delivery bills the whole asset size across the drain's deltas",
         );
-        assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
+        assert_eq!(
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
+            "the gateway never touches egress_bytes",
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

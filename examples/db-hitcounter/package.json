@@ -1,0 +1,22 @@
+{
+  "name": "db-hitcounter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Minimal migration-first env.db hit counter used by the deployed DB end-to-end test.",
+  "scripts": {
+    "gen-types": "vite build --mode development",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zeroship/db": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@zeroship/migrate": "workspace:*",
+    "@zeroship/types": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}
