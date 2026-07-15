@@ -12,7 +12,7 @@
 //!   rules within ONE layer — more rules on a key can only loosen (II.3.2). Bool OR,
 //!   StrSet ∪, Uint max, OrderedEnum rank-max.
 //! - **`meet_value` (`⊓_value`, the TIGHTEST):** clamps two trusted ceilings
-//!   pointwise (`compose_clamp`, II.3.2). Bool AND, StrSet ∩, Uint min,
+//!   pointwise (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min,
 //!   OrderedEnum rank-min.
 //! - **`leq_value` (`⊑_value`):** the polarity order — Bool implication
 //!   (`false ⊑ true`), StrSet ⊆, Uint ≤, OrderedEnum rank ≤. `a ⊑ b ⟺ join(a,b)=b`
@@ -109,7 +109,7 @@ pub fn join_value(
 }
 
 /// `a ⊓_value b` under `kind` — the TIGHTEST (greatest lower bound): the ceiling
-/// clamp (`compose_clamp`, II.3.2). Bool AND, StrSet ∩, Uint min, OrderedEnum
+/// clamp (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min, OrderedEnum
 /// rank-min. `Digest` only when equal (opaque).
 pub fn meet_value(
     kind: &KnobKind,

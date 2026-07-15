@@ -82,7 +82,7 @@ pub enum TableShapeError {
 /// Column order is the sealed inject total order (outermost inject first, each
 /// spec's columns in document order); indexes likewise. The primary key is the
 /// FIRST covering spec that pins one (the outermost ceiling wins — a draft cannot
-/// override a ceiling PK, which `compose_strict`'s collision blame already
+/// override a ceiling PK, which `admit`'s collision blame already
 /// guarantees is non-conflicting). `author_primary_key` is `Forbid` if ANY covering
 /// spec forbids (obligations union up).
 struct ResolvedInject {
@@ -520,7 +520,7 @@ indexes = [
 /// is parsed against the engine's builtin registry, then composes against a
 /// grant-only draft extracted from the same ceiling. Inject/require/validate
 /// rules survive from the root ceiling; grants become effective through the draft
-/// side of `compose_strict` after proving they do not exceed the root ceiling.
+/// side of `admit` after proving they do not exceed the root ceiling.
 /// Inject-only ceilings still compose because the extracted draft is empty.
 ///
 /// This is the engine-side constructor the production authoring verb
@@ -541,7 +541,7 @@ pub fn effective_policy_from_ceiling_toml(ceiling_toml: &str) -> Result<Effectiv
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
-    zero_migrate_policy::compose_strict(&ceiling, &draft, &registry)
+    zero_migrate_policy::admit(&ceiling, &draft, &registry)
         .map_err(|e| format!("policy composition failed: {e:?}"))
 }
 

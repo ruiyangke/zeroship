@@ -1,6 +1,6 @@
 //! The COMPOSITION ORACLE — the correctness proof for the security crown jewel.
 //!
-//! The pointwise-grant admissibility check in `compose_strict` is what prevents
+//! The pointwise-grant admissibility check in `admit` is what prevents
 //! privilege escalation. Prose review of it cannot be trusted (exactly as with the
 //! scope lattice, which the Phase-1a oracle settled). So this suite proves it by
 //! brute force:
@@ -9,13 +9,13 @@
 //!   SMALL value domain (a `Bool` key and a `UintCeiling` key), it materializes
 //!   `value(ceiling, k, ·)` and `value(draft, k, ·)` as CONCRETE `Object -> Value`
 //!   maps computed DIRECTLY from the rule lists (never via the code under test).
-//! - **Core property:** `compose_strict(ceiling, draft)` is `Ok` IFF, for every
+//! - **Core property:** `admit(ceiling, draft)` is `Ok` IFF, for every
 //!   object `o` and every grant key `k`, `draft_value(k,o) ⊑ ceiling_value(k,o)`
 //!   (pointwise ground truth). It runs the property over many generated
 //!   ceiling/draft pairs — catching ANY residual scope-only or value-blind check.
 //! - It PINS the critic's two escalation cases (both must REJECT) and a
 //!   strictly-inside case (must ACCEPT).
-//! - It proves `compose_clamp` associativity + the clamp-then-strict equivalence,
+//! - It proves `restrict` associativity + the clamp-then-strict equivalence,
 //!   the require/inject/validate union-up, compose-time collision blame, and
 //!   `EffectivePolicy` unforgeability.
 //!
@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use zero_migrate_policy::{
-    compose_clamp, compose_strict, ComposeError, Enforcement, KnobDef, KnobKey, KnobKind,
+    restrict, admit, ComposeError, Enforcement, KnobDef, KnobKey, KnobKind,
     KnobValue, ObjectName, PolicyDoc, PolicyRegistry, Polarity, RootCeiling, RuleKind,
 };
 
@@ -222,11 +222,11 @@ fn parse_root(gens: &[Gen]) -> RootCeiling {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// THE CORE PROPERTY: compose_strict Ok ⟺ pointwise draft ⊑ ceiling
+// THE CORE PROPERTY: admit Ok ⟺ pointwise draft ⊑ ceiling
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn oracle_compose_strict_ok_iff_pointwise_leq() {
+fn oracle_admit_ok_iff_pointwise_leq() {
     let univ = universe();
     let reg = registry();
 
@@ -264,7 +264,7 @@ fn oracle_compose_strict_ok_iff_pointwise_leq() {
                                     let draft = parse_layer(&draft_gens);
 
                                     let gt = gt_admissible(&ceiling_doc, &draft, &univ);
-                                    let got = compose_strict(&root, &draft, &reg);
+                                    let got = admit(&root, &draft, &reg);
 
                                     total += 1;
                                     match (&got, gt) {
@@ -315,7 +315,7 @@ fn oracle_compose_strict_ok_iff_pointwise_leq() {
     // Guard against a vacuous sweep.
     assert!(total >= 1000, "sweep too small: {total}");
     assert!(accepted > 0 && rejected > 0, "sweep degenerate: acc={accepted} rej={rejected}");
-    eprintln!("compose_strict oracle: total={total} accepted={accepted} rejected={rejected}");
+    eprintln!("admit oracle: total={total} accepted={accepted} rejected={rejected}");
 }
 
 // Debug-derive helper for the panic messages above.
@@ -343,7 +343,7 @@ fn pinned_value_blind_escalation_rejects() {
         Gen { key: UINT_KEY, pat: Pat::Staging, value: "600" },
     ]);
     let draft = parse_layer(&[Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" }]);
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::GrantExceedsCeiling { .. })),
         "value-blind escalation must REJECT, got {got:?}"
@@ -359,7 +359,7 @@ fn pinned_exclude_escalation_rejects() {
     let reg = registry();
     let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStarNoTmp, value: "true" }]);
     let draft = parse_layer(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(
         matches!(
             got,
@@ -383,16 +383,16 @@ fn pinned_strictly_inside_accepts() {
         Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" },
         Gen { key: UINT_KEY, pat: Pat::AppStar, value: "60" },
     ]);
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(got.is_ok(), "strictly-inside draft must ACCEPT, got {got:?}");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// compose_clamp: associativity + clamp-then-strict equivalence
+// restrict: associativity + clamp-then-strict equivalence
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Materialize the effective value map of a composed policy over the universe, for
-/// both materialized grant keys — the comparable denotation of a `compose_clamp`.
+/// both materialized grant keys — the comparable denotation of a `restrict`.
 fn value_map_of(
     ep: &zero_migrate_policy::EffectivePolicy,
     univ: &[ObjectName],
@@ -408,7 +408,7 @@ fn value_map_of(
 }
 
 #[test]
-fn oracle_compose_clamp_associative_and_pointwise_meet() {
+fn oracle_restrict_associative_and_pointwise_meet() {
     let univ = universe();
     let reg = registry();
     let pats = Pat::all();
@@ -431,14 +431,14 @@ fn oracle_compose_clamp_associative_and_pointwise_meet() {
                             let p = parse_root(&[Gen { key: UINT_KEY, pat: pp, value: pv }]);
 
                             // clamp(clamp(h,o),p) and clamp(h,clamp(o,p)).
-                            let ho = compose_clamp(&h, &o, &reg).unwrap();
-                            let left = compose_clamp(&ho, &p, &reg).unwrap();
-                            let op_ = compose_clamp(&o, &p, &reg).unwrap();
-                            let right = compose_clamp(&h, &op_, &reg).unwrap();
+                            let ho = restrict(&h, &o, &reg).unwrap();
+                            let left = restrict(&ho, &p, &reg).unwrap();
+                            let op_ = restrict(&o, &p, &reg).unwrap();
+                            let right = restrict(&h, &op_, &reg).unwrap();
 
                             let lm = value_map_of(&left, &univ);
                             let rm = value_map_of(&right, &univ);
-                            assert_eq!(lm, rm, "compose_clamp NOT associative");
+                            assert_eq!(lm, rm, "restrict NOT associative");
 
                             // Pointwise meet ground truth: value(clamp) at o ==
                             // meet(value(h), value(o), value(p)) per key.
@@ -488,7 +488,7 @@ fn oracle_clamp_then_strict_equals_strict_against_tightest_chain() {
                 for ov in uint_vals {
                     let h = parse_root(&[Gen { key: UINT_KEY, pat: hp, value: hv }]);
                     let o = parse_root(&[Gen { key: UINT_KEY, pat: op, value: ov }]);
-                    let clamp = compose_clamp(&h, &o, &reg).unwrap();
+                    let clamp = restrict(&h, &o, &reg).unwrap();
 
                     for &dp in &pats {
                         for dv in uint_vals {
@@ -509,7 +509,7 @@ fn oracle_clamp_then_strict_equals_strict_against_tightest_chain() {
                                 }
                             }
 
-                            let got = compose_strict(&clamp, &draft, &reg);
+                            let got = admit(&clamp, &draft, &reg);
                             total += 1;
                             match (&got, gt) {
                                 (Ok(_), true) => acc += 1,
@@ -542,7 +542,7 @@ impl std::fmt::Debug for Pat {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Union-up: every ceiling require/inject/validate survives compose_strict
+// Union-up: every ceiling require/inject/validate survives admit
 // ══════════════════════════════════════════════════════════════════════════════
 
 fn registry_with_require() -> PolicyRegistry {
@@ -590,7 +590,7 @@ scope = { include = ["staging"] }
     )
     .unwrap();
 
-    let ep = compose_strict(&root, &draft, &reg).unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
 
     // Obligation survives.
@@ -651,10 +651,10 @@ scope = { include = ["app_*"] }
     )
     .unwrap();
 
-    // compose_strict is Ok: a Require obligation composes UP, so a draft can never
+    // admit is Ok: a Require obligation composes UP, so a draft can never
     // LOWER a ceiling obligation — the draft `never` is admissible (it only ever
     // raises), and the effective value is the union-up `always`.
-    let ep = compose_strict(&root, &draft, &reg).unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let obs = ep.obligations(&app_t);
 
@@ -714,7 +714,7 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::DraftInjectCollidesCeiling { .. })),
         "draft-vs-ceiling inject collision must REJECT at compose, got {got:?}"
@@ -744,7 +744,7 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::DraftValidateContradictsCeilingInject { .. })),
         "draft validate contradicting ceiling inject must REJECT, got {got:?}"
@@ -772,7 +772,7 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
         &reg,
     )
     .unwrap();
-    let got = compose_clamp(&a, &b, &reg);
+    let got = restrict(&a, &b, &reg);
     assert!(
         matches!(got, Err(ComposeError::CeilingInjectCollision { .. })),
         "ceiling-vs-ceiling inject collision must be a loud operator error, got {got:?}"
@@ -813,7 +813,7 @@ scope = { include = ["staging"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let got = compose_strict(&root, &draft, &reg);
+    let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::CreatableEscapesMandatoryInject { .. })),
         "creatable escaping mandatory inject must REJECT, got {got:?}"
@@ -849,7 +849,7 @@ scope = { include = ["app_*"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    assert!(compose_strict(&root, &draft, &reg).is_ok());
+    assert!(admit(&root, &draft, &reg).is_ok());
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -877,7 +877,7 @@ primary_key = ["id"]
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let ep = compose_strict(&root, &draft, &reg).unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let other = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
@@ -898,7 +898,7 @@ primary_key = ["id"]
 // ══════════════════════════════════════════════════════════════════════════════
 
 // This test documents the unforgeability mechanism by CONSTRUCTION: the only paths
-// to an `EffectivePolicy` are compose_strict / compose_clamp (from a RootCeiling) and
+// to an `EffectivePolicy` are admit / restrict (from a RootCeiling) and
 // the explicit deny_all floor. The type has private fields, no Deserialize, and no
 // public `new`/`Default` — so the following are the ONLY constructors, and the crate
 // compiles iff that remains true. (A negative compile test is covered by the absence
@@ -912,17 +912,17 @@ fn effective_policy_only_via_compose_or_deny_all() {
     let o = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     assert_eq!(floor.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(false)));
 
-    // (2) compose_strict from a RootCeiling.
+    // (2) admit from a RootCeiling.
     let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
     let draft = parse_layer(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let ep = compose_strict(&root, &draft, &reg).unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
     assert_eq!(ep.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(true)));
 
-    // (3) compose_clamp of two RootCeilings, then used itself as a ceiling.
+    // (3) restrict of two RootCeilings, then used itself as a ceiling.
     let a = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
     let b = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let clamp = compose_clamp(&a, &b, &reg).unwrap();
-    let _ep2 = compose_strict(&clamp, &draft, &reg).unwrap();
+    let clamp = restrict(&a, &b, &reg).unwrap();
+    let _ep2 = admit(&clamp, &draft, &reg).unwrap();
 
     // There is deliberately NO other constructor: no Default, no Deserialize, no
     // public `new`. This test compiling is the proof the surface is closed.

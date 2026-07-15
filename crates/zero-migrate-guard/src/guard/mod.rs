@@ -168,8 +168,8 @@ impl GuardConfig {
     /// carry inject/validate rules + scoped creation grants, so the guard's raw-SQL
     /// classification (II.2.5: `RawCreateInInjectScope` / creation-gating) and
     /// injected-shape immutability (II.2.6b) can be exercised against a real inject
-    /// scope. The `EffectivePolicy` is unforgeable (only `compose_strict`/
-    /// `compose_clamp` produce one), so a caller cannot smuggle an escalated grant
+    /// scope. The `EffectivePolicy` is unforgeable (only `admit`/
+    /// `restrict` produce one), so a caller cannot smuggle an escalated grant
     /// through it.
     #[must_use]
     pub fn confined_with_effective(
@@ -862,7 +862,7 @@ impl PolicyInputs {
                         zero_migrate_policy::LoadContext::NonRootLayer,
                     )
                     .ok()?;
-                    zero_migrate_policy::compose_strict(&ceiling, &draft, &registry).ok()
+                    zero_migrate_policy::admit(&ceiling, &draft, &registry).ok()
                 });
         composed.unwrap_or_else(|| EffectivePolicy::deny_all(&registry))
     }

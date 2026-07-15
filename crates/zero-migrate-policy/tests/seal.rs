@@ -9,7 +9,7 @@
 //! present.
 
 use zero_migrate_policy::{
-    compose_strict, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, PolicyDoc,
+    admit, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, PolicyDoc,
     PolicyRegistry, Polarity, RootCeiling, SealError,
 };
 
@@ -98,7 +98,7 @@ fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolic
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    compose_strict(&root, &draft, reg).unwrap()
+    admit(&root, &draft, reg).unwrap()
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +154,7 @@ scope = { include = ["app_*"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let policy_600 = compose_strict(&root, &draft_600, &reg).unwrap();
+    let policy_600 = admit(&root, &draft_600, &reg).unwrap();
     let sealed = seal(&policy_600, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CEILING_VER);
 
     // A tightened tamper: draft 60 @ app_* — a DIFFERENT effective grant map.
@@ -169,7 +169,7 @@ scope = { include = ["app_*"] }
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft_60, &reg).unwrap();
+    let tampered = admit(&root, &draft_60, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -198,7 +198,7 @@ fn tampered_scope_fails() {
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft, &reg).unwrap();
+    let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -220,7 +220,7 @@ fn tampered_inject_column_fails() {
         zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    let tampered = compose_strict(&root, &draft, &reg).unwrap();
+    let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
         sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
@@ -324,8 +324,8 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
 
-    let pa = compose_strict(&RootCeiling::parse_toml(a_toml, &reg).unwrap(), &empty, &reg).unwrap();
-    let pb = compose_strict(&RootCeiling::parse_toml(b_toml, &reg).unwrap(), &empty, &reg).unwrap();
+    let pa = admit(&RootCeiling::parse_toml(a_toml, &reg).unwrap(), &empty, &reg).unwrap();
+    let pb = admit(&RootCeiling::parse_toml(b_toml, &reg).unwrap(), &empty, &reg).unwrap();
 
     let sa = seal(&pa, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CEILING_VER);
     // The seal minted over order-A must NOT verify against order-B's policy.

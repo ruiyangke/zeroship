@@ -151,7 +151,7 @@ pub const fn variants() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::policy_registry::builtin_registry;
-    use zero_migrate_policy::{compose_strict, LoadContext, PolicyDoc, RootCeiling};
+    use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCeiling};
 
     /// Compose an [`EffectivePolicy`] over the builtin registry from a ceiling TOML
     /// (the operator obligation) against an empty creator draft.
@@ -161,7 +161,7 @@ mod tests {
         let empty_draft =
             PolicyDoc::parse_toml("policy_version = 1\n", &reg, LoadContext::NonRootLayer)
                 .expect("empty draft parses");
-        compose_strict(&root, &empty_draft, &reg).expect("composes")
+        admit(&root, &empty_draft, &reg).expect("composes")
     }
 
     fn drop_table(schema: &str, table: &str) -> Op {

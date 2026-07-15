@@ -38,23 +38,26 @@
 //!
 //! - [`value_order`] — the per-knob VALUE lattice (`⊑_value`/`⊔_value`/`⊓_value`),
 //!   derived from each [`knob::KnobKind`] so no facet-specific meet can drift.
-//! - [`compose`] — [`RootCeiling`] (the only trust anchor), [`compose_strict`]
-//!   (untrusted-draft ingress: pointwise `draft ⊑ ceiling` grants + union-up
-//!   require/inject/validate + compose-time collision blame + the creatable-scope
-//!   lint), [`compose_clamp`] (meet of two trusted ceilings — associative, total),
-//!   and the UNFORGEABLE [`EffectivePolicy`] with its decision-query API
+//! - [`compose`] — [`RootCeiling`] (the only trust anchor), [`restrict`] (meet of two
+//!   trusted ceilings — associative, total), and the UNFORGEABLE [`EffectivePolicy`]
+//!   with its decision-query API
 //!   (`grants`/`obligations`/`injects_for`/`validates_for`/`is_injected_shape`). All
 //!   scope resolution lives here; the guard holds no `Scope`.
+//! - [`boundary`] — [`admit`] (untrusted-draft ingress: pointwise `draft ⊑ ceiling`
+//!   grants + union-up require/inject/validate + compose-time collision blame + the
+//!   creatable-scope lint), the SOLE untrusted trust-boundary crossing, deliberately
+//!   apart from the trusted combinators.
 //! - [`seal`] — [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
 //!   the sealed inject total order) ‖ registry digest ‖ `(dialect, matcher_version)`
 //!   ‖ `ceiling_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
 //!   tamper or binding mismatch.
 //!
 //! The pointwise-grant admissibility check is proven by a brute-force COMPOSITION
-//! ORACLE (`tests/compose_oracle.rs`): `compose_strict` is `Ok` IFF the draft is
+//! ORACLE (`tests/compose_oracle.rs`): `admit` is `Ok` IFF the draft is
 //! pointwise `⊑` the ceiling at every object and key. Where prose review of the
 //! escalation check could not be trusted, the oracle-green code is authoritative.
 
+pub mod boundary;
 pub mod compose;
 pub mod document;
 pub mod knob;
@@ -81,8 +84,9 @@ pub use scope::{
     Difference, Scope, ScopeError,
 };
 pub use value_order::{join_value, leq_value, meet_value, ValueOrderError};
+pub use boundary::admit;
 pub use compose::{
-    compose_clamp, compose_strict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy,
-    GrantRegion, RootCeiling, ShapeElement,
+    restrict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy, GrantRegion, RootCeiling,
+    ShapeElement,
 };
 pub use seal::{seal, SealError, SealedPolicy};
