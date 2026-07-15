@@ -608,6 +608,84 @@ scope = { include = ["staging"] }
     assert!(!vals.is_empty(), "ceiling validate dropped");
 }
 
+/// An `OrderedEnum` `Require` obligation modelled on `sec.require_approval`
+/// (`never ⊑ on_destructive ⊑ always`), for the union-up composition test.
+fn registry_with_require_approval() -> PolicyRegistry {
+    registry()
+        .with([def(
+            "sec.require_approval",
+            KnobKind::OrderedEnum {
+                variants: vec!["never".into(), "on_destructive".into(), "always".into()],
+            },
+            Polarity::Require,
+            KnobValue::Str("never".into()),
+        )])
+        .unwrap()
+}
+
+#[test]
+fn require_approval_composes_union_up_operator_always_beats_creator_never() {
+    let reg = registry_with_require_approval();
+    // OPERATOR ceiling requires approval ALWAYS on app_*.
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[require]]
+key = "sec.require_approval"
+value = "always"
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+
+    // CREATOR draft tries to LOWER it to `never` on the same scope.
+    let draft = PolicyDoc::parse_toml(
+        r#"policy_version = 1
+[[require]]
+key = "sec.require_approval"
+value = "never"
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+
+    // compose_strict is Ok: a Require obligation composes UP, so a draft can never
+    // LOWER a ceiling obligation — the draft `never` is admissible (it only ever
+    // raises), and the effective value is the union-up `always`.
+    let ep = compose_strict(&root, &draft, &reg).unwrap();
+    let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let obs = ep.obligations(&app_t);
+
+    // The operator's `always` obligation survives (the creator could not drop it).
+    assert!(
+        obs.iter().any(|(k, v)| k.as_str() == "sec.require_approval"
+            && *v == KnobValue::Str("always".into())),
+        "operator `always` obligation dropped by creator draft: {obs:?}"
+    );
+    // The effective LOOSEST covering obligation is `always` (rank-max over the two
+    // covering rules `always` and `never`).
+    let loosest = obs
+        .iter()
+        .filter(|(k, _)| k.as_str() == "sec.require_approval")
+        .filter_map(|(_, v)| match v {
+            KnobValue::Str(s) => Some(s.clone()),
+            _ => None,
+        })
+        .max_by_key(|s| match s.as_str() {
+            "never" => 0u8,
+            "on_destructive" => 1,
+            "always" => 2,
+            _ => 3,
+        });
+    assert_eq!(
+        loosest.as_deref(),
+        Some("always"),
+        "creator `never` must not lower the operator `always` obligation"
+    );
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Compose-time collision blame
 // ══════════════════════════════════════════════════════════════════════════════

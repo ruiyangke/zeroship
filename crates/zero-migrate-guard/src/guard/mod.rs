@@ -284,12 +284,6 @@ impl GuardConfig {
         require_rls: bool,
         destructive_ops: DestructiveOps,
     ) -> Self {
-        let destructive_ops = match destructive_ops {
-            // Approval is server-only. If a direct caller hands it to the guard,
-            // fail closed by enforcing the stricter projection.
-            DestructiveOps::RequireApproval => DestructiveOps::Forbid,
-            other => other,
-        };
         let inputs = PolicyInputs::from_effective(&self.effective);
         let dialect = self.dialect;
         Self::from_policy(
@@ -828,9 +822,8 @@ impl PolicyInputs {
         let destructive_variant = match self.destructive_ops {
             DestructiveOps::Allow => Some("allow"),
             DestructiveOps::Warn => Some("warn"),
-            // Forbid is the deny default; RequireApproval is projected to Forbid by
-            // the builder. Neither needs an explicit grant.
-            DestructiveOps::Forbid | DestructiveOps::RequireApproval => None,
+            // Forbid is the deny default; it needs no explicit grant.
+            DestructiveOps::Forbid => None,
         };
         if let Some(variant) = destructive_variant {
             grant_rules.push(serde_json::json!({
@@ -1696,7 +1689,7 @@ impl SqlGuard {
         // The destructive posture now rides in the effective policy (the
         // `sec.destructive_ops` grant); query it rather than the field.
         match self.cfg.effective_destructive_ops() {
-            DestructiveOps::Forbid | DestructiveOps::RequireApproval => match class.data_security {
+            DestructiveOps::Forbid => match class.data_security {
                 DataSecurityClass::NonDestructive => Ok(()),
                 DataSecurityClass::Destructive(operation) => Err(GuardError::DataSecurityPolicy {
                     rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,

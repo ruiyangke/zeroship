@@ -127,9 +127,23 @@ pub const KEY_SEC_REQUIRE_RLS: &str = "sec.require_rls";
 pub const KEY_SEC_NO_HARD_DELETE: &str = "sec.no_hard_delete";
 /// Data-security destructive posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
 pub const KEY_SEC_DESTRUCTIVE_OPS: &str = "sec.destructive_ops";
+/// Data-security approval OBLIGATION: `never` ⊑ `on_destructive` ⊑ `always`
+/// (OrderedEnum, `Require` polarity — composes UP, un-lowerable). This is a SEALED
+/// obligation the engine only DECLARES: it is `Enforcement::DeclaredOnly`, so the
+/// engine's own guard/apply never gate on it. The HOST (`migrated`) reads it via
+/// [`crate::policy_approval::migration_requires_approval`] and enforces approval as a
+/// state machine — the engine `apply` stays dumb. Object-scoped like every other
+/// knob (the level resolves per target object; the host ORs across a migration's ops).
+pub const KEY_SEC_REQUIRE_APPROVAL: &str = "sec.require_approval";
 
 /// The tightest→loosest variant order shared by the posture OrderedEnum knobs.
 const POSTURE_VARIANTS: &[&str] = &["forbid", "warn", "allow"];
+
+/// The tightest→loosest variant order for the `sec.require_approval` obligation:
+/// `never` ⊑ `on_destructive` ⊑ `always`. `never` is the tightest (no obligation);
+/// composition UNIONS up toward `always` (the operator raises, the creator cannot
+/// lower). This is the value order the OrderedEnum kind imposes.
+pub const REQUIRE_APPROVAL_VARIANTS: &[&str] = &["never", "on_destructive", "always"];
 
 // ══════════════════════════════════════════════════════════════════════════════
 // VendorCapability → KnobKey
@@ -233,6 +247,25 @@ fn posture_grant(key: &str, docs: &str) -> KnobDef {
     }
 }
 
+/// The `sec.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
+/// OrderedEnum, `Require` polarity (composes UP), `DeclaredOnly` enforcement (the
+/// engine never gates on it — the HOST does), default `never` (no obligation).
+/// Object-scoped so an operator can require approval on exactly the objects it names.
+fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
+    KnobDef {
+        key: KnobKey::parse(key).expect("builtin knob key well-formed"),
+        kind: KnobKind::OrderedEnum {
+            variants: REQUIRE_APPROVAL_VARIANTS.iter().map(|s| (*s).to_string()).collect(),
+        },
+        polarity: Polarity::Require,
+        default: KnobValue::Str("never".to_string()),
+        enforcement: Enforcement::DeclaredOnly,
+        object_model: ObjectModel::PerTable,
+        requires_db_privilege: false,
+        docs: docs.to_string(),
+    }
+}
+
 /// The engine's BUILTIN [`PolicyRegistry`]: every zero-migrate knob the guard and
 /// validator gate on, as PDP knob defs. An [`EffectivePolicy`] the guard queries is
 /// composed over exactly this registry, so `grants(key, object)` resolves to the
@@ -294,6 +327,11 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_require(KEY_SEC_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled."),
             bool_require(KEY_SEC_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP."),
             posture_grant(KEY_SEC_DESTRUCTIVE_OPS, "Destructive-op posture: forbid ⊑ warn ⊑ allow."),
+            // The approval obligation — DECLARED by the engine, ENFORCED by the host.
+            require_approval_knob(
+                KEY_SEC_REQUIRE_APPROVAL,
+                "Approval obligation: never ⊑ on_destructive ⊑ always (host-enforced state machine).",
+            ),
         ])
         .expect("builtin registry keys are distinct + well-formed")
 }
@@ -387,6 +425,33 @@ mod tests {
             assert_eq!(def.polarity, Polarity::Require);
             assert_eq!(def.default, KnobValue::Bool(false));
         }
+    }
+
+    #[test]
+    fn require_approval_is_a_declared_only_require_obligation() {
+        let reg = builtin_registry();
+        let def = reg
+            .get(&KnobKey::parse(KEY_SEC_REQUIRE_APPROVAL).unwrap())
+            .expect("sec.require_approval is registered");
+        // Require polarity (composes UP — operator raises, creator cannot lower).
+        assert_eq!(def.polarity, Polarity::Require);
+        // DeclaredOnly — the engine never enforces it (the host does).
+        assert_eq!(def.enforcement, Enforcement::DeclaredOnly);
+        // Object-scoped like the other knobs.
+        assert_eq!(def.object_model, ObjectModel::PerTable);
+        // Default is the tightest variant, `never` (no obligation).
+        assert_eq!(def.default, KnobValue::Str("never".to_string()));
+        // The three-variant never ⊑ on_destructive ⊑ always order.
+        assert_eq!(
+            def.kind,
+            KnobKind::OrderedEnum {
+                variants: vec![
+                    "never".to_string(),
+                    "on_destructive".to_string(),
+                    "always".to_string(),
+                ]
+            }
+        );
     }
 
     #[test]
