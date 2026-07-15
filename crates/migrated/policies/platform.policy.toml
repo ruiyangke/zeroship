@@ -5,11 +5,12 @@
 # shape (the platform's own `db/migrations-ts` author their tables verbatim), so
 # `resolve_create_table_policy` is a no-op over it. It grants the full privileged
 # vendor-capability set the platform bootstrap needs (roles, grants, extensions,
-# schemas, RLS, policies, functions, raw SQL, materialized views) plus the
-# `core.raw_island_role` relaxation the platform's bootstrap DO-blocks need
-# (CREATE ROLE / ALTER ROLE ... SET search_path inside raw islands).
+# schemas, RLS, policies, functions, raw SQL, materialized views). The raw-island
+# role / search_path needle relaxation is no longer a distinct grant — the guard's
+# INTERNAL vendor-lower rule keys off `access.role` (GuardMode::Enforced + access.role),
+# which this posture satisfies by holding `access.role`.
 #
-# It does NOT grant `core.skip_static_guard` — that is the public dbmate-like
+# It does NOT set `GuardMode::Off` (the belt-skip) — that is the public dbmate-like
 # "trusted" posture, which the managed server never mints. Every grant is `scope =
 # "all"`; the platform is unconfined by design.
 
@@ -17,89 +18,80 @@ policy_version = 1
 
 # ── privileged vendor capabilities (whole-DB) ──
 [[grant]]
-key = "pg.role"
+key = "access.role"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.grant"
+key = "access.grant"
+value = true
+scope = "all"
+
+# The CREATE EXTENSION allowlist (StrSet) IS the extension capability (empty = deny
+# all). The platform migrations rely on `citext` + `uuid-ossp`.
+[[grant]]
+key = "code.extension"
+value = ["citext", "uuid-ossp"]
+scope = "all"
+
+[[grant]]
+key = "schema.create_schema"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.extension"
+key = "access.policy"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.schema"
+key = "access.rls"
 value = true
 scope = "all"
 
 [[grant]]
-key = "core.create_schema"
+key = "schema.partition"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.policy"
+key = "code.function"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.rls"
+key = "sql.raw"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.partition"
+key = "sql.raw_view_body"
 value = true
 scope = "all"
 
 [[grant]]
-key = "pg.function"
-value = true
-scope = "all"
-
-[[grant]]
-key = "core.raw_sql"
-value = true
-scope = "all"
-
-[[grant]]
-key = "core.raw_view_body"
-value = true
-scope = "all"
-
-[[grant]]
-key = "pg.materialized_view"
+key = "code.materialized_view"
 value = true
 scope = "all"
 
 # ── namespace authority (create / move tables anywhere) ──
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = "all"
 
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 
 [[grant]]
-key = "core.rename_into"
-value = true
-scope = "all"
-
-# ── operator raw-island relaxation (role / search_path needles in raw bodies) ──
-[[grant]]
-key = "core.raw_island_role"
+key = "schema.rename"
 value = true
 scope = "all"
 
 # ── destructive posture ──
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
