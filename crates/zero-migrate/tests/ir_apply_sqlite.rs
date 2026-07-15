@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr, PolicyProfile,
+    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr,
     SqlDialect, SqliteBackend,
 };
 
@@ -56,7 +56,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
-        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -79,7 +79,7 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
     // The REAL fail-closed gate + lower, SQLite dialect.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("a valid IR envelope must lower on SQLite");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
@@ -128,7 +128,7 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("date columns must validate and lower on SQLite");
     assert!(
         migrations
@@ -194,7 +194,6 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
             &registry(&[]),
             &LiveSchema::default(),
             &guard_cfg,
-            None,
         )
         .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
 
@@ -287,7 +286,7 @@ async fn out_of_envelope_splitpart_refused_on_sqlite() {
     live.insert("users".to_string());
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let err = author
-        .load_and_lower(ir, APP, &registry(&[("users", APP)]), &(&live).into(), None)
+        .load_and_lower(ir, APP, &registry(&[("users", APP)]), &(&live).into())
         .expect_err("an out-of-envelope splitPart must be refused on SQLite");
     match err {
         LoadAndLowerError::Load(zero_migrate::IrLoadError::Validate(ae)) => {

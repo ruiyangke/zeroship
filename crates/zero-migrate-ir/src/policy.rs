@@ -99,9 +99,14 @@ impl SchemaScope {
 }
 
 /// Destructive operation posture. Ordered from more restrictive to less
-/// restrictive. `RequireApproval` is retained as a server composition value, but
-/// sealed engine configs accept only the enforceable `forbid`/`warn`/`allow`
-/// states.
+/// restrictive: `forbid` ⊑ `warn` ⊑ `allow`. This is the enforceable
+/// `sec.destructive_ops` guard posture ONLY — the guard denies/warns/allows a
+/// destructive statement by it.
+///
+/// Approval is NOT one of these states. It is the separate, host-enforced
+/// `sec.require_approval` obligation (`never`/`on_destructive`/`always`) the engine
+/// only DECLARES (see [`crate::policy_registry::KEY_SEC_REQUIRE_APPROVAL`] +
+/// [`crate::policy_approval`]); it composes independently of this posture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestructiveOps {
@@ -109,9 +114,7 @@ pub enum DestructiveOps {
     Forbid,
     /// Allow destructive operations and surface a structured warning.
     Warn,
-    /// Require server approval before projecting to forbid/allow.
-    RequireApproval,
-    /// Allow today's approval-gated behavior.
+    /// Allow destructive operations silently.
     #[default]
     Allow,
 }
@@ -119,10 +122,9 @@ pub enum DestructiveOps {
 impl DestructiveOps {
     const fn rank(self) -> u8 {
         match self {
-            Self::RequireApproval => 0,
-            Self::Forbid => 1,
-            Self::Warn => 2,
-            Self::Allow => 3,
+            Self::Forbid => 0,
+            Self::Warn => 1,
+            Self::Allow => 2,
         }
     }
 

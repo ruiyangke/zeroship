@@ -28,7 +28,7 @@ use crate::guard::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::ir::{MigrationIr, Op};
-use crate::model::policy::{DestructiveOps, SchemaScope, TrustProfile};
+use crate::model::policy::{DestructiveOps, SchemaScope};
 use crate::SqlDialect;
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
@@ -452,6 +452,7 @@ fn decision_of(g: &SqlGuard, sql: &str) -> GuardDecision {
         Ok(_) => GuardDecision::Allow,
         Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
         Err(GuardError::Parse(_)) => GuardDecision::Parse,
         Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
@@ -467,6 +468,7 @@ fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
         Ok(()) => GuardDecision::Allow,
         Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
         Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
         Err(GuardError::Parse(_)) => GuardDecision::Parse,
         Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
@@ -749,9 +751,15 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 #[test]
 fn t11_platform_capability_mints_only_via_runner_seam() {
     let cap = OperatorCapability::for_test();
-    // The token grants a Platform GuardConfig + ExecutorConfig.
+    // The token grants a Platform GuardConfig + ExecutorConfig. The Platform posture
+    // is now identified by its PDP shape: a schema allowlist scope + the full belt
+    // (it does NOT skip the static guard — only Trusted does).
     let gcfg = GuardConfig::platform(&cap, vec!["zero_migrate".into()], vec![]);
-    assert_eq!(gcfg.trust(), TrustProfile::Platform);
+    assert_eq!(
+        gcfg.schema_scope(),
+        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+    );
+    assert!(!gcfg.skips_denylist_belt(), "Platform runs the full static belt");
     let ecfg = crate::conn::ExecutorConfig::platform(
         &cap,
         "platform",
@@ -759,7 +767,11 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         vec!["zero_migrate".into()],
         vec![],
     );
-    assert_eq!(ecfg.guard_config().trust(), TrustProfile::Platform);
+    assert_eq!(
+        ecfg.guard_config().schema_scope(),
+        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+    );
+    assert!(!ecfg.guard_config().skips_denylist_belt());
     // NOTE: `OperatorCapability::new` is crate-private. Production code uses
     // named mint seams; tests use the `#[cfg(test)] for_test` seam. The
     // external un-nameability is pinned by tests/trybuild_*.

@@ -33,7 +33,7 @@ use zero_migrate::model::ir::{
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::schema::query::SqlDialect;
-use zero_migrate::{resolve_create_table_policy, PolicyProfile, SqliteBackend};
+use zero_migrate::{resolve_create_table_policy, zeroship_confined_ceiling, SqliteBackend};
 
 struct Paths {
     _dir: TempDir,
@@ -75,7 +75,7 @@ fn lower(op: Op) -> Vec<Migration> {
         preconditions: vec![],
         checksum: None,
     };
-    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
+    let ir = resolve_create_table_policy(&ir, &zeroship_confined_ceiling())
         .expect("guard test IR resolves");
     let author = IrAuthor::new("main", "app_test", SqlDialect::Sqlite);
     author

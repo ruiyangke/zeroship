@@ -31,7 +31,7 @@ use zero_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
 use zero_migrate::schema::query::SqlDialect as SchemaDialect;
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig,
-    MigrationBackend, MigrationEngine, PolicyProfile, SqlDialect, SqliteBackend,
+    MigrationBackend, MigrationEngine, SqlDialect, SqliteBackend,
 };
 use zero_migrate::{PlanStep, RenameStep};
 
@@ -173,7 +173,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             checksum: None,
         };
         let ir =
-            resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+            resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .expect("lower create");

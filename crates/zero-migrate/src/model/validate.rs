@@ -47,14 +47,14 @@
 //! structured-error envelope ([`AuthoringError`]), the `Dialect`/`UnsupportedKind`
 //! vocabulary, the `CODE_*` codes, [`TargetScope`], and [`validate_expr`] — now
 //! lives in the [`zero_migrate_ir::validate`] leaf crate. It carries no
-//! [`PolicyProfile`]/[`SchemaScope`](crate::model::policy::SchemaScope) dependency
-//! and no `pg_query`. THIS module keeps the policy-bound layer: the
-//! `SchemaScope`/`PolicyProfile`-threaded op/IR validators, the vendor-capability
-//! gate, the raw-view-body `pg_query` scan, and the primary-key policy check. The
+//! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
+//! THIS module keeps the policy-bound layer: the `SchemaScope`-threaded op/IR
+//! validators, the vendor-capability gate, the raw-view-body `pg_query` scan, and
+//! the pure primary-key validation. (Author-PK CONFORMANCE against the operator's
+//! injected shape is owned by the injection resolver, not this validator.) The
 //! structural surface is re-exported below so callers name it unchanged.
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
-use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
@@ -107,13 +107,7 @@ pub fn validate_ir(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
-    validate_ir_scoped(
-        ir,
-        target_dialect,
-        ts_locations,
-        None,
-        &PolicyProfile::confined(),
-    )
+    validate_ir_scoped(ir, target_dialect, ts_locations, None)
 }
 
 /// [`validate_ir`] threaded with the active schema confinement scope.
@@ -136,18 +130,10 @@ pub fn validate_ir_scoped(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
     schema_scope: Option<&crate::model::policy::SchemaScope>,
-    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
-        validate_op_scoped(
-            op,
-            target_dialect,
-            op_index,
-            ts,
-            schema_scope,
-            policy_profile,
-        )?;
+        validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
     validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
@@ -844,14 +830,7 @@ pub fn validate_op(
 ) -> Result<(), AuthoringError> {
     // The bare entry keeps the Trusted posture (no cross-schema confinement); the
     // schema-ident + guard-direction checks still run (trust-independent).
-    validate_op_scoped(
-        op,
-        target_dialect,
-        op_index,
-        ts_location,
-        None,
-        &PolicyProfile::confined(),
-    )
+    validate_op_scoped(op, target_dialect, op_index, ts_location, None)
 }
 
 fn validate_dialectal_op(
@@ -863,7 +842,6 @@ fn validate_dialectal_op(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
-    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     fn mk(
         target_dialect: Dialect,
@@ -925,7 +903,6 @@ fn validate_dialectal_op(
                     op_index,
                     ts_location,
                     schema_scope,
-                    policy_profile,
                 )?;
             }
         }
@@ -938,7 +915,6 @@ fn validate_dialectal_op(
                 op_index,
                 ts_location,
                 schema_scope,
-                policy_profile,
             )?;
         }
     }
@@ -950,7 +926,6 @@ fn validate_dialectal_op(
                 op_index,
                 ts_location,
                 schema_scope,
-                policy_profile,
             )?;
         }
     }
@@ -962,7 +937,6 @@ fn validate_dialectal_op(
                 op_index,
                 ts_location,
                 schema_scope,
-                policy_profile,
             )?;
         }
     }
@@ -981,7 +955,6 @@ pub fn validate_op_scoped(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
-    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
@@ -1003,7 +976,6 @@ pub fn validate_op_scoped(
             op_index,
             ts_location,
             schema_scope,
-            policy_profile,
         );
     }
 
@@ -1019,13 +991,7 @@ pub fn validate_op_scoped(
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
     // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
-    validate_create_table_primary_key_policy(
-        op,
-        target_dialect,
-        op_index,
-        ts_location,
-        policy_profile,
-    )?;
+    validate_create_table_primary_key_policy(op, target_dialect, op_index, ts_location)?;
     validate_op_support(op, target_dialect, op_index, ts_location)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
     validate_function_type_refs(op, target_dialect, op_index, ts_location)?;
@@ -1561,7 +1527,6 @@ fn validate_create_table_primary_key_policy(
     target_dialect: Dialect,
     op_index: usize,
     ts_location: Option<&str>,
-    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -1569,7 +1534,6 @@ fn validate_create_table_primary_key_policy(
         name,
         columns,
         primary_key,
-        indexes,
         ..
     } = op
     else {
@@ -1623,42 +1587,16 @@ fn validate_create_table_primary_key_policy(
         }
     }
 
-    if matches!(
-        policy_profile.system_shape.author_primary_key,
-        AuthorPrimaryKeyPolicy::Allow
-    ) {
-        return Ok(());
-    }
-
-    let matches_profile = crate::model::table_shape::resolved_create_table_matches_profile(
-        columns,
-        primary_key,
-        indexes,
-        policy_profile,
-    )
-    .map_err(|source| {
-        err(
-            CODE_TABLE_SHAPE_POLICY,
-            format!(
-                "createTable {name:?} could not validate against the active table-shape profile: \
-                 {source}"
-            ),
-            "fix the migration policy profile or regenerate the resolved IR".to_string(),
-        )
-    })?;
-
-    if !matches_profile {
-        return Err(err(
-            CODE_TABLE_SHAPE_POLICY,
-            format!(
-                "createTable {name:?} violates the active table-shape profile: \
-                 author_primary_key is forbid, so the resolved table must carry the profile \
-                 system columns, system indexes, and primaryKey [\"id\"]"
-            ),
-            "regenerate this migration under the confined profile, or apply it with a profile whose system_shape.author_primary_key is allow".to_string(),
-        ));
-    }
-
+    // NOTE (Cut 3 — de-thread PolicyProfile): the author-PK CONFORMANCE re-check
+    // (does the resolved table carry the operator's injected system shape / PK?) is
+    // no longer a hardcoded confined-profile gate here. That conformance is owned by
+    // the injection resolver ([`crate::model::table_shape::resolve_create_table_policy`]),
+    // which is the `EffectivePolicy`/`injects_for` evaluator: a `createTable` in a
+    // mandatory-inject scope whose author declares its own PK is refused there with
+    // `AuthorPrimaryKeyForbidden`. The generic engine no longer bakes zeroship's
+    // shape into validate-time; only the PURE primaryKey validation (empty / dup /
+    // absent-column, above) stays. See the design doc §"7-column system_shape → one
+    // inject rule".
     Ok(())
 }
 
@@ -4886,7 +4824,7 @@ mod tests {
     }
 
     fn validate_ir_platform(ir: &MigrationIr, dialect: Dialect) -> Result<(), AuthoringError> {
-        validate_ir_scoped(ir, dialect, &[], None, &PolicyProfile::platform())
+        validate_ir_scoped(ir, dialect, &[], None)
     }
 
     fn part_col(name: &str, ty: ColType, not_null: bool) -> IrColumn {
@@ -5469,8 +5407,7 @@ mod tests {
             &cross,
             Dialect::Postgres,
             &[],
-            Some(&scope),
-            &PolicyProfile::confined(),
+            Some(&scope)
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA, "got: {err}");
@@ -5486,8 +5423,7 @@ mod tests {
             &same,
             Dialect::Postgres,
             &[],
-            Some(&scope),
-            &PolicyProfile::confined(),
+            Some(&scope)
         )
         .is_ok());
 
@@ -5502,8 +5438,7 @@ mod tests {
             &none,
             Dialect::Postgres,
             &[],
-            Some(&scope),
-            &PolicyProfile::confined(),
+            Some(&scope)
         )
         .is_ok());
     }
@@ -5525,8 +5460,7 @@ mod tests {
             &foreign,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::confined(),
+            None
         )
         .is_ok());
         // Platform allow-list excluding "anything": refused.
@@ -5535,8 +5469,7 @@ mod tests {
             &foreign,
             Dialect::Postgres,
             &[],
-            Some(&scope),
-            &PolicyProfile::platform(),
+            Some(&scope)
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA);
@@ -5551,8 +5484,7 @@ mod tests {
             &ok,
             Dialect::Postgres,
             &[],
-            Some(&scope),
-            &PolicyProfile::platform(),
+            Some(&scope)
         )
         .is_ok());
     }
@@ -5574,8 +5506,7 @@ mod tests {
                 &ir,
                 Dialect::Postgres,
                 &[],
-                None,
-                &PolicyProfile::confined(),
+                None
             )
             .unwrap_err();
             assert_eq!(
@@ -5608,8 +5539,7 @@ mod tests {
             &bad_create,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::platform(),
+            None
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
@@ -5625,8 +5555,7 @@ mod tests {
             &bad_drop,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::confined(),
+            None
         )
         .unwrap_err();
         assert_eq!(err2.code, CODE_GUARD_DIRECTION);
@@ -5649,8 +5578,7 @@ mod tests {
             &ok_create,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::platform(),
+            None
         )
         .is_ok());
     }
@@ -5675,8 +5603,7 @@ mod tests {
             &ir,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::platform(),
+            None
         )
         .expect("platform profile accepts author-owned composite createTable primaryKey");
     }
@@ -5701,14 +5628,18 @@ mod tests {
             &ir,
             Dialect::Postgres,
             &[],
-            None,
-            &PolicyProfile::platform(),
+            None
         )
         .expect("platform profile accepts no primary key");
     }
 
+    // Cut 3 — the author-PK CONFORMANCE refusal is now owned by the injection
+    // resolver (`resolve_create_table_policy` over the operator's `EffectivePolicy`),
+    // NOT a hardcoded confined-profile gate in `validate_ir_scoped`. A createTable in
+    // a mandatory-inject scope (author_primary_key = "forbid") that declares its own
+    // PK is refused there with `AuthorPrimaryKeyForbidden`.
     #[test]
-    fn confined_profile_refuses_create_table_author_primary_key() {
+    fn confined_inject_refuses_create_table_author_primary_key() {
         let ir = ir_with(vec![op_json(
             r#"{
               "op": "createTable",
@@ -5723,18 +5654,22 @@ mod tests {
             }"#,
         )]);
 
-        let err = validate_ir_scoped(
+        // The pure PK-column validation still passes (the columns exist); the shape
+        // conformance is the injection resolver's job.
+        validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
+            .expect("pure primaryKey validation passes (columns present)");
+
+        let err = crate::model::table_shape::resolve_create_table_policy(
             &ir,
-            Dialect::Postgres,
-            &[],
-            None,
-            &PolicyProfile::confined(),
+            &crate::model::table_shape::zeroship_confined_ceiling(),
         )
-        .expect_err("confined profile must refuse author-owned createTable primaryKey");
-        assert_eq!(err.code, CODE_TABLE_SHAPE_POLICY, "got: {err}");
+        .expect_err("a mandatory-inject scope must refuse an author-owned createTable primaryKey");
         assert!(
-            err.reason.contains("author_primary_key") && err.reason.contains("primaryKey"),
-            "policy refusal should name the profile gate, got: {err}"
+            matches!(
+                err,
+                crate::model::table_shape::TableShapeError::AuthorPrimaryKeyForbidden { .. }
+            ),
+            "expected AuthorPrimaryKeyForbidden, got {err:?}"
         );
     }
 
@@ -5751,11 +5686,13 @@ mod tests {
               "indexes": []
             }"#,
         )]);
-        let confined = PolicyProfile::confined();
-        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
-            .expect("confined table-shape resolution succeeds");
+        let resolved = crate::model::table_shape::resolve_create_table_policy(
+            &raw,
+            &crate::model::table_shape::zeroship_confined_ceiling(),
+        )
+        .expect("confined table-shape resolution succeeds");
 
-        validate_ir_scoped(&resolved, Dialect::Postgres, &[], None, &confined)
+        validate_ir_scoped(&resolved, Dialect::Postgres, &[], None)
             .expect("resolved confined system shape remains valid");
     }
 
@@ -6067,7 +6004,7 @@ mod tests {
         }]);
         let ir = crate::model::table_shape::resolve_create_table_policy(
             &ir,
-            &crate::model::profile::PolicyProfile::confined(),
+            &crate::model::table_shape::zeroship_confined_ceiling(),
         )
         .expect("resolve confined table shape");
         assert!(

@@ -30,6 +30,15 @@ default = ["host-pg"]
 # build (`--no-default-features --features host-pg`) stays cross-platform (no
 # io_uring), since no native network PG driver is ever present.
 host-pg = []
+# TEST-ONLY: exposes the generic `zeroship_confined_ceiling()` test ceiling
+# (an in-repo `RootCeiling` TOML reproducing today's confined system shape) as a
+# public function so the ENGINE-external integration tests can route their
+# `resolve_create_table_policy` setup through one shared helper. In-crate unit
+# tests reach it via `cfg(test)`; the crate's own `[dev-dependencies]` self-enable
+# turns it on for the integration-test crates too under plain `cargo test`. This is
+# the engine's GENERIC test ceiling; zeroship's REAL confined ceiling lives in the
+# monorepo, not here (no `confined` preset ships from the engine).
+test-support = []
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -76,6 +85,13 @@ zero-migrate-ir = { workspace = true }
 # re-exports this surface at its root so `zero_migrate::{SqlGuard, GuardConfig, …}`
 # names are unchanged.
 zero-migrate-guard = { workspace = true }
+# The Policy Decision Point (PDP): the scope lattice + composition algebra +
+# unforgeable `EffectivePolicy`. `resolve_create_table_policy` drives its
+# column/index/PK injection off `EffectivePolicy::injects_for(object)` (the
+# injection-as-rule model), replacing the old `PolicyProfile.system_shape`. This
+# crate is a pure LEAF (no SQL deps) — the engine maps its opaque inject `ty`
+# tokens to `ColType`.
+zero-migrate-policy = { workspace = true }
 # The canonical version→id derivation (in the loader) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
@@ -115,6 +131,11 @@ tracing = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+# Self-enable the `test-support` feature for the ENGINE-external integration-test
+# crates (a crate can list itself as a dev-dependency to switch on a feature only
+# for its own tests). This makes `zeroship_confined_ceiling()` (the shared generic
+# test ceiling) visible to `tests/*.rs` under plain `cargo test` — no extra flags.
+zero-migrate = { path = ".", features = ["test-support"] }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is
 # `async`, so the test harness drives it on a runtime. `#[compio::test]` spins a
 # throwaway compio run loop per test (zero tokio) to `.await` the seam-generic

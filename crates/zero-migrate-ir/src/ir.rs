@@ -3546,6 +3546,113 @@ impl Op {
         }
     }
 
+    /// Is this op DESTRUCTIVE / data-lossy — the SAME notion the guard's
+    /// `data_security_class` classifies (`sec.destructive_ops` consumes) at the SQL
+    /// level, mapped onto the closed [`Op`] vocabulary.
+    ///
+    /// The guard is the authoritative classifier over rendered SQL; this is its
+    /// Op-level mirror for callers that must decide destructiveness BEFORE lowering
+    /// (the host's `sec.require_approval` `on_destructive` query). It is EXHAUSTIVE
+    /// over the closed [`Op`] set — a new variant is a compile error until it
+    /// declares its data-security class, so the two classifiers cannot silently
+    /// drift.
+    ///
+    /// The destructive shapes track the guard's `data_security_class`:
+    /// - every `DROP` of a durable object (table/column/schema/view/sequence/enum
+    ///   =`DROP TYPE`/domain/function/constraint) + `DROP OWNED BY`;
+    /// - a partition `DROP` (`DROP TABLE <partition>`) and `DETACH PARTITION`;
+    /// - a column TYPE change (`ALTER COLUMN TYPE` — potentially lossy);
+    /// - the row-affecting DML (`UPDATE`/`DELETE`, and `Backfill`, whose assembled
+    ///   `UPDATE` is the same shape).
+    ///
+    /// Deliberately NON-destructive (matching the guard): `DROP INDEX` (index drops
+    /// are reversible structure at the SQL level — a UNIQUE-index drop is gated
+    /// separately via [`crate::migration::MigrationFlags`], not here), `DROP ROLE`,
+    /// `DROP EXTENSION`, `DROP POLICY`, `DROP TRIGGER`, `REVOKE`, and every additive
+    /// op. `Dialectal` is destructive iff ANY present leg has a destructive op; a
+    /// `PgRaw` island carries opaque SQL the guard classifies at parse time, so at
+    /// the Op level it is treated as destructive (fail-closed — it may drop/delete).
+    #[must_use]
+    pub fn is_destructive(&self) -> bool {
+        match self {
+            // ── durable-object drops (guard: DROP <object>) ────────────────────
+            Self::DropTable { .. }
+            | Self::DropColumn { .. }
+            | Self::DropSchema { .. }
+            | Self::DropView { .. }
+            | Self::DropSequence { .. }
+            | Self::DropEnum { .. }
+            | Self::DropDomain { .. }
+            | Self::DropFunction { .. }
+            | Self::DropConstraint { .. }
+            | Self::DropOwnedBy { .. }
+            // ── partition drop / detach ────────────────────────────────────────
+            | Self::DropPartition { .. }
+            | Self::DetachPartition { .. }
+            // ── potentially-lossy column type change ───────────────────────────
+            | Self::SetColumnType { .. }
+            // ── row-affecting DML ──────────────────────────────────────────────
+            | Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::Backfill { .. }
+            // ── opaque raw SQL — fail closed ───────────────────────────────────
+            | Self::PgRaw { .. } => true,
+            // `Dialectal` is destructive iff any present leg is.
+            Self::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => [
+                default.as_deref(),
+                pg.as_deref(),
+                sqlite.as_deref(),
+                mysql.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(Op::is_destructive),
+            // ── additive / non-lossy — NOT destructive (guard: NonDestructive) ─
+            Self::CreateTable { .. }
+            | Self::CreatePartition { .. }
+            | Self::AttachPartition { .. }
+            | Self::SetTableOptions { .. }
+            | Self::RenameTable { .. }
+            | Self::AddColumn { .. }
+            | Self::CreateIndex { .. }
+            | Self::DropIndex { .. }
+            | Self::SetColumnNotNull { .. }
+            | Self::DropColumnNotNull { .. }
+            | Self::SetColumnDefault { .. }
+            | Self::DropColumnDefault { .. }
+            | Self::RenameColumn { .. }
+            | Self::AddConstraint { .. }
+            | Self::ValidateConstraint { .. }
+            | Self::Insert { .. }
+            | Self::CreateView { .. }
+            | Self::CreateEnum { .. }
+            | Self::CreateDomain { .. }
+            | Self::CreateSequence { .. }
+            | Self::AlterSequence { .. }
+            | Self::Comment { .. }
+            | Self::CreateSchema { .. }
+            | Self::CreateExtension { .. }
+            | Self::DropExtension { .. }
+            | Self::CreateRole { .. }
+            | Self::AlterRole { .. }
+            | Self::DropRole { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::CreateFunction { .. }
+            | Self::SetRls { .. }
+            | Self::CreatePolicy { .. }
+            | Self::DropPolicy { .. }
+            | Self::CreateTrigger { .. }
+            | Self::DropTrigger { .. } => false,
+        }
+    }
+
     /// Add every table this op can touch into `set`. Most ops touch at most one
     /// table and delegate to [`Self::touched_table`]; `Dialectal` recursively
     /// flattens all present legs because its op sequence can touch several tables.

@@ -186,19 +186,37 @@ pub use guard::{
     flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
     PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
-pub use model::policy::{SchemaScope, TrustProfile};
-pub use model::profile::{
-    seal_effective_profile, AuthorPrimaryKeyPolicy, DataSecurityConfig, DestructiveOps,
-    IndexCreation, InjectedSystemColumnPolicy, InjectedSystemIndexPolicy, OperationalConfig,
-    PolicyCapabilities, PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile,
-    PrimaryKeyAuthorPolicy, RoleAttribute, RoleCapabilityConfig, SealError, SealVerifier,
-    SealedPosture, SealedProfile, TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy,
-    CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
+pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
+// The policy PDP seal primitives (Phase 2 Step 3 — the `PolicyProfile`-era seal
+// machinery `seal_effective_profile`/`SealedProfile`/`SealVerifier`/`SealedPosture`
+// is deleted; the surviving seal is the `zero-migrate-policy` HMAC over a composed
+// `EffectivePolicy`).
+pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
+pub use model::table_shape::{
+    confined_no_inject_policy, effective_policy_from_ceiling_toml, resolve_create_table_policy,
+    TableShapeError,
 };
-pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
+// The composed policy-decision point the injection + guard share. Re-exported at
+// the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
+// name it without reaching into the `zero-migrate-policy` crate directly.
+pub use zero_migrate_policy::EffectivePolicy;
+#[cfg(any(test, feature = "test-support"))]
+pub use model::table_shape::{
+    zeroship_confined_ceiling, zeroship_no_inject_ceiling, ZEROSHIP_CONFINED_CEILING_TOML,
+};
 pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
     ProduceError, RecoveredCheck,
+};
+// The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or
+// a declared `CollectionDescriptor` set) into the two co-emitted projections
+// (`schema.runtime.json` v1 descriptor + generated `env.db.ts`), plus the in-memory
+// `--check` drift gate. Both sources route through the SAME renderer, so output is
+// byte-identical for equivalent schemas.
+pub use render::gen_types::{
+    check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
+    CheckDiff, GenTypesError, GeneratedArtifacts, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
+    RUNTIME_DESCRIPTOR_FILE,
 };
 // The deploy-target dialect — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new`.

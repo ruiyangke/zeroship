@@ -1722,20 +1722,40 @@ fn column_snapshot_for_field(
     })
 }
 
+/// The confined system-shape CONTENT this codegen renders (G7): the fixed column
+/// list + index list + pinned PK, as plain engine data — NOT read from a
+/// `PolicyProfile`. This is the SDK-side mirror of what `plugin-db`'s
+/// `build_system_field_columns`/`build_system_field_indexes` materialise and of the
+/// confined inject rule the engine's `EffectivePolicy` carries; the differ renders
+/// this content, it does not judge policy. Kept here (a codegen constant) so the
+/// reverse-fold / desired-snapshot path is decoupled from the policy authoring
+/// surface. The type tokens are `information_schema` spellings.
+///
+/// `(name, information_schema_type, nullable)` in canonical order: `id TEXT` (PK),
+/// `created_at`/`updated_at` `TIMESTAMPTZ NOT NULL`, `created_by`/`updated_by` `TEXT
+/// NULL`, `version` `INTEGER NOT NULL`, `deleted_at` `TIMESTAMPTZ NULL`.
+const CONFINED_SYSTEM_COLUMNS: &[(&str, &str, bool)] = &[
+    ("id", "text", false),
+    ("created_at", "timestamp with time zone", false),
+    ("updated_at", "timestamp with time zone", false),
+    ("created_by", "text", true),
+    ("updated_by", "text", true),
+    ("version", "integer", false),
+    ("deleted_at", "timestamp with time zone", true),
+];
+
 /// The seven platform-managed system fields, in canonical order, as
-/// [`ColumnSnapshot`]s. Replicated from `plugin-db`'s
-/// `build_system_field_columns` (`id TEXT PRIMARY KEY`, `created_at`/`updated_at`
-/// `TIMESTAMPTZ NOT NULL`, `created_by`/`updated_by` `TEXT NULL`, `version`
-/// `INTEGER NOT NULL`, `deleted_at` `TIMESTAMPTZ NULL`), expressed in
-/// `information_schema` data-type spelling.
+/// [`ColumnSnapshot`]s — rendered from the [`CONFINED_SYSTEM_COLUMNS`] content.
 ///
 /// Every collection table gets these injected by [`desired_snapshot`], matching
 /// what `installSchema` materialises, so the desired snapshot round-trips to the
 /// live table the SDK creates.
 #[cfg(test)]
 fn system_field_columns() -> Vec<ColumnSnapshot> {
-    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
-    shape.columns.iter().map(system_column_snapshot).collect()
+    CONFINED_SYSTEM_COLUMNS
+        .iter()
+        .map(|&(name, ty, nullable)| system_column_snapshot(name, ty, nullable))
+        .collect()
 }
 
 /// The columns the platform auto-indexes on every table. Mirrors
@@ -1745,30 +1765,19 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// is deliberately NOT indexed (bumped on every UPDATE — index thrash).
 const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
 
-fn system_column_snapshot(
-    column: &crate::model::profile::InjectedSystemColumnPolicy,
-) -> ColumnSnapshot {
+fn system_column_snapshot(name: &str, data_type: &str, nullable: bool) -> ColumnSnapshot {
     ColumnSnapshot {
-        name: column.name.clone(),
-        data_type: column.data_type.clone(),
-        nullable: column.nullable,
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        nullable,
         ..Default::default()
     }
 }
 
-fn system_index_snapshots(
-    table: &str,
-    indexes: &[crate::model::profile::InjectedSystemIndexPolicy],
-) -> Vec<IndexSnapshot> {
-    indexes
+fn system_index_snapshots(table: &str) -> Vec<IndexSnapshot> {
+    SYSTEM_INDEXED_COLS
         .iter()
-        .map(|idx| {
-            IndexSnapshot::btree(
-                non_unique_index_name(table, &idx.columns.join("_")),
-                false,
-                idx.columns.clone(),
-            )
-        })
+        .map(|col| IndexSnapshot::btree(non_unique_index_name(table, col), false, vec![(*col).to_string()]))
         .collect()
 }
 
@@ -2055,12 +2064,11 @@ pub(crate) fn build_resolved_table_snapshot(
 }
 
 fn carries_confined_system_column_prefix(d: &CollectionDescriptor) -> bool {
-    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
-    d.fields.len() >= shape.columns.len()
+    d.fields.len() >= CONFINED_SYSTEM_COLUMNS.len()
         && d.fields
             .iter()
-            .zip(shape.columns.iter())
-            .all(|(field, system)| field.name == system.name)
+            .zip(CONFINED_SYSTEM_COLUMNS.iter())
+            .all(|(field, &(name, _, _))| field.name == name)
 }
 
 #[derive(Debug, Clone)]
@@ -2086,15 +2094,14 @@ impl SnapshotResolvedShape {
     }
 
     fn confined(table: &str) -> Self {
-        let shape = crate::model::profile::PolicyProfile::confined().system_shape;
-        let primary_key = match shape.primary_key {
-            crate::model::profile::TablePrimaryKeyPolicy::ExplicitColumns(columns) => Some(columns),
-            crate::model::profile::TablePrimaryKeyPolicy::Author(_) => None,
-        };
         Self {
-            columns: shape.columns.iter().map(system_column_snapshot).collect(),
-            indexes: system_index_snapshots(table, &shape.indexes),
-            primary_key,
+            columns: CONFINED_SYSTEM_COLUMNS
+                .iter()
+                .map(|&(name, ty, nullable)| system_column_snapshot(name, ty, nullable))
+                .collect(),
+            indexes: system_index_snapshots(table),
+            // The confined shape pins the primary key to `["id"]`.
+            primary_key: Some(vec!["id".to_string()]),
         }
     }
 
@@ -7258,25 +7265,26 @@ mod snapshot_builder_refactor_safety_tests {
     }
 
     fn system_prefix_fields() -> Vec<FieldDescriptor> {
-        crate::model::profile::PolicyProfile::confined()
-            .system_shape
-            .columns
-            .into_iter()
-            .map(|column| {
-                let ty = match column.data_type.as_str() {
-                    "text" => "string",
-                    "timestamp with time zone" => "date",
-                    "integer" => "int",
-                    other => panic!("unexpected confined system column type {other}"),
-                };
-                FieldDescriptor {
-                    name: column.name,
-                    ty: ty.into(),
-                    required: !column.nullable,
-                    ..Default::default()
-                }
-            })
-            .collect()
+        // The zeroship confined system columns (the shape the confined ceiling's
+        // inject rule contributes) as descriptor fields. `(name, descriptor-type,
+        // required)`; required = NOT NULL.
+        [
+            ("id", "string", true),
+            ("created_at", "date", true),
+            ("updated_at", "date", true),
+            ("created_by", "string", false),
+            ("updated_by", "string", false),
+            ("version", "int", true),
+            ("deleted_at", "date", false),
+        ]
+        .into_iter()
+        .map(|(name, ty, required)| FieldDescriptor {
+            name: name.into(),
+            ty: ty.into(),
+            required,
+            ..Default::default()
+        })
+        .collect()
     }
 
     fn resolved_descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {

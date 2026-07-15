@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate::model::profile::PolicyProfile;
 use zero_migrate::model::validate::{
     validate_ir, validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
 };
@@ -245,8 +244,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
         &ir(vec![text_nextval.clone()]),
         Dialect::Postgres,
         &[],
-        None,
-        &PolicyProfile::platform(),
+        None
     )
     .unwrap_err();
     assert_eq!(
@@ -264,8 +262,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
             &ir(vec![text_nextval.clone()]),
             dialect,
             &[],
-            None,
-            &PolicyProfile::platform(),
+            None
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);

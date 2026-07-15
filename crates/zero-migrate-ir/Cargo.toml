@@ -32,6 +32,12 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 # UUIDv7-shaped migration ids (base62-encoded via the vendored typed-id module).
 uuid = { workspace = true }
+# The Policy Decision Point machine (KnobDef/KnobKey/KnobKind/PolicyRegistry). The
+# builtin registry (`policy_registry`) declares zero-migrate's engine knobs — the
+# vendor capabilities as grant keys + the op/security knobs — as the CONTENT the
+# PDP mechanism enforces. `zero-migrate-policy` is itself a pure-data leaf with no
+# dep on this crate, so `ir → policy` introduces no cycle and keeps ir a leaf.
+zero-migrate-policy = { workspace = true }
 
 [lints]
 workspace = true

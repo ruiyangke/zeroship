@@ -6,7 +6,7 @@ use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
 use zero_migrate::model::validate::{validate_ir, Dialect, CODE_OP_INVALID};
 use zero_migrate::{
     resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, PlanStep, PolicyProfile, SqlDialect, SqliteBackend,
+    MigrationEngine, MigrationIr, PlanStep, SqlDialect, SqliteBackend,
     CURRENT_IR_VERSION,
 };
 
@@ -119,7 +119,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
-        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -138,7 +138,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default(), None)
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("SQLite should lower createTable and skip absent dialectal leg");
     assert_eq!(
         migrations.len(),

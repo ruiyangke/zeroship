@@ -58,7 +58,8 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     );
 
     // GENERATED side: produce ops + fold-and-recover.
-    let ops = descriptors_to_create_ops(&[descriptor]).expect("producer");
+    let ops = descriptors_to_create_ops(&[descriptor], &zero_migrate::zeroship_confined_ceiling())
+        .expect("producer");
     let generated = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).expect("fold");
     let ssn = &generated["people"]["ssn"];
 

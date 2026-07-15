@@ -29,7 +29,8 @@ fn assert_denied(sql: &str) {
         Err(
             GuardError::Denied { .. }
             | GuardError::CrossSchema { .. }
-            | GuardError::DataSecurityPolicy { .. },
+            | GuardError::DataSecurityPolicy { .. }
+            | GuardError::NamespacePolicy { .. },
         ) => {}
         Err(GuardError::Parse(e)) => panic!("expected Denied, got Parse({e:?}) for: {sql}"),
         // The PG `guard()` here is never SQLite, so this is unreachable.

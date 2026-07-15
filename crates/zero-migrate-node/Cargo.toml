@@ -63,6 +63,12 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# TEST-ONLY: enable the engine's `test-support` so the lower tests can name the
+# generic confined test ceiling (`ZEROSHIP_CONFINED_CEILING_TOML`) as the policy
+# input. Not enabled for the shipped `.node` (dev-dependency only).
+zero-migrate = { path = "../zero-migrate", default-features = false, features = ["host-pg", "test-support"] }
+
 [build-dependencies]
 # `napi_build::setup()` only emits cdylib link args (allow-undefined for the Node
 # ABI symbols, resolved at `.node` load time) — it needs NO Node headers at build

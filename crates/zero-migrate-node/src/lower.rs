@@ -29,8 +29,11 @@ use std::collections::BTreeMap;
 
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::migration::Migration;
-use zero_migrate::model::profile::PolicyProfile;
-use zero_migrate::{resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, SqlDialect};
+use zero_migrate::model::table_shape::confined_no_inject_policy;
+use zero_migrate::{
+    effective_policy_from_ceiling_toml, resolve_create_table_policy, GuardConfig, IrAuthor,
+    LiveSchema, SqlDialect,
+};
 
 /// Map the wire dialect spelling to the render [`SqlDialect`]. Unknown → `Err`.
 fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
@@ -56,18 +59,25 @@ fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
 /// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
 /// - `registry_json` — the project's `{ "table": "owner_app", … }` map (drives the
 ///   ownership check); an empty object `{}` on a fresh single-app project.
+/// - `policy_ceiling_toml` — the **policy input**: the host's `RootCeiling` document
+///   (TOML) that drives table-shape injection. The engine constructs NO default
+///   ceiling: `None` injects nothing (the author-owned shape passes through); `Some`
+///   composes the ceiling (against an empty draft) into the `EffectivePolicy` whose
+///   `injects_for(object)` drives column/index/PK injection. The monorepo caller
+///   passes zeroship's confined ceiling here (Phase 3).
 ///
 /// # Errors
-/// A JSON `Err(message)` on: an unknown dialect, a malformed registry, the load gate
-/// refusing the artifact (malformed / future `ir_version` / structural reject /
-/// ownership violation / checksum-hint mismatch), or a lower failure — never a
-/// panic.
+/// A JSON `Err(message)` on: an unknown dialect, a malformed registry, a malformed
+/// policy ceiling document, the load gate refusing the artifact (malformed / future
+/// `ir_version` / structural reject / ownership violation / checksum-hint mismatch),
+/// or a lower failure — never a panic.
 pub fn lower_envelope_to_migrations(
     envelope_json: &str,
     owner_app: &str,
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
+    policy_ceiling_toml: Option<&str>,
 ) -> Result<Vec<Migration>, String> {
     let dialect = parse_sql_dialect(dialect)?;
     let registry: BTreeMap<String, String> = serde_json::from_str(registry_json)
@@ -76,17 +86,27 @@ pub fn lower_envelope_to_migrations(
     // **System-shape fold (mirrors the pure-JS recorder's fold).** The
     // pure-JS host recorder drains ONLY the author-declared columns — the
     // platform-managed system fields (`id`/`created_at`/`updated_at`/`version`/…)
-    // + the `["id"]` PRIMARY KEY are injected by `resolve_create_table_policy` under
-    // the **Confined creator profile**, NOT by the JS DSL. The native IR envelope on
-    // disk is post-fold (the recorder folds before writing); the host path folds
-    // here so the addon lowers the SAME resolved shape — otherwise the confined
-    // table-shape guard rejects a createTable missing its system columns
-    // (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never sees
-    // the system fields (they are platform-owned).
-    let confined = PolicyProfile::confined();
+    // + the `["id"]` PRIMARY KEY are injected by `resolve_create_table_policy` off the
+    // host-supplied POLICY CEILING (the `EffectivePolicy`'s `injects_for`), NOT by the
+    // JS DSL. The engine hardcodes no ceiling: the monorepo passes zeroship's confined
+    // ceiling. The native IR envelope on disk is post-fold (the recorder folds before
+    // writing); the host path folds here so the addon lowers the SAME resolved shape —
+    // otherwise the confined table-shape guard rejects a createTable missing its system
+    // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
+    // sees the system fields (they are platform-owned).
+    //
+    // Injection and guard share this one composed `EffectivePolicy`; the load gate
+    // no longer takes a separate `PolicyProfile` (retired in Cut 3).
+    let effective = match policy_ceiling_toml {
+        Some(toml) => effective_policy_from_ceiling_toml(toml)?,
+        // No ceiling supplied ⇒ inject nothing (author-owned shape). The engine
+        // constructs no default inject ceiling of its own, but still supplies the
+        // scoped confined namespace grants the guard requires.
+        None => confined_no_inject_policy(project_schema)?,
+    };
     let raw_ir: MigrationIr = serde_json::from_str(envelope_json)
         .map_err(|e| format!("envelope is not a MigrationIr document: {e}"))?;
-    let resolved = resolve_create_table_policy(&raw_ir, &confined)
+    let resolved = resolve_create_table_policy(&raw_ir, &effective)
         .map_err(|e| format!("table-shape resolve failed: {e}"))?;
     let resolved_bytes = serde_json::to_string(&resolved)
         .map_err(|e| format!("resolved IR failed to serialize: {e}"))?;
@@ -102,11 +122,7 @@ pub fn lower_envelope_to_migrations(
     // instead of the shared anchor — which diverges from the reference journal
     // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
     // checksum column is byte-identical to the reference path's.
-    let guard_cfg = match dialect {
-        SqlDialect::Postgres => GuardConfig::confined(project_schema.to_string()),
-        SqlDialect::Sqlite => GuardConfig::confined_sqlite(project_schema.to_string()),
-        SqlDialect::Mysql => GuardConfig::confined_mysql(project_schema.to_string()),
-    };
+    let guard_cfg = GuardConfig::from_policy(effective, dialect);
     author
         .load_and_lower_guarded(
             &resolved_bytes,
@@ -114,7 +130,6 @@ pub fn lower_envelope_to_migrations(
             &registry,
             &LiveSchema::default(),
             &guard_cfg,
-            Some(&confined),
         )
         .map(|artifact| artifact.migrations())
         .map_err(|e| e.to_string())
@@ -134,6 +149,7 @@ pub fn lower_envelope_to_migrations_json(
     project_schema: &str,
     dialect: &str,
     registry_json: &str,
+    policy_ceiling_toml: Option<&str>,
 ) -> Result<String, String> {
     let migrations = lower_envelope_to_migrations(
         envelope_json,
@@ -141,6 +157,7 @@ pub fn lower_envelope_to_migrations_json(
         project_schema,
         dialect,
         registry_json,
+        policy_ceiling_toml,
     )?;
     serde_json::to_string(&migrations)
         .map_err(|e| format!("failed to serialize lowered migrations: {e}"))
@@ -170,10 +187,13 @@ mod tests {
         .to_string()
     }
 
+    // The generic confined test ceiling the monorepo will supply in Phase 3.
+    const CEILING: &str = zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML;
+
     #[test]
     fn unknown_dialect_is_an_err_not_a_panic() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}");
+        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", Some(CEILING));
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("unknown dialect"));
     }
@@ -181,9 +201,25 @@ mod tests {
     #[test]
     fn malformed_registry_is_an_err() {
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]");
+        let r =
+            lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]", Some(CEILING));
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("registry_json"));
+    }
+
+    #[test]
+    fn malformed_policy_ceiling_is_an_err() {
+        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let r = lower_envelope_to_migrations(
+            &env,
+            "app_x",
+            "app_x",
+            "postgres",
+            "{}",
+            Some("this is not = valid toml ["),
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("policy"));
     }
 
     #[test]
@@ -195,7 +231,14 @@ mod tests {
         // fails closed with a message (never a panic). Both are acceptable proofs the
         // lower path is wired; the DB-backed oracle asserts journal identity.
         let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
-        match lower_envelope_to_migrations(&env, "app_widgets", "app_widgets", "postgres", "{}") {
+        match lower_envelope_to_migrations(
+            &env,
+            "app_widgets",
+            "app_widgets",
+            "postgres",
+            "{}",
+            Some(CEILING),
+        ) {
             Ok(migs) => {
                 assert!(
                     !migs.is_empty(),

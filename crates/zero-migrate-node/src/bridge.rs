@@ -50,8 +50,9 @@ use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 use crate::wire::{
-    ApplyReply, ApplyRequest, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
-    StatusReply, StatusRequest,
+    ApplyReply, ApplyRequest, CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply,
+    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
+    RuntimeOptionsDto, StatusReply, StatusRequest,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -104,6 +105,168 @@ pub fn load_verify(
     registry: std::collections::HashMap<String, String>,
 ) -> LoadVerifyReply {
     api::load_verify(&envelope_json, &deploying_app, &dialect, &registry)
+}
+
+/// `genArtifacts` — the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
+/// (EITHER a set of IR envelopes — the generated source — OR a declared
+/// `CollectionDescriptor` set — the manual source) into the two co-emitted
+/// artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
+/// renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
+/// same `policyCeilingToml` drives both (the confined system-shape injection is
+/// policy-driven, not a baked-in engine preset; the caller supplies the confined
+/// ceiling).
+///
+/// Runs inline on the napi call thread (no DB, no host driver). Returns a typed
+/// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
+/// malformed policy ceiling (never a throw). Exactly one of `envelopes`/`descriptors`
+/// must be populated.
+#[napi(js_name = "genArtifacts")]
+#[must_use]
+pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
+    let schema = source.project_schema.as_deref();
+    let ceiling = source.policy_ceiling_toml.as_deref();
+    match (source.envelopes, source.descriptors) {
+        (Some(_), Some(_)) => gen_artifacts_err(
+            "genArtifacts: exactly one of `envelopes` (generated source) or `descriptors` \
+             (manual source) must be set — both were provided",
+        ),
+        (None, None) => gen_artifacts_err(
+            "genArtifacts: a source is required — set `envelopes` (generated source) or \
+             `descriptors` (manual source)",
+        ),
+        (Some(envelopes), None) => {
+            api::gen_artifacts_from_envelopes(&envelopes, schema, ceiling)
+        }
+        (None, Some(dtos)) => {
+            let descriptors = match dtos
+                .into_iter()
+                .map(descriptor_dto_to_engine)
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(d) => d,
+                Err(e) => return gen_artifacts_err(e),
+            };
+            api::gen_artifacts_from_descriptors(&descriptors, schema, ceiling)
+        }
+    }
+}
+
+fn gen_artifacts_err(msg: impl Into<String>) -> GenArtifactsReply {
+    GenArtifactsReply {
+        ok: false,
+        env_db_ts: None,
+        runtime_json: None,
+        error: Some(msg.into()),
+    }
+}
+
+/// Convert a boundary [`CollectionDescriptorDto`] into the engine's declarative
+/// `CollectionDescriptor`. The rich sub-object facets crossed as `JsonValue`, so
+/// they `serde_json::from_value` into their closed engine types verbatim.
+fn descriptor_dto_to_engine(
+    dto: CollectionDescriptorDto,
+) -> std::result::Result<zero_migrate::render::declarative::CollectionDescriptor, String> {
+    use zero_migrate::render::declarative::{CollectionDescriptor, IndexDescriptor};
+
+    let fields = dto
+        .fields
+        .into_iter()
+        .map(field_dto_to_engine)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let indexes = dto
+        .indexes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| IndexDescriptor {
+            name: i.name,
+            columns: i.columns,
+            unique: i.unique.unwrap_or(false),
+        })
+        .collect();
+
+    let runtime_options = runtime_options_dto_to_engine(dto.runtime_options)?;
+
+    Ok(CollectionDescriptor {
+        name: dto.name,
+        owner_app: dto.owner_app,
+        fields,
+        indexes,
+        runtime_options,
+    })
+}
+
+fn field_dto_to_engine(
+    dto: FieldDescriptorDto,
+) -> std::result::Result<zero_migrate::render::declarative::FieldDescriptor, String> {
+    use zero_migrate::model::ir::{GeneratedCol, IdentityCol};
+    use zero_migrate::render::declarative::FieldDescriptor;
+
+    let generated: Option<GeneratedCol> = match dto.generated {
+        Some(v) => Some(
+            serde_json::from_value(v)
+                .map_err(|e| format!("field {:?}: invalid `generated` facet: {e}", dto.name))?,
+        ),
+        None => None,
+    };
+    let identity: Option<IdentityCol> = match dto.identity {
+        Some(v) => Some(
+            serde_json::from_value(v)
+                .map_err(|e| format!("field {:?}: invalid `identity` facet: {e}", dto.name))?,
+        ),
+        None => None,
+    };
+
+    Ok(FieldDescriptor {
+        name: dto.name,
+        ty: dto.ty,
+        required: dto.required.unwrap_or(false),
+        unique: dto.unique.unwrap_or(false),
+        references: dto.references,
+        on_delete: dto.on_delete,
+        on_update: dto.on_update,
+        deferrable: dto.deferrable,
+        literal_value: None,
+        default: dto.default,
+        min: dto.min,
+        max: dto.max,
+        enum_values: dto.enum_values,
+        id_prefix: dto.id_prefix,
+        vector_dims: dto.vector_dims,
+        char_len: None,
+        vector_metric: dto.vector_metric,
+        case_sensitive: dto.case_sensitive,
+        encrypted: dto.encrypted,
+        mask: dto.mask,
+        fts: dto.fts.unwrap_or(false),
+        fts_language: dto.fts_language,
+        generated,
+        identity,
+    })
+}
+
+fn runtime_options_dto_to_engine(
+    dto: Option<RuntimeOptionsDto>,
+) -> std::result::Result<zero_migrate::TableRuntimeOptions, String> {
+    use zero_migrate::{TableRuntimeOptions, TableStrictness};
+    let Some(dto) = dto else {
+        return Ok(TableRuntimeOptions::default());
+    };
+    let strictness = match dto.strictness.as_deref() {
+        None | Some("strict") => TableStrictness::Strict,
+        Some("lenient") => TableStrictness::Lenient,
+        Some("off") => TableStrictness::Off,
+        Some(other) => {
+            return Err(format!(
+                "invalid runtime option strictness {other:?} (expected strict|lenient|off)"
+            ))
+        }
+    };
+    Ok(TableRuntimeOptions {
+        soft_delete: dto.soft_delete.unwrap_or(false),
+        versioning: dto.versioning.unwrap_or(false),
+        strictness,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +552,7 @@ pub fn apply_ir(
             &req.project_schema,
             &req.dialect,
             &registry_json,
+            req.policy_ceiling.as_deref(),
         )
         .map_err(Error::from_reason)?;
         serde_json::from_str(&json)

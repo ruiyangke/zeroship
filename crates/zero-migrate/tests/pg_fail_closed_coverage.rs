@@ -10,7 +10,7 @@ use zero_migrate::model::validate::{
     CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::{IrAuthor, LiveSchema, PolicyProfile, SchemaScope, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema, SchemaScope, SqlDialect};
 
 const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentSetting",
@@ -443,8 +443,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             &ir,
             Dialect::Postgres,
             &[],
-            Some(&platform_scope),
-            &PolicyProfile::platform(),
+            Some(&platform_scope)
         )
         .unwrap_or_else(|err| panic!("{kind} must validate on PG under platform scope: {err:?}"));
 
@@ -463,8 +462,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             &ir,
             Dialect::Postgres,
             &[],
-            Some(&confined_scope),
-            &PolicyProfile::confined(),
+            Some(&confined_scope)
         )
         .expect_err("confined PG scope must refuse vendor ops by capability");
         assert_eq!(
@@ -477,8 +475,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
                 &ir,
                 dialect,
                 &[],
-                Some(&platform_scope),
-                &PolicyProfile::platform(),
+                Some(&platform_scope)
             )
             .expect_err("PG vendor op must refuse off Postgres");
             assert_eq!(

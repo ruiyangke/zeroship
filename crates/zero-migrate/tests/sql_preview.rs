@@ -26,7 +26,7 @@ use zero_migrate::render::sql_preview::{
 };
 use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::PlanStep;
-use zero_migrate::{resolve_create_table_policy, MigrationIr, PolicyProfile};
+use zero_migrate::{resolve_create_table_policy, zeroship_confined_ceiling, MigrationIr};
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, an online rename).
@@ -128,7 +128,7 @@ fn render_representative(dialect: SqlDialect) -> String {
 
 fn resolve_envelope_json(ir: &str) -> String {
     let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
-    let resolved = resolve_create_table_policy(&raw, &PolicyProfile::confined())
+    let resolved = resolve_create_table_policy(&raw, &zeroship_confined_ceiling())
         .expect("preview fixture IR resolves");
     serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
