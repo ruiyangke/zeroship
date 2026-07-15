@@ -203,6 +203,16 @@ pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_to_field_defs, recover_check_facet, FoldError,
     ProduceError, RecoveredCheck,
 };
+// The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or
+// a declared `CollectionDescriptor` set) into the two co-emitted projections
+// (`schema.runtime.json` v1 descriptor + generated `env.db.ts`), plus the in-memory
+// `--check` drift gate. Both sources route through the SAME renderer, so output is
+// byte-identical for equivalent schemas.
+pub use render::gen_types::{
+    check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
+    CheckDiff, GenTypesError, GeneratedArtifacts, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
+    RUNTIME_DESCRIPTOR_FILE,
+};
 // The deploy-target dialect — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new`.
 pub use schema::query::SqlDialect;

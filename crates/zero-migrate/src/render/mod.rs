@@ -3,6 +3,7 @@ pub mod dml;
 pub mod existence_probe;
 pub mod expand_contract;
 pub mod fold;
+pub mod gen_types;
 pub mod lower;
 pub mod plan;
 pub(crate) mod renderer;
