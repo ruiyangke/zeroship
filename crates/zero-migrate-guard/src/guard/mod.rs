@@ -55,31 +55,31 @@ pub mod namespace_rule {
     /// structured DSL may create an injected table.
     pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
     /// II.2.6a — a create (`CREATE TABLE`, structured or classified-raw) is not
-    /// covered by a `core.create_table` grant (default-deny namespace anchor).
+    /// covered by a `schema.create_table` grant (default-deny namespace anchor).
     pub const CREATE_TABLE_NOT_GRANTED: &str = "CreateTableNotGranted";
     /// II.2.6a — a `CREATE SCHEMA` (structured or classified-raw) is not covered by
-    /// a `core.create_schema` grant.
+    /// a `schema.create_schema` grant.
     pub const CREATE_SCHEMA_NOT_GRANTED: &str = "CreateSchemaNotGranted";
     /// II.2.5 — a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
     /// engine cannot re-inject over raw text, so the move is denied.
     pub const RAW_RENAME_INTO_INJECT_SCOPE: &str = "RawRenameIntoInjectScope";
-    /// II.2.6a — a rename/move into a scope is not covered by a `core.rename_into`
+    /// II.2.6a — a rename/move into a scope is not covered by a `schema.rename`
     /// grant at the target.
     pub const RENAME_INTO_NOT_GRANTED: &str = "RenameIntoNotGranted";
-    /// II.2.5 — an unqualified object reference under a non-⊤ `core.raw_sql` grant is
+    /// II.2.5 — an unqualified object reference under a non-⊤ `sql.raw` grant is
     /// unattributable (no live search_path to resolve it) → ⊤-only → deny.
     pub const UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL: &str = "UnqualifiedNameUnderScopedRawSql";
-    /// II.2.5 — `SET search_path` (or equivalent) under a non-⊤ `core.raw_sql` grant
+    /// II.2.5 — `SET search_path` (or equivalent) under a non-⊤ `sql.raw` grant
     /// mutates the very name-resolution context attribution depends on → refused.
     pub const SEARCH_PATH_UNDER_SCOPED_RAW_SQL: &str = "SearchPathUnderScopedRawSql";
     /// II.2.5 — an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
-    /// `DO`) under a non-⊤ `core.raw_sql` grant defeats statement-level attribution.
+    /// `DO`) under a non-⊤ `sql.raw` grant defeats statement-level attribution.
     pub const OPAQUE_BODY_UNDER_SCOPED_RAW_SQL: &str = "OpaqueBodyUnderScopedRawSql";
     /// II.2.5 — a raw statement the parser cannot classify into exactly one shape,
     /// or whose target is dynamic/unqualified, is unattributable under a non-⊤ grant.
     pub const UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL: &str = "UnattributableRawUnderScopedRawSql";
     /// II.2.6b — an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
-    /// inject rule contributes, without an explicit `core.alter_injected_column` grant.
+    /// inject rule contributes, without an explicit `schema.alter_injected` grant.
     pub const INJECTED_SHAPE_IMMUTABLE: &str = "InjectedShapeImmutable";
     /// II.2.6b — an index-mutating op on an injected index.
     pub const INJECTED_INDEX_IMMUTABLE: &str = "InjectedIndexImmutable";
@@ -116,6 +116,25 @@ pub mod data_security_rule {
 /// profiles because both share the identical security model: the operator
 /// running the binary holds it; no creator path can.
 ///
+/// The engine-construction POSTURE that decides whether the static parse-time guard
+/// belt runs at all. This is NOT a composable policy knob: "run without the deny-list
+/// guard" is the single most dangerous switch, so it is a root/host-set posture on the
+/// guard config — it can neither be granted, inherited, nor drafted by a creator.
+///
+/// - `Enforced` (the default) — the full belt runs: the deny-list, cross-schema
+///   confinement, and body walks. Confined and Platform both run `Enforced`.
+/// - `Off` — the public dbmate-like Trusted posture (Track A): the operator owns the
+///   DB, so there is NO untrusted boundary and the whole belt is skipped (arbitrary
+///   SQL applies as the connecting role). Raw islands embedded in structured IR still
+///   run their deny-list backstop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardMode {
+    /// Run the full static parse-time guard belt (Confined / Platform).
+    Enforced,
+    /// Skip the belt entirely — the Trusted dbmate-like posture (host owns the DB).
+    Off,
+}
+
 /// Per-guard configuration.
 ///
 /// All fields are **private**: a `GuardConfig` is obtained ONLY through
@@ -143,22 +162,39 @@ pub struct GuardConfig {
     ///   ([`GuardConfig::for_dialect`]).
     dialect: SqlDialect,
     /// PRIVATE. The unforgeable [`EffectivePolicy`] — the SINGLE source the guard's
-    /// every decision now queries. The capability gate asks `grants(key, object)`
-    /// for the statement's builtin knob key; cross-schema confinement asks
-    /// `grants(core.cross_schema, schema)`; the raw-island role relaxation asks
-    /// `grants(core.raw_island_role)`; the belt-skip asks `grants(core.skip_static_guard)`;
-    /// the data-security obligations read `obligations`/`grants` on the sec.* knobs.
-    /// There is no separate posture/scope state — the policy IS the posture.
+    /// every composable decision queries. The capability gate asks `grants(key,
+    /// object)` for the statement's builtin knob key; cross-schema confinement asks
+    /// `grants(schema.cross_schema, schema)`; the data-security obligations read
+    /// `obligations`/`grants` on the safety.* knobs. There is no separate posture/scope
+    /// state for the composable knobs — the policy IS the posture.
     effective: EffectivePolicy,
+    /// PRIVATE. The root/host-set [`GuardMode`] — whether the static parse-time belt
+    /// runs. This is NOT a composable knob (it quarantines the "skip the guard" switch
+    /// out of the policy registry); the belt-skip reads it, and the raw-island
+    /// role-needle relaxation keys off it + the `access.role` grant internally.
+    guard_mode: GuardMode,
 }
 
 impl GuardConfig {
-    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect.
-    /// The effective policy is the SINGLE source for injection and every guard
-    /// decision; there is no separate posture/scope state.
+    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect, at
+    /// the default [`GuardMode::Enforced`] posture (the full belt runs). The effective
+    /// policy is the SINGLE source for injection and every composable guard decision.
     #[must_use]
     pub fn from_policy(effective: EffectivePolicy, dialect: SqlDialect) -> Self {
-        Self { dialect, effective }
+        Self::from_policy_with_mode(effective, dialect, GuardMode::Enforced)
+    }
+
+    /// Construct a guard from a composed [`EffectivePolicy`] + dialect + an explicit
+    /// root/host-set [`GuardMode`]. `GuardMode::Off` is the Trusted dbmate-like posture
+    /// (belt skipped). The mode is NOT derivable from the policy — it is a posture the
+    /// host sets, never a composable grant.
+    #[must_use]
+    pub fn from_policy_with_mode(
+        effective: EffectivePolicy,
+        dialect: SqlDialect,
+        guard_mode: GuardMode,
+    ) -> Self {
+        Self { dialect, effective, guard_mode }
     }
 
     /// Construct a **Confined** guard whose PDP is a caller-composed
@@ -249,7 +285,7 @@ impl GuardConfig {
     }
 
     /// The first schema this config OWNS (the confined project schema, or the first
-    /// entry of a platform allowlist), derived from the `core.cross_schema` grant's
+    /// entry of a platform allowlist), derived from the `schema.cross_schema` grant's
     /// literal schema includes. Empty when the grant is `⊤` / globbed / absent.
     fn first_owned_schema(&self) -> String {
         owned_schemas_from_effective(&self.effective)
@@ -266,7 +302,7 @@ impl GuardConfig {
     /// [`GuardConfig::platform`] instead.
     #[must_use]
     pub fn with_extension_allowlist(self, extensions: Vec<String>) -> Self {
-        // Recompose the effective policy, replacing the `pg.extensions` StrSet grant
+        // Recompose the effective policy, replacing the `code.extension` StrSet grant
         // with the new allowlist while preserving every other input read back from
         // the current policy (owned schemas, vendor caps, data-security posture).
         let inputs = PolicyInputs::from_effective(&self.effective);
@@ -295,7 +331,7 @@ impl GuardConfig {
     /// Platform profile. REQUIRES an [`OperatorCapability`] token, minted by
     /// operator-side named seams. The `_cap` arg is the in-crate enforcement. The
     /// platform posture grants the full vendor capability set, cross-schema over the
-    /// `schemas` allowlist, and the `core.raw_island_role` relaxation.
+    /// `schemas` allowlist, and the the internal raw-island role relaxation (GuardMode::Enforced + access.role) relaxation.
     #[must_use]
     pub fn platform(
         _cap: &OperatorCapability,
@@ -316,12 +352,12 @@ impl GuardConfig {
     /// (`submit`/`engine`) can produce a Trusted guard. The deny-list, the
     /// cross-schema confinement, and the body walks are all SKIPPED by
     /// [`SqlGuard::check`] under Trusted (arbitrary SQL applies as the connecting
-    /// role) — the belt-skip is the `core.skip_static_guard` grant this posture
-    /// (and ONLY this posture) carries; the destructive/transactional/approval flags
-    /// are still derived.
+    /// role) — the belt-skip is the root/host-set [`GuardMode::Off`] this posture (and
+    /// ONLY this posture) carries; the destructive/transactional/approval flags are
+    /// still derived.
     #[must_use]
     pub fn trusted(_cap: &OperatorCapability) -> Self {
-        Self::from_policy(trusted_effective_policy(), SqlDialect::Postgres)
+        Self::from_policy_with_mode(trusted_effective_policy(), SqlDialect::Postgres, GuardMode::Off)
     }
 
     /// PHASE 4 — the target SQL dialect this guard config vets.
@@ -331,16 +367,22 @@ impl GuardConfig {
     }
 
     /// Whether this config skips the confined deny-list belt entirely (the Trusted
-    /// dbmate-like posture) — the `core.skip_static_guard` PDP grant. `pub`: the
-    /// engine's profile behaviour-lock tests assert it across the crate boundary.
+    /// dbmate-like posture) — the root/host-set [`GuardMode::Off`]. `pub`: the engine's
+    /// profile behaviour-lock tests assert it across the crate boundary.
     #[must_use]
     pub fn skips_denylist_belt(&self) -> bool {
-        self.grants_global_bool(policy_registry::KEY_CORE_SKIP_STATIC_GUARD)
+        matches!(self.guard_mode, GuardMode::Off)
+    }
+
+    /// The root/host-set [`GuardMode`] posture this config carries.
+    #[must_use]
+    pub fn guard_mode(&self) -> GuardMode {
+        self.guard_mode
     }
 
     /// The schema-confinement scope this guard config enforces, for the
     /// validate-time cross-schema gate. Derived from the effective policy's
-    /// `core.cross_schema` grant:
+    /// `schema.cross_schema` grant:
     /// - a `⊤` (whole-universe) grant ⇒ `Unconfined` (the Trusted operator posture);
     /// - a finite set of owned schemas ⇒ `Single(s)` for one, `Allowlist([…])` for
     ///   several (Confined / Platform);
@@ -351,15 +393,15 @@ impl GuardConfig {
     /// friendlier validate-time refusal agree on the permitted set.
     #[must_use]
     pub fn schema_scope(&self) -> Option<SchemaScope> {
-        let key = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok()?;
+        let key = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok()?;
         if matches!(self.effective.grant_region(&key), GrantRegion::Top) {
             return Some(SchemaScope::Unconfined);
         }
         let owned = owned_schemas_from_effective(&self.effective);
         // The operator (Platform) posture is a schema ALLOWLIST even for a single
-        // owned schema — it grants the privileged vendor set (`pg.role`); a Confined
+        // owned schema — it grants the privileged vendor set (`access.role`); a Confined
         // posture (no privileged caps) with one owned schema is a `Single` pin.
-        let is_operator_posture = self.grants_global_bool(policy_registry::KEY_PG_ROLE);
+        let is_operator_posture = self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         Some(match owned.as_slice() {
             [one] if !is_operator_posture => SchemaScope::Single(one.clone()),
             [] if !is_operator_posture => SchemaScope::Single(String::new()),
@@ -367,7 +409,7 @@ impl GuardConfig {
         })
     }
 
-    /// Data-security RLS requirement carried into the guard (the `sec.require_rls`
+    /// Data-security RLS requirement carried into the guard (the `safety.require_rls`
     /// obligation).
     #[must_use]
     pub fn require_rls(&self) -> bool {
@@ -375,7 +417,7 @@ impl GuardConfig {
     }
 
     /// Data-security destructive-op posture carried into the guard (the
-    /// `sec.destructive_ops` grant).
+    /// `safety.destructive_ops` grant).
     #[must_use]
     pub fn destructive_ops(&self) -> DestructiveOps {
         self.effective_destructive_ops()
@@ -411,26 +453,34 @@ impl GuardConfig {
     /// `platform_drop_object_allowed` via the PDP.
     fn grants_drop_object(&self, remove_type: i32) -> bool {
         if remove_type == ObjectType::ObjectSchema as i32 {
-            return self.grants_global_bool(policy_registry::KEY_PG_SCHEMA);
+            return self.grants_global_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA);
         }
         if remove_type == ObjectType::ObjectExtension as i32 {
-            return self.grants_global_bool(policy_registry::KEY_PG_EXTENSION);
+            return self.grants_extension_capability();
         }
         if remove_type == ObjectType::ObjectPolicy as i32 {
-            return self.grants_global_bool(policy_registry::KEY_PG_POLICY);
+            return self.grants_global_bool(policy_registry::KEY_ACCESS_POLICY);
         }
         if remove_type == ObjectType::ObjectRole as i32 {
-            return self.grants_global_bool(policy_registry::KEY_PG_ROLE);
+            return self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         }
         false
     }
 
+    /// Whether the effective policy holds the EXTENSION capability at all — i.e. the
+    /// `code.extension` StrSet allowlist is non-empty. The allowlist IS the capability:
+    /// empty = deny all (so no CREATE/DROP EXTENSION). `FORBIDDEN_EXTENSIONS` still
+    /// overrides which specific names may be created.
+    fn grants_extension_capability(&self) -> bool {
+        !self.granted_extension_allowlist().is_empty()
+    }
+
     /// The permitted `CREATE EXTENSION` names granted by the effective policy — the
-    /// `pg.extensions` StrSet grant value at the global witness. Empty when no
+    /// `code.extension` StrSet grant value at the global witness. Empty when no
     /// grant covers it (deny-by-default). `FORBIDDEN_EXTENSIONS` still overrides
     /// this in the guard regardless.
     fn granted_extension_allowlist(&self) -> Vec<String> {
-        let Some(k) = KnobKey::parse(policy_registry::KEY_PG_EXTENSIONS).ok() else {
+        let Some(k) = KnobKey::parse(policy_registry::KEY_CODE_EXTENSION).ok() else {
             return Vec::new();
         };
         match self.effective.grants(&k, &global_witness()) {
@@ -440,10 +490,10 @@ impl GuardConfig {
     }
 
     /// True iff the effective policy obligates RLS on `object` — the
-    /// `sec.require_rls` Require obligation covers it. Reproduces the
+    /// `safety.require_rls` Require obligation covers it. Reproduces the
     /// `self.require_rls` read, object-scoped.
     fn obligates_require_rls(&self, object: &ObjectName) -> bool {
-        let Some(want) = KnobKey::parse(policy_registry::KEY_SEC_REQUIRE_RLS).ok() else {
+        let Some(want) = KnobKey::parse(policy_registry::KEY_SAFETY_REQUIRE_RLS).ok() else {
             return false;
         };
         self.effective
@@ -452,12 +502,12 @@ impl GuardConfig {
             .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
     }
 
-    /// The effective destructive-op posture — the `sec.destructive_ops` OrderedEnum
+    /// The effective destructive-op posture — the `safety.destructive_ops` OrderedEnum
     /// grant value at the global witness, mapped back onto [`DestructiveOps`]. The
     /// deny-by-default value is `forbid`; an absent grant resolves to the knob
     /// default (`forbid`). This drives the destructive gating.
     fn effective_destructive_ops(&self) -> DestructiveOps {
-        let Some(k) = KnobKey::parse(policy_registry::KEY_SEC_DESTRUCTIVE_OPS).ok() else {
+        let Some(k) = KnobKey::parse(policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS).ok() else {
             return DestructiveOps::Forbid;
         };
         match self.effective.grants(&k, &global_witness()) {
@@ -474,7 +524,7 @@ impl GuardConfig {
 
     /// The project schema an UNQUALIFIED relation resolves to under this config's
     /// cross-schema pin — the sole schema owned by the effective policy's
-    /// `core.cross_schema` grant. `None` when there is no unique owned schema (empty
+    /// `schema.cross_schema` grant. `None` when there is no unique owned schema (empty
     /// confined default, multi-schema platform, or a `⊤` grant) — an unqualified name
     /// is then not uniquely attributable by the guard.
     fn pinned_schema(&self) -> Option<String> {
@@ -490,10 +540,10 @@ impl GuardConfig {
         self.grants_bool_at(key, object)
     }
 
-    /// The [`GrantRegion`] of `core.raw_sql` — the ⊤/Scoped/Ungranted posture the
+    /// The [`GrantRegion`] of `sql.raw` — the ⊤/Scoped/Ungranted posture the
     /// scoped-raw-SQL rules (II.2.5) turn on.
     fn raw_sql_region(&self) -> GrantRegion {
-        match KnobKey::parse(policy_registry::KEY_CORE_RAW_SQL) {
+        match KnobKey::parse(policy_registry::KEY_SQL_RAW) {
             Ok(k) => self.effective.grant_region(&k),
             Err(_) => GrantRegion::Ungranted,
         }
@@ -511,14 +561,14 @@ impl GuardConfig {
     }
 
     /// Cross-schema confinement, decided directly on the PDP: is a reference to
-    /// `schema` admitted? True iff the effective policy grants `core.cross_schema`
+    /// `schema` admitted? True iff the effective policy grants `schema.cross_schema`
     /// at the (PG-normalized) schema object — the project schema(s) a confined/
     /// platform posture owns are granted; every other schema is a `CrossSchema`
     /// violation (default-deny). An un-normalizable schema name (empty / malformed)
     /// is NOT admitted (fail-closed). This replaces the derived-`SchemaScope`
     /// `permits(schema)` read.
     fn grants_cross_schema(&self, schema: &str) -> bool {
-        let Some(k) = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok() else {
+        let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
             return false;
         };
         let Some(object) = normalize_pg_identifier(schema) else {
@@ -561,18 +611,18 @@ fn grant_str_set_from_effective(effective: &EffectivePolicy, key: &str) -> Vec<S
     }
 }
 
-/// The literal schemas an effective policy OWNS — the `core.cross_schema` grant's
+/// The literal schemas an effective policy OWNS — the `schema.cross_schema` grant's
 /// literal schema includes (the project schema(s) a confined/platform posture
 /// carries). Empty for a `⊤` / globbed / absent grant.
 fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
-    let Some(k) = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok() else {
+    let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
         return Vec::new();
     };
     effective.grant_literal_schema_includes(&k).unwrap_or_default()
 }
 
 fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps {
-    let Some(k) = KnobKey::parse(policy_registry::KEY_SEC_DESTRUCTIVE_OPS).ok() else {
+    let Some(k) = KnobKey::parse(policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS).ok() else {
         return DestructiveOps::Forbid;
     };
     match effective.grants(&k, &global_witness()) {
@@ -586,7 +636,7 @@ fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps
 }
 
 fn require_rls_from_effective(effective: &EffectivePolicy) -> bool {
-    let Some(want) = KnobKey::parse(policy_registry::KEY_SEC_REQUIRE_RLS).ok() else {
+    let Some(want) = KnobKey::parse(policy_registry::KEY_SAFETY_REQUIRE_RLS).ok() else {
         return false;
     };
     effective
@@ -604,19 +654,20 @@ fn require_rls_from_effective(effective: &EffectivePolicy) -> bool {
 ///
 /// The knobs it composes:
 /// - each held vendor capability (Global Bool) at `⊤`;
-/// - `core.cross_schema` + `core.create_table` + `core.rename_into` scoped to the
+/// - `schema.cross_schema` + `schema.create_table` + `schema.rename` scoped to the
 ///   OWNED schemas (`include: [...]`, or `all` when there is no owned schema);
-/// - the `pg.extensions` StrSet allowlist;
-/// - the operator-posture relaxations `core.raw_island_role` / `core.skip_static_guard`;
-/// - the data-security `sec.require_rls` obligation + `sec.destructive_ops` grant.
+/// - the `code.extension` StrSet allowlist;
+/// - the data-security `safety.require_rls` obligation + `safety.destructive_ops` grant.
+///
+/// The two former operator-posture toggles are NOT here: the belt-skip is the
+/// root/host-set [`GuardMode`] (not a composable grant), and the raw-island role-needle
+/// relaxation is an INTERNAL guard vendor-lower rule keyed off the posture.
 struct PolicyInputs {
     caps: VendorCapabilities,
-    /// The schemas this posture OWNS (`core.cross_schema` + creation grants scoped
+    /// The schemas this posture OWNS (`schema.cross_schema` + creation grants scoped
     /// here). Empty ⇒ a `⊤` grant (the degenerate default / Trusted).
     owned_schemas: Vec<String>,
     extension_allowlist: Vec<String>,
-    raw_island_role: bool,
-    skip_static_guard: bool,
     require_rls: bool,
     destructive_ops: DestructiveOps,
 }
@@ -635,40 +686,37 @@ impl PolicyInputs {
             caps: VendorCapabilities::confined(),
             owned_schemas,
             extension_allowlist: extensions.to_vec(),
-            raw_island_role: false,
-            skip_static_guard: false,
             require_rls: false,
             destructive_ops: DestructiveOps::Allow,
         }
     }
 
     /// The platform posture: the full vendor capability set, cross-schema/creation
-    /// over the `schemas` allowlist, the `core.raw_island_role` relaxation, and the
-    /// extension allowlist.
+    /// over the `schemas` allowlist, and the extension allowlist. The raw-island
+    /// role-needle relaxation is NOT a grant here — it is the guard's internal
+    /// vendor-lower rule (`GuardMode::Enforced` + `access.role`), which the platform
+    /// posture satisfies by holding `access.role` under `Enforced`.
     fn platform(schemas: &[String], extensions: &[String]) -> Self {
         Self {
             caps: VendorCapabilities::operator(),
             owned_schemas: schemas.to_vec(),
             extension_allowlist: extensions.to_vec(),
-            raw_island_role: true,
-            skip_static_guard: false,
             require_rls: false,
             destructive_ops: DestructiveOps::Allow,
         }
     }
 
     /// The trusted (dbmate-like) posture: every vendor capability, cross-schema at
-    /// `⊤` (no confinement), and the `core.skip_static_guard` belt-skip. The belt is
-    /// skipped entirely so the scoped grants are never consulted; `core.raw_island_role`
-    /// is deliberately OMITTED (the raw-island body backstop still denies role/
-    /// search_path needles under Trusted — the vendor-lower matrix locks this).
+    /// `⊤` (no confinement). The belt-skip is the root/host-set [`GuardMode::Off`] the
+    /// [`GuardConfig::trusted`] constructor stamps — NOT a grant — so the scoped grants
+    /// are never consulted. The raw-island body backstop still denies role/search_path
+    /// needles under Trusted (its internal rule relaxes ONLY under `GuardMode::Enforced`
+    /// + `access.role`, and Trusted is `Off`), a behaviour the vendor-lower matrix locks.
     fn trusted() -> Self {
         Self {
             caps: VendorCapabilities::operator(),
             owned_schemas: Vec::new(),
             extension_allowlist: Vec::new(),
-            raw_island_role: false,
-            skip_static_guard: true,
             require_rls: false,
             destructive_ops: DestructiveOps::Allow,
         }
@@ -680,45 +728,34 @@ impl PolicyInputs {
     fn from_effective(effective: &EffectivePolicy) -> Self {
         let w = global_witness();
         let mut caps = VendorCapabilities::confined();
-        caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_PG_ROLE, &w);
-        caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_PG_GRANT, &w);
+        caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_ROLE, &w);
+        caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_GRANT, &w);
         caps.allow_extension =
-            grant_bool_from_effective(effective, policy_registry::KEY_PG_EXTENSION, &w);
+            !grant_str_set_from_effective(effective, policy_registry::KEY_CODE_EXTENSION).is_empty();
         caps.allow_schema =
-            grant_bool_from_effective(effective, policy_registry::KEY_PG_SCHEMA, &w)
-                || grant_bool_from_effective(effective, policy_registry::KEY_CORE_CREATE_SCHEMA, &w);
-        caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_PG_POLICY, &w);
-        caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_PG_RLS, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_SCHEMA_CREATE_SCHEMA, &w);
+        caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_POLICY, &w);
+        caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_RLS, &w);
         caps.allow_partition =
-            grant_bool_from_effective(effective, policy_registry::KEY_PG_PARTITION, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_SCHEMA_PARTITION, &w);
         caps.allow_function =
-            grant_bool_from_effective(effective, policy_registry::KEY_PG_FUNCTION, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_CODE_FUNCTION, &w);
         caps.allow_raw_sql =
-            grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_SQL, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_SQL_RAW, &w);
         caps.allow_raw_view_body =
-            grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_VIEW_BODY, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_SQL_RAW_VIEW_BODY, &w);
         caps.allow_materialized_view =
-            grant_bool_from_effective(effective, policy_registry::KEY_PG_MATERIALIZED_VIEW, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_CODE_MATERIALIZED_VIEW, &w);
         let owned_schemas = owned_schemas_from_effective(effective);
         caps.allow_cross_schema =
-            grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &w);
+            grant_bool_from_effective(effective, policy_registry::KEY_SCHEMA_CROSS_SCHEMA, &w);
         caps.schemas = owned_schemas.clone();
         Self {
             caps,
             owned_schemas,
             extension_allowlist: grant_str_set_from_effective(
                 effective,
-                policy_registry::KEY_PG_EXTENSIONS,
-            ),
-            raw_island_role: grant_bool_from_effective(
-                effective,
-                policy_registry::KEY_CORE_RAW_ISLAND_ROLE,
-                &w,
-            ),
-            skip_static_guard: grant_bool_from_effective(
-                effective,
-                policy_registry::KEY_CORE_SKIP_STATIC_GUARD,
-                &w,
+                policy_registry::KEY_CODE_EXTENSION,
             ),
             require_rls: require_rls_from_effective(effective),
             destructive_ops: destructive_ops_from_effective(effective),
@@ -759,26 +796,19 @@ impl PolicyInputs {
         };
 
         // ── vendor capabilities → their builtin knob keys ──────────────────────
-        grant_bool(policy_registry::KEY_PG_ROLE, self.caps.allow_role);
-        grant_bool(policy_registry::KEY_PG_GRANT, self.caps.allow_grant);
-        grant_bool(policy_registry::KEY_PG_EXTENSION, self.caps.allow_extension);
-        // Schema-create carries both spellings; grant both under the same bit.
-        grant_bool(policy_registry::KEY_PG_SCHEMA, self.caps.allow_schema);
-        grant_bool(policy_registry::KEY_CORE_CREATE_SCHEMA, self.caps.allow_schema);
-        grant_bool(policy_registry::KEY_PG_POLICY, self.caps.allow_policy);
-        grant_bool(policy_registry::KEY_PG_RLS, self.caps.allow_rls);
-        grant_bool(policy_registry::KEY_PG_PARTITION, self.caps.allow_partition);
-        grant_bool(policy_registry::KEY_PG_FUNCTION, self.caps.allow_function);
-        grant_bool(policy_registry::KEY_CORE_RAW_SQL, self.caps.allow_raw_sql);
-        grant_bool(policy_registry::KEY_CORE_RAW_VIEW_BODY, self.caps.allow_raw_view_body);
-        grant_bool(policy_registry::KEY_PG_MATERIALIZED_VIEW, self.caps.allow_materialized_view);
-
-        // ── operator-posture relaxations ───────────────────────────────────────
-        grant_bool(policy_registry::KEY_CORE_RAW_ISLAND_ROLE, self.raw_island_role);
-        grant_bool(policy_registry::KEY_CORE_SKIP_STATIC_GUARD, self.skip_static_guard);
+        grant_bool(policy_registry::KEY_ACCESS_ROLE, self.caps.allow_role);
+        grant_bool(policy_registry::KEY_ACCESS_GRANT, self.caps.allow_grant);
+        grant_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, self.caps.allow_schema);
+        grant_bool(policy_registry::KEY_ACCESS_POLICY, self.caps.allow_policy);
+        grant_bool(policy_registry::KEY_ACCESS_RLS, self.caps.allow_rls);
+        grant_bool(policy_registry::KEY_SCHEMA_PARTITION, self.caps.allow_partition);
+        grant_bool(policy_registry::KEY_CODE_FUNCTION, self.caps.allow_function);
+        grant_bool(policy_registry::KEY_SQL_RAW, self.caps.allow_raw_sql);
+        grant_bool(policy_registry::KEY_SQL_RAW_VIEW_BODY, self.caps.allow_raw_view_body);
+        grant_bool(policy_registry::KEY_CODE_MATERIALIZED_VIEW, self.caps.allow_materialized_view);
 
         // ── cross-schema + namespace-authority creation-gating (II.2.6a) ───────
-        // `core.cross_schema` (the confinement) + `core.create_table`/`core.rename_into`
+        // `schema.cross_schema` (the confinement) + `schema.create_table`/`schema.rename`
         // (creation-gating) are all scoped to the OWNED schemas: a confined migration
         // may reference/create/rename in its own project schema(s) but nowhere else.
         // An empty owned set grants `all` (the degenerate default / Trusted — which
@@ -790,9 +820,9 @@ impl PolicyInputs {
                 serde_json::json!({ "include": self.owned_schemas })
             };
             for key in [
-                policy_registry::KEY_CORE_CROSS_SCHEMA,
-                policy_registry::KEY_CORE_CREATE_TABLE,
-                policy_registry::KEY_CORE_RENAME_INTO,
+                policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
+                policy_registry::KEY_SCHEMA_CREATE_TABLE,
+                policy_registry::KEY_SCHEMA_RENAME,
             ] {
                 grant_rules.push(serde_json::json!({
                     "key": key,
@@ -802,10 +832,10 @@ impl PolicyInputs {
             }
         }
 
-        // ── CREATE EXTENSION name allowlist (StrSet) ───────────────────────────
+        // ── CREATE EXTENSION name allowlist (StrSet) — the allowlist IS the knob ─
         if !self.extension_allowlist.is_empty() {
             grant_rules.push(serde_json::json!({
-                "key": policy_registry::KEY_PG_EXTENSIONS,
+                "key": policy_registry::KEY_CODE_EXTENSION,
                 "value": self.extension_allowlist,
                 "scope": "all",
             }));
@@ -814,7 +844,7 @@ impl PolicyInputs {
         // ── data-security posture ──────────────────────────────────────────────
         if self.require_rls {
             require_rules.push(serde_json::json!({
-                "key": policy_registry::KEY_SEC_REQUIRE_RLS,
+                "key": policy_registry::KEY_SAFETY_REQUIRE_RLS,
                 "value": true,
                 "scope": "all",
             }));
@@ -827,7 +857,7 @@ impl PolicyInputs {
         };
         if let Some(variant) = destructive_variant {
             grant_rules.push(serde_json::json!({
-                "key": policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+                "key": policy_registry::KEY_SAFETY_DESTRUCTIVE_OPS,
                 "value": variant,
                 "scope": "all",
             }));
@@ -1182,7 +1212,7 @@ impl SqlGuard {
     /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, …).
     fn check_node(&self, node: &NodeEnum, json: &Value, raw: &str) -> Result<(), GuardError> {
         // 0. Scoped-raw-SQL refusals (II.2.5) run FIRST, but ONLY under a Scoped
-        //    (non-⊤) `core.raw_sql` grant — the posture that HAS relaxed raw SQL, so
+        //    (non-⊤) `sql.raw` grant — the posture that HAS relaxed raw SQL, so
         //    the refined namespace refusal (SearchPathUnderScopedRawSql /
         //    OpaqueBodyUnderScopedRawSql / UnqualifiedNameUnderScopedRawSql) owns the
         //    diagnostic instead of the deny-list belt. Under the plain confined path
@@ -1205,8 +1235,8 @@ impl SqlGuard {
 
         // 2c. NAMESPACE-authority structural gate (II.2.5 raw-SQL create/rename
         //     classification / II.2.6 creation-gating + injected-shape immutability):
-        //     a raw create must pass `core.create_table` and is denied in any inject
-        //     scope; a rename/move needs `core.rename_into` and is denied into an
+        //     a raw create must pass `schema.create_table` and is denied in any inject
+        //     scope; a rename/move needs `schema.rename` and is denied into an
         //     inject scope; an alter/drop of an injected shape element is immutable.
         //     Runs AFTER cross-schema so a foreign-schema target reports `CrossSchema`.
         self.check_namespace_structural(node, raw)?;
@@ -1257,7 +1287,7 @@ impl SqlGuard {
     /// rename classification + II.2.6 creation-gating / injected-shape immutability).
     /// The scoped-raw-SQL refusals (`SET search_path` / opaque body / unqualified
     /// name) are a SEPARATE method ([`Self::check_scoped_raw_sql`]) run earlier, only
-    /// under a Scoped `core.raw_sql` grant.
+    /// under a Scoped `sql.raw` grant.
     ///
     /// A raw statement the guard sees via [`SqlGuard::check`] must ALSO clear the
     /// structured gate for whatever it does. Injection is an IR transform that cannot
@@ -1265,11 +1295,11 @@ impl SqlGuard {
     ///
     /// - a **create** (`CreateStmt` incl. `LIKE`/`INHERITS`/`PARTITION OF`,
     ///   `CreateTableAsStmt` = CTAS / `CREATE TABLE AS EXECUTE`, `SelectStmt` with an
-    ///   `into_clause` = `SELECT … INTO`) must pass `core.create_table` at the target
+    ///   `into_clause` = `SELECT … INTO`) must pass `schema.create_table` at the target
     ///   AND is denied wherever any inject rule covers it (`RawCreateInInjectScope`);
-    /// - a `CreateSchemaStmt` must pass `core.create_schema`;
+    /// - a `CreateSchemaStmt` must pass `schema.create_schema`;
     /// - a `RenameStmt`/`AlterObjectSchemaStmt` that moves a table checks
-    ///   `core.rename_into` and is denied into any inject scope
+    ///   `schema.rename` and is denied into any inject scope
     ///   (`RawRenameIntoInjectScope`); a `RENAME COLUMN` of an injected column is
     ///   immutable;
     /// - an `AlterTableStmt` touching an injected column/PK is immutable
@@ -1317,7 +1347,7 @@ impl SqlGuard {
                     Some(schema_obj) => {
                         if !self
                             .cfg
-                            .grants_namespace_bool(policy_registry::KEY_CORE_CREATE_SCHEMA, &schema_obj)
+                            .grants_namespace_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, &schema_obj)
                         {
                             return Err(namespace_denied(
                                 namespace_rule::CREATE_SCHEMA_NOT_GRANTED,
@@ -1387,10 +1417,10 @@ impl SqlGuard {
         })
     }
 
-    /// Gate a raw CREATE-TABLE-shaped statement: `core.create_table` must grant the
+    /// Gate a raw CREATE-TABLE-shaped statement: `schema.create_table` must grant the
     /// target AND no inject rule may cover it (II.2.5/II.2.6a). The inject check comes
     /// first — a table inside an inject scope can ONLY be created via the structured
-    /// DSL, so even a `core.create_table` grant cannot admit a raw create there.
+    /// DSL, so even a `schema.create_table` grant cannot admit a raw create there.
     fn gate_raw_create(&self, target: &ObjectName, raw: &str) -> Result<(), GuardError> {
         if self.cfg.injects_cover(target) {
             return Err(namespace_denied(
@@ -1400,7 +1430,7 @@ impl SqlGuard {
         }
         if !self
             .cfg
-            .grants_namespace_bool(policy_registry::KEY_CORE_CREATE_TABLE, target)
+            .grants_namespace_bool(policy_registry::KEY_SCHEMA_CREATE_TABLE, target)
         {
             return Err(namespace_denied(
                 namespace_rule::CREATE_TABLE_NOT_GRANTED,
@@ -1412,7 +1442,7 @@ impl SqlGuard {
 
     /// `ALTER TABLE … RENAME TO` (table move) / `RENAME COLUMN` (injected-column
     /// immutability). A bare same-schema table rename still re-anchors under
-    /// `core.rename_into` at the target and is denied into any inject scope.
+    /// `schema.rename` at the target and is denied into any inject scope.
     fn check_rename(&self, r: &protobuf::RenameStmt, raw: &str) -> Result<(), GuardError> {
         let is_table = r.rename_type == ObjectType::ObjectTable as i32;
         let is_column = r.rename_type == ObjectType::ObjectColumn as i32;
@@ -1429,7 +1459,7 @@ impl SqlGuard {
                     .cfg
                     .is_injected_shape(&source, &ShapeElement::Column(col))
                 && !self.cfg.grants_namespace_bool(
-                    policy_registry::KEY_CORE_ALTER_INJECTED_COLUMN,
+                    policy_registry::KEY_SCHEMA_ALTER_INJECTED,
                     &source,
                 )
             {
@@ -1489,7 +1519,7 @@ impl SqlGuard {
     /// scope boundary (the covering inject/rename-grant set differs before vs after):
     /// - denied into ANY inject scope (`RawRenameIntoInjectScope` — the moved table
     ///   would owe an injection the raw path cannot supply);
-    /// - otherwise requires `core.rename_into` at the target.
+    /// - otherwise requires `schema.rename` at the target.
     fn gate_rename_into(
         &self,
         source: &ObjectName,
@@ -1509,7 +1539,7 @@ impl SqlGuard {
         }
         if !self
             .cfg
-            .grants_namespace_bool(policy_registry::KEY_CORE_RENAME_INTO, target)
+            .grants_namespace_bool(policy_registry::KEY_SCHEMA_RENAME, target)
         {
             return Err(namespace_denied(
                 namespace_rule::RENAME_INTO_NOT_GRANTED,
@@ -1521,7 +1551,7 @@ impl SqlGuard {
 
     /// Injected-shape immutability for `ALTER TABLE` subcommands (II.2.6b): a
     /// `DROP COLUMN` / `ALTER COLUMN` (type/nullability) on an injected column, or a
-    /// `DROP CONSTRAINT` of a pinned PK, is denied unless `core.alter_injected_column`
+    /// `DROP CONSTRAINT` of a pinned PK, is denied unless `schema.alter_injected`
     /// grants the table. An injected-index `DROP INDEX` is handled on the `DropStmt`
     /// arm (indexes are not `ALTER TABLE` subcommands here).
     fn check_alter_table_injected(
@@ -1542,7 +1572,7 @@ impl SqlGuard {
         let target = self.resolve_relation_target(at.relation.as_ref(), raw)?;
         let granted = self
             .cfg
-            .grants_namespace_bool(policy_registry::KEY_CORE_ALTER_INJECTED_COLUMN, &target);
+            .grants_namespace_bool(policy_registry::KEY_SCHEMA_ALTER_INJECTED, &target);
         for cmd in &at.cmds {
             let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
                 continue;
@@ -1592,7 +1622,7 @@ impl SqlGuard {
         Ok(())
     }
 
-    /// Scoped-raw-SQL refusals (II.2.5): under a Scoped (non-⊤) `core.raw_sql` grant,
+    /// Scoped-raw-SQL refusals (II.2.5): under a Scoped (non-⊤) `sql.raw` grant,
     /// an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/`DO`), a
     /// `SET search_path` (or `set_config`/`ALTER ROLE|DATABASE … SET search_path`),
     /// and any unqualified object reference are unattributable and DENIED — only a
@@ -1687,7 +1717,7 @@ impl SqlGuard {
         advisories: &mut Vec<Advisory>,
     ) -> Result<(), GuardError> {
         // The destructive posture now rides in the effective policy (the
-        // `sec.destructive_ops` grant); query it rather than the field.
+        // `safety.destructive_ops` grant); query it rather than the field.
         match self.cfg.effective_destructive_ops() {
             DestructiveOps::Forbid => match class.data_security {
                 DataSecurityClass::NonDestructive => Ok(()),
@@ -1780,7 +1810,7 @@ impl SqlGuard {
                 if role_grants_superuser(&s.options) {
                     return Err(denied(rule::SUPERUSER_ROLE, raw));
                 }
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_ROLE) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -1789,13 +1819,13 @@ impl SqlGuard {
                 if role_grants_superuser(&s.options) {
                     return Err(denied(rule::SUPERUSER_ROLE, raw));
                 }
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_ROLE) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
             }
             NodeEnum::AlterRoleSetStmt(_) | NodeEnum::DropRoleStmt(_) => {
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_ROLE) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -1807,7 +1837,7 @@ impl SqlGuard {
                 if grant_stmt_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_GRANT) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_GRANT) {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -1816,7 +1846,7 @@ impl SqlGuard {
                 if grant_role_stmt_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_GRANT) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_GRANT) {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -1825,7 +1855,7 @@ impl SqlGuard {
                 if alter_default_privileges_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_GRANT) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_GRANT) {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -1891,7 +1921,7 @@ impl SqlGuard {
                 if denylist::list_contains_ci(denylist::FORBIDDEN_EXTENSIONS, &name) {
                     return Err(denied(rule::FORBIDDEN_EXTENSION, raw));
                 }
-                // The per-name allowlist is the `pg.extensions` StrSet grant value.
+                // The per-name allowlist is the `code.extension` StrSet grant value.
                 let allowed = self
                     .cfg
                     .granted_extension_allowlist()
@@ -1929,7 +1959,7 @@ impl SqlGuard {
                 // DROP ROLE via the DropStmt spelling — ALLOW iff Platform
                 // (the `.down.sql` reverse of CREATE ROLE), else deny.
                 if d.remove_type == ObjectType::ObjectRole as i32 {
-                    if self.cfg.grants_global_bool(policy_registry::KEY_PG_ROLE) {
+                    if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
                         return Ok(());
                     }
                     return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -1948,7 +1978,7 @@ impl SqlGuard {
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
             NodeEnum::CreateSchemaStmt(_) => {
-                if !self.cfg.grants_global_bool(policy_registry::KEY_PG_SCHEMA) {
+                if !self.cfg.grants_global_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
@@ -1956,14 +1986,14 @@ impl SqlGuard {
             // Platform (0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
             NodeEnum::CreatePolicyStmt(_) => {
-                if !self.cfg.grants_global_bool(policy_registry::KEY_PG_POLICY) {
+                if !self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_POLICY) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
             // DROP OWNED BY <role> — deny-by-default for Confined; ALLOW iff
             // Platform (0025 rollback DO-block).
             NodeEnum::DropOwnedStmt(_) => {
-                if self.cfg.grants_global_bool(policy_registry::KEY_PG_ROLE) {
+                if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
                     return Ok(());
                 }
                 return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
@@ -2027,7 +2057,7 @@ impl SqlGuard {
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
-        let allow_rls = self.cfg.grants_global_bool(policy_registry::KEY_PG_RLS);
+        let allow_rls = self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_RLS);
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
                 let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
@@ -2333,11 +2363,15 @@ impl SqlGuard {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
         // The role-management body needles are relaxed under the PLATFORM posture
-        // only, now a `core.raw_island_role` PDP grant (the platform ceiling grants
-        // it; confined omits it, and Trusted — which holds every capability — omits
-        // it too, so its raw-island body backstop still denies these needles, a
-        // behaviour the vendor-lower matrix locks).
-        let allow_role = self.cfg.grants_global_bool(policy_registry::KEY_CORE_RAW_ISLAND_ROLE);
+        // ONLY — now an INTERNAL guard vendor-lower rule (no operator-authorable knob):
+        // the belt is running (`GuardMode::Enforced`) AND the config holds the
+        // `access.role` capability. Platform is `Enforced` + `access.role` → relaxed;
+        // Confined is `Enforced` without `access.role` → denied; Trusted is
+        // `GuardMode::Off` → the whole belt is skipped in `check()`, but its raw-island
+        // body backstop (which reaches here with `Off`) still DENIES these needles, a
+        // behaviour the vendor-lower matrix locks.
+        let allow_role = !self.cfg.skips_denylist_belt()
+            && self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {
@@ -2407,7 +2441,7 @@ pub fn check_raw_view_body_text(
 ) -> Result<(), GuardError> {
     // The view-body scanner runs under a Confined posture pinned to the caller's
     // owned schemas. Map the (transitional) `SchemaScope` onto the owned-schema
-    // include set the confined effective policy grants `core.cross_schema` over:
+    // include set the confined effective policy grants `schema.cross_schema` over:
     //   - `Single(s)`      ⇒ `[s]` (a single owned project schema);
     //   - `Allowlist(v)`   ⇒ `v` (the platform allowlist);
     //   - `Unconfined`/None ⇒ empty ⇒ a `⊤` cross-schema grant (no confinement).
@@ -2437,7 +2471,7 @@ fn foreign_schema_literal_in_body(body: &str, permits: &dyn Fn(&str) -> bool) ->
     let uses_ident_template = body.to_ascii_lowercase().contains("%i");
     for literal in extract_string_literals(body) {
         let lit = literal.trim();
-        // A schema the PDP admits (`grants(core.cross_schema, lit)`) is never a
+        // A schema the PDP admits (`grants(schema.cross_schema, lit)`) is never a
         // violation — the project schema(s) a confined/platform posture owns, plus
         // any operator-supplied schema.
         if permits(lit) {
@@ -2751,7 +2785,7 @@ pub fn check_ir_data_security_policy(
     ir: &MigrationIr,
 ) -> Result<(), IrDataSecurityError> {
     // The require-RLS obligation now rides in the effective policy (the ⊤-scope
-    // `sec.require_rls` Require rule); a policy with no such obligation covering
+    // `safety.require_rls` Require rule); a policy with no such obligation covering
     // tables is a no-op. Probe the global witness — the obligation is authored
     // ⊤-scope, so any covered object confirms it.
     if !cfg.obligates_require_rls(&global_witness()) {
@@ -3611,7 +3645,7 @@ fn regproc_leading_ident(lit: &str) -> &str {
 /// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
 ///
 /// Returns the first foreign schema found. `permits` is the PDP cross-schema
-/// decision (`grants(core.cross_schema, schema)`); the per-slot well-known-schema
+/// decision (`grants(schema.cross_schema, schema)`); the per-slot well-known-schema
 /// exemptions ([`slot_exempts_schema`]) remain a FIXED guard hard-rule applied
 /// AFTER the PDP admission, keyed off the reference-slot kind.
 fn foreign_schema_in_tree(v: &Value, permits: &dyn Fn(&str) -> bool) -> Option<String> {

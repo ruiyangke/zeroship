@@ -27,6 +27,7 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
         enforcement: Enforcement::Enforced,
         object_model: zero_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
+        inherit: true,
         docs: String::new(),
     }
 }
@@ -34,14 +35,14 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
             def(
-                "op.lock_timeout_ms",
+                "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
         ])
         .unwrap()
 }
@@ -52,32 +53,32 @@ fn registry_flipped_privilege() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
             {
-                let mut d = def("core.raw_sql", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false));
+                let mut d = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false));
                 d.requires_db_privilege = true;
                 d
             },
             def(
-                "op.lock_timeout_ms",
+                "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
         ])
         .unwrap()
 }
 
 const ROOT_TOML: &str = r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"] }
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 600
 scope = { include = ["app_*"] }
 [[require]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["app_*"] }
 [[inject]]
@@ -146,7 +147,7 @@ fn tampered_grant_value_fails() {
     let draft_600 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 600
 scope = { include = ["app_*"] }
 "#,
@@ -161,7 +162,7 @@ scope = { include = ["app_*"] }
     let draft_60 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 60
 scope = { include = ["app_*"] }
 "#,
@@ -351,7 +352,7 @@ fn layer_reflatten_changes_tag() {
     let base = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -361,7 +362,7 @@ scope = { include = ["app_*"] }
     let env = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#,
@@ -381,11 +382,11 @@ scope = { include = ["staging"] }
     let flat_root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"] }
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#,
@@ -397,7 +398,7 @@ scope = { include = ["staging"] }
     // The two denote the SAME effective grants (sanity), but different layer stacks.
     let staging_t = zero_migrate_policy::ObjectName::table(b"staging".to_vec(), b"t".to_vec());
     let app_t = zero_migrate_policy::ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
-    let rk = KnobKey::parse("core.raw_sql").unwrap();
+    let rk = KnobKey::parse("sql.raw").unwrap();
     assert_eq!(pa.grants(&rk, &staging_t), pb.grants(&rk, &staging_t));
     assert_eq!(pa.grants(&rk, &app_t), pb.grants(&rk, &app_t));
 

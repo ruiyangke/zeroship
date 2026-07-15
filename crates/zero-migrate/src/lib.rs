@@ -183,8 +183,8 @@ pub use apply::executor::apply;
 // the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
 pub use guard::{
-    flags_for, guard_for, GuardConfig, GuardError, GuardOutcome, GuardReport, MigrationGuard,
-    PgGuard, SqlGuard, SqliteDescriptorGuard,
+    flags_for, guard_for, GuardConfig, GuardError, GuardMode, GuardOutcome, GuardReport,
+    MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
 pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // The policy PDP seal primitives (Phase 2 Step 3 — the `PolicyProfile`-era seal

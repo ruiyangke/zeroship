@@ -104,8 +104,8 @@ impl SchemaScope {
 /// destructive statement by it.
 ///
 /// Approval is NOT one of these states. It is the separate, host-enforced
-/// `sec.require_approval` obligation (`never`/`on_destructive`/`always`) the engine
-/// only DECLARES (see [`crate::policy_registry::KEY_SEC_REQUIRE_APPROVAL`] +
+/// `safety.require_approval` obligation (`never`/`on_destructive`/`always`) the engine
+/// only DECLARES (see [`crate::policy_registry::KEY_SAFETY_REQUIRE_APPROVAL`] +
 /// [`crate::policy_approval`]); it composes independently of this posture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

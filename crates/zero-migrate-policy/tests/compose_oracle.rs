@@ -29,9 +29,9 @@ use zero_migrate_policy::{
 // Registry — a small, deliberately-chosen set of grant knobs
 // ══════════════════════════════════════════════════════════════════════════════
 
-const BOOL_KEY: &str = "core.raw_sql"; // Bool grant, PerTable, default false
-const UINT_KEY: &str = "op.lock_timeout_ms"; // UintCeiling grant, PerTable, default 1
-const CREATE_KEY: &str = "core.create_table"; // Bool grant, PerTable, default false
+const BOOL_KEY: &str = "sql.raw"; // Bool grant, PerTable, default false
+const UINT_KEY: &str = "runtime.lock_timeout_ms"; // UintCeiling grant, PerTable, default 1
+const CREATE_KEY: &str = "schema.create_table"; // Bool grant, PerTable, default false
 
 fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> KnobDef {
     KnobDef {
@@ -42,6 +42,7 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
         enforcement: Enforcement::Enforced,
         object_model: zero_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
+        inherit: true,
         docs: String::new(),
     }
 }
@@ -427,11 +428,11 @@ fn pinned_c1_disjoint_exclude_escalation_rejects() {
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_*"], exclude = ["app_secret"] }
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["reports"] }
 "#,
@@ -442,7 +443,7 @@ scope = { include = ["reports"] }
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["app_secret"] }
 "#,
@@ -483,7 +484,7 @@ fn pinned_layered_override_narrow_region() {
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 30000
 scope = "all"
 "#,
@@ -493,7 +494,7 @@ scope = "all"
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 10000
 scope = { include = ["app_*"] }
 "#,
@@ -527,7 +528,7 @@ fn pinned_narrow_to_default_wins() {
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = "all"
 "#,
@@ -537,7 +538,7 @@ scope = "all"
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = false
 scope = { include = ["app_*"] }
 "#,
@@ -748,7 +749,7 @@ fn oracle_overlay_unions_inject_and_require_lists() {
     let base = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[require]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["app_*"] }
 [[inject]]
@@ -762,7 +763,7 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     let over = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[require]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["staging"] }
 [[inject]]
@@ -782,8 +783,8 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
     let staging_t = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
 
     // Both require rules survive (accumulate).
-    assert!(ep.obligations(&app_t).iter().any(|(k, _)| k.as_str() == "sec.require_rls"));
-    assert!(ep.obligations(&staging_t).iter().any(|(k, _)| k.as_str() == "sec.require_rls"));
+    assert!(ep.obligations(&app_t).iter().any(|(k, _)| k.as_str() == "safety.require_rls"));
+    assert!(ep.obligations(&staging_t).iter().any(|(k, _)| k.as_str() == "safety.require_rls"));
     // Both injects survive on app_* (base created_at + over updated_at).
     let injs = ep.injects_for(&app_t);
     let names: Vec<&str> = injs.iter().flat_map(|s| s.columns.iter().map(|c| c.name.as_str())).collect();
@@ -801,7 +802,7 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
 
 fn registry_with_require() -> PolicyRegistry {
     registry()
-        .with([def("sec.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false))])
+        .with([def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false))])
         .unwrap()
 }
 
@@ -810,7 +811,7 @@ fn union_up_ceiling_obligations_and_injects_and_validates_survive() {
     let reg = registry_with_require();
     let root_toml = r#"policy_version = 1
 [[require]]
-key = "sec.require_rls"
+key = "safety.require_rls"
 value = true
 scope = { include = ["app_*"] }
 [[inject]]
@@ -821,11 +822,11 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 scope = { include = ["app_*"] }
 predicate = { kind = "has_primary_key" }
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app_*"] }
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#;
@@ -834,7 +835,7 @@ scope = { include = ["staging"] }
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = { include = ["staging"] }
 "#,
@@ -848,7 +849,7 @@ scope = { include = ["staging"] }
 
     let obs = ep.obligations(&app_t);
     assert!(
-        obs.iter().any(|(k, v)| k.as_str() == "sec.require_rls" && *v == KnobValue::Bool(true)),
+        obs.iter().any(|(k, v)| k.as_str() == "safety.require_rls" && *v == KnobValue::Bool(true)),
         "ceiling require dropped: {obs:?}"
     );
     let injs = ep.injects_for(&app_t);
@@ -1032,7 +1033,7 @@ scope = { include = ["app_*"] }
 mandatory = true
 columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 "#;
@@ -1071,7 +1072,7 @@ scope = { include = ["app_*"] }
 mandatory = true
 columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app_*"] }
 "#,
@@ -1143,6 +1144,121 @@ fn effective_policy_only_via_admit_or_deny_all() {
     // There is deliberately NO other constructor: no Default, no Deserialize, no
     // public `new`. And an AssembledCeiling is NOT an AdmitCeiling — it cannot reach
     // admit until finalized. This test compiling is the proof the surface is closed.
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// inherit = false — a SILENT draft does NOT inherit a power-grant from the ceiling
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// A registry whose one grant knob is a POWER GRANT (`inherit = false`), plus an
+/// ordinary inheritable knob for contrast.
+fn registry_with_noninherit() -> PolicyRegistry {
+    let power = KnobDef {
+        key: KnobKey::parse("schema.alter_injected").unwrap(),
+        kind: KnobKind::Bool,
+        polarity: Polarity::Grant,
+        default: KnobValue::Bool(false),
+        enforcement: Enforcement::Enforced,
+        object_model: zero_migrate_policy::ObjectModel::PerTable,
+        requires_db_privilege: false,
+        inherit: false,
+        docs: String::new(),
+    };
+    PolicyRegistry::empty()
+        .with([
+            power,
+            def(BOOL_KEY, KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+        ])
+        .unwrap()
+}
+
+#[test]
+fn silent_draft_does_not_inherit_noninherit_grant() {
+    let reg = registry_with_noninherit();
+    let power_key = KnobKey::parse("schema.alter_injected").unwrap();
+    let bool_key = KnobKey::parse(BOOL_KEY).unwrap();
+
+    // Ceiling GRANTS the power knob (and the ordinary knob) over app_*.
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "schema.alter_injected"
+value = true
+scope = { include = ["app_*"] }
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+
+    // A SILENT draft (grants nothing).
+    let draft = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
+
+    let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+
+    // The power grant is NOT inherited by the silent draft → it reads the DEFAULT
+    // (deny), NOT the ceiling's granted `true`.
+    assert_eq!(
+        ep.grants(&power_key, &app_t),
+        Some(KnobValue::Bool(false)),
+        "an inherit=false grant must NOT flow to a silent draft"
+    );
+    // The ordinary (inheritable) grant IS inherited — the ceiling's `true` shows through.
+    assert_eq!(
+        ep.grants(&bool_key, &app_t),
+        Some(KnobValue::Bool(true)),
+        "an ordinary grant is still ceiling-inherited by a silent draft"
+    );
+}
+
+#[test]
+fn explicit_draft_may_still_earn_a_noninherit_grant_within_ceiling() {
+    // inherit=false only blocks INHERITANCE-BY-OMISSION; a draft that EXPLICITLY
+    // grants the power knob (⊑ the ceiling) still gets it — the normal escalation
+    // check governs.
+    let reg = registry_with_noninherit();
+    let power_key = KnobKey::parse("schema.alter_injected").unwrap();
+
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "schema.alter_injected"
+value = true
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+    let draft = PolicyDoc::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "schema.alter_injected"
+value = true
+scope = { include = ["app_main"] }
+"#,
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
+
+    let app_main_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let app_other_t = ObjectName::table(b"app_tmp_x".to_vec(), b"t".to_vec());
+
+    // Where the draft EXPLICITLY asked (app_main), it earns the grant.
+    assert_eq!(ep.grants(&power_key, &app_main_t), Some(KnobValue::Bool(true)));
+    // Where it stayed silent (app_tmp_x, still under the ceiling's app_*), it does
+    // NOT inherit — default deny.
+    assert_eq!(ep.grants(&power_key, &app_other_t), Some(KnobValue::Bool(false)));
 }
 
 // Pat needs Debug for the panic messages.

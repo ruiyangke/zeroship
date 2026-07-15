@@ -161,11 +161,16 @@ pub struct ExecutorConfig {
     pub pg: PgConfinement,
     /// PRIVATE (`pub(crate)`). The composed policy every executor-path guard uses.
     /// Confined configs carry a no-inject policy with project-scoped
-    /// create/rename/cross-schema grants; platform configs carry the operator
-    /// policy; a trusted config additionally grants `core.skip_static_guard`. The
-    /// guard is built from this single policy source — the belt-skip is now a policy
-    /// grant, not a separate executor bit.
+    /// create/rename/cross-schema grants; platform/trusted configs carry the operator
+    /// policy. The guard is built from this single policy source for every COMPOSABLE
+    /// decision.
     pub(crate) effective: zero_migrate_policy::EffectivePolicy,
+    /// PRIVATE (`pub(crate)`). The root/host-set [`GuardMode`] the executor stamps onto
+    /// every guard it builds. `Off` ONLY for the Trusted (dbmate-like) posture — the
+    /// belt-skip is this posture, NOT a policy grant. Confined/Platform stay `Enforced`.
+    ///
+    /// [`GuardMode`]: crate::guard::GuardMode
+    pub(crate) guard_mode: crate::guard::GuardMode,
 }
 
 impl ExecutorConfig {
@@ -185,6 +190,8 @@ impl ExecutorConfig {
             // The PG-specific confinement block (meta schema, timeouts, role,
             // extension-resolution schemas). Inert for a SQLite-backed config.
             pg: PgConfinement::new(meta_schema),
+            // Confined/Platform run the full belt; only `trusted()` flips this to `Off`.
+            guard_mode: crate::guard::GuardMode::Enforced,
         }
     }
 
@@ -204,7 +211,11 @@ impl ExecutorConfig {
     /// `pub(crate)` ctors, which always stamp one) FAILS CLOSED to Confined.
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
-        crate::guard::GuardConfig::from_policy(self.effective.clone(), crate::SqlDialect::Postgres)
+        crate::guard::GuardConfig::from_policy_with_mode(
+            self.effective.clone(),
+            crate::SqlDialect::Postgres,
+            self.guard_mode,
+        )
     }
 
     /// Build a **Platform** executor config. REQUIRES a
@@ -281,10 +292,12 @@ impl ExecutorConfig {
         project_schema: impl Into<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        // The trusted policy grants every vendor capability, ⊤ cross-schema, AND the
-        // `core.skip_static_guard` belt-skip — the belt-skip is now a policy grant.
+        // The trusted policy grants every vendor capability + ⊤ cross-schema. The
+        // belt-skip is NOT a grant — it is the root/host-set `GuardMode::Off` stamped
+        // here, which `guard_config()` threads into every guard this config builds.
         cfg.effective = crate::model::table_shape::trusted_no_inject_policy()
             .expect("trusted no-inject policy composes");
+        cfg.guard_mode = crate::guard::GuardMode::Off;
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
         // connecting role, exactly like Platform's admin (no `SET ROLE`).
         cfg
@@ -334,10 +347,10 @@ impl ExecutorConfig {
     /// well-formed `ExecutorConfig`).
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
         let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
-        if policy_grants_bool(&self.effective, zero_migrate_ir::policy_registry::KEY_PG_ROLE) {
+        if policy_grants_bool(&self.effective, zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE) {
             if let Some(schemas) = policy_literal_schema_includes(
                 &self.effective,
-                zero_migrate_ir::policy_registry::KEY_CORE_CREATE_TABLE,
+                zero_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
             ) {
                 if !schemas.is_empty() {
                     return schemas
