@@ -111,15 +111,20 @@ pub fn load_verify(
 /// (EITHER a set of IR envelopes — the generated source — OR a declared
 /// `CollectionDescriptor` set — the manual source) into the two co-emitted
 /// artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
-/// renderer, so their output is byte-identical for equivalent schemas.
+/// renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
+/// same `policyCeilingToml` drives both (the confined system-shape injection is
+/// policy-driven, not a baked-in engine preset; the caller supplies the confined
+/// ceiling).
 ///
 /// Runs inline on the napi call thread (no DB, no host driver). Returns a typed
-/// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source
-/// (never a throw). Exactly one of `envelopes`/`descriptors` must be populated.
+/// [`GenArtifactsReply`]; `ok=false` + `error` on a malformed/incoherent source or a
+/// malformed policy ceiling (never a throw). Exactly one of `envelopes`/`descriptors`
+/// must be populated.
 #[napi(js_name = "genArtifacts")]
 #[must_use]
 pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
     let schema = source.project_schema.as_deref();
+    let ceiling = source.policy_ceiling_toml.as_deref();
     match (source.envelopes, source.descriptors) {
         (Some(_), Some(_)) => gen_artifacts_err(
             "genArtifacts: exactly one of `envelopes` (generated source) or `descriptors` \
@@ -129,7 +134,9 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
             "genArtifacts: a source is required — set `envelopes` (generated source) or \
              `descriptors` (manual source)",
         ),
-        (Some(envelopes), None) => api::gen_artifacts_from_envelopes(&envelopes, schema),
+        (Some(envelopes), None) => {
+            api::gen_artifacts_from_envelopes(&envelopes, schema, ceiling)
+        }
         (None, Some(dtos)) => {
             let descriptors = match dtos
                 .into_iter()
@@ -139,7 +146,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
                 Ok(d) => d,
                 Err(e) => return gen_artifacts_err(e),
             };
-            api::gen_artifacts_from_descriptors(&descriptors, schema)
+            api::gen_artifacts_from_descriptors(&descriptors, schema, ceiling)
         }
     }
 }

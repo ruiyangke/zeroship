@@ -27,6 +27,54 @@ function assert(cond, msg) {
   }
 }
 
+// --- The confined schema-emit ceiling (a `RootCeiling` TOML) both sources pass as
+//     `policyCeilingToml`. The engine bakes in NO confined preset: the caller supplies
+//     the injection shape. Both sides pass the SAME ceiling ⇒ byte-identical output.
+//     This mirrors the monorepo's bundled confined schema-emit ceiling (the 7 system
+//     columns + [id] PK + 3 system indexes + the grants emission needs). ---
+const CONFINED_CEILING_TOML = `policy_version = 1
+
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "core.create_table"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "core.rename_into"
+value = true
+scope = { include = ["app"] }
+
+[[grant]]
+key = "sec.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id",         type = "text",        nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false },
+  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_by", type = "text",        nullable = true  },
+  { name = "updated_by", type = "text",        nullable = true  },
+  { name = "version",    type = "integer",     nullable = false },
+  { name = "deleted_at", type = "timestamptz", nullable = true  },
+]
+indexes = [
+  { name = "ix_deleted_at", columns = ["deleted_at"] },
+  { name = "ix_updated_at", columns = ["updated_at"] },
+  { name = "ix_created_by", columns = ["created_by"] },
+]
+`;
+
 // --- The GENERATED source: the RAW author-only create-table envelope (recorder shape:
 //     author columns ONLY, no system fields, no author PK — genArtifacts resolves the
 //     confined system shape before folding). ---
@@ -59,10 +107,10 @@ const descriptor = {
   ],
 };
 
-const gen = addon.genArtifacts({ envelopes: [envelope] });
+const gen = addon.genArtifacts({ envelopes: [envelope], policyCeilingToml: CONFINED_CEILING_TOML });
 assert(gen.ok, `generated source ok: ${gen.error}`);
 
-const man = addon.genArtifacts({ descriptors: [descriptor] });
+const man = addon.genArtifacts({ descriptors: [descriptor], policyCeilingToml: CONFINED_CEILING_TOML });
 assert(man.ok, `manual source ok: ${man.error}`);
 
 // (1) byte-identical runtimeJson + envDbTs.

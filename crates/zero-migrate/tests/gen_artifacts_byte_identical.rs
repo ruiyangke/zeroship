@@ -2,17 +2,22 @@
 //!
 //! The schema-artifact emitter (`gen-types`) has two front-doors:
 //!   - `render_artifacts(ops, schema)` — the GENERATED source (op.* migrations).
-//!   - `render_artifacts_from_descriptors(descriptors, schema)` — the MANUAL source
-//!     (a declared `CollectionDescriptor` set), routed through
-//!     `descriptors_to_create_ops` and then the SAME renderer tail.
+//!   - `render_artifacts_from_descriptors(descriptors, schema, effective)` — the
+//!     MANUAL source (a declared `CollectionDescriptor` set), routed through
+//!     `descriptors_to_create_ops` (which injects the confined system shape under
+//!     `effective`) and then the SAME renderer tail.
 //!
 //! This test constructs the SAME logical schema two independent ways — a
 //! **RAW author-only** `op.*` `CreateTable` (the exact shape the pure-JS recorder
 //! emits — NO system columns/indexes) resolved through the create-table policy
-//! (`resolve_create_table_policy` under the Confined profile), EXACTLY as the
-//! `gen_artifacts_from_envelopes` napi path now does before folding — AND an
-//! equivalent `CollectionDescriptor` (which `descriptors_to_create_ops` resolves
-//! internally) — and pins:
+//! (`resolve_create_table_policy` under the confined ceiling
+//! `zeroship_confined_ceiling()`), EXACTLY as the `gen_artifacts_from_envelopes` napi
+//! path now does before folding — AND an equivalent `CollectionDescriptor` (which
+//! `descriptors_to_create_ops` resolves under the SAME ceiling) — and pins:
+//!
+//! The injection is POLICY-DRIVEN (the engine bakes in no confined preset), so BOTH
+//! sides are driven by the SAME composed `EffectivePolicy` — which is what preserves
+//! the byte-identical guarantee now that the shape comes from the ceiling.
 //!
 //! This is the TRUE byte-identical guarantee: the generated side feeds RAW,
 //! UNRESOLVED envelope ops (author columns only) and the resolution injects the 7
@@ -32,7 +37,8 @@ use serde_json::Value;
 use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 use zero_migrate::{
-    render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy, PolicyProfile,
+    render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy,
+    zeroship_confined_ceiling,
 };
 
 const SCHEMA: &str = "public";
@@ -126,7 +132,7 @@ fn people_ops_generated() -> Vec<Op> {
     } else {
         panic!("expected a createTable");
     }
-    resolve_create_table_policy(&raw, &PolicyProfile::confined())
+    resolve_create_table_policy(&raw, &zeroship_confined_ceiling())
         .expect("create-table policy resolves")
         .ops
 }
@@ -135,7 +141,7 @@ fn people_ops_generated() -> Vec<Op> {
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let generated = render_artifacts(&people_ops_generated(), SCHEMA).expect("generated render");
     let manual =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA).expect("manual render");
+        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("manual render");
 
     assert_eq!(
         generated.runtime_json, manual.runtime_json,
@@ -153,7 +159,7 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 #[test]
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA).expect("render");
+        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
     let v: Value = serde_json::from_str(&artifacts.runtime_json).expect("runtime json parses");
 
     // version == 1
@@ -208,7 +214,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 #[test]
 fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
     let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA).expect("render");
+        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
     let ts = &artifacts.env_db_ts;
 
     // A real `.ts` module: the `@zeroship/db` import, a `const schema = { … }`
@@ -250,7 +256,7 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
 #[test]
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA).expect("render");
+        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
 
     // Clean: committed == freshly generated → Ok.
     zero_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)

@@ -5831,7 +5831,7 @@ mod tests {
             },
         ];
 
-        let ops = descriptors_to_create_ops(&[d.clone()]).unwrap();
+        let ops = descriptors_to_create_ops(&[d.clone()], &zeroship_confined_ceiling()).unwrap();
         let Op::CreateTable { indexes, .. } = &ops[0] else {
             panic!("createTable")
         };
@@ -5862,7 +5862,9 @@ mod tests {
         assert_eq!(unique_idx.unique, Some(true), "the unique flag is preserved");
 
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
-        let artifacts = crate::render_artifacts_from_descriptors(&[d], SCHEMA).unwrap();
+        let artifacts =
+            crate::render_artifacts_from_descriptors(&[d], SCHEMA, &zeroship_confined_ceiling())
+                .unwrap();
         let v: serde_json::Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
         let idx_names: Vec<String> = v["collections"]["articles"]["indexes"]
             .as_array()

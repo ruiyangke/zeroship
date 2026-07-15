@@ -405,18 +405,29 @@ pub fn render_artifacts(
 
 /// Render both artifacts from a DECLARED `CollectionDescriptor` set (the MANUAL
 /// source). This turns the descriptors into `createTable` ops via
-/// [`crate::descriptors_to_create_ops`] and then routes through the SAME
-/// [`render_artifacts`] tail — so the manual and generated paths are
-/// byte-identical for equivalent schemas.
+/// [`crate::descriptors_to_create_ops`] — which resolves each descriptor's
+/// table shape under the supplied `effective` policy (injecting the confined
+/// system columns/indexes/PK the caller's ceiling declares) — and then routes
+/// through the SAME [`render_artifacts`] tail. So the manual and generated paths
+/// are byte-identical for equivalent schemas, PROVIDED both are driven by an
+/// `EffectivePolicy` that injects the same shape (the generated path resolves the
+/// raw envelope ops through the SAME ceiling before folding).
+///
+/// The engine constructs no default ceiling: the caller composes the confined
+/// `EffectivePolicy` (the monorepo passes zeroship's confined ceiling; the tests
+/// pass the generic confined test ceiling) and threads it in.
 ///
 /// # Errors
-/// [`GenTypesError::Produce`] if the descriptor set cannot be turned into ops;
+/// [`GenTypesError::Produce`] if the descriptor set cannot be turned into ops
+/// (including a table-shape resolve failure under `effective`);
 /// [`GenTypesError::Fold`] if the produced ops are structurally incoherent.
 pub fn render_artifacts_from_descriptors(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
     project_schema: &str,
+    effective: &zero_migrate_policy::EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
-    let ops = crate::descriptors_to_create_ops(descriptors).map_err(GenTypesError::Produce)?;
+    let ops =
+        crate::descriptors_to_create_ops(descriptors, effective).map_err(GenTypesError::Produce)?;
     render_artifacts(&ops, project_schema)
 }
 

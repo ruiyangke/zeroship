@@ -400,6 +400,15 @@ pub struct GenArtifactsSource {
     /// The project schema the fold threads (FK `definition`s embed it). Optional;
     /// defaults to `"public"`.
     pub project_schema: Option<String>,
+    /// The **policy input**: the host's `RootCeiling` document (TOML) that drives
+    /// the confined system-shape injection — the SAME shape the apply path's
+    /// `policyCeilingToml` uses. The engine bakes in NO default confined preset:
+    /// `None` injects nothing (author-owned shape passes through); `Some` composes
+    /// the ceiling whose `injects_for` prepends the seven platform system columns +
+    /// `["id"]` PK + the system indexes into every created table (applied identically
+    /// on the envelope and descriptor sides, so the two stay byte-identical). The
+    /// monorepo caller passes zeroship's confined schema-emit ceiling here.
+    pub policy_ceiling_toml: Option<String>,
 }
 
 /// The typed reply for the sync, DB-free `loadVerify` gate. Never throws for a

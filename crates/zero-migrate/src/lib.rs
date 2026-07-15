@@ -193,8 +193,13 @@ pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // `EffectivePolicy`).
 pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 pub use model::table_shape::{
-    effective_policy_from_ceiling_toml, resolve_create_table_policy, TableShapeError,
+    confined_no_inject_policy, effective_policy_from_ceiling_toml, resolve_create_table_policy,
+    TableShapeError,
 };
+// The composed policy-decision point the injection + guard share. Re-exported at
+// the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
+// name it without reaching into the `zero-migrate-policy` crate directly.
+pub use zero_migrate_policy::EffectivePolicy;
 #[cfg(any(test, feature = "test-support"))]
 pub use model::table_shape::{
     zeroship_confined_ceiling, zeroship_no_inject_ceiling, ZEROSHIP_CONFINED_CEILING_TOML,

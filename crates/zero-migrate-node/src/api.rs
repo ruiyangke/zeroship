@@ -17,11 +17,11 @@ use std::collections::HashMap;
 
 use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
 use zero_migrate::model::load::load_ir_document;
-use zero_migrate::model::profile::PolicyProfile;
 use zero_migrate::model::validate::Dialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
-    render_artifacts, render_artifacts_from_descriptors, resolve_create_table_policy,
+    confined_no_inject_policy, effective_policy_from_ceiling_toml, render_artifacts,
+    render_artifacts_from_descriptors, resolve_create_table_policy, EffectivePolicy,
     DEFAULT_PROJECT_SCHEMA,
 };
 
@@ -88,6 +88,28 @@ pub fn load_verify(
     }
 }
 
+/// Compose the schema-emit [`EffectivePolicy`] from an optional host `RootCeiling`
+/// document (TOML) — the SAME `policy_ceiling_toml` input the apply path
+/// (`lower_envelope_to_migrations`) threads. The engine constructs NO baked-in
+/// confined ceiling: `None` injects nothing (the author-owned shape passes through);
+/// `Some` composes the ceiling whose `injects_for(object)` drives the confined
+/// system-column/index/PK injection. The monorepo caller passes zeroship's confined
+/// ceiling; the byte-identical tests pass the generic confined test ceiling.
+///
+/// `project_schema` seeds the no-inject fallback's scoped namespace grants.
+///
+/// # Errors
+/// A human-readable message on a malformed ceiling / composition failure.
+fn schema_emit_policy(
+    policy_ceiling_toml: Option<&str>,
+    project_schema: &str,
+) -> Result<EffectivePolicy, String> {
+    match policy_ceiling_toml {
+        Some(toml) => effective_policy_from_ceiling_toml(toml),
+        None => confined_no_inject_policy(project_schema),
+    }
+}
+
 /// Render the two schema artifacts from the GENERATED source: a set of IR
 /// envelopes (`{ ir_version, name, ops }`). Each envelope's `ops` are concatenated
 /// in order and folded through the shared renderer.
@@ -99,26 +121,33 @@ pub fn load_verify(
 /// the author-declared columns; the platform-managed system fields
 /// (`id`/`created_at`/`updated_at`/`created_by`/`updated_by`/`version`/`deleted_at`)
 /// + the `["id"]` PRIMARY KEY + the system indexes are injected by
-/// [`resolve_create_table_policy`] under the **Confined** creator profile, NOT by the
-/// JS DSL (exactly the fold `crate::lower::lower_envelope_to_migrations` runs before
-/// it lowers). So each envelope is resolved here — per-envelope, as its own
-/// [`MigrationIr`], with the SAME `PolicyProfile::confined()` the apply-side lower
-/// uses — BEFORE the ops are concatenated and folded. Resolution stays OUT of the
-/// shared [`render_artifacts`] tail: the manual descriptor path already resolves
-/// inside `descriptors_to_create_ops`, so double-resolving there would be wrong. This
-/// keeps the generated + manual paths byte-identical (both feed RESOLVED ops to the
-/// one renderer).
+/// [`resolve_create_table_policy`] under the caller-supplied **confined policy
+/// ceiling**, NOT by the JS DSL (exactly the fold
+/// `crate::lower::lower_envelope_to_migrations` runs before it lowers). The engine
+/// bakes in no confined preset: `policy_ceiling_toml` carries the host's
+/// `RootCeiling` (the monorepo passes zeroship's confined ceiling). Each envelope is
+/// resolved here — per-envelope, as its own [`MigrationIr`], under the SAME composed
+/// [`EffectivePolicy`] the apply-side lower uses — BEFORE the ops are concatenated
+/// and folded. Resolution stays OUT of the shared [`render_artifacts`] tail: the
+/// manual descriptor path already resolves inside `descriptors_to_create_ops` (under
+/// the SAME ceiling), so double-resolving there would be wrong. This keeps the
+/// generated + manual paths byte-identical (both feed RESOLVED ops — injected by the
+/// same ceiling — to the one renderer).
 ///
-/// Returns a [`GenArtifactsReply`]; a malformed envelope / a table-shape resolve
-/// failure / an incoherent op stream yields `ok: false` with the message, never a
-/// panic.
+/// Returns a [`GenArtifactsReply`]; a malformed envelope / a malformed policy
+/// ceiling / a table-shape resolve failure / an incoherent op stream yields
+/// `ok: false` with the message, never a panic.
 #[must_use]
 pub fn gen_artifacts_from_envelopes(
     envelopes: &[serde_json::Value],
     project_schema: Option<&str>,
+    policy_ceiling_toml: Option<&str>,
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
-    let confined = PolicyProfile::confined();
+    let effective = match schema_emit_policy(policy_ceiling_toml, schema) {
+        Ok(p) => p,
+        Err(e) => return gen_err(format!("schema-emit policy ceiling failed to load: {e}")),
+    };
     let mut ops: Vec<Op> = Vec::new();
     for (i, env) in envelopes.iter().enumerate() {
         let raw_ir: MigrationIr = match serde_json::from_value(env.clone()) {
@@ -128,8 +157,9 @@ pub fn gen_artifacts_from_envelopes(
             }
         };
         // Resolve the confined system shape (system columns + [id] PK + system
-        // indexes) BEFORE folding — the JS recorder emits author-only ops.
-        let resolved = match resolve_create_table_policy(&raw_ir, &confined) {
+        // indexes) BEFORE folding — the JS recorder emits author-only ops. The
+        // shape is the ceiling's `injects_for`, NOT a baked-in preset.
+        let resolved = match resolve_create_table_policy(&raw_ir, &effective) {
             Ok(ir) => ir,
             Err(e) => {
                 return gen_err(format!("envelope[{i}] table-shape resolve failed: {e}"));
@@ -145,20 +175,28 @@ pub fn gen_artifacts_from_envelopes(
 
 /// Render the two schema artifacts from the MANUAL source: a declared
 /// `CollectionDescriptor` set. The descriptors are turned into `createTable` ops via
-/// the producer and folded through the SAME renderer tail — so the manual output is
-/// byte-identical to the generated output for an equivalent schema.
+/// the producer — which injects the confined system shape under the caller-supplied
+/// `policy_ceiling_toml` ceiling — and folded through the SAME renderer tail, so the
+/// manual output is byte-identical to the generated output for an equivalent schema
+/// (both driven by the SAME ceiling).
 ///
-/// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
+/// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`. The engine
+/// constructs no default ceiling: `policy_ceiling_toml = None` injects nothing.
 ///
-/// Returns a [`GenArtifactsReply`]; a descriptor set the producer/fold refuses
-/// yields `ok: false` with the message, never a panic.
+/// Returns a [`GenArtifactsReply`]; a malformed policy ceiling / a descriptor set the
+/// producer/fold refuses yields `ok: false` with the message, never a panic.
 #[must_use]
 pub fn gen_artifacts_from_descriptors(
     descriptors: &[CollectionDescriptor],
     project_schema: Option<&str>,
+    policy_ceiling_toml: Option<&str>,
 ) -> GenArtifactsReply {
     let schema = project_schema.unwrap_or(DEFAULT_PROJECT_SCHEMA);
-    match render_artifacts_from_descriptors(descriptors, schema) {
+    let effective = match schema_emit_policy(policy_ceiling_toml, schema) {
+        Ok(p) => p,
+        Err(e) => return gen_err(format!("schema-emit policy ceiling failed to load: {e}")),
+    };
+    match render_artifacts_from_descriptors(descriptors, schema, &effective) {
         Ok(a) => gen_ok(a),
         Err(e) => gen_err(e.to_string()),
     }
@@ -234,7 +272,11 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(&[envelope], None);
+        let reply = gen_artifacts_from_envelopes(
+            &[envelope],
+            None,
+            Some(zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML),
+        );
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let ts = reply.env_db_ts.expect("env.db.ts");
@@ -266,7 +308,11 @@ mod tests {
                 "primaryKey": null
             }]
         });
-        let reply = gen_artifacts_from_envelopes(&[envelope], None);
+        let reply = gen_artifacts_from_envelopes(
+            &[envelope],
+            None,
+            Some(zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML),
+        );
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let v: serde_json::Value = serde_json::from_str(&runtime).expect("runtime json parses");
@@ -311,7 +357,11 @@ mod tests {
     #[test]
     fn gen_artifacts_from_a_malformed_envelope_fails_soft() {
         let bad = serde_json::json!({ "ir_version": current_ir_version(), "ops": "not-an-array" });
-        let reply = gen_artifacts_from_envelopes(&[bad], None);
+        let reply = gen_artifacts_from_envelopes(
+            &[bad],
+            None,
+            Some(zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML),
+        );
         assert!(!reply.ok);
         assert!(reply.error.is_some());
         assert!(reply.runtime_json.is_none());
@@ -331,7 +381,11 @@ mod tests {
             indexes: Vec::new(),
             runtime_options: Default::default(),
         };
-        let reply = gen_artifacts_from_descriptors(&[descriptor], None);
+        let reply = gen_artifacts_from_descriptors(
+            &[descriptor],
+            None,
+            Some(zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML),
+        );
         assert!(reply.ok, "render ok: {:?}", reply.error);
         assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
         assert!(reply.env_db_ts.unwrap().contains("label: t.string(),"));
