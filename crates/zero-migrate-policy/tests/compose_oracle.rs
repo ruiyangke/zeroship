@@ -1,31 +1,28 @@
 //! The COMPOSITION ORACLE — the correctness proof for the security crown jewel.
 //!
-//! The pointwise-grant admissibility check in `admit` is what prevents
-//! privilege escalation. Prose review of it cannot be trusted (exactly as with the
-//! scope lattice, which the Phase-1a oracle settled). So this suite proves it by
-//! brute force:
+//! The composition algebra (`admit`/`restrict`/`overlay`/`finalize_ceiling`) is what
+//! prevents privilege escalation. Prose review of it cannot be trusted (exactly as
+//! with the scope lattice, which the Phase-1a oracle settled). So this suite proves it
+//! by brute force over a bounded universe of concrete object names, with GROUND-TRUTH
+//! value maps computed DIRECTLY from the rule lists (never via the code under test):
 //!
-//! - Over a bounded universe of concrete object names, and for grant keys with a
-//!   SMALL value domain (a `Bool` key and a `UintCeiling` key), it materializes
-//!   `value(ceiling, k, ·)` and `value(draft, k, ·)` as CONCRETE `Object -> Value`
-//!   maps computed DIRECTLY from the rule lists (never via the code under test).
-//! - **Core property:** `admit(ceiling, draft)` is `Ok` IFF, for every
-//!   object `o` and every grant key `k`, `draft_value(k,o) ⊑ ceiling_value(k,o)`
-//!   (pointwise ground truth). It runs the property over many generated
-//!   ceiling/draft pairs — catching ANY residual scope-only or value-blind check.
-//! - It PINS the critic's two escalation cases (both must REJECT) and a
-//!   strictly-inside case (must ACCEPT).
-//! - It proves `restrict` associativity + the clamp-then-strict equivalence,
-//!   the require/inject/validate union-up, compose-time collision blame, and
-//!   `EffectivePolicy` unforgeability.
+//! - **`restrict`** is the exact pointwise MEET of two trusted docs.
+//! - **`overlay`** is total, per-scalar-knob presence-based last-wins, rule-lists
+//!   union (base-then-over).
+//! - **`admit`** is CEILING-INHERITED: `Ok` IFF every draft grant that raises above
+//!   default is `⊑` the ceiling pointwise; the effective grant = presence-override +
+//!   inherit; and — the no-escalation invariant — **`effective ⊑ ceiling` for EVERY
+//!   key/object** over the whole universe (all three arms: silent-inherit,
+//!   narrow-to-default, narrow-above-default). Obligations union-up survive.
+//! - It PINS the critic's C-1 escalation counterexample (must REJECT), the layered
+//!   override, narrow-to-default, and the seal re-flatten hard-fail.
 //!
 //! The value maps are the ground truth; the composer is the code under test.
 
-use std::collections::BTreeMap;
-
 use zero_migrate_policy::{
-    restrict, admit, ComposeError, Enforcement, KnobDef, KnobKey, KnobKind,
-    KnobValue, ObjectName, PolicyDoc, PolicyRegistry, Polarity, RootCeiling, RuleKind,
+    admit, finalize_ceiling, overlay, restrict, ComposeError, Enforcement, KnobDef, KnobKey,
+    KnobKind, KnobValue, ObjectName, PolicyDoc, PolicyRegistry, Polarity, RootCeiling, RuleKind,
+    TrustedDoc,
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -104,8 +101,15 @@ fn value_gt(doc: &PolicyDoc, kind: &KnobKind, default: &KnobValue, key: &str, o:
     acc
 }
 
-/// The ground-truth value join (loosest): Bool OR, Uint max. (Only Bool + Uint keys
-/// are materialized by this oracle.)
+/// Ground-truth PRESENCE: does `doc` have ANY grant rule on `key` covering `o`?
+fn covers_gt(doc: &PolicyDoc, key: &str, o: &ObjectName) -> bool {
+    doc.rules.iter().any(|rule| {
+        matches!(&rule.kind, RuleKind::Grant { key: rk, .. } if rk.as_str() == key)
+            && rule.scope.objects_membership(o)
+    })
+}
+
+/// The ground-truth value join (loosest): Bool OR, Uint max.
 fn join_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
     match (kind, a, b) {
         (KnobKind::Bool, KnobValue::Bool(x), KnobValue::Bool(y)) => KnobValue::Bool(*x || *y),
@@ -136,29 +140,56 @@ fn meet_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
     }
 }
 
-/// The two materialized keys + their kinds/defaults, for the ground-truth sweep.
+/// The materialized keys + their kinds/defaults, for the ground-truth sweep.
 fn materialized_keys() -> Vec<(&'static str, KnobKind, KnobValue)> {
     vec![
         (BOOL_KEY, KnobKind::Bool, KnobValue::Bool(false)),
         (UINT_KEY, KnobKind::UintCeiling { hard_floor: 1 }, KnobValue::Uint(1)),
-        (CREATE_KEY, KnobKind::Bool, KnobValue::Bool(false)),
     ]
 }
 
-/// Ground-truth ACCEPT predicate: for every materialized key and object, the draft's
-/// value ⊑ the ceiling's value. (Grants only — the generated docs carry no
-/// require/inject/validate, so union-up always holds trivially.)
-fn gt_admissible(ceiling: &PolicyDoc, draft: &PolicyDoc, univ: &[ObjectName]) -> bool {
+/// Ground-truth ACCEPT predicate for `admit(ceiling, draft)`: for every materialized
+/// key and object where the DRAFT raises above default, the draft's value ⊑ the
+/// ceiling's effective value. (Grants only — the generated docs carry no
+/// require/inject/validate.) `ceiling_value` computes the ceiling's EFFECTIVE value at
+/// `(k,o)`.
+fn gt_admissible(
+    ceiling_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
+    draft: &PolicyDoc,
+    univ: &[ObjectName],
+) -> bool {
     for (key, kind, default) in materialized_keys() {
         for o in univ {
             let dv = value_gt(draft, &kind, &default, key, o);
-            let cv = value_gt(ceiling, &kind, &default, key, o);
+            // Only objects where the draft RAISES above default are checked.
+            if leq_gt(&dv, &default) {
+                continue;
+            }
+            let cv = ceiling_value(key, &kind, &default, o);
             if !leq_gt(&dv, &cv) {
                 return false;
             }
         }
     }
     true
+}
+
+/// Ground-truth EFFECTIVE value of `admit(ceiling, draft)` at `(k,o)`: presence-based
+/// override — the draft's value if the draft covers `(k,o)`, else the ceiling's
+/// effective value (inherit).
+fn gt_effective(
+    ceiling_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
+    draft: &PolicyDoc,
+    key: &str,
+    kind: &KnobKind,
+    default: &KnobValue,
+    o: &ObjectName,
+) -> KnobValue {
+    if covers_gt(draft, key, o) {
+        value_gt(draft, kind, default, key, o)
+    } else {
+        ceiling_value(key, kind, default, o)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -170,9 +201,9 @@ fn gt_admissible(ceiling: &PolicyDoc, draft: &PolicyDoc, univ: &[ObjectName]) ->
 /// `app_* \ app_tmp_*`.
 #[derive(Clone, Copy)]
 enum Pat {
-    AppStar,        // include = ["app_*"]
-    AppStarNoTmp,   // include = ["app_*"], exclude = ["app_tmp_*"]
-    Staging,        // include = ["staging"]
+    AppStar,      // include = ["app_*"]
+    AppStarNoTmp, // include = ["app_*"], exclude = ["app_tmp_*"]
+    Staging,      // include = ["staging"]
 }
 
 impl Pat {
@@ -209,10 +240,10 @@ fn doc_toml(gens: &[Gen]) -> String {
     s
 }
 
-/// Parse a generated doc as a plain (non-root) layer.
-fn parse_layer(gens: &[Gen]) -> PolicyDoc {
+/// Parse a generated doc as a plain (non-root) UNTRUSTED draft layer.
+fn parse_draft(gens: &[Gen]) -> PolicyDoc {
     PolicyDoc::parse_toml(&doc_toml(gens), &registry(), zero_migrate_policy::LoadContext::NonRootLayer)
-        .unwrap_or_else(|e| panic!("layer parse failed: {e:?}\n{}", doc_toml(gens)))
+        .unwrap_or_else(|e| panic!("draft parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
 /// Parse a generated doc as a root ceiling.
@@ -221,17 +252,21 @@ fn parse_root(gens: &[Gen]) -> RootCeiling {
         .unwrap_or_else(|e| panic!("root parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
+/// Parse a generated doc as a TRUSTED catalog entry (an `overlay`/`restrict` operand).
+fn parse_trusted(gens: &[Gen]) -> TrustedDoc {
+    TrustedDoc::register_catalog_entry(&doc_toml(gens), &registry())
+        .unwrap_or_else(|e| panic!("trusted parse failed: {e:?}\n{}", doc_toml(gens)))
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
-// THE CORE PROPERTY: admit Ok ⟺ pointwise draft ⊑ ceiling
+// THE CORE PROPERTY (admit): Ok ⟺ pointwise draft ⊑ ceiling + effective ⊑ ceiling
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn oracle_admit_ok_iff_pointwise_leq() {
+fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
     let univ = universe();
     let reg = registry();
 
-    // Ceiling grant rules: one Bool + one Uint rule over the pattern pool + value
-    // pool. Draft: same shape. Sweep the Cartesian product (bounded).
     let bool_vals = ["true", "false"];
     let uint_vals = ["60", "600"];
     let pats = Pat::all();
@@ -240,7 +275,6 @@ fn oracle_admit_ok_iff_pointwise_leq() {
     let mut accepted = 0usize;
     let mut rejected = 0usize;
 
-    // Ceiling = { BOOL @ cpat = cbool ; UINT @ cpat2 = cuint }.
     for &cpat in &pats {
         for &cpat2 in &pats {
             for cbool in bool_vals {
@@ -249,10 +283,13 @@ fn oracle_admit_ok_iff_pointwise_leq() {
                         Gen { key: BOOL_KEY, pat: cpat, value: cbool },
                         Gen { key: UINT_KEY, pat: cpat2, value: cuint },
                     ];
-                    let ceiling_doc = parse_layer(&ceiling_gens);
+                    let ceiling_doc = parse_draft(&ceiling_gens);
                     let root = parse_root(&ceiling_gens);
+                    // The ceiling's effective value = the root doc's grant value.
+                    let cval = |key: &str, kind: &KnobKind, default: &KnobValue, o: &ObjectName| {
+                        value_gt(&ceiling_doc, kind, default, key, o)
+                    };
 
-                    // Draft = { BOOL @ dpat = dbool ; UINT @ dpat2 = duint }.
                     for &dpat in &pats {
                         for &dpat2 in &pats {
                             for dbool in bool_vals {
@@ -261,9 +298,9 @@ fn oracle_admit_ok_iff_pointwise_leq() {
                                         Gen { key: BOOL_KEY, pat: dpat, value: dbool },
                                         Gen { key: UINT_KEY, pat: dpat2, value: duint },
                                     ];
-                                    let draft = parse_layer(&draft_gens);
+                                    let draft = parse_draft(&draft_gens);
 
-                                    let gt = gt_admissible(&ceiling_doc, &draft, &univ);
+                                    let gt = gt_admissible(&cval, &draft, &univ);
                                     let got = admit(&root, &draft, &reg);
 
                                     total += 1;
@@ -272,9 +309,7 @@ fn oracle_admit_ok_iff_pointwise_leq() {
                                         (Err(_), false) => rejected += 1,
                                         (Ok(ep), false) => panic!(
                                             "FALSE ACCEPT (escalation slipped through)!\n\
-                                             ceiling={ceiling_gens:?}\n draft={draft_gens:?}\n\
-                                             composed ok but ground truth says a draft value \
-                                             exceeds the ceiling somewhere.\n{ep:?}"
+                                             ceiling={ceiling_gens:?}\n draft={draft_gens:?}\n{ep:?}"
                                         ),
                                         (Err(e), true) => panic!(
                                             "FALSE REJECT (should have composed)!\n\
@@ -282,23 +317,26 @@ fn oracle_admit_ok_iff_pointwise_leq() {
                                         ),
                                     }
 
-                                    // When accepted, the composed policy's decision
-                                    // query must equal the draft's ground-truth value
-                                    // map (the effective grant is the draft's, proven
-                                    // ⊑ the ceiling pointwise).
                                     if let Ok(ep) = &got {
                                         for (key, kind, default) in materialized_keys() {
-                                            if key == CREATE_KEY {
-                                                continue; // no create grants generated
-                                            }
                                             let pk = KnobKey::parse(key).unwrap();
                                             for o in &univ {
-                                                let want =
-                                                    value_gt(&draft, &kind, &default, key, o);
+                                                // (a) effective == presence-override GT.
+                                                let want = gt_effective(
+                                                    &cval, &draft, key, &kind, &default, o,
+                                                );
                                                 let got_v = ep.grants(&pk, o).unwrap();
                                                 assert_eq!(
                                                     got_v, want,
-                                                    "decision-query value mismatch at {o:?} key {key}"
+                                                    "effective value mismatch at {o:?} key {key}"
+                                                );
+                                                // (b) THE NO-ESCALATION INVARIANT:
+                                                //     effective ⊑ ceiling everywhere.
+                                                let cv = cval(key, &kind, &default, o);
+                                                assert!(
+                                                    leq_gt(&got_v, &cv),
+                                                    "effective ⋢ ceiling at {o:?} key {key}: \
+                                                     eff={got_v:?} ceiling={cv:?}"
                                                 );
                                             }
                                         }
@@ -312,7 +350,6 @@ fn oracle_admit_ok_iff_pointwise_leq() {
         }
     }
 
-    // Guard against a vacuous sweep.
     assert!(total >= 1000, "sweep too small: {total}");
     assert!(accepted > 0 && rejected > 0, "sweep degenerate: acc={accepted} rej={rejected}");
     eprintln!("admit oracle: total={total} accepted={accepted} rejected={rejected}");
@@ -331,18 +368,14 @@ impl std::fmt::Debug for Gen {
 
 #[test]
 fn pinned_value_blind_escalation_rejects() {
-    // Ceiling: { timeout 60s @ app_* , 600s @ staging }.
-    // Draft:   { timeout 600s @ app_* }  (also 600s @ staging is fine, but app_* is
-    //          where the ceiling only allows 60s).
-    // At app_main.t: value(ceiling) = 60 (only the app_* ceiling rule covers it),
-    //                value(draft)   = 600  →  600 ≤ 60 is FALSE  →  REJECT.
-    // A scope-only check (draft app_* ⊑ ceiling app_*∪staging) would WRONGLY pass.
+    // Ceiling: { timeout 60s @ app_* , 600s @ staging }.  Draft: { timeout 600s @ app_* }.
+    // At app_main.t: value(ceiling)=60, value(draft)=600 → REJECT.
     let reg = registry();
     let root = parse_root(&[
         Gen { key: UINT_KEY, pat: Pat::AppStar, value: "60" },
         Gen { key: UINT_KEY, pat: Pat::Staging, value: "600" },
     ]);
-    let draft = parse_layer(&[Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" }]);
+    let draft = parse_draft(&[Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" }]);
     let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::GrantExceedsCeiling { .. })),
@@ -352,13 +385,11 @@ fn pinned_value_blind_escalation_rejects() {
 
 #[test]
 fn pinned_exclude_escalation_rejects() {
-    // Ceiling grant @ { app_* exclude app_tmp_* } = true.
-    // Draft   grant @ { app_* } = true.
-    // The draft grants at app_tmp_x, which the ceiling excludes → REJECT (exercises
-    // the ∖ uncovered-region check).
+    // Ceiling grant @ { app_* exclude app_tmp_* } = true. Draft grant @ { app_* } = true.
+    // The draft grants at app_tmp_x, which the ceiling excludes → REJECT.
     let reg = registry();
     let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStarNoTmp, value: "true" }]);
-    let draft = parse_layer(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let draft = parse_draft(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
     let got = admit(&root, &draft, &reg);
     assert!(
         matches!(
@@ -372,43 +403,191 @@ fn pinned_exclude_escalation_rejects() {
 
 #[test]
 fn pinned_strictly_inside_accepts() {
-    // Ceiling grant @ app_* = true, timeout 600 @ app_*.
-    // Draft   grant @ app_* = true (same), timeout 60 @ app_* (tighter) → ACCEPT.
+    // Ceiling grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 → ACCEPT.
     let reg = registry();
     let root = parse_root(&[
         Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" },
         Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" },
     ]);
-    let draft = parse_layer(&[
+    let draft = parse_draft(&[
         Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" },
         Gen { key: UINT_KEY, pat: Pat::AppStar, value: "60" },
     ]);
+    assert!(admit(&root, &draft, &reg).is_ok(), "strictly-inside draft must ACCEPT");
+}
+
+/// **THE C-1 COUNTEREXAMPLE.** Ceiling grants `raw_sql` on `Of{[app_*],
+/// exclude=[app_secret]}` PLUS a disjoint `Of{[reports]}`; draft `raw_sql@app_secret`
+/// → admit REJECTS. A `⊔`-materialized ceiling side would DROP the `app_secret`
+/// exclude (folding the two ceiling rules), compute `app_secret` as covered, and
+/// wrongly ACCEPT. The iterated-per-rule-∖ path keeps the exclude → reject.
+#[test]
+fn pinned_c1_disjoint_exclude_escalation_rejects() {
+    let reg = registry();
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = { include = ["app_*"], exclude = ["app_secret"] }
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = { include = ["reports"] }
+"#,
+        &reg,
+    )
+    .unwrap();
+    // Draft grants raw_sql on app_secret — the excluded region.
+    let draft = PolicyDoc::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = { include = ["app_secret"] }
+"#,
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
     let got = admit(&root, &draft, &reg);
-    assert!(got.is_ok(), "strictly-inside draft must ACCEPT, got {got:?}");
+    assert!(
+        matches!(
+            got,
+            Err(ComposeError::GrantExceedsCeiling { .. })
+                | Err(ComposeError::UncoveredRegionNotRepresentable { .. })
+        ),
+        "C-1 disjoint-exclude escalation MUST reject (a ⊔-materialized ceiling would \
+         have wrongly ACCEPTED), got {got:?}"
+    );
+
+    // Sanity: the OLD ⊔-materialized formula (fold the two ceiling rules into one
+    // scope via join, dropping the exclude) WOULD compute app_secret as covered.
+    // We assert the ground truth is a reject: at app_secret.t the ceiling's effective
+    // raw_sql is FALSE (app_* grants it but the exclude removes app_secret; reports is
+    // disjoint), while the draft raises it to TRUE → true ⋢ false → escalation.
+    let secret = ObjectName::table(b"app_secret".to_vec(), b"t".to_vec());
+    let ceiling_doc = root.doc();
+    let cv = value_gt(ceiling_doc, &KnobKind::Bool, &KnobValue::Bool(false), BOOL_KEY, &secret);
+    assert_eq!(cv, KnobValue::Bool(false), "ceiling denies app_secret (exclude honored)");
+}
+
+/// **PIN the layered override.** Draft `timeout=10000@app_*` over ceiling
+/// `timeout=30000@All` → `grants(timeout, app_main.t) == 10000` (draft narrows),
+/// `grants(timeout, other.t) == 30000` (inherited from the ceiling). The flat
+/// loosest-covering formula could not represent this (it would return 30000 at
+/// app_main.t, discarding the narrower draft value).
+#[test]
+fn pinned_layered_override_narrow_region() {
+    let reg = registry();
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "op.lock_timeout_ms"
+value = 30000
+scope = "all"
+"#,
+        &reg,
+    )
+    .unwrap();
+    let draft = PolicyDoc::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "op.lock_timeout_ms"
+value = 10000
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&root, &draft, &reg).expect("narrowing draft is admissible");
+    let pk = KnobKey::parse(UINT_KEY).unwrap();
+
+    let app_main_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let other_t = ObjectName::table(b"other".to_vec(), b"t".to_vec());
+    assert_eq!(
+        ep.grants(&pk, &app_main_t),
+        Some(KnobValue::Uint(10000)),
+        "draft narrows timeout in app_* (layered override)"
+    );
+    assert_eq!(
+        ep.grants(&pk, &other_t),
+        Some(KnobValue::Uint(30000)),
+        "outside app_*, the ceiling's timeout is inherited"
+    );
+}
+
+/// **PIN narrow-to-default.** Draft `raw_sql=false@app_*` over ceiling `raw_sql=true@All`
+/// → effective false in app_* (the creator asked for less and gets less; presence, not
+/// raises-above-default, is the override trigger). Inherited true elsewhere.
+#[test]
+fn pinned_narrow_to_default_wins() {
+    let reg = registry();
+    let root = RootCeiling::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = "all"
+"#,
+        &reg,
+    )
+    .unwrap();
+    let draft = PolicyDoc::parse_toml(
+        r#"policy_version = 1
+[[grant]]
+key = "core.raw_sql"
+value = false
+scope = { include = ["app_*"] }
+"#,
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
+    let ep = admit(&root, &draft, &reg).expect("narrow-to-default is admissible");
+    let pk = KnobKey::parse(BOOL_KEY).unwrap();
+
+    let app_main_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let other_t = ObjectName::table(b"other".to_vec(), b"t".to_vec());
+    assert_eq!(
+        ep.grants(&pk, &app_main_t),
+        Some(KnobValue::Bool(false)),
+        "draft narrow-to-default WINS in app_* (presence override)"
+    );
+    assert_eq!(
+        ep.grants(&pk, &other_t),
+        Some(KnobValue::Bool(true)),
+        "outside app_*, the ceiling's true is inherited"
+    );
+}
+
+/// **PIN silent-inherit.** A draft SILENT on a key inherits the ceiling's grant
+/// (inherit-then-narrow, not draft-authoritative). A draft that omits a grant the
+/// ceiling allows KEEPS it.
+#[test]
+fn pinned_silent_draft_inherits_ceiling_grant() {
+    let reg = registry();
+    let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    // Draft says nothing about raw_sql.
+    let draft = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
+        .unwrap();
+    let ep = admit(&root, &draft, &reg).unwrap();
+    let pk = KnobKey::parse(BOOL_KEY).unwrap();
+    let app_main_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    assert_eq!(
+        ep.grants(&pk, &app_main_t),
+        Some(KnobValue::Bool(true)),
+        "silent draft INHERITS the ceiling's grant"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// restrict: associativity + clamp-then-strict equivalence
+// restrict: exact pointwise MEET + associativity
 // ══════════════════════════════════════════════════════════════════════════════
-
-/// Materialize the effective value map of a composed policy over the universe, for
-/// both materialized grant keys — the comparable denotation of a `restrict`.
-fn value_map_of(
-    ep: &zero_migrate_policy::EffectivePolicy,
-    univ: &[ObjectName],
-) -> BTreeMap<(String, ObjectName), KnobValue> {
-    let mut m = BTreeMap::new();
-    for (key, _kind, _default) in materialized_keys() {
-        let pk = KnobKey::parse(key).unwrap();
-        for o in univ {
-            m.insert((key.to_string(), o.clone()), ep.grants(&pk, o).unwrap());
-        }
-    }
-    m
-}
 
 #[test]
-fn oracle_restrict_associative_and_pointwise_meet() {
+fn oracle_restrict_is_exact_pointwise_meet() {
     let univ = universe();
     let reg = registry();
     let pats = Pat::all();
@@ -417,128 +596,203 @@ fn oracle_restrict_associative_and_pointwise_meet() {
 
     let mut checked = 0usize;
 
-    // Three trusted ceilings h, o, p — each a root ceiling (all trusted here). We use
-    // the roots as ceilings and clamp them; associativity is asserted over the value
-    // map denotation.
-    for &hp in &pats {
-        for hv in uint_vals {
-            for &op in &pats {
-                for ov in bool_vals {
-                    for &pp in &pats {
-                        for pv in uint_vals {
-                            let h = parse_root(&[Gen { key: UINT_KEY, pat: hp, value: hv }]);
-                            let o = parse_root(&[Gen { key: BOOL_KEY, pat: op, value: ov }]);
-                            let p = parse_root(&[Gen { key: UINT_KEY, pat: pp, value: pv }]);
+    for &ap in &pats {
+        for av in uint_vals {
+            for &bp in &pats {
+                for bv in bool_vals {
+                    let a_gens = vec![Gen { key: UINT_KEY, pat: ap, value: av }];
+                    let b_gens = vec![Gen { key: BOOL_KEY, pat: bp, value: bv }];
+                    let a = parse_trusted(&a_gens);
+                    let b = parse_trusted(&b_gens);
+                    let a_doc = parse_draft(&a_gens);
+                    let b_doc = parse_draft(&b_gens);
 
-                            // clamp(clamp(h,o),p) and clamp(h,clamp(o,p)).
-                            let ho = restrict(&h, &o, &reg).unwrap();
-                            let left = restrict(&ho, &p, &reg).unwrap();
-                            let op_ = restrict(&o, &p, &reg).unwrap();
-                            let right = restrict(&h, &op_, &reg).unwrap();
+                    // restrict → finalize → admit(empty draft) to read the ceiling value.
+                    let restricted = restrict(&a, &b, &reg).unwrap();
+                    let ceiling = finalize_ceiling(restricted).unwrap();
+                    let empty = PolicyDoc::parse_toml(
+                        "policy_version = 1\n",
+                        &reg,
+                        zero_migrate_policy::LoadContext::NonRootLayer,
+                    )
+                    .unwrap();
+                    let ep = admit(&ceiling, &empty, &reg).unwrap();
 
-                            let lm = value_map_of(&left, &univ);
-                            let rm = value_map_of(&right, &univ);
-                            assert_eq!(lm, rm, "restrict NOT associative");
-
-                            // Pointwise meet ground truth: value(clamp) at o ==
-                            // meet(value(h), value(o), value(p)) per key.
-                            for (key, kind, default) in materialized_keys() {
-                                if key == CREATE_KEY {
-                                    continue;
-                                }
-                                let pk = KnobKey::parse(key).unwrap();
-                                for obj in &univ {
-                                    let vh = value_gt(h.doc(), &kind, &default, key, obj);
-                                    let vo = value_gt(o.doc(), &kind, &default, key, obj);
-                                    let vp = value_gt(p.doc(), &kind, &default, key, obj);
-                                    let want =
-                                        meet_gt(&kind, &meet_gt(&kind, &vh, &vo), &vp);
-                                    let got = left.grants(&pk, obj).unwrap();
-                                    assert_eq!(
-                                        got, want,
-                                        "clamp pointwise-meet mismatch at {obj:?} key {key}"
-                                    );
-                                }
-                            }
-                            checked += 1;
+                    for (key, kind, default) in materialized_keys() {
+                        let pk = KnobKey::parse(key).unwrap();
+                        for o in &univ {
+                            let va = value_gt(&a_doc, &kind, &default, key, o);
+                            let vb = value_gt(&b_doc, &kind, &default, key, o);
+                            let want = meet_gt(&kind, &va, &vb);
+                            let got = ep.grants(&pk, o).unwrap();
+                            assert_eq!(got, want, "restrict ≠ pointwise meet at {o:?} key {key}");
                         }
                     }
+                    checked += 1;
                 }
             }
         }
     }
-    assert!(checked >= 100, "clamp sweep too small: {checked}");
+    assert!(checked >= 30, "restrict sweep too small: {checked}");
 }
 
 #[test]
-fn oracle_clamp_then_strict_equals_strict_against_tightest_chain() {
-    // strict(clamp(h,o), draft) is Ok IFF the draft is pointwise ⊑ the pointwise
-    // meet of h and o everywhere — i.e. ⊑ the tightest chain.
+fn oracle_restrict_commutative() {
+    // `restrict` is a lattice MEET, hence commutative: restrict(a,b) and restrict(b,a)
+    // denote the same effective grants. (True 3-way associativity is not expressible
+    // with the 2-ary `TrustedDoc` signature — the meet output is not a `TrustedDoc` —
+    // and the exact-meet property is already proven by `oracle_restrict_is_exact_meet`,
+    // from which associativity follows by the meet laws.)
     let univ = universe();
     let reg = registry();
     let pats = Pat::all();
     let uint_vals = ["60", "600"];
 
-    let mut total = 0;
-    let mut acc = 0;
-    let mut rej = 0;
-    for &hp in &pats {
-        for hv in uint_vals {
-            for &op in &pats {
-                for ov in uint_vals {
-                    let h = parse_root(&[Gen { key: UINT_KEY, pat: hp, value: hv }]);
-                    let o = parse_root(&[Gen { key: UINT_KEY, pat: op, value: ov }]);
-                    let clamp = restrict(&h, &o, &reg).unwrap();
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
 
-                    for &dp in &pats {
-                        for dv in uint_vals {
-                            let draft = parse_layer(&[Gen { key: UINT_KEY, pat: dp, value: dv }]);
+    let mut checked = 0usize;
+    for &pat_a in &pats {
+        for val_a in uint_vals {
+            for &pat_b in &pats {
+                for val_b in uint_vals {
+                    let doc_a = parse_trusted(&[Gen { key: UINT_KEY, pat: pat_a, value: val_a }]);
+                    let doc_b = parse_trusted(&[Gen { key: UINT_KEY, pat: pat_b, value: val_b }]);
 
-                            // Ground truth: draft ⊑ meet(h, o) pointwise.
-                            let kind = KnobKind::UintCeiling { hard_floor: 1 };
-                            let default = KnobValue::Uint(1);
-                            let mut gt = true;
-                            for obj in &univ {
-                                let vd = value_gt(&draft, &kind, &default, UINT_KEY, obj);
-                                let vh = value_gt(h.doc(), &kind, &default, UINT_KEY, obj);
-                                let vo = value_gt(o.doc(), &kind, &default, UINT_KEY, obj);
-                                let tight = meet_gt(&kind, &vh, &vo);
-                                if !leq_gt(&vd, &tight) {
-                                    gt = false;
-                                    break;
-                                }
-                            }
+                    let ab = finalize_ceiling(restrict(&doc_a, &doc_b, &reg).unwrap()).unwrap();
+                    let ba = finalize_ceiling(restrict(&doc_b, &doc_a, &reg).unwrap()).unwrap();
+                    let ep_ab = admit(&ab, &empty, &reg).unwrap();
+                    let ep_ba = admit(&ba, &empty, &reg).unwrap();
 
-                            let got = admit(&clamp, &draft, &reg);
-                            total += 1;
-                            match (&got, gt) {
-                                (Ok(_), true) => acc += 1,
-                                (Err(_), false) => rej += 1,
-                                (Ok(_), false) => panic!(
-                                    "FALSE ACCEPT vs tightest chain: h={hp:?}{hv} o={op:?}{ov} draft={dp:?}{dv}"
-                                ),
-                                (Err(e), true) => panic!(
-                                    "FALSE REJECT vs tightest chain: h={hp:?}{hv} o={op:?}{ov} draft={dp:?}{dv} err={e:?}"
-                                ),
-                            }
-                        }
+                    let pk = KnobKey::parse(UINT_KEY).unwrap();
+                    for obj in &univ {
+                        assert_eq!(
+                            ep_ab.grants(&pk, obj),
+                            ep_ba.grants(&pk, obj),
+                            "restrict not commutative at {obj:?}"
+                        );
                     }
+                    checked += 1;
                 }
             }
         }
     }
-    assert!(total >= 50 && acc > 0 && rej > 0, "sweep degenerate: total={total} acc={acc} rej={rej}");
+    assert!(checked >= 30, "restrict-commutativity sweep too small: {checked}");
 }
 
-// Pat needs Debug for the panic messages.
-impl std::fmt::Debug for Pat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Pat::AppStar => "app_*",
-            Pat::AppStarNoTmp => "app_*\\app_tmp_*",
-            Pat::Staging => "staging",
-        })
+// ══════════════════════════════════════════════════════════════════════════════
+// overlay: total, presence-based last-wins, rule-lists union
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn oracle_overlay_is_presence_last_wins() {
+    let univ = universe();
+    let reg = registry();
+    let pats = Pat::all();
+    let uint_vals = ["60", "600"];
+    let bool_vals = ["true", "false"];
+
+    let mut checked = 0usize;
+    for &bp in &pats {
+        for bv in uint_vals {
+            for &op in &pats {
+                for ov in uint_vals {
+                    // base sets UINT@bp=bv; over sets UINT@op=ov. Where `over` covers,
+                    // over wins (presence, last-wins); else base.
+                    let base_gens = vec![Gen { key: UINT_KEY, pat: bp, value: bv }];
+                    let over_gens = vec![Gen { key: UINT_KEY, pat: op, value: ov }];
+                    let base = parse_trusted(&base_gens);
+                    let over = parse_trusted(&over_gens);
+                    let base_doc = parse_draft(&base_gens);
+                    let over_doc = parse_draft(&over_gens);
+
+                    let assembled = overlay(&base, &over, &reg).unwrap();
+                    let ceiling = finalize_ceiling(assembled).unwrap();
+                    let empty = PolicyDoc::parse_toml(
+                        "policy_version = 1\n",
+                        &reg,
+                        zero_migrate_policy::LoadContext::NonRootLayer,
+                    )
+                    .unwrap();
+                    let ep = admit(&ceiling, &empty, &reg).unwrap();
+
+                    let kind = KnobKind::UintCeiling { hard_floor: 1 };
+                    let default = KnobValue::Uint(1);
+                    let pk = KnobKey::parse(UINT_KEY).unwrap();
+                    for o in &univ {
+                        let want = if covers_gt(&over_doc, UINT_KEY, o) {
+                            value_gt(&over_doc, &kind, &default, UINT_KEY, o)
+                        } else {
+                            value_gt(&base_doc, &kind, &default, UINT_KEY, o)
+                        };
+                        let got = ep.grants(&pk, o).unwrap();
+                        assert_eq!(got, want, "overlay ≠ presence-last-wins at {o:?}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
     }
+    let _ = bool_vals;
+    assert!(checked >= 30, "overlay sweep too small: {checked}");
+}
+
+#[test]
+fn oracle_overlay_unions_inject_and_require_lists() {
+    let reg = registry_with_require();
+    // base: require rls @ app_*, inject created_at @ app_*.
+    let base = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[require]]
+key = "sec.require_rls"
+value = true
+scope = { include = ["app_*"] }
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+"#,
+        &reg,
+    )
+    .unwrap();
+    // over: require rls @ staging, inject updated_at @ app_*.
+    let over = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[require]]
+key = "sec.require_rls"
+value = true
+scope = { include = ["staging"] }
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
+"#,
+        &reg,
+    )
+    .unwrap();
+
+    let ceiling = finalize_ceiling(overlay(&base, &over, &reg).unwrap()).unwrap();
+    let empty = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
+        .unwrap();
+    let ep = admit(&ceiling, &empty, &reg).unwrap();
+
+    let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let staging_t = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
+
+    // Both require rules survive (accumulate).
+    assert!(ep.obligations(&app_t).iter().any(|(k, _)| k.as_str() == "sec.require_rls"));
+    assert!(ep.obligations(&staging_t).iter().any(|(k, _)| k.as_str() == "sec.require_rls"));
+    // Both injects survive on app_* (base created_at + over updated_at).
+    let injs = ep.injects_for(&app_t);
+    let names: Vec<&str> = injs.iter().flat_map(|s| s.columns.iter().map(|c| c.name.as_str())).collect();
+    assert!(names.contains(&"created_at"), "base inject dropped: {names:?}");
+    assert!(names.contains(&"updated_at"), "over inject dropped: {names:?}");
+    // Base-then-over order (M-3): created_at (base) precedes updated_at (over).
+    let ci = names.iter().position(|n| *n == "created_at").unwrap();
+    let ui = names.iter().position(|n| *n == "updated_at").unwrap();
+    assert!(ci < ui, "overlay inject order must be base-then-over: {names:?}");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -577,7 +831,6 @@ scope = { include = ["staging"] }
 "#;
     let root = RootCeiling::parse_toml(root_toml, &reg).unwrap();
 
-    // Draft adds a grant but NO require/inject/validate — the ceiling's must survive.
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
@@ -593,17 +846,14 @@ scope = { include = ["staging"] }
     let ep = admit(&root, &draft, &reg).unwrap();
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
 
-    // Obligation survives.
     let obs = ep.obligations(&app_t);
     assert!(
         obs.iter().any(|(k, v)| k.as_str() == "sec.require_rls" && *v == KnobValue::Bool(true)),
         "ceiling require dropped: {obs:?}"
     );
-    // Inject survives.
     let injs = ep.injects_for(&app_t);
     assert_eq!(injs.len(), 1, "ceiling inject dropped");
     assert_eq!(injs[0].columns[0].name, "created_at");
-    // Validate survives.
     let vals = ep.validates_for(&app_t);
     assert!(!vals.is_empty(), "ceiling validate dropped");
 }
@@ -626,7 +876,6 @@ fn registry_with_require_approval() -> PolicyRegistry {
 #[test]
 fn require_approval_composes_union_up_operator_always_beats_creator_never() {
     let reg = registry_with_require_approval();
-    // OPERATOR ceiling requires approval ALWAYS on app_*.
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[require]]
@@ -637,8 +886,6 @@ scope = { include = ["app_*"] }
         &reg,
     )
     .unwrap();
-
-    // CREATOR draft tries to LOWER it to `never` on the same scope.
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[require]]
@@ -651,21 +898,15 @@ scope = { include = ["app_*"] }
     )
     .unwrap();
 
-    // admit is Ok: a Require obligation composes UP, so a draft can never
-    // LOWER a ceiling obligation — the draft `never` is admissible (it only ever
-    // raises), and the effective value is the union-up `always`.
     let ep = admit(&root, &draft, &reg).unwrap();
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let obs = ep.obligations(&app_t);
 
-    // The operator's `always` obligation survives (the creator could not drop it).
     assert!(
         obs.iter().any(|(k, v)| k.as_str() == "sec.require_approval"
             && *v == KnobValue::Str("always".into())),
         "operator `always` obligation dropped by creator draft: {obs:?}"
     );
-    // The effective LOOSEST covering obligation is `always` (rank-max over the two
-    // covering rules `always` and `never`).
     let loosest = obs
         .iter()
         .filter(|(k, _)| k.as_str() == "sec.require_approval")
@@ -679,21 +920,16 @@ scope = { include = ["app_*"] }
             "always" => 2,
             _ => 3,
         });
-    assert_eq!(
-        loosest.as_deref(),
-        Some("always"),
-        "creator `never` must not lower the operator `always` obligation"
-    );
+    assert_eq!(loosest.as_deref(), Some("always"), "creator `never` must not lower `always`");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Compose-time collision blame
+// Compose-time collision blame (admit: draft-vs-ceiling)
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn draft_inject_colliding_ceiling_inject_rejects_at_compose() {
     let reg = registry();
-    // Ceiling injects created_at:timestamptz on app_*.
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[inject]]
@@ -703,7 +939,6 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
         &reg,
     )
     .unwrap();
-    // Draft injects created_at with a DIVERGENT type on overlapping scope → collision.
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[inject]]
@@ -733,7 +968,6 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
         &reg,
     )
     .unwrap();
-    // Draft forbids created_at on overlapping scope → contradicts the ceiling inject.
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[validate]]
@@ -751,10 +985,15 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
     );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// finalize_ceiling: ceiling-vs-ceiling conflicts + creatable-escape
+// ══════════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn ceiling_vs_ceiling_inject_collision_rejects_at_clamp() {
+fn ceiling_vs_ceiling_inject_collision_rejects_at_finalize() {
+    use zero_migrate_policy::FinalizeError;
     let reg = registry();
-    let a = RootCeiling::parse_toml(
+    let a = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -763,7 +1002,7 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
         &reg,
     )
     .unwrap();
-    let b = RootCeiling::parse_toml(
+    let b = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_main"] }
@@ -772,21 +1011,59 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
         &reg,
     )
     .unwrap();
-    let got = restrict(&a, &b, &reg);
+    let assembled = restrict(&a, &b, &reg).unwrap(); // TOTAL — does NOT reject.
+    let got = finalize_ceiling(assembled);
     assert!(
-        matches!(got, Err(ComposeError::CeilingInjectCollision { .. })),
-        "ceiling-vs-ceiling inject collision must be a loud operator error, got {got:?}"
+        matches!(got, Err(FinalizeError::CeilingInjectColumnConflict { .. })),
+        "ceiling-vs-ceiling inject collision must be a loud FINALIZE error, got {got:?}"
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Creation-gating lint: creatable ⊑ every mandatory inject
-// ══════════════════════════════════════════════════════════════════════════════
+#[test]
+fn creatable_escaping_mandatory_inject_rejects_at_finalize() {
+    use zero_migrate_policy::FinalizeError;
+    let reg = registry();
+    // A single root ceiling: mandatory inject on app_* only, but create_table @ all.
+    // Assemble it via restrict(root_as_trusted, empty_trusted) so it flows through
+    // finalize; the creatable-escape must be caught.
+    let ceiling_doc = r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+mandatory = true
+columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+[[grant]]
+key = "core.create_table"
+value = true
+scope = "all"
+"#;
+    // A RootCeiling carries the mandatory inject; to run it through finalize we take
+    // its layers via admit-less path: restrict with an empty trusted doc keeps the
+    // mandatory inject and the create grant, then finalize lints the escape.
+    let root = RootCeiling::parse_toml(ceiling_doc, &reg).unwrap();
+    // Wrap the SAME source as a trusted "base" is illegal (mandatory on non-root), so
+    // we assert the finalize lint via the root's own finalize path: build an assembled
+    // ceiling from the root's TrustedDoc is not possible (mandatory), so instead we
+    // check the lint fires for a NON-mandatory-equivalent assembled ceiling below and
+    // rely on admit's transitive bound for the root case.
+    let _ = root;
+
+    // Assembled (non-root) ceiling reproducing the escape shape WITHOUT `mandatory`
+    // is not an escape (only mandatory injects gate). So we exercise the finalize lint
+    // through restrict of two trusted docs where one pins a mandatory-like inject is
+    // impossible on non-root. The creatable-escape lint is therefore proven on the
+    // ROOT path: a root whose create grant escapes its mandatory inject must fail when
+    // finalized. We finalize the root by re-parsing it as the sole layer:
+    let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
+    let got = finalize_ceiling(assembled);
+    assert!(
+        matches!(got, Err(FinalizeError::CreatableEscapesMandatoryInject { .. })),
+        "creatable escaping mandatory inject must REJECT at finalize, got {got:?}"
+    );
+}
 
 #[test]
-fn creatable_escaping_mandatory_inject_rejects() {
+fn creatable_within_mandatory_inject_accepts_at_finalize() {
     let reg = registry();
-    // Mandatory inject on app_* only; but the draft can create in staging too.
     let root = RootCeiling::parse_toml(
         r#"policy_version = 1
 [[inject]]
@@ -796,60 +1073,13 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 [[grant]]
 key = "core.create_table"
 value = true
-scope = "all"
-"#,
-        &reg,
-    )
-    .unwrap();
-    // Draft grants create_table @ staging (⊄ app_*) → escapes the mandatory inject.
-    let draft = PolicyDoc::parse_toml(
-        r#"policy_version = 1
-[[grant]]
-key = "core.create_table"
-value = true
-scope = { include = ["staging"] }
-"#,
-        &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
-    )
-    .unwrap();
-    let got = admit(&root, &draft, &reg);
-    assert!(
-        matches!(got, Err(ComposeError::CreatableEscapesMandatoryInject { .. })),
-        "creatable escaping mandatory inject must REJECT, got {got:?}"
-    );
-}
-
-#[test]
-fn creatable_within_mandatory_inject_accepts() {
-    let reg = registry();
-    let root = RootCeiling::parse_toml(
-        r#"policy_version = 1
-[[inject]]
-scope = { include = ["app_*"] }
-mandatory = true
-columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
-[[grant]]
-key = "core.create_table"
-value = true
-scope = "all"
-"#,
-        &reg,
-    )
-    .unwrap();
-    // Draft creates only inside app_* → within the mandatory inject.
-    let draft = PolicyDoc::parse_toml(
-        r#"policy_version = 1
-[[grant]]
-key = "core.create_table"
-value = true
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
-    assert!(admit(&root, &draft, &reg).is_ok());
+    let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
+    assert!(finalize_ceiling(assembled).is_ok(), "creatable within mandatory inject must finalize");
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -871,24 +1101,18 @@ primary_key = ["id"]
         &reg,
     )
     .unwrap();
-    let draft = PolicyDoc::parse_toml(
-        "policy_version = 1\n",
-        &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
-    )
-    .unwrap();
+    let draft = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
+        .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let other = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
 
     assert!(ep.is_injected_shape(&app_t, &ShapeElement::Column("created_at")));
-    // Case-fold: `Created_At` folds to created_at → still injected.
     assert!(ep.is_injected_shape(&app_t, &ShapeElement::Column("Created_At")));
     assert!(ep.is_injected_shape(&app_t, &ShapeElement::Index("idx_created")));
     assert!(ep.is_injected_shape(&app_t, &ShapeElement::PrimaryKey));
     assert!(!ep.is_injected_shape(&app_t, &ShapeElement::Column("other")));
-    // Outside the inject scope: nothing injected.
     assert!(!ep.is_injected_shape(&other, &ShapeElement::Column("created_at")));
     assert!(!ep.is_injected_shape(&other, &ShapeElement::PrimaryKey));
 }
@@ -897,33 +1121,37 @@ primary_key = ["id"]
 // Unforgeability
 // ══════════════════════════════════════════════════════════════════════════════
 
-// This test documents the unforgeability mechanism by CONSTRUCTION: the only paths
-// to an `EffectivePolicy` are admit / restrict (from a RootCeiling) and
-// the explicit deny_all floor. The type has private fields, no Deserialize, and no
-// public `new`/`Default` — so the following are the ONLY constructors, and the crate
-// compiles iff that remains true. (A negative compile test is covered by the absence
-// of any other public constructor; asserted here by exercising every real one.)
 #[test]
-fn effective_policy_only_via_compose_or_deny_all() {
+fn effective_policy_only_via_admit_or_deny_all() {
     let reg = registry();
 
-    // (1) deny_all — the explicit engine floor (grants nothing above default).
     let floor = zero_migrate_policy::EffectivePolicy::deny_all(&reg);
     let o = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     assert_eq!(floor.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(false)));
 
-    // (2) admit from a RootCeiling.
     let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let draft = parse_layer(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let draft = parse_draft(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
     let ep = admit(&root, &draft, &reg).unwrap();
     assert_eq!(ep.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(true)));
 
-    // (3) restrict of two RootCeilings, then used itself as a ceiling.
-    let a = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let b = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let clamp = restrict(&a, &b, &reg).unwrap();
-    let _ep2 = admit(&clamp, &draft, &reg).unwrap();
+    // A finalized restrict ceiling, then admitted.
+    let a = parse_trusted(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let b = parse_trusted(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let ceiling = finalize_ceiling(restrict(&a, &b, &reg).unwrap()).unwrap();
+    let _ep2 = admit(&ceiling, &draft, &reg).unwrap();
 
     // There is deliberately NO other constructor: no Default, no Deserialize, no
-    // public `new`. This test compiling is the proof the surface is closed.
+    // public `new`. And an AssembledCeiling is NOT an AdmitCeiling — it cannot reach
+    // admit until finalized. This test compiling is the proof the surface is closed.
+}
+
+// Pat needs Debug for the panic messages.
+impl std::fmt::Debug for Pat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Pat::AppStar => "app_*",
+            Pat::AppStarNoTmp => "app_*\\app_tmp_*",
+            Pat::Staging => "staging",
+        })
+    }
 }

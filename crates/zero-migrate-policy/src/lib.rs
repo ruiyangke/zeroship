@@ -67,7 +67,9 @@ pub mod scope;
 pub mod seal;
 pub mod value_order;
 
-pub use document::{LoadContext, LoadError, LoadWarning, PolicyDoc, SUPPORTED_POLICY_VERSION};
+pub use document::{
+    LoadContext, LoadError, LoadWarning, PolicyDoc, ProfileCatalog, SUPPORTED_POLICY_VERSION,
+};
 pub use knob::{
     Enforcement, KnobDef, KnobKey, KnobKeyError, KnobKind, KnobValue, KnobValueError, ObjectModel,
     Polarity,
@@ -86,7 +88,7 @@ pub use scope::{
 pub use value_order::{join_value, leq_value, meet_value, ValueOrderError};
 pub use boundary::admit;
 pub use compose::{
-    restrict, Ceiling, ClampedCeiling, ComposeError, EffectivePolicy, GrantRegion, RootCeiling,
-    ShapeElement,
+    finalize_ceiling, overlay, restrict, AdmitCeiling, AssembledCeiling, Ceiling, ComposeError,
+    EffectivePolicy, FinalizeError, GrantRegion, RootCeiling, ShapeElement, TrustedDoc,
 };
 pub use seal::{seal, SealError, SealedPolicy};

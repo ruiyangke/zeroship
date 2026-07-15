@@ -23,15 +23,32 @@ use crate::{Pattern, Scope, ScopeError};
 /// a hard error (E7 — versioned for code-evolution discipline).
 pub const SUPPORTED_POLICY_VERSION: u32 = 1;
 
-/// The layer a document is being loaded AS. Only the host's ROOT ceiling may carry
-/// `mandatory = true` inject rules; a non-root layer (catalog entry / draft) that
-/// does is rejected (`MandatoryInjectOnNonRootLayer`, II.4.2).
+/// The layer a document is being loaded AS. Two axes it governs:
+/// - **`mandatory` injects** are `RootCeiling`-only; any non-root layer that carries
+///   one is rejected (`MandatoryInjectOnNonRootLayer`, II.4.2).
+/// - **`extends`** is TRUSTED-only (H-1): the `RootCeiling` and trusted catalog
+///   entries may inherit a trusted base; an untrusted creator DRAFT that carries
+///   `extends` is a hard load error (`ExtendsForbiddenInDraft`, II.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoadContext {
-    /// The host's root ceiling — the only layer allowed a mandatory inject.
+    /// The host's root ceiling — the only layer allowed a mandatory inject; trusted,
+    /// so `extends` is permitted.
     RootCeiling,
-    /// Any non-root layer (a `ProfileCatalog` entry or a submitted draft).
+    /// A TRUSTED, non-root catalog entry (a `ProfileCatalog` `env` fragment): no
+    /// mandatory inject, but `extends` IS permitted (resolved against the trusted
+    /// catalog).
+    TrustedCatalogEntry,
+    /// An UNTRUSTED creator draft (submitted to `admit`): no mandatory inject, and
+    /// `extends` is a hard load error (H-1).
     NonRootLayer,
+}
+
+impl LoadContext {
+    /// Whether this context is trusted (may use `extends`).
+    #[must_use]
+    fn is_trusted(self) -> bool {
+        matches!(self, LoadContext::RootCeiling | LoadContext::TrustedCatalogEntry)
+    }
 }
 
 /// A resolved, validated policy document — one layer (II.3). Produced by the
@@ -99,6 +116,17 @@ pub enum LoadError {
     /// A single document both injects a column X and forbids X (or forbids the
     /// inject's own required table name) on overlapping scope (II.4.4).
     SelfContradictoryInjectValidate { detail: String },
+    /// An UNTRUSTED creator draft carries an `extends` field (H-1, II.7). A draft may
+    /// never inherit a catalog base — the ceiling it is admitted against already
+    /// carries the operator floor. Forbidding it removes the untrusted-`extends`
+    /// laundering hazard outright.
+    ExtendsForbiddenInDraft,
+    /// A trusted document's `extends` names a base not present in the injected trusted
+    /// catalog (II.7). Resolution is fail-closed: an unknown base is an error, never a
+    /// silent skip.
+    ExtendsUnknownBase { base: String },
+    /// A trusted `extends` chain revisits a base name — a cycle (II.7). Fail-closed.
+    ExtendsCycle { base: String },
 }
 
 impl From<ScopeError> for LoadError {
@@ -119,6 +147,11 @@ impl From<ScopeError> for LoadError {
 #[serde(deny_unknown_fields)]
 struct WireDoc {
     policy_version: u32,
+    /// A trusted base to inherit (II.7, H-1). TRUSTED-only: a creator draft carrying
+    /// `extends` is a hard load error; a trusted doc resolves it against the injected
+    /// trusted catalog with cycle detection.
+    #[serde(default)]
+    extends: Option<String>,
     #[serde(default)]
     default_scope: Option<WireScope>,
     #[serde(default)]
@@ -285,15 +318,52 @@ impl PolicyDoc {
         Self::resolve(wire, registry, ctx)
     }
 
+    /// Parse + validate a TRUSTED document that may `extends` a base, resolving the
+    /// base chain against the injected trusted `catalog` (II.7, H-1) with cycle
+    /// detection. `ctx` MUST be a trusted context (`RootCeiling`/`TrustedCatalogEntry`)
+    /// — an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
+    /// base document's rules are inherited UNDER this document's (doc-level overlay:
+    /// this doc's rules are the inner/override layer, base is outer), and its
+    /// `default_scope` is inherited when this doc omits its own.
+    pub fn parse_toml_with_catalog(
+        src: &str,
+        registry: &PolicyRegistry,
+        ctx: LoadContext,
+        catalog: &dyn ProfileCatalog,
+    ) -> Result<PolicyDoc, LoadError> {
+        let wire: WireDoc =
+            toml::from_str(src).map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+        Self::resolve_with_catalog(wire, registry, ctx, Some(catalog), &mut Vec::new())
+    }
+
     /// The resolution + legality core shared by both format front-ends.
     fn resolve(
         wire: WireDoc,
         registry: &PolicyRegistry,
         ctx: LoadContext,
     ) -> Result<PolicyDoc, LoadError> {
+        Self::resolve_with_catalog(wire, registry, ctx, None, &mut Vec::new())
+    }
+
+    /// The resolution core, catalog-aware for `extends`. `seen` tracks the base chain
+    /// for cycle detection.
+    fn resolve_with_catalog(
+        wire: WireDoc,
+        registry: &PolicyRegistry,
+        ctx: LoadContext,
+        catalog: Option<&dyn ProfileCatalog>,
+        seen: &mut Vec<String>,
+    ) -> Result<PolicyDoc, LoadError> {
         // Gate: policy_version major.
         if wire.policy_version != SUPPORTED_POLICY_VERSION {
             return Err(LoadError::UnknownPolicyVersion { found: wire.policy_version });
+        }
+
+        // Gate: `extends` provenance (H-1, II.7).
+        let extends = wire.extends.clone();
+        if extends.is_some() && !ctx.is_trusted() {
+            // An untrusted creator draft may never inherit a base.
+            return Err(LoadError::ExtendsForbiddenInDraft);
         }
 
         let default_scope = match wire.default_scope {
@@ -361,15 +431,82 @@ impl PolicyDoc {
         // Cross-rule single-doc legality: self-contradictory inject vs validate.
         check_self_contradiction(&rules)?;
 
-        // Dead-rule detection (warn, not error).
-        let warnings = rules
+        let mut this = PolicyDoc {
+            policy_version: wire.policy_version,
+            default_scope,
+            rules,
+            warnings: Vec::new(),
+        };
+
+        // ── extends resolution (trusted-only, catalog-resolved, cycle-detected) ────
+        if let Some(base_name) = extends {
+            // Reachable only in a trusted context (the untrusted-draft case errored
+            // above). A trusted `extends` REQUIRES a catalog; without one it is an
+            // unknown base (fail-closed — never a silent skip).
+            let Some(catalog) = catalog else {
+                return Err(LoadError::ExtendsUnknownBase { base: base_name });
+            };
+            // Cycle detection over the base chain.
+            if seen.iter().any(|n| n == &base_name) {
+                return Err(LoadError::ExtendsCycle { base: base_name });
+            }
+            seen.push(base_name.clone());
+            let base_src = catalog
+                .get_source(&base_name)
+                .ok_or_else(|| LoadError::ExtendsUnknownBase { base: base_name.clone() })?;
+            // Resolve the base as a TRUSTED catalog entry (it may itself `extends`).
+            let base_wire: WireDoc = toml::from_str(&base_src)
+                .map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+            let base = Self::resolve_with_catalog(
+                base_wire,
+                registry,
+                LoadContext::TrustedCatalogEntry,
+                Some(catalog),
+                seen,
+            )?;
+            // Doc-level overlay: the base's rules are inherited UNDER this doc's (base
+            // first, then this doc's — this doc overrides on scalar knobs at query
+            // time, and rule lists accumulate). `default_scope` is inherited when this
+            // doc omits its own.
+            this = overlay_docs(base, this);
+        }
+
+        // Dead-rule detection (warn, not error) — computed AFTER extends merge.
+        this.warnings = this
+            .rules
             .iter()
             .enumerate()
             .filter(|(_, r)| matches!(r.scope, Scope::Nothing))
             .map(|(index, _)| LoadWarning::DeadRule { index })
             .collect();
 
-        Ok(PolicyDoc { policy_version: wire.policy_version, default_scope, rules, warnings })
+        Ok(this)
+    }
+}
+
+/// A trusted PROFILE CATALOG (II.5): resolves a base NAME to its host-authored source
+/// document. Every entry is host-injected — a `TrustedDoc` provenance (H-1). Used by
+/// the loader to resolve a trusted `extends`. Returning the SOURCE (not a parsed doc)
+/// lets the loader re-resolve a base's own `extends` chain with shared cycle tracking.
+pub trait ProfileCatalog {
+    /// The host-authored source of the named base, or `None` if not in the catalog.
+    fn get_source(&self, name: &str) -> Option<String>;
+}
+
+/// Doc-level overlay for `extends` (II.7): the `base` is the OUTER layer, `over` the
+/// INNER (override) layer. Rule lists ACCUMULATE (base first, then `over`) so a
+/// query's loosest-covering/fall-through sees `over` first; `over`'s `default_scope`
+/// wins when present, else `base`'s is inherited. This mirrors the `overlay`
+/// combinator's list-accumulation at the document level (the composer's scalar
+/// last-wins is realized at query time by rule order).
+fn overlay_docs(base: PolicyDoc, over: PolicyDoc) -> PolicyDoc {
+    let mut rules = base.rules;
+    rules.extend(over.rules);
+    PolicyDoc {
+        policy_version: over.policy_version,
+        default_scope: over.default_scope.or(base.default_scope),
+        rules,
+        warnings: Vec::new(),
     }
 }
 

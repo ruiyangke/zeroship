@@ -1,152 +1,150 @@
 //! The trust boundary (II.1 `boundary`, II.3.2) — the SOLE untrusted crossing.
 //!
-//! `admit(ceiling, draft)` is the *only* place an UNTRUSTED creator [`PolicyDoc`]
-//! meets a TRUSTED ceiling, so it is the *only* place **escalation** is checked. It
-//! lives in its own module — apart from the trusted, total combinators
+//! [`admit`]`(ceiling, draft)` is the *only* place an UNTRUSTED creator [`PolicyDoc`]
+//! meets a TRUSTED, FINALIZED ceiling, so it is the *only* place **escalation** is
+//! checked. It lives in its own module — apart from the trusted, total combinators
 //! [`overlay`](crate::compose::overlay) / [`restrict`](crate::compose::restrict) and
 //! the trusted-side conflict gate
 //! [`finalize_ceiling`](crate::compose::finalize_ceiling) — precisely so the one
 //! security-bearing operator is unmissable when reading or auditing the crate.
 //!
-//! `admit` returns `Ok(EffectivePolicy)` iff the draft escalates nothing; otherwise
-//! a [`ComposeError`] blaming the draft. It takes a **finalized** [`Ceiling`] (a
-//! [`RootCeiling`] or an already-composed [`EffectivePolicy`]) so an un-finalized
-//! assembled ceiling cannot reach it at the type level.
+//! `admit` produces a LAYERED [`EffectivePolicy`] — `[draft] over [ceiling]` (H-4) —
+//! whose grant query falls through top→down. Grants are **ceiling-inherited,
+//! narrow-only, presence-overridden**: a silent draft inherits the ceiling's grant; a
+//! draft that NARROWS wins by presence (admitted because a narrow is `⊑` the ceiling);
+//! a draft that RAISES above default is admitted only where its value is `⊑` the
+//! ceiling's (II.3.2). Obligations/injects/validates union-up (un-droppable). The
+//! escalation check computes the uncovered region by ITERATED per-ceiling-rule `∖`
+//! subtraction (never a `⊔`-materialized ceiling — the C-1 fix), and rejects a
+//! non-representable difference (fail-closed).
+//!
+//! `admit`'s `ceiling` is a finalized [`AdmitCeiling`] (a [`RootCeiling`], a
+//! [`Ceiling`](crate::compose::Ceiling) from `finalize_ceiling`, or an already-composed
+//! [`EffectivePolicy`]); an un-finalized [`AssembledCeiling`](crate::compose::AssembledCeiling)
+//! deliberately does NOT implement `AdmitCeiling`, so it cannot reach `admit` at the
+//! type level (MED).
 
 use crate::compose::{
-    check_inject_collisions, check_validate_vs_inject, render_scope, rules_of, witness_of, Ceiling,
-    ComposeError, EffectivePolicy, GrantModel, CREATE_TABLE_KEY,
+    check_inject_collisions, check_validate_vs_inject, layered_nondefault_grant_rules,
+    layered_value_at, render_scope, rules_of, witness_of, AdmitCeiling, ComposeError,
+    EffectivePolicy, GrantModel, Layer, LayerTag,
 };
 use crate::knob::KnobKey;
 use crate::registry::PolicyRegistry;
-use crate::rule::{Rule, RuleKind};
+use crate::rule::RuleKind;
 use crate::scope::{Difference, Scope};
 use crate::value_order::leq_value;
 use crate::PolicyDoc;
 
-/// Ingress of an UNTRUSTED `draft` against a trusted `ceiling` (II.3.2). Returns an
-/// [`EffectivePolicy`] iff the draft escalates nowhere; otherwise a [`ComposeError`]
-/// blaming the draft. NO clipping — strict reject only.
+/// Ingress of an UNTRUSTED `draft` against a trusted, FINALIZED `ceiling` (II.3.2).
+/// Returns a LAYERED [`EffectivePolicy`] (`[draft] over [ceiling]`, H-4) iff the draft
+/// escalates nowhere; otherwise a [`ComposeError`] blaming the draft. NO clipping —
+/// strict reject only.
 ///
 /// The algorithm, pointwise per (key, object) but decided SYMBOLICALLY:
-/// - **Grants:** for each key, the draft is admissible iff at every object in the
-///   draft's granted scope the draft value is `⊑` the ceiling value. Decided by
-///   (1) partitioning the draft's granted scope by each ceiling grant rule's scope
-///   (via `⊓`) and comparing loosest values on the overlap; and (2) computing the
-///   UNCOVERED region `grantedScope(draft,k) ∖ grantedScope(ceiling,k)` — where the
-///   ceiling value is `default` (tightest), so any non-default draft value there
-///   rejects; a not-representable `∖` fails closed.
-/// - **Require/Inject/Validate:** union-up (ceiling rules ∪ draft rules), each at its
-///   own scope; a ceiling rule is never dropped or narrowed. Injects keep the sealed
-///   total order: ceiling injects first (outermost), then draft injects.
+/// - **Grants — ceiling-inherited, narrow-only, presence-overridden.** For each grant
+///   key the draft is admissible iff at every object where the draft RAISES `k` above
+///   default (`grantedScope(draft, k)`) the draft value is `⊑` the ceiling's LAYERED
+///   effective value. Decided by (1) the UNCOVERED region — `grantedScope(draft,k)`
+///   minus each ceiling grant rule's `effective_scope`, iterated ONE RULE AT A TIME
+///   (C-1: never a `⊔`-materialized ceiling), where the ceiling's value is `default`
+///   so any non-default draft value escalates; and (2) the COVERED region — the draft
+///   value at a witness of each partition `⊑` the ceiling's layered effective value
+///   there (this arm also catches an upper-ceiling-layer masking a lower grant to
+///   default). A not-representable `∖` fails closed.
+/// - **Require/Inject/Validate:** union-up across all layers; a ceiling rule is never
+///   dropped or narrowed.
 /// - **Collisions:** a draft inject colliding with a ceiling inject, or a draft
 ///   validate contradicting a ceiling inject, rejects at compose time.
-/// - **Creation-gating lint:** the draft's `core.create_table` granted scope must be
-///   `⊑` every MANDATORY ceiling inject's scope.
+///
+/// The creatable-scope lint is NOT here — it is a ceiling-side misconfiguration lint
+/// run at [`finalize_ceiling`](crate::compose::finalize_ceiling) (MED), and admit's
+/// per-key `draft ⊑ ceiling` grant check transitively bounds the draft's creatable
+/// region below the ceiling's.
 pub fn admit(
-    ceiling: &impl Ceiling,
+    ceiling: &impl AdmitCeiling,
     draft: &PolicyDoc,
     registry: &PolicyRegistry,
 ) -> Result<EffectivePolicy, ComposeError> {
-    let ceiling_grants = ceiling.grant_model(registry)?;
+    let ceiling_layers = ceiling.ceiling_layers(registry)?;
     let draft_grants = GrantModel::build(&draft.rules, registry)?;
 
-    // ── grant check: pointwise draft ⊑ ceiling, per key ────────────────────────
-    for key in draft_grants.key_union(&ceiling_grants) {
-        check_grant_key(key, &draft_grants, &ceiling_grants)?;
+    // ── grant check: pointwise draft ⊑ ceiling (ceiling-inherited), per key ─────
+    // The keys to check = every key the DRAFT grants (a key the draft is silent on
+    // simply inherits the ceiling — no escalation possible).
+    for key in draft_grants.keys() {
+        check_grant_key(key, &draft_grants, &ceiling_layers, registry)?;
     }
 
-    // ── require/inject/validate union-up (ceiling ∪ draft) ─────────────────────
-    let ceiling_injects = ceiling.ceiling_injects();
+    // ── require/inject/validate collision blame (draft vs ceiling) ──────────────
+    let ceiling_injects = flatten_ceiling(&ceiling_layers, |k| matches!(k, RuleKind::Inject { .. }));
     let draft_injects = rules_of(&draft.rules, |k| matches!(k, RuleKind::Inject { .. }));
-
-    // Compose-time collision blame: draft inject vs ceiling inject.
-    check_inject_collisions(&ceiling_injects, &draft_injects, false)?;
-    // Draft validate contradicting a ceiling inject.
+    check_inject_collisions(&ceiling_injects, &draft_injects)?;
     let draft_validates = rules_of(&draft.rules, |k| matches!(k, RuleKind::Validate { .. }));
     check_validate_vs_inject(&ceiling_injects, &draft_validates)?;
 
-    // Sealed inject total order: ceiling (outermost) first, then draft (inward).
-    let mut injects = ceiling_injects.clone();
-    injects.extend(draft_injects);
+    // ── build the layered result: [draft] over [ceiling layers] (H-4) ───────────
+    let draft_layer = Layer::from_doc(LayerTag::Draft, draft, registry)?;
+    let mut layers = Vec::with_capacity(ceiling_layers.len() + 1);
+    layers.push(draft_layer); // TOP (innermost) first
+    layers.extend(ceiling_layers);
 
-    let mut requires = ceiling.ceiling_requires();
-    requires.extend(rules_of(&draft.rules, |k| matches!(k, RuleKind::Require { .. })));
-
-    let mut validates = ceiling.ceiling_validates();
-    validates.extend(draft_validates);
-
-    // ── creation-gating lint: draft creatable ⊑ every mandatory ceiling inject ──
-    check_creatable_lint(&draft_grants, &ceiling_grants, &ceiling_injects)?;
-
-    Ok(EffectivePolicy::from_parts(registry.clone(), draft_grants, requires, injects, validates))
+    Ok(EffectivePolicy::from_layers(registry.clone(), layers))
 }
 
-/// The per-key grant admissibility check (II.3.2): draft value `⊑` ceiling value at
-/// every object in the draft's granted scope.
+/// The per-key CEILING-INHERITED grant admissibility check (II.3.2): at every object
+/// where the draft raises `k` above default, the draft value `⊑` the ceiling's layered
+/// effective value. Uncovered region by iterated per-ceiling-rule `∖` (C-1);
+/// covered-region value comparison at a witness (also catches masking).
 fn check_grant_key(
     key: &KnobKey,
     draft: &GrantModel,
-    ceiling: &GrantModel,
+    ceiling_layers: &[Layer],
+    registry: &PolicyRegistry,
 ) -> Result<(), ComposeError> {
-    let Some(dk) = draft.keys.get(key) else {
-        return Ok(()); // draft grants nothing on this key → nothing to check.
+    let Some(dk) = draft.get(key) else {
+        return Ok(()); // draft grants nothing on this key.
     };
     let draft_granted = dk.granted_scope()?;
     if matches!(draft_granted, Scope::Nothing) {
         return Ok(()); // draft raises nothing above default → admissible.
     }
 
-    // The ceiling's model for this key (may be absent → everywhere default).
-    let ceiling_km = ceiling.keys.get(key);
-    let ceiling_granted = match ceiling_km {
-        Some(ck) => ck.granted_scope()?,
-        None => Scope::Nothing,
-    };
+    let def = registry
+        .get(key)
+        .ok_or_else(|| ComposeError::RegistryOrValueMismatch { detail: format!("unknown knob {key}") })?;
 
-    // (1) UNCOVERED region: draft grants where the ceiling grants only default.
-    //     Any non-default draft value there escalates → reject (unless it computes
-    //     empty). `∖` over-approximates-or-rejects (fail-closed).
-    match draft_granted.difference(&ceiling_granted) {
-        Difference::NotRepresentable => {
-            return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
-        }
-        Difference::Scope(uncovered) => {
-            if !matches!(uncovered, Scope::Nothing) {
-                // The ceiling value on the uncovered region is `default` (tightest).
-                // The draft's granted-scope is exactly where its value ≠ default, so
-                // any non-empty uncovered region carries a draft value ⋣ default =
-                // escalation. (There is no draft_value ⊑ default case here: a rule in
-                // granted_scope() has value strictly above default by construction.)
-                return Err(ComposeError::GrantExceedsCeiling {
-                    key: key.clone(),
-                    offending_pattern: render_scope(&uncovered),
-                });
+    // (1) UNCOVERED region: R := grantedScope(draft,k); for each ceiling grant rule r
+    //     on k (across layers), R := R ∖ r.effective_scope — ITERATED, per rule, so
+    //     `⊔` never materializes the ceiling side (C-1). Excludes on each ceiling rule
+    //     survive (the ∖ construction keeps a subtrahend's holes). A non-representable
+    //     ∖ at any step ⇒ reject (fail-closed).
+    let ceiling_rules = layered_nondefault_grant_rules(ceiling_layers, key)?;
+    let mut r = draft_granted.clone();
+    for c_scope in &ceiling_rules {
+        match r.difference(c_scope) {
+            Difference::Scope(s) => r = s,
+            Difference::NotRepresentable => {
+                return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
             }
         }
     }
+    if !matches!(r, Scope::Nothing) {
+        // The ceiling value on the uncovered region is `default` (tightest); the
+        // draft's granted-scope raises above default there ⇒ escalation.
+        return Err(ComposeError::GrantExceedsCeiling {
+            key: key.clone(),
+            offending_pattern: render_scope(&r),
+        });
+    }
 
     // (2) COVERED region: partition the draft's granted scope by each ceiling grant
-    //     rule's scope (via ⊓) and compare loosest values on the overlap. We compare
-    //     value(draft, k, ·) ⊑ value(ceiling, k, ·) at a WITNESS of each region.
-    //
-    // Because the grant maps are symbolic, we check the value relation over the meet
-    // of the draft's granted scope with each ceiling rule's scope, at a canonical
-    // witness object of that non-empty meet. This is sound: value() is CONSTANT
-    // across a region carved by the ⊓ of all covering rule scopes (any two objects a
-    // region-meet contains are covered by exactly the same set of rules → same
-    // loosest value), and the oracle exhaustively confirms the region check against
-    // pointwise ground truth.
-    let Some(ck) = ceiling_km else {
-        // Ceiling grants nothing above default anywhere, yet the draft's granted
-        // scope is entirely inside ceiling_granted (Nothing) — impossible unless
-        // draft_granted is Nothing, handled above. If we reach here the uncovered
-        // check already accounted for the whole draft_granted; nothing covered.
-        return Ok(());
-    };
-    // The regions to compare: draft granted ⊓ (each ceiling grant rule's scope).
-    for crule in &ck.rules {
-        let region = draft_granted.meet(&crule.scope);
+    //     rule's scope (via ⊓) and compare the draft's value to the ceiling's LAYERED
+    //     effective value at a witness of each region. This arm also catches masking:
+    //     where an upper ceiling layer narrows k to default, the layered effective
+    //     value is default, so a non-default draft value there rejects here.
+    for c_scope in &ceiling_rules {
+        let region = draft_granted.meet(c_scope);
         if matches!(region, Scope::Nothing) {
             continue;
         }
@@ -155,8 +153,8 @@ fn check_grant_key(
             return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
         };
         let dv = dk.value_at(&witness)?;
-        let cv = ck.value_at(&witness)?;
-        if !leq_value(&dk.kind, &dv, &cv)? {
+        let cv = layered_value_at(ceiling_layers, &def.default, key, &witness)?;
+        if !leq_value(&def.kind, &dv, &cv)? {
             return Err(ComposeError::GrantExceedsCeiling {
                 key: key.clone(),
                 offending_pattern: render_scope(&region),
@@ -166,37 +164,21 @@ fn check_grant_key(
     Ok(())
 }
 
-/// The creatable-scope lint (II.2.6a): the draft-composed `core.create_table`
-/// granted scope must be `⊑` every MANDATORY ceiling inject's scope. Only the ceiling
-/// carries mandatory injects (loader-enforced), so we read them from the ceiling.
-fn check_creatable_lint(
-    draft: &GrantModel,
-    _ceiling: &GrantModel,
-    ceiling_injects: &[Rule],
-) -> Result<(), ComposeError> {
-    let create_key = KnobKey::parse(CREATE_TABLE_KEY).ok();
-    let Some(create_key) = create_key else { return Ok(()) };
-    // The effective creatable scope is the DRAFT's granted scope for create_table
-    // (grants compose downward; the draft is the tightest layer for its own grants,
-    // and `admit` already proved draft ⊑ ceiling on this key).
-    let creatable = match draft.keys.get(&create_key) {
-        Some(km) => km.granted_scope()?,
-        None => Scope::Nothing,
-    };
-    if matches!(creatable, Scope::Nothing) {
-        return Ok(()); // creates nothing → cannot escape any inject.
-    }
-    for rule in ceiling_injects {
-        let RuleKind::Inject { spec } = &rule.kind else { continue };
-        if !spec.mandatory {
-            continue;
-        }
-        // creatable ⊑ scope(I). `⊑` is sound (a false only conservative-rejects).
-        if !creatable.subset(&rule.scope) {
-            return Err(ComposeError::CreatableEscapesMandatoryInject {
-                inject_scope: render_scope(&rule.scope),
-            });
-        }
-    }
-    Ok(())
+/// Flatten a ceiling's layer stack to the rules of one kind (for the draft-vs-ceiling
+/// collision checks, which are over the whole ceiling rule set).
+fn flatten_ceiling(
+    layers: &[Layer],
+    pred: impl Fn(&RuleKind) -> bool + Copy,
+) -> Vec<crate::rule::Rule> {
+    layers
+        .iter()
+        .rev() // outermost first
+        .flat_map(|l| {
+            let injects = l.injects.iter();
+            let validates = l.validates.iter();
+            injects.chain(validates)
+        })
+        .filter(|r| pred(&r.kind))
+        .cloned()
+        .collect()
 }

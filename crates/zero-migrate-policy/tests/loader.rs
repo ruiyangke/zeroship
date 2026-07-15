@@ -720,3 +720,112 @@ scope = { include = ["\"a.b\""] }
         other => panic!("expected Of, got {other:?}"),
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// extends (II.7, H-1): draft-forbid + trusted catalog resolution + cycle detection
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// A trivial in-memory trusted catalog for the extends tests.
+struct MapCatalog(std::collections::BTreeMap<String, String>);
+
+impl zero_migrate_policy::ProfileCatalog for MapCatalog {
+    fn get_source(&self, name: &str) -> Option<String> {
+        self.0.get(name).cloned()
+    }
+}
+
+fn catalog(entries: &[(&str, &str)]) -> MapCatalog {
+    MapCatalog(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+}
+
+#[test]
+fn extends_in_untrusted_draft_is_hard_error() {
+    // A creator draft (NonRootLayer) carrying `extends` is rejected outright (H-1).
+    let err = PolicyDoc::parse_toml(
+        "policy_version = 1\nextends = \"base\"\n",
+        &registry(),
+        LoadContext::NonRootLayer,
+    )
+    .unwrap_err();
+    assert_eq!(err, LoadError::ExtendsForbiddenInDraft);
+}
+
+#[test]
+fn extends_trusted_resolves_against_catalog() {
+    // A trusted catalog entry inherits `base`'s rules under its own.
+    let cat = catalog(&[(
+        "base",
+        r#"policy_version = 1
+[[grant]]
+key = "core.raw_sql"
+value = true
+scope = { include = ["app_*"] }
+"#,
+    )]);
+    let doc = PolicyDoc::parse_toml_with_catalog(
+        r#"policy_version = 1
+extends = "base"
+[[grant]]
+key = "op.lock_timeout_ms"
+value = 5000
+scope = { include = ["app_*"] }
+"#,
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap();
+    // Both the base's raw_sql grant and this doc's timeout grant are present.
+    let keys: Vec<&str> = doc
+        .rules
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RuleKind::Grant { key, .. } => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(keys.contains(&"core.raw_sql"), "base rule not inherited: {keys:?}");
+    assert!(keys.contains(&"op.lock_timeout_ms"), "own rule missing: {keys:?}");
+}
+
+#[test]
+fn extends_unknown_base_is_error() {
+    let cat = catalog(&[]);
+    let err = PolicyDoc::parse_toml_with_catalog(
+        "policy_version = 1\nextends = \"nope\"\n",
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert_eq!(err, LoadError::ExtendsUnknownBase { base: "nope".into() });
+}
+
+#[test]
+fn extends_cycle_is_detected() {
+    // a extends b, b extends a → cycle.
+    let cat = catalog(&[
+        ("a", "policy_version = 1\nextends = \"b\"\n"),
+        ("b", "policy_version = 1\nextends = \"a\"\n"),
+    ]);
+    let err = PolicyDoc::parse_toml_with_catalog(
+        "policy_version = 1\nextends = \"a\"\n",
+        &registry(),
+        LoadContext::TrustedCatalogEntry,
+        &cat,
+    )
+    .unwrap_err();
+    assert!(matches!(err, LoadError::ExtendsCycle { .. }), "expected cycle, got {err:?}");
+}
+
+#[test]
+fn extends_without_catalog_is_unknown_base() {
+    // A trusted doc with `extends` but no catalog (plain parse_toml) fails closed.
+    let err = PolicyDoc::parse_toml(
+        "policy_version = 1\nextends = \"base\"\n",
+        &registry(),
+        LoadContext::RootCeiling,
+    )
+    .unwrap_err();
+    assert!(matches!(err, LoadError::ExtendsUnknownBase { .. }), "expected unknown base, got {err:?}");
+}
