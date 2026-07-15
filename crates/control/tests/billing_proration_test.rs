@@ -21,16 +21,14 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::metering::Metering;
 use zeroship_control::proration::{self, PlanChangeOutcome, MAX_PLAN_CHANGES_PER_PERIOD};
 use zeroship_control::stripe_client::StripeClient;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// Serialize the reconcile-driving tests (same rationale as billing_reconcile_test:
@@ -372,6 +370,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
             .expect("workflow blob store"),
     );
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -388,7 +395,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -411,14 +418,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
-        tax_provider: zeroship_control::tax::build_tax_provider(
-            &zeroship_control::tax::TaxProviderConfig::native(),
-        )
-        .expect("native tax provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
+        tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
@@ -448,6 +451,7 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
 
 /// Seed the global `requests` weight (1 CU/op) once.
 async fn seed_weight(state: &AppState) {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -508,29 +512,21 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
 /// Ingest usage at a given period_start (the CLOSED period the reconciler bills).
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -671,10 +667,7 @@ async fn read_event(
 /// segments collapse to ONE Stripe item / ONE line (segment 1 under-billed).
 #[compio::test]
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "twoseg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -798,10 +791,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 /// POST carried NO `compute_units`/`usage` metadata — every assertion below fails.
 #[compio::test]
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "segcu").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -938,10 +928,7 @@ async fn segment_partition_invariants_hold() {
 /// item, one line, one provider-ref).
 #[compio::test]
 async fn no_change_yields_exactly_one_segment_zero_line() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "nochange").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -984,10 +971,7 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 /// EXACTLY once.
 #[compio::test]
 async fn reconcile_rerun_does_not_double_post_segments() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1039,13 +1023,10 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 /// FINALIZED attributes to the NEXT period.
 #[compio::test]
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "snap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = chrono::Utc::now().timestamp();
 
     seed_weight(&fx.state).await;
     let one_cent: i64 = 1_000_000_000_000;
@@ -1120,10 +1101,7 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 /// (MAJOR-4) — never under a cheaper recorded plan.
 #[compio::test]
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1222,10 +1200,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 /// metric never credits the bill (faithful, end-to-end through the reconcile).
 #[compio::test]
 async fn end_missing_metric_does_not_credit_the_bill() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "floor").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1285,10 +1260,7 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 /// gated, open-period-floats-until-finalize) behaviour.
 #[compio::test]
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "catalogtime").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1369,10 +1341,7 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 /// the current segment set persists, and the DB subtotal == the Stripe item total.
 #[compio::test]
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "orphan").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1477,10 +1446,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 /// creator is NOT billed, no Stripe item is posted, and no finalized invoice.
 #[compio::test]
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "corrupt").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();

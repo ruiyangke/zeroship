@@ -1,6 +1,6 @@
 # Workflow journal op-DSL migration verification
 
-**Status:** verification report, 2026-07-05
+**Status:** historical verification report, 2026-07-05; current runner guidance updated 2026-07-15
 
 ## Summary
 
@@ -8,13 +8,22 @@ The durable-workflows journal migration was authored as a platform op-DSL migrat
 
 - `db/migrations-ts/20260705000000_durable_workflows_journal.ts`
 
-Platform op-DSL migrations are established in `db/migrations-ts/`. The platform runner applies them with:
+Platform op-DSL migrations are established in `db/migrations-ts/`. The current
+platform runner is `zeroship-platform-migrate`, built from
+`crates/zeroship-migrate-adapter` on the published migration engine. Apply the
+platform corpus with:
 
 ```bash
-zeroship-migrate --profile platform --dir db/migrations-ts migrate --yes
+zeroship-platform-migrate \
+  --migrations-dir db/migrations-ts \
+  --database-url "$ZEROSHIP_MIGRATE_DSN" \
+  --project-schema zeroship \
+  --project-id zeroship
 ```
 
-The legacy `db/migrations/*.sql` corpus remains the raw-SQL path. Platform `.ts` migrations are recorded to transient IR at migrate time; committed `.ir.json` is not the platform source of truth.
+Platform `.ts` migrations are recorded to transient IR at migrate time;
+committed `.ir.json` and the historical raw-SQL fixtures are not the platform
+schema source of truth.
 
 ## Verification
 
@@ -23,7 +32,11 @@ Reference:
 - `db/migrations/V0068__durable_workflows_journal.sql`
 - `db/migrations/V0068__durable_workflows_journal.down.sql`
 
-Method:
+Historical method:
+
+The steps below record what was run on 2026-07-05 with the now-retired in-tree
+runner. Its command names are evidence for that verification, not current
+runnable guidance.
 
 1. Rendered the new op-DSL migration through the zeroship-migrate TS recorder plus PG lower/render path.
 2. Applied the op-DSL migration with `zeroship-migrate --profile platform` to a fresh disposable Postgres database on the `appbase-migrate-postgres-1` container.
@@ -35,19 +48,11 @@ Method:
 
 All disposable DBs and the temporary tablespaces were dropped after verification.
 
-Target-schema diff result:
-
-```diff
-@@ -172,7 +172,7 @@
-     output_content_type text,
-     wake_at timestamp with time zone,
-     signal_type text,
--    max_signal_age interval,
-+    max_signal_age text,
-     consumed_signal_id text,
-     child_run_id text,
-     batch_id text NOT NULL,
-```
+The historical target-schema comparison found one duration-representation
+mismatch: the raw-SQL fixture used a database-native duration while the first
+op-DSL draft used text. Both shapes are superseded. The implemented journal
+stores `max_signal_age_ms` as `bigint`; the engine computes and binds the
+timestamp cutoff used by the signal-freshness query.
 
 The op-DSL down body left only the base fixture table:
 
@@ -55,7 +60,8 @@ The op-DSL down body left only the base fixture table:
 DOWN_REMAINING_TABLES=apps,
 ```
 
-The normal `zeroship-migrate rollback --dir <ts-dir>` path did not run the source `.ts` down migration; see gaps.
+At the time, the retired runner's normal rollback path did not run the source
+`.ts` down migration; see the historical gap below.
 
 ## Construct Coverage
 
@@ -73,27 +79,17 @@ Expressed faithfully:
 
 ## Gaps
 
-### 1. No interval column type
+### 1. Duration representation mismatch (resolved)
 
-Raw SQL:
+The historical reference and the first op-DSL draft disagreed on the storage
+shape. The durable-workflow contract now uses one portable representation:
 
-```sql
-max_signal_age INTERVAL
-```
+- `workflow_steps.max_signal_age_ms` is a `bigint` millisecond count.
+- `wake_at` and the signal-freshness cutoff are bound timestamps.
+- Workflow SQL does not store a database-native duration or cast a duration
+  string at query time.
 
-Current DSL support:
-
-- `interval("HH:MM:SS")` exists as an expression literal.
-- `t.interval()` does not exist as a column type.
-
-Result:
-
-- The op-DSL migration uses `t.text()` for `workflow_steps.max_signal_age`, so the schema diff is not equivalent.
-
-Recommended fix:
-
-- Add a column type, e.g. `t.interval()` or a PG vendor type under `@zeroship/migrate/pg`.
-- If cross-dialect support is required, define the portable downgrade explicitly instead of silently using text in PG.
+No migration-engine duration column type is required for this feature.
 
 ### 2. No guarded role-grant primitive
 
@@ -119,39 +115,40 @@ Recommended fix:
 
 - Add `ifRoleExists: true` to role-targeting `grant` / `revoke`, or add a higher-level platform grant profile primitive for standard platform roles.
 
-### 3. Platform TS render is not exposed by the CLI
+### 3. Platform TS render is not exposed by the current runner
 
-Observed:
+Historical observation:
 
-- `zeroship-migrate plan` only loads `.sql` and `.ir.json`; it reports no artifacts for a `.ts` platform migration dir.
-- `zeroship-migrate-js record` records under the confined creator profile, so it rejects platform tables with author-owned `id` columns and vendor `grant` ops.
+- The retired plan command did not record a platform `.ts` directory, and its
+  creator-facing recorder used the confined policy rather than the platform
+  policy.
 
-Result:
+Current result:
 
-- Rendering platform `.ts` before apply required a temporary helper that called public crate APIs to record with `PolicyProfile::platform()` and lower to PG SQL.
-
-Recommended fix:
-
-- Teach `zeroship-migrate plan --profile platform --dir <ts-dir>` to transiently record platform `.ts` migrations and render them without a DB apply.
-
-### 4. Platform TS rollback/down is not wired
-
-Observed:
-
-```text
-zeroship-migrate: load migrations: unrecognized migration filename:
-'20260705000000_durable_workflows_journal.ts'
-```
-
-`migrate --profile platform --dir <ts-dir>` applies `.ts` migrations, but `rollback --dir <ts-dir>` still routes through the raw SQL loader.
-
-Result:
-
-- The source migration includes `export function down()`, and the down operations are expressible.
-- The normal platform CLI rollback path cannot invoke that `.ts` down today.
+- `zeroship-platform-migrate` authors, lowers, and applies the platform corpus,
+  but does not expose an offline preview flag.
 
 Recommended fix:
 
-- Extend rollback/down to discover platform `.ts` migrations, record their `down()` phase, and apply the resulting down IR/fragments in reverse.
-- Alternatively, explicitly declare platform `.ts` migrations forward-only and remove/forbid misleading `down()` exports.
+- Add a preview mode to `zeroship-platform-migrate` backed by the adapter's same
+  platform authoring and guarded-lowering path, without opening or applying to a
+  database.
 
+### 4. Platform TS rollback/down is not exposed by the current runner
+
+Historical observation:
+
+- The retired rollback path sent `.ts` files through its raw-SQL loader and
+  rejected the migration filename.
+
+Current result:
+
+- `zeroship-platform-migrate` is an apply-only runner. Although the source
+  migration can describe `down()` operations, the platform runner has no
+  rollback command.
+
+Recommended fix:
+
+- Either add a platform-policy rollback mode to `zeroship-platform-migrate`
+  that records and applies `down()` operations in reverse, or explicitly make
+  platform migrations forward-only and reject misleading `down()` exports.

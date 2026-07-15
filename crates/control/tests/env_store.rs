@@ -11,14 +11,21 @@ use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
 
-fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
+fn db_url() -> String {
+    std::env::var("CONTROL_TEST_DB")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
+}
 
 async fn create_test_app(registry: &Registry) -> Uuid {
     // create_app now binds an owner membership (FK → zeroship.users), so seed a
     // throwaway owner first. These tests only exercise EnvStore, not authz, so
     // the owner identity is immaterial — it just has to exist.
     let owner_id = Uuid::new_v4();
-    let url = db_url().expect("CONTROL_TEST_DB set when this runs");
+    let url = db_url();
     let pg = pg_connect(&url).await;
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
@@ -61,10 +68,7 @@ async fn raw_conn(dsn: &str) -> compio_postgres::Client {
 
 #[compio::test]
 async fn var_crud_roundtrip() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -94,7 +98,7 @@ async fn var_crud_roundtrip() {
 
 #[compio::test]
 async fn secret_roundtrip_encrypted() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -131,7 +135,7 @@ async fn secret_roundtrip_encrypted() {
 
 #[compio::test]
 async fn merged_env_secret_overrides_var() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -148,7 +152,7 @@ async fn merged_env_secret_overrides_var() {
 
 #[compio::test]
 async fn invalid_key_rejected_client_side() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -167,7 +171,7 @@ async fn invalid_key_rejected_client_side() {
 
 #[compio::test]
 async fn per_app_isolation() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app_a = create_test_app(&registry).await;
@@ -191,7 +195,7 @@ async fn per_app_isolation() {
 
 #[compio::test]
 async fn wrong_master_key_fails_decrypt() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let writer = EnvStore::new(registry.clone(), "correct-key", false).expect("store");
     let reader = EnvStore::new(registry.clone(), "wrong-key", false).expect("store");
@@ -213,7 +217,7 @@ async fn wrong_master_key_fails_decrypt() {
 
 #[compio::test]
 async fn ciphertext_transplant_fails_across_app_and_key() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app_a = create_test_app(&registry).await;
@@ -266,7 +270,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
 #[compio::test]
 async fn delete_cascades_from_app() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -282,7 +286,7 @@ async fn delete_cascades_from_app() {
 
 #[compio::test]
 async fn env_version_bumps_on_every_mutation() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -319,7 +323,7 @@ async fn env_version_bumps_on_every_mutation() {
 
 #[compio::test]
 async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
 
@@ -362,7 +366,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
 
 #[compio::test]
 async fn audit_log_roundtrip() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
     let first_actor = Uuid::new_v4();
@@ -412,7 +416,7 @@ async fn audit_log_roundtrip() {
 
 #[compio::test]
 async fn app_audit_is_append_only() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
 
@@ -453,7 +457,7 @@ async fn app_audit_is_append_only() {
 
 #[compio::test]
 async fn merged_env_404s_on_missing_app() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k", false).expect("store");
 
@@ -467,7 +471,7 @@ async fn merged_env_404s_on_missing_app() {
 
 #[compio::test]
 async fn empty_master_key_rejected_without_dev_flag() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let err = EnvStore::new(registry, "", false).unwrap_err();
     assert!(matches!(err, zeroship_control::env_store::EnvError::MasterKeyRequired));
@@ -475,14 +479,14 @@ async fn empty_master_key_rejected_without_dev_flag() {
 
 #[compio::test]
 async fn empty_master_key_allowed_in_dev_mode() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let _store = EnvStore::new(registry, "", true).expect("dev-mode should accept empty key");
 }
 
 #[compio::test]
 async fn set_value_over_cap_rejected() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -498,7 +502,7 @@ async fn set_value_over_cap_rejected() {
 
 #[compio::test]
 async fn merged_env_for_worker_emits_split_shape() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
@@ -556,7 +560,7 @@ async fn merged_env_for_worker_emits_split_shape() {
 
 #[compio::test]
 async fn long_value_roundtrip() {
-    let Some(url) = db_url() else { return; };
+    let url = db_url();
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;

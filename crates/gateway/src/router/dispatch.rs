@@ -2643,6 +2643,17 @@ mod tests {
         }
     }
 
+    fn usage_value(
+        events: &[zeroship_core::usage_event::UsageEvent],
+        app_id: Uuid,
+        meter: &str,
+    ) -> Option<u64> {
+        events
+            .iter()
+            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .map(|event| event.value)
+    }
+
     /// Drain a `ResponseBody<Body>` to bytes — the dispatch tests need
     /// to inspect idempotency-replayed and error-envelope bodies.
     async fn collect_body(mut body: ResponseBody<Body>) -> Vec<u8> {
@@ -4864,18 +4875,16 @@ mod tests {
         let served = collect_body(resp.take_body()).await;
         assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
 
-        let snap = meter.drain();
-        let usage = snap
-            .get(&app_id)
-            .expect("gateway recorded usage for the static route's app");
+        let events = meter.drain();
         assert_eq!(
-            usage.custom.get("gateway_egress_bytes").copied(),
+            usage_value(&events, app_id, "gateway_egress_bytes"),
             Some(served.len() as u64),
             "static (gateway-owned) egress must be metered as gateway_egress_bytes \
              equal to the served body length",
         );
         assert_eq!(
-            usage.egress_bytes, 0,
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
             "the gateway must NEVER touch the worker-owned egress_bytes metric",
         );
     }
@@ -4914,17 +4923,13 @@ mod tests {
         )
         .await;
 
-        let snap = meter.drain();
-        // Either the app has no entry at all, or it has one but with NO
-        // gateway_egress_bytes — the gateway must not meter the worker arm.
-        if let Some(usage) = snap.get(&app_id) {
-            assert_eq!(
-                usage.custom.get("gateway_egress_bytes").copied(),
-                None,
-                "the gateway must NOT meter a worker-proxied response body as \
-                 gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
-            );
-        }
+        let events = meter.drain();
+        assert_eq!(
+            usage_value(&events, app_id, "gateway_egress_bytes"),
+            None,
+            "the gateway must NOT meter a worker-proxied response body as \
+             gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
+        );
     }
 
     /// A worker RPC route that caps input at `max` bytes, so a body over the
@@ -5015,33 +5020,41 @@ mod tests {
         let body = collect_body(resp.take_body()).await;
         assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
 
-        let snap = meter.drain();
+        let events = meter.drain();
         // The gateway must record NOTHING for an error envelope: no
         // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
-        if let Some(usage) = snap.get(&app_id) {
-            assert_eq!(
-                usage.custom.get("gateway_egress_bytes").copied(),
-                None,
-                "a gateway error/4xx envelope is platform overhead and must NOT \
-                 be metered as gateway_egress_bytes",
-            );
-            assert_eq!(usage.egress_bytes, 0, "the gateway never touches egress_bytes");
-        }
+        assert_eq!(
+            usage_value(&events, app_id, "gateway_egress_bytes"),
+            None,
+            "a gateway error/4xx envelope is platform overhead and must NOT \
+             be metered as gateway_egress_bytes",
+        );
+        assert_eq!(
+            usage_value(&events, app_id, "egress_bytes"),
+            None,
+            "the gateway never touches egress_bytes",
+        );
     }
 
-    /// Restart-safety (§2.3 / the boot-nonce lesson): two
-    /// `boot_worker_id("gate-…")` calls for the SAME stable base must differ,
-    /// so the gateway's per-process `SequenceSource` resetting to 1 each boot
-    /// can't collide with pre-restart `(producer_id, sequence)` rows and be
-    /// dropped as a phantom duplicate (silent under-bill).
+    /// Restart-safety under the usage-event model: event IDs, rather than a
+    /// process-local sequence, are the provider dedup identity. Two process
+    /// instances using the same stable source must still emit distinct IDs.
     #[test]
-    fn gateway_producer_id_is_restart_unique() {
-        let base = "gate-pod-3";
-        let a = zeroship_metering::boot_worker_id(base);
-        let b = zeroship_metering::boot_worker_id(base);
-        assert_ne!(a, b, "each gateway boot must get a fresh metering identity");
-        assert!(a.starts_with(&format!("{base}-")));
-        assert!(b.starts_with(&format!("{base}-")));
+    fn gateway_usage_event_ids_are_restart_unique() {
+        let app_id = Uuid::new_v4();
+        let first = zeroship_metering::Meter::with_source("gate-pod-3");
+        let second = zeroship_metering::Meter::with_source("gate-pod-3");
+        first.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+        second.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+
+        let first_event = first.drain().pop().expect("first usage event");
+        let second_event = second.drain().pop().expect("second usage event");
+        assert_eq!(first_event.source, "gate-pod-3");
+        assert_eq!(second_event.source, "gate-pod-3");
+        assert_ne!(
+            first_event.event_id, second_event.event_id,
+            "separate gateway boots must not collide at provider dedup",
+        );
     }
 
     /// Allow → the gate passes (so dispatch proceeds to the proxy, which fails

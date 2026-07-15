@@ -7,12 +7,20 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./host": {
+      "types": "./dist/host.d.ts",
+      "import": "./dist/host.js"
+    },
+    "./host-recorder": {
+      "types": "./dist/host-recorder.d.ts",
+      "import": "./dist/host-recorder.js"
     }
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "src"],
+  "files": ["dist", "src", "native"],
   "scripts": {
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
     "gen:dialect-table": "node scripts/gen-dialect-table.mjs",
@@ -26,7 +34,13 @@
   "dependencies": {
     "@zeroship/db": "workspace:*"
   },
+  "optionalDependencies": {
+    "pg": "^8.13.0",
+    "mysql2": "^3.11.0"
+  },
   "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
     "json-schema-to-typescript": "^15.0.4",
     "tsup": "^8.5.1",
     "tsx": "catalog:",

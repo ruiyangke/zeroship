@@ -30,7 +30,7 @@ import mime from "mime";
 import {
   GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
-} from "./migrations.js";
+} from "./gen-types/index.js";
 
 const brotliCompressAsync = promisify(brotliCompress);
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });

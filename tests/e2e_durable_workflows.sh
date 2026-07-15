@@ -110,8 +110,9 @@ require_cmd lsof
 echo "=== DW-07 build ==="
 pnpm build
 cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker
-cargo build --release -p zeroship-migrate --features standalone-cli --bins
-for b in zeroship-control zeroship-gate zeroship-worker zeroship-migrate dev-provision; do
+cargo build --release -p zeroship-migrate-adapter --bin zeroship-platform-migrate \
+  --features zeroship-migrate-adapter/platform-cli
+for b in zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate dev-provision; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b"; exit 2; }
 done
 pass "release binaries built"
@@ -164,17 +165,16 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
   pass "applied ops/postgres-init.sql"
 fi
 
-ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
-  "$BIN/zeroship-migrate" migrate \
-  --profile platform \
-  --dir "$ROOT/db/migrations-ts" \
+"$BIN/zeroship-platform-migrate" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
   --database-url "$DBURL" \
-  --yes > "$WORK/migrate.log" 2>&1 || {
+  --project-schema zeroship \
+  --project-id zeroship > "$WORK/migrate.log" 2>&1 || {
     fail "platform migrations failed"
     tail -80 "$WORK/migrate.log"
     exit 1
   }
-pass "platform migrations applied with zeroship-migrate"
+pass "platform migrations applied with zeroship-platform-migrate"
 
 mkdir -p "$WORK/blobs" "$WORK/blob-cache"
 

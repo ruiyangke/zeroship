@@ -468,7 +468,10 @@ pub async fn reap_parked_cancel_requested_batch(
     Ok(registered)
 }
 
-/// Retired control-side scan tick. The scheduler store is the timer authority.
+/// Control-hosted timer-authority tick.
+///
+/// Timer state lives in the scheduler store; control claims due rows and owns
+/// dispatch/ack handling until that loop moves into the standalone scheduler.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());

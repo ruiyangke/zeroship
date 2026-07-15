@@ -24,8 +24,10 @@
             # mismatched clippy fails with E0514 against crates already
             # built by this rustc).
             clippy
+            cmake
             pkg-config
             openssl
+            curl.dev
             # SQLite CLI for ad-hoc inspection of dev/test databases.
             # Note: rusqlite uses the `bundled` Cargo feature in
             # crates/plugin-db, so it does NOT link against this sqlite —

@@ -28,16 +28,14 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
-use zeroship_control::metering::Metering;
-use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice};
+use zeroship_control::pricing::{charge_cents, MetricWeights, PlanPrice};
 use zeroship_control::stripe_client::{Period, StripeApi, StripeClient, STRIPE_API_VERSION};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::types::{AppUsage, UsageReport};
 
-fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 /// `billing_reconcile::tick_with`/`sweep` single-flights fleet-wide via
@@ -113,6 +111,18 @@ struct MockState {
     /// Created invoices, keyed by the `in_…` id the mock minted: the swept total
     /// (D1) + the settlement ids the EXPANDED `GET /v1/invoices` returns (D2).
     invoices: HashMap<String, MockInvoice>,
+    fault: MockFault,
+}
+
+#[derive(Default)]
+enum MockFault {
+    #[default]
+    None,
+    FailAfterInvoiceItems { fail_after: usize, seen: usize },
+    PostThenCrashInvoiceItem,
+    CrashOnFinalize,
+    FinalizeAlreadyFinalized,
+    FinalizeReturnsFixedId(String),
 }
 
 /// A pending invoice item recorded by the mock.
@@ -185,6 +195,33 @@ impl MockStripe {
     /// Turn OFF Idempotency-Key replay to simulate Stripe's >24h key expiry.
     fn disable_dedupe(&self) {
         self.state.lock().unwrap().dedupe_by_key = false;
+    }
+
+    fn clear_fault(&self) {
+        self.state.lock().unwrap().fault = MockFault::None;
+    }
+
+    fn fail_after_invoice_items(&self, fail_after: usize) {
+        self.state.lock().unwrap().fault = MockFault::FailAfterInvoiceItems {
+            fail_after,
+            seen: 0,
+        };
+    }
+
+    fn post_then_crash_invoice_item(&self) {
+        self.state.lock().unwrap().fault = MockFault::PostThenCrashInvoiceItem;
+    }
+
+    fn crash_on_finalize(&self) {
+        self.state.lock().unwrap().fault = MockFault::CrashOnFinalize;
+    }
+
+    fn finalize_already_finalized(&self) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeAlreadyFinalized;
+    }
+
+    fn finalize_returns_fixed_id(&self, fixed_id: String) {
+        self.state.lock().unwrap().fault = MockFault::FinalizeReturnsFixedId(fixed_id);
     }
 
     /// The swept total the mock attached to a created invoice (D1). ZERO when the
@@ -352,6 +389,19 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
     }
 
+    if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
+        let mut st = state.lock().unwrap();
+        if let MockFault::FailAfterInvoiceItems { fail_after, seen } = &mut st.fault {
+            *seen += 1;
+            if *seen > *fail_after {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item"}}"#,
+                );
+            }
+        }
+    }
+
     // GET /v1/invoiceitems?...&pending=true — list the pending items for a
     // customer (C1's `find_invoice_item_by_key`). Faithful Stripe list shape:
     // `{ "object":"list", "data":[ {id, metadata:{zs_item_key}}, … ] }`.
@@ -419,6 +469,53 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&body);
     }
 
+    if req.method == "POST"
+        && req.path.starts_with("/v1/invoices/")
+        && req.path.contains("/finalize")
+    {
+        let draft_id = req
+            .path
+            .trim_start_matches("/v1/invoices/")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let mut st = state.lock().unwrap();
+        st.requests.push(req.clone());
+        match &st.fault {
+            MockFault::CrashOnFinalize => {
+                return http_json(
+                    500,
+                    r#"{"error":{"type":"api_error","code":"simulated_crash_before_finalize"}}"#,
+                );
+            }
+            MockFault::FinalizeAlreadyFinalized => {
+                return http_json(
+                    400,
+                    r#"{"error":{"type":"invalid_request_error","code":"invoice_already_finalized"}}"#,
+                );
+            }
+            MockFault::FinalizeReturnsFixedId(fixed_id) => {
+                let json =
+                    format!(r#"{{"id":"{fixed_id}","object":"invoice","status":"open"}}"#);
+                if let Some(key) = req.idempotency_key.clone() {
+                    st.idempotency_replies
+                        .entry(key)
+                        .or_insert_with(|| json.clone());
+                }
+                return http_200_json(&json);
+            }
+            _ => {}
+        }
+        let json = format!(r#"{{"id":"{draft_id}","object":"invoice","status":"open"}}"#);
+        if let Some(key) = req.idempotency_key.clone() {
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
+        }
+        return http_200_json(&json);
+    }
+
     // POST /v1/refunds (D2 refund leg). Faithful to real Stripe: `currency` is NOT an
     // accepted parameter — a body that sends it gets a 400 `parameter_unknown`. The
     // body MUST carry exactly one money target (`payment_intent` OR `charge`).
@@ -468,6 +565,10 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     {
         let mut st = state.lock().unwrap();
         // Record a created invoice item so the GET-list (adopt) path can find it.
+        let post_then_crash =
+            matches!(st.fault, MockFault::PostThenCrashInvoiceItem)
+                && req.method == "POST"
+                && req.path.starts_with("/v1/invoiceitems");
         if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
             let customer = form_param(&req.body, "customer").unwrap_or_default();
             let key = form_param(&req.body, "metadata[zs_item_key]");
@@ -516,6 +617,12 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
             st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+        }
+        if post_then_crash {
+            return http_json(
+                500,
+                r#"{"error":{"type":"api_error","code":"simulated_crash_after_invoice_item_post"}}"#,
+            );
         }
     }
 
@@ -641,6 +748,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
             .expect("workflow blob store"),
     );
+    let tax_provider = zeroship_control::tax::build_tax_provider(
+        &zeroship_control::tax::TaxProviderConfig::native(),
+    )
+    .expect("native tax provider builds");
+    let billing_stack = common::lite_billing_stack(
+        registry.clone(),
+        mock.base_url.clone(),
+        Arc::clone(&tax_provider),
+    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -657,7 +773,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -680,14 +796,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-        metering_provider: zeroship_control::metering::provider::build_provider(
-            &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-        )
-        .expect("native provider builds"),
-        tax_provider: zeroship_control::tax::build_tax_provider(
-            &zeroship_control::tax::TaxProviderConfig::native(),
-        )
-        .expect("native tax provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack,
+        billing_stream: None,
+        tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
@@ -724,6 +836,7 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
 /// Seed a plan that charges 1 cent/request with no included CU. CU pricing:
 /// global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU (= 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
+    common::seed_metric_catalog(&state.control_pg, "requests").await;
     state
         .control_pg
         .execute(
@@ -775,26 +888,18 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     app_id
 }
 
-fn report(worker: &str, seq: u64, app: Uuid, requests: u64) -> UsageReport {
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { requests, ..Default::default() });
-    UsageReport {
-        worker_id: worker.to_string(),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    }
-}
-
-/// Ingest usage directly at a given period_start (the CLOSED period the
-/// reconciler bills). Mirrors `Metering::ingest_at`.
+/// Seed usage directly at a given period_start (the CLOSED period the
+/// reconciler bills).
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
-    let metering = Metering::new(state.registry.clone());
-    let worker = format!("w-{}", Uuid::new_v4());
-    metering
-        .ingest_at(&report(&worker, seq, app, requests), period_start)
-        .await
-        .expect("ingest usage");
+    let _ = seq;
+    common::seed_usage_delta(
+        &state.control_pg,
+        app,
+        period_start,
+        "requests",
+        i64::try_from(requests).expect("test requests fit i64"),
+    )
+    .await;
 }
 
 /// Ingest a set of CUSTOM metrics (name → raw) for `app` at `period_start`, after
@@ -808,26 +913,27 @@ async fn ingest_custom_metrics(
     period_start: i64,
     seq: u64,
 ) {
-    // Ingest FIRST: the real metering path auto-registers each `custom` metric in
-    // `billing_metrics` (the catalog `metric_weights.metric` FKs to) and writes its
-    // `usage_aggregates` delta. Seeding a weight before the catalog row exists would
-    // violate `metric_weights_metric_fkey`.
-    let mut custom = HashMap::new();
     for (name, raw) in metrics {
-        custom.insert(name.clone(), *raw);
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
+                 VALUES ($1, 'custom', 'unit', $2, NOW()) \
+                 ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW()",
+                &[name, &app],
+            )
+            .await
+            .expect("seed custom metric");
+        common::seed_usage_delta(
+            &state.control_pg,
+            app,
+            period_start,
+            name,
+            i64::try_from(*raw).expect("test metric value fits i64"),
+        )
+        .await;
     }
-    let mut counters = HashMap::new();
-    counters.insert(app, AppUsage { custom, ..Default::default() });
-    let report = UsageReport {
-        worker_id: format!("w-{}", Uuid::new_v4()),
-        report_id: Uuid::now_v7(),
-        sequence: seq,
-        counters,
-    };
-    Metering::new(state.registry.clone())
-        .ingest_at(&report, period_start)
-        .await
-        .expect("ingest custom metrics");
+    let _ = seq;
 
     // Now that each metric is cataloged, seed a 1 CU/op weight so it prices through
     // the real CU pipeline at reconcile time.
@@ -846,7 +952,7 @@ async fn ingest_custom_metrics(
 
 /// `now` placed mid-current-month so the CLOSED period is the previous month.
 fn now_for_closed_period() -> i64 {
-    chrono::Utc::now().timestamp()
+    common::isolated_closed_period_now()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -1004,10 +1110,7 @@ async fn read_line_snapshot(
 /// client hitting the mock server. Records on `billing_runs`.
 #[compio::test]
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "items").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1059,10 +1162,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 /// before and after: the money is provably unchanged).
 #[compio::test]
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1150,10 +1250,7 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 /// check (the keys are absent), so the test fails on the first metadata lookup.
 #[compio::test]
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1295,10 +1392,7 @@ async fn every_stripe_call_pins_the_api_version() {
 /// idempotency guard is what makes this GREEN.
 #[compio::test]
 async fn reconcile_is_idempotent_per_period() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "idem").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1349,10 +1443,7 @@ async fn reconcile_is_idempotent_per_period() {
 /// server's recorded requests — proving the wire path, not a stubbed client.
 #[compio::test]
 async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "hdr").await;
 
     // Drive the REAL client directly against the mock.
@@ -1370,7 +1461,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         .expect("create draft");
     assert!(draft.starts_with("in_mock_"), "parsed the draft invoice id");
     let invoice = client.finalize_invoice(&draft).await.expect("finalize");
-    assert!(invoice.starts_with("in_mock_final_"), "parsed the finalized invoice id");
+    assert_eq!(invoice, draft, "finalize preserves the Stripe invoice id");
 
     let reqs = fx.mock.requests();
     let item_req = reqs.iter().find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems")).expect("item req");
@@ -1400,10 +1491,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
 /// `invoice_swept_total` is 0 (≠ 1234+766) and the body lacks the param.
 #[compio::test]
 async fn create_invoice_sweeps_pending_items_via_include_behavior() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d1-sweep").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1457,10 +1545,7 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
 /// returns nothing — proving the expand is load-bearing.
 #[compio::test]
 async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d2-expand").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1504,10 +1589,7 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
 /// refund fails (the exact real-Stripe 400 the e2e hit).
 #[compio::test]
 async fn create_refund_omits_currency_and_targets_pi_directly() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "d2-refund").await;
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
@@ -1562,10 +1644,7 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
 /// through the store + mock; asserts the store persisted one customer id.
 #[compio::test]
 async fn setup_session_creates_customer_once() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "setup").await;
     let creator = make_user(&fx.state, "setup").await;
 
@@ -1604,10 +1683,7 @@ async fn setup_session_creates_customer_once() {
 /// skipped (an unowned app gets no invoice).
 #[compio::test]
 async fn reconcile_groups_apps_by_owner_via_app_members() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "owner").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1662,10 +1738,7 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
 /// the SAME deterministic idempotency key and the row is completed.
 #[compio::test]
 async fn crashed_run_with_null_invoice_id_is_redriven() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1735,10 +1808,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 /// `Ok`; here it returns `Err` and writes nothing.
 #[compio::test]
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1748,6 +1818,10 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
 
     // Weights present (so usage WOULD accrue CU), but the plan inherits the FX
     // (NULL) and we delete the global default — leaving the FX unresolvable.
+    // Seed billing_metrics('requests') first so the metric_weights FK holds even
+    // when this test races a sibling under the suite's parallel runner (the FK
+    // target isn't guaranteed present otherwise).
+    common::seed_metric_catalog(&fx.state.control_pg, "requests").await;
     fx.state
         .control_pg
         .execute(
@@ -1931,10 +2005,7 @@ impl StripeApi for FailAfterFirstItem {
 /// GREEN: count_created == 2 total (A once + B once), never 3.
 #[compio::test]
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "partial").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -1949,11 +2020,9 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     ingest_at(&fx.state, app_b, 200, period, 2).await; // 200c
 
     // First drive: crashes after the first invoice item posts.
-    let failing = FailAfterFirstItem {
-        inner: dummy_passthrough(&fx),
-        items_seen: std::cell::Cell::new(0),
-    };
-    let res = billing_reconcile::tick_with(&fx.state, &failing, now).await;
+    fx.mock.fail_after_invoice_items(1);
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     // The sweep swallows per-creator errors → Ok(0) (nobody fully billed), but
     // exactly ONE item must have posted + been ledgered.
     assert_eq!(res.expect("tick swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
@@ -2084,10 +2153,7 @@ impl StripeApi for PostThenCrash {
 /// (double-bill). The claim-then-call fix makes it count_created == 1.
 #[compio::test]
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2101,8 +2167,9 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 
     // First drive: the item posts to Stripe, then we crash before the ledger
     // confirms it.
-    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
-    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.post_then_crash_invoice_item();
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "no creator fully billed on the crashed drive");
 
     // The item DID post to Stripe exactly once on the crashed drive.
@@ -2158,10 +2225,7 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 /// so the deterministic Idempotency-Key path also yields exactly one created item.
 #[compio::test]
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2173,8 +2237,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     fx.state.stripe_store.set_customer(creator, &format!("cus_test_c1within_{}", Uuid::new_v4().simple())).await.unwrap();
     ingest_at(&fx.state, app, 320, period, 1).await; // 320c
 
-    let crashing = PostThenCrash { inner: dummy_passthrough(&fx) };
-    let _ = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.post_then_crash_invoice_item();
+    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before crash");
 
     // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
@@ -2281,10 +2346,7 @@ impl StripeApi for CrashOnFinalize {
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
 #[compio::test]
 async fn crash_before_finalize_finalizes_original_draft_after_24h() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2297,8 +2359,9 @@ async fn crash_before_finalize_finalizes_original_draft_after_24h() {
     ingest_at(&fx.state, app, 700, period, 1).await; // 700c
 
     // First drive: items post, draft is created + persisted, then finalize crashes.
-    let crashing = CrashOnFinalize { inner: dummy_passthrough(&fx) };
-    let res = billing_reconcile::tick_with(&fx.state, &crashing, now).await;
+    fx.mock.crash_on_finalize();
+    let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
+    fx.mock.clear_fault();
     assert_eq!(res.expect("sweep swallows the per-creator error"), 0, "not fully billed (finalize crashed)");
 
     // The item posted, the draft was created exactly once and PERSISTED.
@@ -2382,10 +2445,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// `:id` to the principal. The fix makes own-id OK and keeps foreign-id 403.
 #[compio::test]
 async fn billing_setup_is_self_service_and_blocks_cross_creator() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "authz").await;
 
     // A normal (non-operator) creator principal. Its PAT user_id IS the creator.
@@ -2429,10 +2489,7 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
 /// creator's billing (foreign id) — the admin PAT carries BillingWrite.
 #[compio::test]
 async fn billing_setup_allows_platform_operator_for_any_creator() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "authz-op").await;
 
     let operator = common::authz_fixture::admin_pat(&fx.state).await;
@@ -2481,10 +2538,7 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 /// makes the no-bearer case 401 while the keyed case still reconciles.
 #[compio::test]
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "force").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2560,10 +2614,7 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 
 #[compio::test]
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2577,6 +2628,16 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_creator() 
     // frozen map; the C1 fix freezes the full map. Either way the replay must equal
     // amount_cents (an unused weight contributes 0), but freezing the full map is
     // what makes the snapshot equal to the real charge INPUT.
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.billing_metrics (metric, kind, unit) \
+             VALUES ('cpu_us', 'platform', 'op') \
+             ON CONFLICT (metric) DO UPDATE SET unit = EXCLUDED.unit",
+            &[],
+        )
+        .await
+        .expect("seed cpu_us metric");
     fx.state
         .control_pg
         .execute(
@@ -2727,10 +2788,7 @@ impl StripeApi for FinalizeAlreadyFinalized {
 
 #[compio::test]
 async fn refinalize_already_finalized_converges_locally() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
@@ -2749,13 +2807,13 @@ async fn refinalize_already_finalized_converges_locally() {
     // First drive: items + draft post for real, but finalize reports the invoice
     // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
     // must CONVERGE the local finalize, not error-loop.
-    let decorated = FinalizeAlreadyFinalized { inner: dummy_passthrough(&fx) };
+    fx.mock.finalize_already_finalized();
     // `billed` is a FLEET-wide count (the sweep bills every un-finalized creator
     // with usage in `period`), so other tests' leftovers can inflate it; assert
     // on THIS creator's converged outcome below rather than the exact count. The
     // key M2 guarantee is that the drive did NOT error-loop (it returned Ok and
     // this creator converged), which a pre-fix run could not do.
-    let billed = billing_reconcile::tick_with(&fx.state, &decorated, now)
+    let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick converges on already-finalized (no error loop)");
     assert!(billed >= 1, "the re-finalize converges (at least this creator billed)");
@@ -2865,10 +2923,7 @@ impl StripeApi for FinalizeReturnsFixedId {
 
 #[compio::test]
 async fn finalize_and_invoice_ref_commit_atomically() {
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
+    let url = db_url();
     let fx = build_fixture(&url, "m1atomic").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
@@ -2924,11 +2979,11 @@ async fn finalize_and_invoice_ref_commit_atomically() {
 
     // Drive the reconcile: finalize returns the fixed id → the ref INSERT collides
     // → the txn must roll back the finalize.
-    let decorated = FinalizeReturnsFixedId { inner: dummy_passthrough(&fx), fixed_id: fixed_id.clone() };
+    fx.mock.finalize_returns_fixed_id(fixed_id.clone());
     // The colliding finalize is a per-creator error the sweep swallows + continues
     // past (so the tick still returns Ok). We assert on THIS creator's state below
     // rather than the fleet-wide count (other tests' creators may also be swept).
-    let _ = billing_reconcile::tick_with(&fx.state, &decorated, now)
+    let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("sweep swallows the per-creator error and returns Ok");
 

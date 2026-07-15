@@ -22,10 +22,14 @@ mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -100,10 +104,9 @@ impl Fixture {
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
-            metering_provider: zeroship_control::metering::provider::build_provider(
-                &zeroship_control::metering::provider::MeteringProviderConfig::native(),
-            )
-            .expect("native provider builds"),
+        provider_registry: zeroship_control::metering::provider::builtin_registry(),
+        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+        billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
@@ -411,10 +414,7 @@ macro_rules! init_control {
 
 #[compio::test]
 async fn list_returns_empty_when_no_grants() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "empty").await;
     let pat = account_pat(&fx.state, "empty").await;
     let app = init_control!(fx);
@@ -434,10 +434,7 @@ async fn list_returns_empty_when_no_grants() {
 
 #[compio::test]
 async fn list_returns_user_grants_with_client_metadata() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "metadata").await;
     let pat = account_pat(&fx.state, "metadata").await;
     let app = init_control!(fx);
@@ -476,10 +473,7 @@ async fn list_returns_user_grants_with_client_metadata() {
 
 #[compio::test]
 async fn list_does_not_leak_other_users_grants() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "isolation").await;
     let pat = account_pat(&fx.state, "isolation-a").await;
     let other_user = insert_user(&fx.state, "isolation-b").await;
@@ -510,10 +504,7 @@ async fn list_does_not_leak_other_users_grants() {
 
 #[compio::test]
 async fn revoke_removes_grant_row() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-row").await;
     let pat = account_pat(&fx.state, "revoke-row").await;
     let app = init_control!(fx);
@@ -540,10 +531,7 @@ async fn revoke_removes_grant_row() {
 
 #[compio::test]
 async fn revoke_removes_native_grant_for_user_client_pair() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-native").await;
     let pat = account_pat(&fx.state, "revoke-native").await;
     let app = init_control!(fx);
@@ -570,10 +558,7 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
 
 #[compio::test]
 async fn revoke_returns_404_when_no_grant() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "missing").await;
     let pat = account_pat(&fx.state, "missing").await;
     let app = init_control!(fx);
@@ -592,10 +577,7 @@ async fn revoke_returns_404_when_no_grant() {
 
 #[compio::test]
 async fn revoke_does_not_affect_other_users() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "other-user").await;
     let owner = account_pat(&fx.state, "other-user-owner").await;
     let revoker = account_pat(&fx.state, "other-user-revoker").await;
@@ -626,10 +608,7 @@ async fn revoke_does_not_affect_other_users() {
 /// the relay alias was forwarding (active) → revoke → it bounces (inactive).
 #[compio::test]
 async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "cascade").await;
     let pat = account_pat(&fx.state, "cascade").await;
     let app = init_control!(fx);
@@ -717,10 +696,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
 /// whose `iat` predates the marker) as revoked. PG-gated.
 #[compio::test]
 async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "tokmarker").await;
     let pat = account_pat(&fx.state, "tokmarker").await;
     let app = init_control!(fx);
@@ -838,10 +814,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
 /// row; here we exercise that clear directly to prove the row is reusable.
 #[compio::test]
 async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "regrant").await;
     let pat = account_pat(&fx.state, "regrant").await;
     let app = init_control!(fx);
@@ -924,10 +897,7 @@ async fn grant_and_alias_state(
 /// losing writer.
 #[compio::test]
 async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "revoke-race").await;
     let pat = account_pat(&fx.state, "revoke-race").await;
     let app = init_control!(fx);
@@ -1128,10 +1098,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
 /// delete or the FK lost its ON DELETE CASCADE.
 #[compio::test]
 async fn app_delete_cascades_away_relay_identities() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "appdel").await;
     // Two users with aliases on the SAME app (same client_id). Both also hold an
     // active grant — the structural revoke-coherence gate requires a live
@@ -1190,10 +1157,7 @@ async fn app_delete_cascades_away_relay_identities() {
 /// failure arm to surface — just a clean 200.
 #[compio::test]
 async fn app_delete_returns_200_atomic() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "atomic-ok").await;
 
     // create_app binds an owner membership (FK → zeroship.users); seed one.
@@ -1237,10 +1201,7 @@ async fn app_delete_returns_200_atomic() {
 
 #[compio::test]
 async fn unauthenticated_request_returns_401() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
-        return;
-    };
+    let db_url = db_url();
     let fx = Fixture::new(&db_url, "unauth").await;
     let app = init_control!(fx);
 

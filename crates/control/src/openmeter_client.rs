@@ -189,9 +189,7 @@ impl OpenMeterClient {
             // Surface the status + a bounded slice of the body for diagnosis. The
             // token is in the request header only — never echoed back here.
             let body_snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
-            Err(ProviderError::Transport(format!(
-                "openmeter: ingest returned HTTP {status}: {body_snippet}"
-            )))
+            Err(classify_ingest_failure(status, body_snippet))
         }
     }
 
@@ -317,9 +315,53 @@ impl OpenMeterApi for OpenMeterClient {
     }
 }
 
+/// Classify an OpenMeter ingest HTTP failure. A 4xx client error is PERMANENT —
+/// a malformed/invalid CloudEvent will never succeed on retry, so it must be
+/// dead-lettered rather than retried forever — EXCEPT the transient 408
+/// (request timeout) and 429 (rate limit), which, like every 5xx, are retriable
+/// [`ProviderError::Transport`]. (Before this the adapter mapped ALL non-2xx to
+/// Transport, so a permanently-rejected event retry-looped and wedged the
+/// forwarder.)
+fn classify_ingest_failure(status: u16, body_snippet: String) -> ProviderError {
+    let msg = format!("openmeter: ingest returned HTTP {status}: {body_snippet}");
+    if (400..500).contains(&status) && status != 408 && status != 429 {
+        ProviderError::permanent_reject(status, msg)
+    } else {
+        ProviderError::Transport(msg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingest_failure_classification_dead_letters_client_errors_but_retries_transient() {
+        // Permanent client errors → permanent reject (the forwarder dead-letters,
+        // no retry-loop). A malformed event never succeeds on retry.
+        for status in [400u16, 401, 403, 404, 409, 422] {
+            let e = classify_ingest_failure(status, "bad".to_string());
+            assert!(
+                e.is_permanent_reject(),
+                "HTTP {status} should be a permanent reject, got {e:?}"
+            );
+        }
+        // Transient client errors → retriable Transport (NOT a permanent reject).
+        for status in [408u16, 429] {
+            let e = classify_ingest_failure(status, "slow".to_string());
+            assert!(
+                !e.is_permanent_reject(),
+                "HTTP {status} should be retriable, got {e:?}"
+            );
+            assert!(matches!(e, ProviderError::Transport(_)));
+        }
+        // Server errors → retriable Transport.
+        for status in [500u16, 502, 503] {
+            let e = classify_ingest_failure(status, "oops".to_string());
+            assert!(!e.is_permanent_reject());
+            assert!(matches!(e, ProviderError::Transport(_)));
+        }
+    }
 
     #[test]
     fn cloudevent_to_json_has_required_fields() {

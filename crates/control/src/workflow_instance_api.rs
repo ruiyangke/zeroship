@@ -1960,12 +1960,14 @@ fn parse_bytes_range(
 async fn record_workflow_output_read_usage(state: &AppState, app_id: &Uuid, bytes: i64) {
     let mut deltas = vec![("storage_ops".to_string(), 1)];
     if bytes > 0 {
-        deltas.push(("storage_bytes".to_string(), bytes));
         deltas.push(("storage_egress_bytes".to_string(), bytes));
         deltas.push(("egress_bytes".to_string(), bytes));
     }
     let metering = crate::metering::Metering::new(state.registry.clone());
-    if let Err(e) = metering.record_direct(app_id, &deltas).await {
+    if let Err(e) = metering
+        .record_direct(app_id, &deltas, state.billing_stream.as_ref())
+        .await
+    {
         tracing::warn!(
             app_id = %app_id,
             error = %e,

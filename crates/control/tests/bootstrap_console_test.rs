@@ -10,8 +10,8 @@
 //! invariant: the seed mints NO control PAT and injects NO
 //! `ZEROSHIP_CONTROL_SERVICE_TOKEN` / `ZEROSHIP_CONTROL_URL` into the console env.
 //!
-//! REQUIRES a Postgres migrated by `zeroship-migrate`
-//! (`zeroship-migrate migrate --dir db/migrations-ts --profile platform`):
+//! REQUIRES a Postgres migrated by the platform migrate one-shot
+//! (`zeroship-platform-migrate --migrations-dir db/migrations-ts`):
 //!   - `CONTROL_TEST_DB` / `AUTH_DB_URL` / `PG_TEST_URL` — the DSN.
 //! Skips (prints why, returns) when absent. The pure derivation logic is covered
 //! by the crate's `bootstrap_console` unit tests, which run without infra.
@@ -38,11 +38,15 @@ use zeroship_control::{EnvStore, Registry};
 /// regression test can prove its ABSENCE.
 const SERVICE_TOKEN_ENV_KEY: &str = "ZEROSHIP_CONTROL_SERVICE_TOKEN";
 
-fn db_url() -> Option<String> {
+fn db_url() -> String {
     std::env::var("CONTROL_TEST_DB")
         .or_else(|_| std::env::var("AUTH_DB_URL"))
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| {
+            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+        })
 }
 
 async fn pg(db_url: &str) -> Client {
@@ -199,10 +203,7 @@ async fn cleanup(control: &Client, host: &str) {
 
 #[compio::test]
 async fn seed_creates_all_artifacts_and_is_idempotent() {
-    let Some(url) = db_url() else {
-        eprintln!("[bootstrap_console_test] CONTROL_TEST_DB/AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
+    let url = db_url();
 
     // A unique host per run keeps the derived ids hermetic even when several
     // test binaries share the DB.

@@ -1,4 +1,4 @@
-import { dropFunction, grant, revoke } from "@zeroship/migrate";
+import { grant, revoke } from "@zeroship/migrate";
 
 export const name = "grants";
 
@@ -22,8 +22,8 @@ export function up() {
   grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, to: ["zeroship_gateway"] });
   grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["signing_keys"] }, to: ["zeroship_gateway"] });
   grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["apps", "oauth_clients", "app_members", "app_secrets", "billing_metrics", "usage_aggregates", "creator_billing", "billing_customer_refs", "platform_policies", "platform_admin_roles", "invoice_lines", "app_net_grants", "identity_links", "principal_grants", "device_grants"] }, to: ["zeroship_control"] });
-  grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["creator_accounts", "creator_account_history", "permission_tokens", "metering_exports", "metric_weights", "pricing_config", "plans", "app_spend_limit", "app_spend_state", "invoices", "creator_fee_policy", "creator_billing_status", "refunds", "billing_notifications", "billing_disputes", "billing_reconciliation_findings", "net_policy_catalog", "migrated_migrations"] }, to: ["zeroship_control"] });
-  grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_vars", "app_env_expose", "oauth_grants", "app_scope_defs", "token_revocations", "usage_reports_seen", "spend_state_history", "pending_disputes", "billing_line_provider_refs"] }, to: ["zeroship_control"] });
+  grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["creator_accounts", "creator_account_history", "permission_tokens", "metering_exports", "metric_weights", "pricing_config", "plans", "app_spend_limit", "app_spend_state", "invoices", "creator_fee_policy", "creator_billing_status", "refunds", "billing_notifications", "billing_disputes", "billing_reconciliation_findings", "provider_dead_letter", "net_policy_catalog", "migrated_migrations"] }, to: ["zeroship_control"] });
+  grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_vars", "app_env_expose", "oauth_grants", "app_scope_defs", "token_revocations", "spend_state_history", "pending_disputes", "billing_line_provider_refs"] }, to: ["zeroship_control"] });
   grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["app_usage", "app_usage_history", "app_oauth_clients", "payouts", "invoice_payments", "creator_billing_status_history", "stripe_events_seen", "credit_ledger", "refund_provider_refs", "plan_change_events", "payout_failures", "billing_provider_refs", "migrated_app_policies", "migrated_migration_audit"] }, to: ["zeroship_control"] });
   grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["users"] }, to: ["zeroship_control"] });
   grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["rate_limits"] }, to: ["zeroship_control"] });
@@ -37,7 +37,13 @@ export function up() {
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, from: ["public"] });
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, from: ["public"] });
   revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] }, from: ["public"] });
-  dropFunction({ schema: "zeroship", name: "zeroship_migrations_schema_migrations_immutable", ifExists: true });
+  // NOTE: the SQL baseline dropped `zeroship_migrations.schema_migrations_immutable()`
+  // here (an artifact of the retired in-tree engine's journal bootstrap). The
+  // published zero-migrate engine OWNS `<meta>_schema_migrations_immutable()` as its
+  // LIVE journal tamper-guard (meta schema `zeroship_migrations`), with a dependent
+  // BEFORE UPDATE/DELETE trigger. Dropping it would (a) fail without CASCADE and
+  // (b) if forced, disarm the append-only journal protection — so this stale
+  // cleanup line is removed; the engine manages its own journal function.
 }
 
 export function down() {

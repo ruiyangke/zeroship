@@ -253,6 +253,18 @@ function runtimeDescriptorFields(
   return null;
 }
 
+function stripRuntimeSystemFields(
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!SYSTEM_FIELD_NAMES.includes(key)) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 /** Input form: a record of TypeBuilder instances. Field values must be
  *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.). */
 type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any>>;
@@ -1228,11 +1240,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   for (const [name, rawSchema] of Object.entries(source)) {
     const isBuilder = rawSchema instanceof SchemaBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
+    const collectionFields =
+      descriptorFields !== null
+        ? stripRuntimeSystemFields(fields as Record<string, unknown>)
+        : fields;
     const opts = collectionOptionsFor(name);
     (collections as Record<string, Collection<unknown, string, T>>)[name] =
       model(
         name,
-        fields as Record<string, unknown>,
+        collectionFields as Record<string, unknown>,
         native,
         namingStrategy,
         opts.softDelete,

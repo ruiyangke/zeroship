@@ -1,0 +1,75 @@
+# Phase F — the monorepo's bridge between the published `zero-migrate` engine and
+# the platform's native compio-postgres driver.
+#
+# `zero-migrate` (the standalone engine at /home/ruiyang/Projects/zero-migrate)
+# ships NO native Rust network Postgres driver: its PG apply path is generic over
+# the driver-neutral `zero_migrate::driver::SqlSession` seam (the host/napi bridge
+# is the production producer). This crate supplies the MONOREPO's producer: a
+# newtype wrapping `compio_postgres::Client` that implements `SqlSession`, so the
+# platform's io_uring PG driver can drive the engine's apply flow directly, with no
+# tokio and no Node in the loop.
+#
+# Stage 1 is NON-DESTRUCTIVE: it only ADDS this consumption + adapter + a live
+# smoke test. It rewires no existing consumers and deletes nothing; the in-tree
+# `crates/zeroship-migrate` stays the platform's migration source until later
+# stages cut over.
+#
+# Stage 4a adds the `platform` module + the `zeroship-platform-migrate` bin (behind
+# the `platform-cli` feature): the platform-schema migrate path rebuilt on the
+# published engine — author `db/migrations-ts/*.ts` via zeroship-runtime V8 → lower
+# under the Platform guard → apply over `CompioPgSession`. Author+lower AND apply
+# run on the published engine's public token-gated Platform seams
+# (`GuardConfig::platform` + `ExecutorConfig::platform`); all 11 platform
+# migrations author+lower+apply green to a fresh DB. See `src/platform.rs`.
+[package]
+name = "zeroship-migrate-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Phase F Stage 4a — the platform-schema migrate binary (`zeroship-platform-migrate`).
+# Lights up the `platform` module + its V8 authoring front-end (zeroship-runtime).
+# OFF by default so the base library surface (Stage 1's adapter) stays V8-free.
+platform-cli = ["dep:zeroship-runtime", "dep:v8", "dep:serde_json", "dep:serde", "dep:zero-migrate-ir", "dep:zero-migrate-policy"]
+
+[dependencies]
+# The published engine (path dep — cargo path-deps may point outside the
+# workspace). Default features light `host-pg` → the internal `pg_seam` cfg, which
+# exposes `driver::SqlSession`, the generic `PostgresBackend<D>`, and the
+# `<D: SqlSession>` apply/journal path this adapter drives.
+zero-migrate = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate" }
+# The published engine's IR crate — names the `OperatorCapability` trust token the
+# Platform executor/guard posture requires (Stage 4a platform-migrate only).
+zero-migrate-ir = { path = "/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-ir", optional = true }
+# The engine PDP — names the composed `EffectivePolicy` the platform table-shape
+# resolver + `load_and_lower_guarded` thread (Stage 4a platform-migrate only).
+zero-migrate-policy = { workspace = true, optional = true }
+# The platform's native io_uring Postgres driver — the concrete session this
+# adapter maps onto the neutral seam.
+compio-postgres = { workspace = true }
+# For spawning + detaching the connection run-loop (the crate-wide compio pattern).
+compio = { workspace = true }
+tracing = { workspace = true }
+# Stage 4a platform-migrate: the V8 authoring front-end + envelope (de)serialize.
+zeroship-runtime = { workspace = true, optional = true }
+v8 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[[bin]]
+name = "zeroship-platform-migrate"
+required-features = ["platform-cli"]
+
+[dev-dependencies]
+compio = { workspace = true }
+# The smoke test authors an IR envelope as JSON, then parses + re-serializes it
+# through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
+serde_json = { workspace = true }
+serde = { workspace = true }
+# Phase F Stage 2 authoring proof: run the STANDALONE zero-migrate recorder inside
+# zeroship-runtime's V8 isolate to author an ir_version:1 envelope from a `.ts`
+# migration — the platform's own V8 (no Node in the loop). Dev-only: the library
+# surface (Stage 1's SqlSession adapter) stays V8-free.
+zeroship-runtime = { workspace = true }
+v8 = { workspace = true }

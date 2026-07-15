@@ -63,6 +63,14 @@ meters:
     eventType: compute_units
     aggregation: SUM
     valueProperty: $.value
+  # The stream-to-provider forwarder posts one CloudEvent per zeroship metric
+  # with eventType == the metric name; the requests meter lets OpenMeter
+  # aggregate the `requests` counter the forwarder->OpenMeter e2e drives.
+  - slug: requests
+    description: zeroship request count (forwarder-fed)
+    eventType: requests
+    aggregation: SUM
+    valueProperty: $.value
 
 # The dev portal token + svix are not used by the export path; keep the portal
 # enabled (harmless) and leave notifications/webhooks out of this minimal stack.

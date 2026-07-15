@@ -50,10 +50,12 @@ pub(crate) mod workflow_limits;
 pub(crate) mod workflow_rollout;
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
 use zeroship_bundle::{BlobStore, WorkflowBlobStore};
+use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
@@ -112,6 +114,239 @@ impl std::fmt::Debug for SecretString {
 }
 // Intentionally NO Display, NO serde::Serialize, NO Deref<Target=String>.
 // The only way to read the contents is `.expose_secret()`.
+
+pub const DEFAULT_BILLING_FORWARDER_GROUP_ID: &str = "billing-forwarder";
+pub const DEFAULT_SPEND_RECOMPUTE_GROUP_ID: &str = "spend-recompute-witness";
+pub const DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID: &str = "control-usage-producer";
+pub const DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH: &str =
+    ".zeroship/usage-outbox-zeroship-control.redb";
+
+#[derive(Default)]
+struct ControlUsageOutboxState {
+    outbox: Option<zeroship_metering::UsageOutbox>,
+    flusher_started: bool,
+}
+
+#[derive(Clone)]
+pub struct BillingStreamConfig {
+    registry: Arc<StreamRegistry>,
+    transport_id: String,
+    base_config: StreamConfig,
+    forwarder_group_id: String,
+    recompute_group_id: String,
+    topic: String,
+    control_usage_outbox_wal_path: PathBuf,
+    control_usage_outbox: Arc<Mutex<ControlUsageOutboxState>>,
+}
+
+impl std::fmt::Debug for BillingStreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BillingStreamConfig")
+            .field("transport_id", &self.transport_id)
+            .field("forwarder_group_id", &self.forwarder_group_id)
+            .field("recompute_group_id", &self.recompute_group_id)
+            .field(
+                "control_usage_producer_group_id",
+                &DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID,
+            )
+            .field("topic", &self.topic)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BillingStreamConfig {
+    pub fn new(
+        registry: Arc<StreamRegistry>,
+        transport_id: impl Into<String>,
+        base_config: StreamConfig,
+        forwarder_group_id: impl Into<String>,
+        recompute_group_id: impl Into<String>,
+    ) -> Result<Self, StreamError> {
+        let forwarder_group_id = forwarder_group_id.into().trim().to_string();
+        let recompute_group_id = recompute_group_id.into().trim().to_string();
+        let topic = stream_topic(&base_config)?;
+        let control_usage_outbox_wal_path = std::env::var("CONTROL_USAGE_OUTBOX_WAL_PATH")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH));
+        let this = Self {
+            registry,
+            transport_id: transport_id.into(),
+            base_config,
+            forwarder_group_id,
+            recompute_group_id,
+            topic,
+            control_usage_outbox_wal_path,
+            control_usage_outbox: Arc::new(Mutex::new(ControlUsageOutboxState::default())),
+        };
+        this.validate()?;
+        Ok(this)
+    }
+
+    #[must_use]
+    pub fn transport_id(&self) -> &str {
+        &self.transport_id
+    }
+
+    #[must_use]
+    pub fn forwarder_group_id(&self) -> &str {
+        &self.forwarder_group_id
+    }
+
+    #[must_use]
+    pub fn recompute_group_id(&self) -> &str {
+        &self.recompute_group_id
+    }
+
+    pub fn build_forwarder(&self) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        self.build_for_group(&self.forwarder_group_id)
+    }
+
+    pub fn build_recompute(&self) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        self.build_for_group(&self.recompute_group_id)
+    }
+
+    /// Override the control producer's durable WAL path. Tests should use a
+    /// unique temporary path; multi-instance deployments should configure a
+    /// stable per-instance path with `CONTROL_USAGE_OUTBOX_WAL_PATH`.
+    #[must_use]
+    pub fn with_control_usage_outbox_wal_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.control_usage_outbox_wal_path = path.as_ref().to_path_buf();
+        self.control_usage_outbox = Arc::new(Mutex::new(ControlUsageOutboxState::default()));
+        self
+    }
+
+    /// Open the control usage WAL and start its single background stream
+    /// flusher. Calling this more than once is harmless; clones of this config
+    /// share the same outbox and flusher guard.
+    ///
+    /// The first flush runs immediately so pending events from a previous
+    /// process lifetime are retried at startup. Later flushes run at the common
+    /// metering outbox interval.
+    pub fn start_control_usage_outbox(&self) -> Result<(), String> {
+        let outbox = self.control_usage_outbox()?;
+        let should_start = {
+            let mut state = self
+                .control_usage_outbox
+                .lock()
+                .map_err(|_| "control usage outbox state lock poisoned".to_string())?;
+            if state.flusher_started {
+                false
+            } else {
+                state.flusher_started = true;
+                true
+            }
+        };
+        if !should_start {
+            return Ok(());
+        }
+
+        compio::runtime::spawn(async move {
+            loop {
+                let result = outbox.publish_events(&[]).await;
+                if result.failed.is_empty() {
+                    if result.published > 0 {
+                        tracing::debug!(
+                            events = result.published,
+                            topic = %outbox.topic(),
+                            "control usage outbox published pending events"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        attempted = result.attempted,
+                        published = result.published,
+                        failed = result.failed.len(),
+                        topic = %outbox.topic(),
+                        "control usage outbox flush completed with failures"
+                    );
+                }
+                compio::time::sleep(zeroship_metering::DEFAULT_OUTBOX_INTERVAL).await;
+            }
+        })
+        .detach();
+        Ok(())
+    }
+
+    pub(crate) fn control_usage_outbox(&self) -> Result<zeroship_metering::UsageOutbox, String> {
+        let mut state = self
+            .control_usage_outbox
+            .lock()
+            .map_err(|_| "control usage outbox state lock poisoned".to_string())?;
+        if let Some(outbox) = state.outbox.as_ref() {
+            return Ok(outbox.clone());
+        }
+
+        let stream = self
+            .build_for_group(DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID)
+            .map_err(|error| error.to_string())?;
+        let outbox = zeroship_metering::UsageOutbox::new(
+            stream,
+            self.topic.clone(),
+            &self.control_usage_outbox_wal_path,
+        )
+        .map_err(|error| error.to_string())?;
+        state.outbox = Some(outbox.clone());
+        Ok(outbox)
+    }
+
+    fn validate(&self) -> Result<(), StreamError> {
+        require_stream_group("billing forwarder group", &self.forwarder_group_id)?;
+        require_stream_group("spend recompute group", &self.recompute_group_id)?;
+        require_stream_group(
+            "control usage producer group",
+            DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID,
+        )?;
+        if self.forwarder_group_id == self.recompute_group_id
+            || self.forwarder_group_id == DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID
+            || self.recompute_group_id == DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID
+        {
+            return Err(StreamError::Config(
+                "billing forwarder, spend recompute, and control usage producer stream groups must differ"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn build_for_group(&self, group_id: &str) -> Result<Arc<dyn StreamTransport>, StreamError> {
+        let config = with_stream_group_id(&self.base_config, group_id)?;
+        self.registry.build(&self.transport_id, &config)
+    }
+}
+
+fn stream_topic(config: &StreamConfig) -> Result<String, StreamError> {
+    let raw: serde_json::Value = config.parse()?;
+    raw.as_object()
+        .and_then(|object| object.get("topic"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| StreamError::Config("billing usage stream topic is required".to_string()))
+}
+
+fn require_stream_group(name: &str, value: &str) -> Result<(), StreamError> {
+    if value.trim().is_empty() {
+        Err(StreamError::Config(format!("{name} is required")))
+    } else {
+        Ok(())
+    }
+}
+
+fn with_stream_group_id(
+    config: &StreamConfig,
+    group_id: &str,
+) -> Result<StreamConfig, StreamError> {
+    config.map_object(|obj| {
+        obj.remove("group_id");
+        obj.insert(
+            "group.id".to_string(),
+            serde_json::Value::String(group_id.to_string()),
+        );
+    })
+}
 
 /// Shared application state injected into every handler.
 ///
@@ -225,13 +460,16 @@ pub struct AppState {
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
-    /// The configured metering/billing provider, built once at boot
-    /// (`--metering-provider`, default `native`). The billing-reconcile cron
-    /// drives `Native` (invoice); the metering-export cron drives the export
-    /// backends `Stripe` (CU → meter_events) and `OpenMeter` (CU → CloudEvents).
-    /// `spend.rs`/`enforce.rs` NEVER touch it (enforcement is the local ledger,
-    /// provider-independent). See [`metering::provider::MeteringProvider`].
-    pub metering_provider: Arc<dyn metering::provider::MeteringProvider>,
+    /// Provider factories available in this process. Boot registers built-ins
+    /// explicitly, then builds the role-addressed billing stack below.
+    pub provider_registry: Arc<metering::provider::ProviderRegistry>,
+    /// Role-addressed billing stack: one provider for metering, one for rating,
+    /// one for invoicing, plus webhook sinks.
+    pub billing_stack: Arc<metering::provider::BillingStack>,
+    /// Optional durable usage-event stream configuration. Cron builds separate
+    /// role-scoped consumers from this spec so forwarder commits and recompute
+    /// rewinds never share a consumer group.
+    pub billing_stream: Option<BillingStreamConfig>,
     /// The configured tax provider, built once at boot (`--tax-provider`, default
     /// `native`). The billing-reconcile cron calls `compute_tax` at finalize and
     /// freezes the result into `invoices.tax_cents`. `Native` computes `0` (the
