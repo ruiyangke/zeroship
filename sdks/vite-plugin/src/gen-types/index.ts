@@ -24,6 +24,7 @@ import { promises as fs } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 import { loadMigrateAddon, type GenArtifactsReply } from "./addon.js";
+import { CONFINED_SCHEMA_EMIT_CEILING_TOML } from "./confined-ceiling.js";
 import { recordMigrationsDir } from "./recorder.js";
 import { evaluateSchemaModule, schemaModuleToDescriptors } from "./manual.js";
 
@@ -71,6 +72,10 @@ export async function genTypesFromSchemaFile(
   const reply = loadMigrateAddon().genArtifacts({
     descriptors,
     projectSchema: "public",
+    // The engine is preset-free: the CALLER supplies the confined injection shape
+    // (the 7 system columns + [id] PK + system indexes). The SAME ceiling on both
+    // sources keeps the descriptor + envelope outputs byte-identical.
+    policyCeilingToml: CONFINED_SCHEMA_EMIT_CEILING_TOML,
   });
   const runtimeJson = unwrap(reply, "manual schema source");
 
@@ -93,6 +98,11 @@ export async function genTypesFromMigrations(
   const reply = loadMigrateAddon().genArtifacts({
     envelopes,
     projectSchema: "public",
+    // The engine is preset-free: the CALLER supplies the confined injection shape.
+    // The pure-JS recorder emits RAW author-only ops; this ceiling injects the 7
+    // system columns + [id] PK + system indexes at resolve time, matching the
+    // descriptor path so both sources stay byte-identical.
+    policyCeilingToml: CONFINED_SCHEMA_EMIT_CEILING_TOML,
   });
   const runtimeJson = unwrap(reply, "generated migration source");
   const envDbTs = reply.envDbTs;

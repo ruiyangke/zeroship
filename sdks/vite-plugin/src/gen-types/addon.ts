@@ -36,6 +36,14 @@ export interface GenArtifactsSource {
   descriptors?: CollectionDescriptorDto[];
   /** The project schema FK definitions thread; defaults to `"public"`. */
   projectSchema?: string;
+  /**
+   * The host `RootCeiling` document (TOML) that drives the confined system-shape
+   * injection. The engine bakes in NO confined preset: the caller supplies the
+   * injection shape. `undefined` injects nothing; gen-types always passes the
+   * bundled {@link ../confined-ceiling.CONFINED_SCHEMA_EMIT_CEILING_TOML}. Applied
+   * identically on the envelope and descriptor sides so the two stay byte-identical.
+   */
+  policyCeilingToml?: string;
 }
 
 /** The two co-emitted artifact strings (or a soft error). */
