@@ -194,12 +194,16 @@ export function up() {
       approved_by: t.uuid(),
       approved_at: t.timestamp(),
       applied_at: t.timestamp(),
+      // The content checksum the operator reviewed at approve() — the TOCTOU pin the
+      // apply gate re-verifies against the re-resolved migration set. NULL until the
+      // record is approved (auto-approved or operator-approved).
+      approved_checksum: t.text(),
       last_error: t.text(),
     },
     primaryKey: ["app_id", "migration_id"],
   });
   table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
-  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_status_check").add({ expr: (col) => col("status").in(["submitted", "pending_approval", "approved", "applied", "failed"]) });
+  table("migrated_migrations", { schema: "zeroship" }).check("migrated_migrations_status_check").add({ expr: (col) => col("status").in(["planned", "pending_approval", "approved", "applied", "rejected"]) });
   table("net_policy_catalog", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),

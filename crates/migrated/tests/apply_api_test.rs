@@ -146,7 +146,7 @@ async fn ensure_migrated_service_tables(conn: &Client) {
           app_id uuid NOT NULL,
           migration_id uuid NOT NULL,
           status text NOT NULL CHECK (
-            status IN ('submitted', 'pending_approval', 'approved', 'applied', 'failed')
+            status IN ('planned', 'pending_approval', 'approved', 'applied', 'rejected')
           ),
           request_body jsonb NOT NULL,
           effective_profile jsonb NOT NULL,
@@ -158,6 +158,7 @@ async fn ensure_migrated_service_tables(conn: &Client) {
           approved_by uuid,
           approved_at timestamptz,
           applied_at timestamptz,
+          approved_checksum text,
           last_error text,
           PRIMARY KEY (app_id, migration_id)
         );
@@ -432,14 +433,16 @@ fn tighter_policy() -> &'static str {
     "policy_version = 1\n\n[[grant]]\nkey = \"op.lock_timeout_ms\"\nvalue = 1000\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
-// The managed `require_approval` posture has no engine-knob equivalent (the PDP
-// `sec.destructive_ops` enum omits it). It is a MANAGED-SERVER directive carried as a
-// top-level `require_approval = true` key in the draft TOML, stripped before the PDP
-// loader and overlaid onto the managed posture: it gates EVERY migration for operator
-// approval (destructive or not) — the exact `PolicyProfile`-era `RequireApproval`
-// behaviour, preserved without an engine knob.
+// Approval is now the SEALED `sec.require_approval` obligation the engine declares and
+// the host enforces. A draft authors it as a normal `[[require]]` — `always` gates
+// EVERY migration for operator approval (destructive or not), the successor to the old
+// managed-only `require_approval = true` overlay. The draft also RE-STATES the
+// `sec.destructive_ops = allow` grant it wants kept (compose_strict resolves grants
+// from the draft layer, so a draft that only tightens one knob must re-state the
+// ceiling grants it relies on — here, keeping destructive ops classifiable-not-denied
+// so the approval gate can hold the DROP for review instead of the guard forbidding it).
 fn require_approval_policy() -> &'static str {
-    "policy_version = 1\nrequire_approval = true\n"
+    "policy_version = 1\n\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
 }
 
 fn second_tighter_policy() -> &'static str {
@@ -1024,6 +1027,178 @@ async fn destructive_apply_requires_operator_approval_then_applies_pg() {
     cleanup_user(&conn, &operator_id).await;
 }
 
+// A `sec.require_approval = "on_destructive"` draft gates ONLY destructive migrations:
+// an additive create applies without approval, a DROP is held `pending_approval`.
+fn on_destructive_policy() -> &'static str {
+    "policy_version = 1\n\n[[require]]\nkey = \"sec.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n\n[[grant]]\nkey = \"sec.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
+}
+
+#[ntex::test]
+async fn on_destructive_gates_destructive_migration_only_pg() {
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    let operator_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+    seed_user(&conn, operator_id, "operator").await;
+
+    let auth = Arc::new(StaticAuthenticator::new());
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert_actions(
+        "operator-token",
+        operator_id,
+        [Action::AppsApproveMigration],
+        [app_id],
+    );
+    let (state, tmp) = state_for(auth);
+    let svc = test::init_service(
+        web::App::new()
+            .state(state)
+            .configure(zeroship_migrated::configure),
+    )
+    .await;
+
+    // Additive create under `on_destructive` → NO approval needed, applies directly.
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer creator-token")
+        .set_json(&with_policy(create_notes_request(), on_destructive_policy()))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "additive migration under on_destructive must not require approval"
+    );
+    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
+
+    // A DROP under `on_destructive` → held pending_approval (409).
+    let req = test::TestRequest::post()
+        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .header("authorization", "Bearer creator-token")
+        .set_json(&with_policy(drop_notes_request(), on_destructive_policy()))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "destructive migration under on_destructive must require approval"
+    );
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
+    assert_eq!(body["error"], "migration_requires_operator_approval");
+    let migration_id = body["migration_id"]
+        .as_str()
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+        .expect("pending migration id");
+    let (status, _) = migration_status(&conn, &app_id, &migration_id)
+        .await
+        .expect("pending row exists");
+    assert_eq!(status, "pending_approval");
+    assert!(
+        table_exists(&conn, &app_id.to_string(), "notes").await,
+        "pending destructive migration must not drop the table"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &operator_id).await;
+}
+
+// The migration-store state machine directly: plan (pending) → approve (stamps
+// approved_checksum = X) → drift-detected revert (approved_checksum ≠ X') → pending.
+#[ntex::test]
+async fn store_state_machine_plan_approve_and_content_drift_revert_pg() {
+    use zeroship_migrated::migration_store::{MigrationStore, StoreMigrationInput};
+    use zeroship_migrated::policy::ManagedPosture;
+    use zero_migrate::DestructiveOps;
+
+    let conn = admin_conn().await;
+    let app_id = Uuid::now_v7();
+    let owner_id = Uuid::new_v4();
+    let operator_id = Uuid::new_v4();
+    seed_app(&conn, app_id, owner_id).await;
+    seed_user(&conn, operator_id, "operator").await;
+
+    let store = MigrationStore::new(dsn());
+    let migration_id = Uuid::now_v7();
+    let posture = ManagedPosture {
+        require_rls: false,
+        destructive_ops: DestructiveOps::Allow,
+        extensions: vec![],
+    };
+    let input = || StoreMigrationInput {
+        app_id,
+        migration_id,
+        principal_id: owner_id,
+        request_body: json!({"kind": "ir", "documents": []}),
+        effective_profile: &posture,
+        ceiling_id: "confined-default",
+        ceiling_version: 1,
+        gated_versions: &[],
+    };
+
+    // PLAN (requires approval) → pending_approval, no approved_checksum yet.
+    store.insert_pending(input()).await.expect("insert pending");
+    let (status, _) = migration_status(&conn, &app_id, &migration_id)
+        .await
+        .expect("row exists");
+    assert_eq!(status, "pending_approval");
+    assert!(approved_checksum(&conn, &app_id, &migration_id).await.is_none());
+
+    // APPROVE stamps status=approved + approved_checksum = X.
+    let x = "checksum-X";
+    store
+        .mark_approved(app_id, migration_id, operator_id, x)
+        .await
+        .expect("approve");
+    let (status, _) = migration_status(&conn, &app_id, &migration_id)
+        .await
+        .expect("row exists");
+    assert_eq!(status, "approved");
+    assert_eq!(
+        approved_checksum(&conn, &app_id, &migration_id).await.as_deref(),
+        Some(x)
+    );
+
+    // A double-approve of an already-approved row is a no-op (guarded on
+    // status='pending_approval').
+    let err = store
+        .mark_approved(app_id, migration_id, operator_id, "checksum-Y")
+        .await;
+    assert!(err.is_err(), "re-approving a non-pending row must fail");
+
+    // CONTENT DRIFT: the re-resolved checksum X' ≠ approved_checksum → revert to
+    // pending_approval, clearing the stale approval.
+    store
+        .revert_to_pending(app_id, migration_id, "content drifted")
+        .await
+        .expect("revert");
+    let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
+        .await
+        .expect("row exists");
+    assert_eq!(status, "pending_approval");
+    assert_eq!(last_error.as_deref(), Some("content drifted"));
+    assert!(
+        approved_checksum(&conn, &app_id, &migration_id).await.is_none(),
+        "revert must clear the stale approved_checksum"
+    );
+
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &operator_id).await;
+}
+
+async fn approved_checksum(conn: &Client, app_id: &Uuid, migration_id: &Uuid) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT approved_checksum FROM zeroship.migrated_migrations \
+              WHERE app_id = $1 AND migration_id = $2",
+            &[app_id, migration_id],
+        )
+        .await
+        .expect("query approved_checksum");
+    rows.first().and_then(|row| row.get("approved_checksum"))
+}
+
 #[ntex::test]
 async fn approval_repreflight_engine_error_audits_rejected_preflight_pg() {
     let conn = admin_conn().await;
@@ -1126,7 +1301,7 @@ async fn approval_repreflight_engine_error_audits_rejected_preflight_pg() {
     let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
         .await
         .expect("workflow row exists");
-    assert_eq!(status, "failed");
+    assert_eq!(status, "rejected");
     assert!(
         last_error
             .as_deref()
@@ -1234,7 +1409,7 @@ async fn approval_refuses_stale_ceiling_after_operator_tightening_pg() {
     let (status, last_error) = migration_status(&conn, &app_id, &migration_id)
         .await
         .expect("workflow row exists");
-    assert_eq!(status, "failed");
+    assert_eq!(status, "rejected");
     assert!(
         last_error
             .as_deref()
