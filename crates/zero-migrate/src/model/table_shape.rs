@@ -691,6 +691,13 @@ pub fn confined_no_inject_policy(project_schema: &str) -> Result<EffectivePolicy
     let schemas = vec![project_schema.to_string()];
     let scope = schema_scope_value(&schemas);
     let grant_rules = vec![
+        // Cross-schema confinement: a confined migration may reference only its own
+        // project schema. This is the guard's `grants(core.cross_schema, s)` source.
+        grant_rule(
+            policy_registry::KEY_CORE_CROSS_SCHEMA,
+            toml::Value::Boolean(true),
+            scope.clone(),
+        ),
         grant_rule(
             policy_registry::KEY_CORE_CREATE_TABLE,
             toml::Value::Boolean(true),
@@ -718,8 +725,26 @@ pub fn operator_no_inject_policy(
     schemas: &[String],
     extensions: &[String],
 ) -> Result<EffectivePolicy, String> {
+    operator_policy_inner(schemas, extensions, false)
+}
+
+/// The **trusted** (dbmate-like) no-inject policy: the operator capability set plus
+/// the `core.skip_static_guard` belt-skip and ⊤ cross-schema (no confinement). The
+/// belt-skip is the policy grant the guard's [`skips_denylist_belt`] reads.
+///
+/// [`skips_denylist_belt`]: crate::guard::GuardConfig::skips_denylist_belt
+pub fn trusted_no_inject_policy() -> Result<EffectivePolicy, String> {
+    operator_policy_inner(&[], &[], true)
+}
+
+fn operator_policy_inner(
+    schemas: &[String],
+    extensions: &[String],
+    skip_static_guard: bool,
+) -> Result<EffectivePolicy, String> {
     let mut grant_rules = Vec::new();
     let all = toml::Value::String("all".to_string());
+    // Whole-DB vendor capabilities (Global ⊤).
     for key in [
         policy_registry::KEY_PG_ROLE,
         policy_registry::KEY_PG_GRANT,
@@ -733,16 +758,34 @@ pub fn operator_no_inject_policy(
         policy_registry::KEY_CORE_RAW_SQL,
         policy_registry::KEY_CORE_RAW_VIEW_BODY,
         policy_registry::KEY_PG_MATERIALIZED_VIEW,
-        policy_registry::KEY_CORE_CROSS_SCHEMA,
     ] {
         grant_rules.push(grant_rule(key, toml::Value::Boolean(true), all.clone()));
     }
+    // Cross-schema + creation/rename, scoped to the owned schema allowlist (⊤ when
+    // empty — the trusted posture, which skips the belt anyway).
     let creation_scope = schema_scope_value(schemas);
     for key in [
+        policy_registry::KEY_CORE_CROSS_SCHEMA,
         policy_registry::KEY_CORE_CREATE_TABLE,
         policy_registry::KEY_CORE_RENAME_INTO,
     ] {
         grant_rules.push(grant_rule(key, toml::Value::Boolean(true), creation_scope.clone()));
+    }
+    // Platform posture relaxes the raw-island role/search_path needles; trusted does
+    // NOT (its raw-island backstop still denies them). Trusted instead skips the
+    // whole static belt via `core.skip_static_guard`.
+    if skip_static_guard {
+        grant_rules.push(grant_rule(
+            policy_registry::KEY_CORE_SKIP_STATIC_GUARD,
+            toml::Value::Boolean(true),
+            all.clone(),
+        ));
+    } else {
+        grant_rules.push(grant_rule(
+            policy_registry::KEY_CORE_RAW_ISLAND_ROLE,
+            toml::Value::Boolean(true),
+            all.clone(),
+        ));
     }
     if !extensions.is_empty() {
         grant_rules.push(grant_rule(

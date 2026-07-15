@@ -80,6 +80,10 @@ key = "sec.destructive_ops"
 value = "allow"
 scope = "all"
 [[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
 key = "core.create_table"
 value = true
 scope = { include = ["app"] }
@@ -146,12 +150,16 @@ fn create_outside_the_create_table_grant_is_denied() {
     // RawCreateInInjectScope) — a create in `staging` is not granted.
     let ceiling = r#"policy_version = 1
 [[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["staging"] }
+[[grant]]
 key = "core.create_table"
 value = true
 scope = { include = ["app"] }
 "#;
-    // Pin the guard to `staging` so `staging.t` is in cross-schema scope but NOT in
-    // the create grant (`app`-only).
+    // `staging` is in cross-schema scope (so `staging.t` is not a CrossSchema
+    // violation) but NOT in the create grant (`app`-only) → CreateTableNotGranted.
     let g = SqlGuard::new(GuardConfig::confined_with_effective("staging", policy(ceiling)));
     assert_namespace_denied(
         &g,
@@ -203,6 +211,10 @@ fn drop_pinned_pk_constraint_is_immutable() {
 // A ceiling with `core.raw_sql` granted only in `app` (Scoped, non-⊤) + a ⊤ create
 // grant so ordinary DDL is not incidentally denied by creation-gating.
 const SCOPED_RAW_SQL_CEILING: &str = r#"policy_version = 1
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = "all"
 [[grant]]
 key = "core.raw_sql"
 value = true
@@ -265,6 +277,10 @@ key = "sec.destructive_ops"
 value = "allow"
 scope = "all"
 [[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
 key = "core.create_table"
 value = true
 scope = "all"
@@ -291,6 +307,10 @@ fn rename_into_inject_scope_is_denied_raw() {
 key = "sec.destructive_ops"
 value = "allow"
 scope = "all"
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
 [[grant]]
 key = "core.create_table"
 value = true
@@ -322,6 +342,10 @@ fn granted_create_outside_any_inject_scope_is_allowed() {
     // create in `app` where create_table is granted AND no inject covers it.
     let ceiling = r#"policy_version = 1
 [[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
+[[grant]]
 key = "core.create_table"
 value = true
 scope = { include = ["app"] }
@@ -340,6 +364,10 @@ fn dsl_path_injected_create_renders_and_passes() {
     // policy that GRANTS create in-scope. This ACCEPT case models the plain grant path:
     // a create in `app` under a create grant with NO inject covering it passes.
     let ceiling = r#"policy_version = 1
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = { include = ["app"] }
 [[grant]]
 key = "core.create_table"
 value = true
@@ -360,6 +388,10 @@ fn top_raw_sql_admits_search_path_and_opaque_body() {
     // and CREATE FUNCTION are admitted (the deny-list still runs, so use a benign
     // trusted-language body + a benign GUC).
     let ceiling = r#"policy_version = 1
+[[grant]]
+key = "core.cross_schema"
+value = true
+scope = "all"
 [[grant]]
 key = "core.raw_sql"
 value = true

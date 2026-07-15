@@ -161,14 +161,11 @@ pub struct ExecutorConfig {
     pub pg: PgConfinement,
     /// PRIVATE (`pub(crate)`). The composed policy every executor-path guard uses.
     /// Confined configs carry a no-inject policy with project-scoped
-    /// create/rename grants; platform configs carry a caller-composed operator
-    /// policy. The guard is built from this single policy source.
+    /// create/rename/cross-schema grants; platform configs carry the operator
+    /// policy; a trusted config additionally grants `core.skip_static_guard`. The
+    /// guard is built from this single policy source — the belt-skip is now a policy
+    /// grant, not a separate executor bit.
     pub(crate) effective: zero_migrate_policy::EffectivePolicy,
-    /// PRIVATE (`pub(crate)`). The legacy Trusted/test belt skip is not a policy
-    /// grant; it remains an explicit executor bit until the Trusted test seam is
-    /// retired.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
-    pub(crate) skip_denylist_belt: bool,
 }
 
 impl ExecutorConfig {
@@ -188,7 +185,6 @@ impl ExecutorConfig {
             // The PG-specific confinement block (meta schema, timeouts, role,
             // extension-resolution schemas). Inert for a SQLite-backed config.
             pg: PgConfinement::new(meta_schema),
-            skip_denylist_belt: false,
         }
     }
 
@@ -208,13 +204,7 @@ impl ExecutorConfig {
     /// `pub(crate)` ctors, which always stamp one) FAILS CLOSED to Confined.
     #[must_use]
     pub(crate) fn guard_config(&self) -> crate::guard::GuardConfig {
-        let cfg =
-            crate::guard::GuardConfig::from_policy(self.effective.clone(), crate::SqlDialect::Postgres);
-        #[cfg(any(test, feature = "test-support"))]
-        if self.skip_denylist_belt {
-            return cfg.with_skip_denylist_belt_for_test();
-        }
-        cfg
+        crate::guard::GuardConfig::from_policy(self.effective.clone(), crate::SqlDialect::Postgres)
     }
 
     /// Build a **Platform** executor config. REQUIRES a
@@ -291,9 +281,10 @@ impl ExecutorConfig {
         project_schema: impl Into<String>,
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema);
-        cfg.effective = crate::model::table_shape::operator_no_inject_policy(&[], &[])
+        // The trusted policy grants every vendor capability, ⊤ cross-schema, AND the
+        // `core.skip_static_guard` belt-skip — the belt-skip is now a policy grant.
+        cfg.effective = crate::model::table_shape::trusted_no_inject_policy()
             .expect("trusted no-inject policy composes");
-        cfg.skip_denylist_belt = true;
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
         // connecting role, exactly like Platform's admin (no `SET ROLE`).
         cfg

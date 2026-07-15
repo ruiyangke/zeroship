@@ -1660,7 +1660,6 @@ pub enum SealError {
 mod tests {
     use super::*;
     use crate::model::capability::VendorCapabilities;
-    use crate::model::policy::TrustProfile;
     use crate::render::declarative::{build_table_snapshot, CollectionDescriptor};
     use crate::schema::query::SqlDialect;
 
@@ -2024,7 +2023,6 @@ mod tests {
         assert_eq!(sealed.posture(), SealedPosture::Confined);
 
         let guard_cfg = sealed.to_guard_config();
-        assert_ne!(guard_cfg.trust(), TrustProfile::Trusted);
         assert!(!guard_cfg.skips_denylist_belt());
         assert!(guard_cfg.require_rls());
         assert_eq!(guard_cfg.destructive_ops(), DestructiveOps::Forbid);
@@ -2165,7 +2163,6 @@ mod tests {
             )
             .unwrap();
             let guard = sealed.to_guard_config();
-            assert_ne!(guard.trust(), TrustProfile::Trusted);
             assert!(
                 !guard.skips_denylist_belt(),
                 "SealedProfile lowering must never carry the Trusted belt-skip"

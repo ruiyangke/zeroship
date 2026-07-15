@@ -42,7 +42,6 @@ use crate::model::ir::{
 };
 use crate::model::load::op_created_table;
 use crate::model::migration::Migration;
-use crate::model::policy::TrustProfile;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
     TableSnapshot,
@@ -3283,7 +3282,7 @@ impl IrAuthor {
                 guard_scope.as_ref(),
                 guard.as_ref(),
                 &raw_island_guard,
-                guard_cfg.trust(),
+                guard_cfg.skips_denylist_belt(),
             )?;
         }
         Ok((steps, fragments))
@@ -3303,7 +3302,10 @@ impl IrAuthor {
         guard_scope: Option<&crate::model::policy::SchemaScope>,
         guard: &dyn MigrationGuard,
         raw_island_guard: &SqlGuard,
-        trust: TrustProfile,
+        // The Trusted (dbmate-like) posture skips the static parse-time belt — the
+        // `core.skip_static_guard` grant. When set, raw islands still run the
+        // deny-list backstop so embedded arbitrary SQL cannot host-reach.
+        skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         if let Op::Dialectal {
             default,
@@ -3332,7 +3334,7 @@ impl IrAuthor {
                         guard_scope,
                         guard,
                         raw_island_guard,
-                        trust,
+                        skips_static_guard,
                     )?;
                 }
             }
@@ -3383,7 +3385,7 @@ impl IrAuthor {
             // THIS op — not buried in a concatenated blob.
             for stmt in &statements {
                 let mut advisories = Vec::new();
-                if trust == TrustProfile::Trusted {
+                if skips_static_guard {
                     match op {
                         Op::PgRaw { .. } => raw_island_guard
                             .check_raw_island_sql_backstop(stmt)

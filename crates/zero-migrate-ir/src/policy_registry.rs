@@ -90,9 +90,26 @@ pub const KEY_CORE_RAW_SQL: &str = "core.raw_sql";
 pub const KEY_CORE_RAW_VIEW_BODY: &str = "core.raw_view_body";
 /// `PostgreSQL` materialized views (Global Bool grant).
 pub const KEY_PG_MATERIALIZED_VIEW: &str = "pg.materialized_view";
-/// Whether references to non-project schemas are admitted (Global Bool grant) —
-/// the capability-model mirror of the schema-scope confinement.
+/// Which schemas this migration may reference (PerSchema Bool grant, default-deny)
+/// — the capability-model replacement for the schema-scope confinement. A reference
+/// to schema `s` is admitted iff `grants(core.cross_schema, s)` is `Bool(true)`; the
+/// project schema(s) a confined/platform posture owns are granted here, everything
+/// else is a `CrossSchema` violation. Object-scoped so the grant can name exactly
+/// the permitted schemas (an `include: ["app1"]` grant permits only `app1`).
 pub const KEY_CORE_CROSS_SCHEMA: &str = "core.cross_schema";
+/// Operator-posture relaxation: raw-island (`pgRaw` / `createFunction.body`) bodies
+/// may carry role-management + `search_path` needles that the confined body-token
+/// backstop denies (Global Bool grant, default-deny). The platform posture grants
+/// it (its bootstrap DO-blocks legitimately `CREATE ROLE` / `ALTER ROLE … SET
+/// search_path`); confined and trusted omit it (trusted skips the belt entirely via
+/// [`KEY_CORE_SKIP_STATIC_GUARD`], and its raw-island backstop still denies these
+/// needles — a behaviour the vendor-lower matrix locks).
+pub const KEY_CORE_RAW_ISLAND_ROLE: &str = "core.raw_island_role";
+/// Operator-posture relaxation: skip the static parse-time guard belt ENTIRELY (the
+/// deny-list, cross-schema confinement, and body walks) — the public dbmate-like
+/// Trusted posture where the operator owns the DB (Global Bool grant, default-deny).
+/// Only the Trusted posture grants it; confined/platform run the full belt.
+pub const KEY_CORE_SKIP_STATIC_GUARD: &str = "core.skip_static_guard";
 
 /// Per-op `lock_timeout` ceiling in ms (UintCeiling, hard floor 1 — the
 /// no-indefinite-lock invariant, II.5).
@@ -249,7 +266,13 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_CORE_RAW_SQL, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
             bool_grant(KEY_CORE_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
             bool_grant(KEY_PG_MATERIALIZED_VIEW, ObjectModel::Global, false, "PostgreSQL materialized views."),
-            bool_grant(KEY_CORE_CROSS_SCHEMA, ObjectModel::Global, false, "References to non-project schemas."),
+            // `core.cross_schema` is PerSchema (the grant names exactly the permitted
+            // schemas); a reference to a schema it does not grant is a CrossSchema
+            // violation.
+            bool_grant(KEY_CORE_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
+            // Operator-posture relaxations (Global; only the platform/trusted ceilings grant them).
+            bool_grant(KEY_CORE_RAW_ISLAND_ROLE, ObjectModel::Global, false, "Raw-island bodies may carry role/search_path needles (platform posture)."),
+            bool_grant(KEY_CORE_SKIP_STATIC_GUARD, ObjectModel::Global, false, "Skip the static parse-time guard belt entirely (trusted dbmate-like posture)."),
             // ── the CREATE EXTENSION name allowlist (StrSet, Global) ───────────
             KnobDef {
                 key: KnobKey::parse(KEY_PG_EXTENSIONS).expect("well-formed"),

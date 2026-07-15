@@ -37,7 +37,7 @@ use zero_migrate_ir::dialect::SqlDialect;
 use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
+use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
 use zero_migrate_policy::{
     normalize_pg_identifier, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName,
@@ -128,29 +128,6 @@ pub mod data_security_rule {
 /// seams.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
-    /// PRIVATE. The trust posture. Settable only through `confined()`/`platform()`.
-    trust: TrustProfile,
-    /// PRIVATE. The config-loaded capability composition the guard consults for
-    /// every widened statement class. `trust` is retained as the public posture
-    /// marker and constructor boundary; guard decisions below read these bits.
-    capabilities: VendorCapabilities,
-    /// PRIVATE. The operator-trusted belt-skip bit. This is intentionally NOT
-    /// derivable from [`VendorCapabilities::operator`]: Platform and Trusted both
-    /// grant the vendor op set, but only Trusted may skip the deny-list belt.
-    skip_denylist_belt: bool,
-    /// PRIVATE. The schemas this guard permits references to. Confined ⇒
-    /// `Single(project_schema)`; Platform ⇒ `Allowlist([...])`.
-    schemas: SchemaScope,
-    /// PRIVATE. `CREATE EXTENSION` allowlist (the [`denylist`]'s
-    /// `FORBIDDEN_EXTENSIONS` still override it in BOTH profiles). Private so
-    /// the only way to obtain a non-empty allowlist is `platform()` or the
-    /// Confined builder [`GuardConfig::with_extension_allowlist`].
-    extension_allowlist: Vec<String>,
-    /// PRIVATE. Data-security obligation: new tables must have a matching
-    /// `ENABLE ROW LEVEL SECURITY` in the same IR migration.
-    require_rls: bool,
-    /// PRIVATE. Destructive DDL/DML posture for structured destructive op classes.
-    destructive_ops: DestructiveOps,
     /// PRIVATE (PHASE 4). The target SQL dialect this guard config is for.
     ///
     /// - `Postgres` (the default) — the `libpg_query` line-1 guard runs
@@ -165,87 +142,23 @@ pub struct GuardConfig {
     ///   PG-only posture → it fail-closes to `Confined` on `SQLite`
     ///   ([`GuardConfig::for_dialect`]).
     dialect: SqlDialect,
-    /// PRIVATE (PHASE 2 Step 2a). The unforgeable [`EffectivePolicy`] the guard's
-    /// CAPABILITY GATE now queries. The op→capability reads in
-    /// [`SqlGuard::check_statement_kind`] ask `grants(key, object)` for the
-    /// statement's builtin knob key (see [`zero_migrate_ir::policy_registry`])
-    /// instead of reading a raw `VendorCapabilities` bit — a behavior-preserving
-    /// SUBSTITUTION (same denials, now via the PDP).
-    ///
-    /// The remaining fields above (`capabilities`/`schemas`/`require_rls`/
-    /// `destructive_ops`/`trust`) are RETAINED as the public-posture surface the
-    /// non-PEP accessors expose (`vendor_capabilities()`/`schema_scope()` feed the
-    /// engine's validate-time confinement + profile tests). The guard's own
-    /// enforcement no longer reads them for the capability gate; Step 3 (which
-    /// deletes `PolicyProfile`) collapses the redundancy.
+    /// PRIVATE. The unforgeable [`EffectivePolicy`] — the SINGLE source the guard's
+    /// every decision now queries. The capability gate asks `grants(key, object)`
+    /// for the statement's builtin knob key; cross-schema confinement asks
+    /// `grants(core.cross_schema, schema)`; the raw-island role relaxation asks
+    /// `grants(core.raw_island_role)`; the belt-skip asks `grants(core.skip_static_guard)`;
+    /// the data-security obligations read `obligations`/`grants` on the sec.* knobs.
+    /// There is no separate posture/scope state — the policy IS the posture.
     effective: EffectivePolicy,
 }
 
 impl GuardConfig {
-    /// Construct a guard directly from a composed [`EffectivePolicy`] + dialect
-    /// (Phase 2 Step 2a). The transitional named constructors
-    /// (`confined`/`platform`/`trusted`/…) build the matching `EffectivePolicy`
-    /// and delegate here; the guard's capability gate then queries that policy.
-    ///
-    /// The `trust`/`schemas`/`capabilities`/`require_rls`/`destructive_ops`
-    /// posture-surface fields are carried alongside so the non-PEP accessors
-    /// (`vendor_capabilities()`/`schema_scope()`/…) keep serving the engine's
-    /// validate-time confinement and profile tests. They are NOT read by the
-    /// capability gate — that reads `effective`. (Step 3 collapses the redundancy
-    /// when `PolicyProfile` is deleted.)
-    #[must_use]
-    fn from_parts(
-        effective: EffectivePolicy,
-        dialect: SqlDialect,
-        trust: TrustProfile,
-        capabilities: VendorCapabilities,
-        skip_denylist_belt: bool,
-        schemas: SchemaScope,
-        extension_allowlist: Vec<String>,
-        require_rls: bool,
-        destructive_ops: DestructiveOps,
-    ) -> Self {
-        Self {
-            trust,
-            capabilities,
-            skip_denylist_belt,
-            schemas,
-            extension_allowlist,
-            require_rls,
-            destructive_ops,
-            dialect,
-            effective,
-        }
-    }
-
     /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect.
-    ///
-    /// The effective policy is now the single PDP source for injection and guard
-    /// decisions. Transitional posture-shaped accessors derive their values from
-    /// the policy's builtin grants while older callers are retired.
+    /// The effective policy is the SINGLE source for injection and every guard
+    /// decision; there is no separate posture/scope state.
     #[must_use]
     pub fn from_policy(effective: EffectivePolicy, dialect: SqlDialect) -> Self {
-        let schemas = schema_scope_from_effective(&effective);
-        let capabilities = capabilities_from_effective(&effective);
-        let extension_allowlist = extension_allowlist_from_effective(&effective);
-        let require_rls = require_rls_from_effective(&effective);
-        let destructive_ops = destructive_ops_from_effective(&effective);
-        let trust = match &schemas {
-            SchemaScope::Unconfined => TrustProfile::Trusted,
-            SchemaScope::Allowlist(_) => TrustProfile::Platform,
-            SchemaScope::Single(_) => TrustProfile::Confined,
-        };
-        Self::from_parts(
-            effective,
-            dialect,
-            trust,
-            capabilities,
-            false,
-            schemas,
-            extension_allowlist,
-            require_rls,
-            destructive_ops,
-        )
+        Self { dialect, effective }
     }
 
     /// Construct a **Confined** guard whose PDP is a caller-composed
@@ -255,30 +168,15 @@ impl GuardConfig {
     /// carry inject/validate rules + scoped creation grants, so the guard's raw-SQL
     /// classification (II.2.5: `RawCreateInInjectScope` / creation-gating) and
     /// injected-shape immutability (II.2.6b) can be exercised against a real inject
-    /// scope. The belt still runs (Confined posture); `project_schema` supplies the
-    /// cross-schema confinement pin.
-    ///
-    /// This is the forward-compatible seam toward Step 3's
-    /// `from_policy(&EffectivePolicy, dialect)` — it does not delete or alter any
-    /// existing constructor. The `EffectivePolicy` is unforgeable (only
-    /// `compose_strict`/`compose_clamp` produce one), so a caller cannot smuggle an
-    /// escalated grant through it.
+    /// scope. The `EffectivePolicy` is unforgeable (only `compose_strict`/
+    /// `compose_clamp` produce one), so a caller cannot smuggle an escalated grant
+    /// through it.
     #[must_use]
     pub fn confined_with_effective(
-        project_schema: impl Into<String>,
+        _project_schema: impl Into<String>,
         effective: EffectivePolicy,
     ) -> Self {
-        Self::from_parts(
-            effective,
-            SqlDialect::Postgres,
-            TrustProfile::Confined,
-            VendorCapabilities::confined(),
-            false,
-            SchemaScope::Single(project_schema.into()),
-            Vec::new(),
-            false,
-            DestructiveOps::Allow,
-        )
+        Self::from_policy(effective, SqlDialect::Postgres)
     }
 
     /// The ONLY constructor reachable from the submission ingress and every
@@ -286,19 +184,10 @@ impl GuardConfig {
     /// Needs NO token — Confined is the safe default anyone may construct.
     #[must_use]
     pub fn confined(project_schema: impl Into<String>) -> Self {
-        let capabilities = VendorCapabilities::confined();
-        let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_parts(
-            effective_policy_from_caps(&capabilities, &[], &schemas),
+        Self::from_policy(
+            confined_effective_policy(&project_schema.into(), &[], false, DestructiveOps::Allow),
             // Default to the PG line-1 guard — byte-identical to before PHASE 4.
             SqlDialect::Postgres,
-            TrustProfile::Confined,
-            capabilities,
-            false,
-            schemas,
-            Vec::new(),
-            false,
-            DestructiveOps::Allow,
         )
     }
 
@@ -312,18 +201,9 @@ impl GuardConfig {
     /// token — Confined is the safe default anyone may construct.
     #[must_use]
     pub fn confined_sqlite(project_schema: impl Into<String>) -> Self {
-        let capabilities = VendorCapabilities::confined();
-        let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_parts(
-            effective_policy_from_caps(&capabilities, &[], &schemas),
+        Self::from_policy(
+            confined_effective_policy(&project_schema.into(), &[], false, DestructiveOps::Allow),
             SqlDialect::Sqlite,
-            TrustProfile::Confined,
-            capabilities,
-            false,
-            schemas,
-            Vec::new(),
-            false,
-            DestructiveOps::Allow,
         )
     }
 
@@ -333,18 +213,9 @@ impl GuardConfig {
     /// `libpg_query`.
     #[must_use]
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
-        let capabilities = VendorCapabilities::confined();
-        let schemas = SchemaScope::Single(project_schema.into());
-        Self::from_parts(
-            effective_policy_from_caps(&capabilities, &[], &schemas),
+        Self::from_policy(
+            confined_effective_policy(&project_schema.into(), &[], false, DestructiveOps::Allow),
             SqlDialect::Mysql,
-            TrustProfile::Confined,
-            capabilities,
-            false,
-            schemas,
-            Vec::new(),
-            false,
-            DestructiveOps::Allow,
         )
     }
 
@@ -364,27 +235,27 @@ impl GuardConfig {
         match dialect {
             SqlDialect::Postgres => self,
             SqlDialect::Sqlite => {
-                // Preserve the project schema (the single confined schema) where we
-                // have one; otherwise empty. Platform's allowlist is dropped — it
-                // has no SQLite meaning. Fail closed to Confined SQLite.
-                let project_schema = match &self.schemas {
-                    SchemaScope::Single(s) => s.clone(),
-                    SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
-                    SchemaScope::Unconfined => String::new(),
-                };
-                Self::confined_sqlite(project_schema)
+                // Preserve the project schema (the first owned schema) where we have
+                // one; otherwise empty. A privileged PG allowlist is dropped — it has
+                // no SQLite meaning. Fail closed to Confined SQLite.
+                Self::confined_sqlite(self.first_owned_schema())
             }
             SqlDialect::Mysql => {
                 // MySQL uses the descriptor-generated DDL guard. Drop any
-                // privileged PG posture and keep only the first confined schema.
-                let project_schema = match &self.schemas {
-                    SchemaScope::Single(s) => s.clone(),
-                    SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
-                    SchemaScope::Unconfined => String::new(),
-                };
-                Self::confined_mysql(project_schema)
+                // privileged PG posture and keep only the first owned schema.
+                Self::confined_mysql(self.first_owned_schema())
             }
         }
+    }
+
+    /// The first schema this config OWNS (the confined project schema, or the first
+    /// entry of a platform allowlist), derived from the `core.cross_schema` grant's
+    /// literal schema includes. Empty when the grant is `⊤` / globbed / absent.
+    fn first_owned_schema(&self) -> String {
+        owned_schemas_from_effective(&self.effective)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
     /// Confined-path builder: set the `CREATE EXTENSION` allowlist. The creator
@@ -394,70 +265,54 @@ impl GuardConfig {
     /// trust posture stays `Confined`. Platform configs set their allowlist via
     /// [`GuardConfig::platform`] instead.
     #[must_use]
-    pub fn with_extension_allowlist(mut self, extensions: Vec<String>) -> Self {
-        self.extension_allowlist = extensions;
-        // The `pg.extensions` StrSet grant in the effective policy carries the
-        // allowlist, so re-derive it after mutating the field.
-        self.effective =
-            effective_policy_from_caps(&self.capabilities, &self.extension_allowlist, &self.schemas);
-        self
+    pub fn with_extension_allowlist(self, extensions: Vec<String>) -> Self {
+        // Recompose the effective policy, replacing the `pg.extensions` StrSet grant
+        // with the new allowlist while preserving every other input read back from
+        // the current policy (owned schemas, vendor caps, data-security posture).
+        let inputs = PolicyInputs::from_effective(&self.effective);
+        let dialect = self.dialect;
+        Self::from_policy(inputs.with_extensions(extensions).compose(), dialect)
     }
 
     /// Tighten the guard with data-security policy knobs from a sealed profile.
     ///
     /// This builder is safe to expose because it can only add validation/denial
-    /// obligations to whatever trust posture the caller can already construct.
+    /// obligations to whatever posture the caller can already construct.
     #[must_use]
     pub fn with_data_security(
-        mut self,
+        self,
         require_rls: bool,
         destructive_ops: DestructiveOps,
     ) -> Self {
-        self.require_rls = require_rls;
-        self.destructive_ops = match destructive_ops {
+        let destructive_ops = match destructive_ops {
             // Approval is server-only. If a direct caller hands it to the guard,
             // fail closed by enforcing the stricter projection.
             DestructiveOps::RequireApproval => DestructiveOps::Forbid,
             other => other,
         };
-        // The data-security obligation (`sec.require_rls`) + the `sec.destructive_ops`
-        // posture now ride in the effective policy the guard queries, so re-derive
-        // it after tightening.
-        self.effective = effective_policy_from_posture(
-            &self.capabilities,
-            &self.extension_allowlist,
-            &self.schemas,
-            self.require_rls,
-            self.destructive_ops,
-        );
-        self
+        let inputs = PolicyInputs::from_effective(&self.effective);
+        let dialect = self.dialect;
+        Self::from_policy(
+            inputs.with_data_security(require_rls, destructive_ops).compose(),
+            dialect,
+        )
     }
 
-    /// Platform profile. REQUIRES a [`OperatorCapability`] token, minted by
-    /// operator-side named seams. The `_cap` arg is the in-crate enforcement;
-    /// `#[non_exhaustive]` on [`TrustProfile`] is the external enforcement. This
-    /// is the single place `TrustProfile::Platform` is named.
+    /// Platform profile. REQUIRES an [`OperatorCapability`] token, minted by
+    /// operator-side named seams. The `_cap` arg is the in-crate enforcement. The
+    /// platform posture grants the full vendor capability set, cross-schema over the
+    /// `schemas` allowlist, and the `core.raw_island_role` relaxation.
     #[must_use]
     pub fn platform(
         _cap: &OperatorCapability,
         schemas: Vec<String>,
         extension_allowlist: Vec<String>,
     ) -> Self {
-        let mut capabilities = VendorCapabilities::operator();
-        capabilities.schemas = schemas.clone();
-        let schema_scope = SchemaScope::Allowlist(schemas);
-        Self::from_parts(
-            effective_policy_from_caps(&capabilities, &extension_allowlist, &schema_scope),
-            // Platform is a PG-only posture (it fail-closes to Confined on SQLite
-            // via `for_dialect`); the config itself is always PG.
+        // Platform is a PG-only posture (it fail-closes to Confined on SQLite via
+        // `for_dialect`); the config itself is always PG.
+        Self::from_policy(
+            platform_effective_policy(&schemas, &extension_allowlist),
             SqlDialect::Postgres,
-            TrustProfile::Platform,
-            capabilities,
-            false,
-            schema_scope,
-            extension_allowlist,
-            false,
-            DestructiveOps::Allow,
         )
     }
 
@@ -466,34 +321,13 @@ impl GuardConfig {
     /// neither an external crate nor an in-crate creator-path module
     /// (`submit`/`engine`) can produce a Trusted guard. The deny-list, the
     /// cross-schema confinement, and the body walks are all SKIPPED by
-    /// [`SqlGuard::check`] under `Trusted` (arbitrary SQL applies as the
-    /// connecting role); the destructive/transactional/approval flags are still
-    /// derived. The `schemas`/`extension_allowlist` fields are unused under
-    /// Trusted (no confinement, no extension allowlisting) — they are set to the
-    /// inert empty shapes so the struct stays uniform. This is the single place
-    /// `TrustProfile::Trusted` is named.
+    /// [`SqlGuard::check`] under Trusted (arbitrary SQL applies as the connecting
+    /// role) — the belt-skip is the `core.skip_static_guard` grant this posture
+    /// (and ONLY this posture) carries; the destructive/transactional/approval flags
+    /// are still derived.
     #[must_use]
     pub fn trusted(_cap: &OperatorCapability) -> Self {
-        let capabilities = VendorCapabilities::operator();
-        // Inert empty allowlist → `creation_grant_schemas` yields a ⊤ creation
-        // grant, but Trusted skips the whole belt (no statement-kind gate), so the
-        // grant is never consulted; kept uniform.
-        let schema_scope = SchemaScope::Allowlist(Vec::new());
-        Self::from_parts(
-            effective_policy_from_caps(&capabilities, &[], &schema_scope),
-            SqlDialect::Postgres,
-            TrustProfile::Trusted,
-            capabilities,
-            true,
-            // Inert: the Trusted early-return never consults `schemas` (no
-            // cross-schema walk) nor `extension_allowlist` (no statement-kind
-            // gate). Kept empty so a future code path can never accidentally
-            // read a stale allowlist.
-            schema_scope,
-            Vec::new(),
-            false,
-            DestructiveOps::Allow,
-        )
+        Self::from_policy(trusted_effective_policy(), SqlDialect::Postgres)
     }
 
     /// PHASE 4 — the target SQL dialect this guard config vets.
@@ -502,76 +336,55 @@ impl GuardConfig {
         self.dialect
     }
 
-    /// The trust posture the guard internals consult. `pub`: the engine's
-    /// IR-lower path reads it to decide the data-security gate.
-    #[must_use]
-    pub const fn trust(&self) -> TrustProfile {
-        self.trust
-    }
-
-    /// The config-loaded capability composition the guard uses for its widened
-    /// statement classes.
-    #[must_use]
-    pub const fn vendor_capabilities(&self) -> &VendorCapabilities {
-        &self.capabilities
-    }
-
-    /// Whether the Trusted posture skips the confined deny-list belt. `pub`: the
+    /// Whether this config skips the confined deny-list belt entirely (the Trusted
+    /// dbmate-like posture) — the `core.skip_static_guard` PDP grant. `pub`: the
     /// engine's profile behaviour-lock tests assert it across the crate boundary.
     #[must_use]
-    pub const fn skips_denylist_belt(&self) -> bool {
-        self.skip_denylist_belt
-    }
-
-    /// Hidden seam for the legacy Trusted executor path while the policy redesign
-    /// removes posture constructors. Production creator paths do not expose a
-    /// caller to this method; it is used only by the engine's test-only Trusted
-    /// executor constructor.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_skip_denylist_belt_for_test(mut self) -> Self {
-        self.skip_denylist_belt = true;
-        self.trust = TrustProfile::Trusted;
-        self.schemas = SchemaScope::Unconfined;
-        self
+    pub fn skips_denylist_belt(&self) -> bool {
+        self.grants_global_bool(policy_registry::KEY_CORE_SKIP_STATIC_GUARD)
     }
 
     /// The schema-confinement scope this guard config enforces, for the
-    /// validate-time cross-schema gate. Returns:
-    /// - `Some(SchemaScope)` for **Confined** (the `Single(project_schema)` pin) and
-    ///   **Platform** (the configured `Allowlist`) — an op's explicit `schema` must
-    ///   be permitted by it.
-    /// - `Some(SchemaScope::Unconfined)` for **Trusted** (the public dbmate-like
-    ///   posture) — NO cross-schema confinement, but still an explicit operator
-    ///   signal to the validate/load APIs.
+    /// validate-time cross-schema gate. Derived from the effective policy's
+    /// `core.cross_schema` grant:
+    /// - a `⊤` (whole-universe) grant ⇒ `Unconfined` (the Trusted operator posture);
+    /// - a finite set of owned schemas ⇒ `Single(s)` for one, `Allowlist([…])` for
+    ///   several (Confined / Platform);
+    /// - no owned schema (empty) ⇒ `Single("")` (the degenerate default).
     ///
-    /// This is the SINGLE source of truth that maps the guard's trust posture to the
-    /// validator's confinement scope, so the parse-guard cross-schema denial (line 1)
-    /// and the friendlier validate-time refusal agree on the permitted set.
+    /// This is the SINGLE source of truth that maps the policy to the validator's
+    /// confinement scope, so the parse-guard cross-schema denial (line 1) and the
+    /// friendlier validate-time refusal agree on the permitted set.
     #[must_use]
     pub fn schema_scope(&self) -> Option<SchemaScope> {
-        match self.trust {
-            TrustProfile::Trusted => Some(SchemaScope::Unconfined),
-            // Confined ⇒ Single(project_schema); Platform ⇒ Allowlist — both carried
-            // verbatim in `self.schemas`.
-            TrustProfile::Confined | TrustProfile::Platform => Some(self.schemas.clone()),
-            // `TrustProfile` is `#[non_exhaustive]` (defined in the `zero-migrate-ir`
-            // leaf); a future variant fails closed to least privilege (its own
-            // carried scope) rather than silently widening confinement.
-            _ => Some(self.schemas.clone()),
+        let key = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok()?;
+        if matches!(self.effective.grant_region(&key), GrantRegion::Top) {
+            return Some(SchemaScope::Unconfined);
         }
+        let owned = owned_schemas_from_effective(&self.effective);
+        // The operator (Platform) posture is a schema ALLOWLIST even for a single
+        // owned schema — it grants the privileged vendor set (`pg.role`); a Confined
+        // posture (no privileged caps) with one owned schema is a `Single` pin.
+        let is_operator_posture = self.grants_global_bool(policy_registry::KEY_PG_ROLE);
+        Some(match owned.as_slice() {
+            [one] if !is_operator_posture => SchemaScope::Single(one.clone()),
+            [] if !is_operator_posture => SchemaScope::Single(String::new()),
+            _ => SchemaScope::Allowlist(owned),
+        })
     }
 
-    /// Data-security RLS requirement carried into the guard.
+    /// Data-security RLS requirement carried into the guard (the `sec.require_rls`
+    /// obligation).
     #[must_use]
-    pub const fn require_rls(&self) -> bool {
-        self.require_rls
+    pub fn require_rls(&self) -> bool {
+        self.obligates_require_rls(&global_witness())
     }
 
-    /// Data-security destructive-op posture carried into the guard.
+    /// Data-security destructive-op posture carried into the guard (the
+    /// `sec.destructive_ops` grant).
     #[must_use]
-    pub const fn destructive_ops(&self) -> DestructiveOps {
-        self.destructive_ops
+    pub fn destructive_ops(&self) -> DestructiveOps {
+        self.effective_destructive_ops()
     }
 
     // ── PDP decision-query helpers (Phase 2 Step 2a) ───────────────────────────
@@ -666,14 +479,13 @@ impl GuardConfig {
     // ── namespace-authority decision queries (Phase 2 Step 2b, II.2.5/II.2.6) ───
 
     /// The project schema an UNQUALIFIED relation resolves to under this config's
-    /// cross-schema pin: the confined `Single(project_schema)`, or the sole entry of
-    /// a single-schema Platform allowlist. `None` when there is no unique pinned
-    /// schema (empty confined default, multi-schema Platform, Unconfined) — an
-    /// unqualified name is then not uniquely attributable by the guard.
+    /// cross-schema pin — the sole schema owned by the effective policy's
+    /// `core.cross_schema` grant. `None` when there is no unique owned schema (empty
+    /// confined default, multi-schema platform, or a `⊤` grant) — an unqualified name
+    /// is then not uniquely attributable by the guard.
     fn pinned_schema(&self) -> Option<String> {
-        match &self.schemas {
-            SchemaScope::Single(s) if !s.is_empty() => Some(s.clone()),
-            SchemaScope::Allowlist(list) if list.len() == 1 => Some(list[0].clone()),
+        match owned_schemas_from_effective(&self.effective).as_slice() {
+            [one] if !one.is_empty() => Some(one.clone()),
             _ => None,
         }
     }
@@ -702,6 +514,23 @@ impl GuardConfig {
     /// Is `element` on `object` an injected shape element (II.2.6b, name-match-at-op-time)?
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool {
         self.effective.is_injected_shape(object, element)
+    }
+
+    /// Cross-schema confinement, decided directly on the PDP: is a reference to
+    /// `schema` admitted? True iff the effective policy grants `core.cross_schema`
+    /// at the (PG-normalized) schema object — the project schema(s) a confined/
+    /// platform posture owns are granted; every other schema is a `CrossSchema`
+    /// violation (default-deny). An un-normalizable schema name (empty / malformed)
+    /// is NOT admitted (fail-closed). This replaces the derived-`SchemaScope`
+    /// `permits(schema)` read.
+    fn grants_cross_schema(&self, schema: &str) -> bool {
+        let Some(k) = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok() else {
+            return false;
+        };
+        let Some(object) = normalize_pg_identifier(schema) else {
+            return false;
+        };
+        matches!(self.effective.grants(&k, &object), Some(KnobValue::Bool(true)))
     }
 }
 
@@ -738,77 +567,14 @@ fn grant_str_set_from_effective(effective: &EffectivePolicy, key: &str) -> Vec<S
     }
 }
 
-fn schema_scope_from_effective(effective: &EffectivePolicy) -> SchemaScope {
-    let grants_cross_schema =
-        grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &global_witness());
-    for key in [
-        policy_registry::KEY_CORE_CREATE_TABLE,
-        policy_registry::KEY_CORE_RENAME_INTO,
-    ] {
-        let Some(k) = KnobKey::parse(key).ok() else {
-            continue;
-        };
-        if let Some(schemas) = effective.grant_literal_schema_includes(&k) {
-            if grants_cross_schema {
-                return SchemaScope::Allowlist(schemas);
-            }
-            return match schemas.as_slice() {
-                [schema] => SchemaScope::Single(schema.clone()),
-                _ => SchemaScope::Allowlist(schemas),
-            };
-        }
-    }
-    if grants_cross_schema {
-        SchemaScope::Unconfined
-    } else {
-        SchemaScope::Single(String::new())
-    }
-}
-
-fn capabilities_from_effective(effective: &EffectivePolicy) -> VendorCapabilities {
-    let witness = global_witness();
-    let mut caps = VendorCapabilities::confined();
-    caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_PG_ROLE, &witness);
-    caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_PG_GRANT, &witness);
-    caps.allow_extension =
-        grant_bool_from_effective(effective, policy_registry::KEY_PG_EXTENSION, &witness);
-    caps.allow_schema =
-        grant_bool_from_effective(effective, policy_registry::KEY_PG_SCHEMA, &witness)
-            || grant_bool_from_effective(effective, policy_registry::KEY_CORE_CREATE_SCHEMA, &witness);
-    caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_PG_POLICY, &witness);
-    caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_PG_RLS, &witness);
-    caps.allow_partition =
-        grant_bool_from_effective(effective, policy_registry::KEY_PG_PARTITION, &witness);
-    caps.allow_function =
-        grant_bool_from_effective(effective, policy_registry::KEY_PG_FUNCTION, &witness);
-    caps.allow_raw_sql =
-        grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_SQL, &witness);
-    caps.allow_raw_view_body =
-        grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_VIEW_BODY, &witness);
-    caps.allow_materialized_view =
-        grant_bool_from_effective(effective, policy_registry::KEY_PG_MATERIALIZED_VIEW, &witness);
-    caps.allow_cross_schema =
-        grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &witness);
-    caps.schemas = match schema_scope_from_effective(effective) {
-        SchemaScope::Allowlist(list) => list,
-        SchemaScope::Single(schema) if !schema.is_empty() => vec![schema],
-        SchemaScope::Single(_) | SchemaScope::Unconfined => Vec::new(),
+/// The literal schemas an effective policy OWNS — the `core.cross_schema` grant's
+/// literal schema includes (the project schema(s) a confined/platform posture
+/// carries). Empty for a `⊤` / globbed / absent grant.
+fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
+    let Some(k) = KnobKey::parse(policy_registry::KEY_CORE_CROSS_SCHEMA).ok() else {
+        return Vec::new();
     };
-    caps
-}
-
-fn extension_allowlist_from_effective(effective: &EffectivePolicy) -> Vec<String> {
-    grant_str_set_from_effective(effective, policy_registry::KEY_PG_EXTENSIONS)
-}
-
-fn require_rls_from_effective(effective: &EffectivePolicy) -> bool {
-    let Some(want) = KnobKey::parse(policy_registry::KEY_SEC_REQUIRE_RLS).ok() else {
-        return false;
-    };
-    effective
-        .obligations(&global_witness())
-        .iter()
-        .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
+    effective.grant_literal_schema_includes(&k).unwrap_or_default()
 }
 
 fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps {
@@ -825,183 +591,311 @@ fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps
     }
 }
 
-/// Build the [`EffectivePolicy`] the guard's capability gate queries, from a
-/// [`VendorCapabilities`] set + the `CREATE EXTENSION` allowlist. This is the
-/// transitional bridge (Step 2a): the named constructors keep taking their
-/// posture, and this reproduces it as a composed PDP policy.
-///
-/// - **confined** (no caps): [`EffectivePolicy::deny_all`] over the builtin
-///   registry — every capability key resolves to its deny default.
-/// - **operator** (all caps): a `RootCeiling` that grants each held Bool capability
-///   at `⊤`-scope + the `pg.extensions` StrSet, composed against an empty draft.
-///
-/// The build is total: a malformed intermediate document is a programming error
-/// (fixed literals), so any failure fails closed to `deny_all`.
-fn effective_policy_from_caps(
-    caps: &VendorCapabilities,
-    allowlist: &[String],
-    schemas: &SchemaScope,
-) -> EffectivePolicy {
-    effective_policy_from_posture(caps, allowlist, schemas, false, DestructiveOps::Allow)
+fn require_rls_from_effective(effective: &EffectivePolicy) -> bool {
+    let Some(want) = KnobKey::parse(policy_registry::KEY_SEC_REQUIRE_RLS).ok() else {
+        return false;
+    };
+    effective
+        .obligations(&global_witness())
+        .iter()
+        .any(|(k, v)| *k == want && matches!(v, KnobValue::Bool(true)))
 }
 
-/// The `core.create_table` / `core.rename_into` creation-gating grant scope for a
-/// posture (II.2.6a). Creation is now default-deny; a posture that legitimately
-/// creates tables must GRANT the anchor over the region it owns:
+/// The composition inputs behind a guard's [`EffectivePolicy`]. This is the single
+/// place the guard's posture is expressed as PDP grants/obligations — every named
+/// constructor and every tightening builder routes through here, and
+/// [`PolicyInputs::from_effective`] reads an existing policy back into inputs so a
+/// builder (`with_extension_allowlist`/`with_data_security`) can recompose without a
+/// separate posture-state cache.
 ///
-/// - **Confined** `Single(project_schema)` → grant scoped to that one schema
-///   (`["<schema>"]`), so a confined migration may create/rename tables in its own
-///   project schema but nowhere else. An empty project schema (the degenerate
-///   [`GuardConfig::default`]) grants `all` — there is no schema to scope by, and a
-///   default guard historically created tables freely; the cross-schema walk is the
-///   real confinement there.
-/// - **Platform** `Allowlist(schemas)` → grant scoped to each allowlisted schema.
-///   Empty allowlist ⇒ `all` (Trusted's inert shape never reaches this — Trusted
-///   skips the belt entirely).
-///
-/// Returns `None` for a `⊤` (all-schemas) grant, or `Some(scopes)` for the concrete
-/// schema list to author `include`-scoped grants over.
-fn creation_grant_schemas(schemas: &SchemaScope) -> Option<Vec<String>> {
-    match schemas {
-        SchemaScope::Single(s) if !s.is_empty() => Some(vec![s.clone()]),
-        SchemaScope::Single(_) => None, // empty project schema → ⊤
-        SchemaScope::Allowlist(list) if !list.is_empty() => Some(list.clone()),
-        SchemaScope::Allowlist(_) | SchemaScope::Unconfined => None,
+/// The knobs it composes:
+/// - each held vendor capability (Global Bool) at `⊤`;
+/// - `core.cross_schema` + `core.create_table` + `core.rename_into` scoped to the
+///   OWNED schemas (`include: [...]`, or `all` when there is no owned schema);
+/// - the `pg.extensions` StrSet allowlist;
+/// - the operator-posture relaxations `core.raw_island_role` / `core.skip_static_guard`;
+/// - the data-security `sec.require_rls` obligation + `sec.destructive_ops` grant.
+struct PolicyInputs {
+    caps: VendorCapabilities,
+    /// The schemas this posture OWNS (`core.cross_schema` + creation grants scoped
+    /// here). Empty ⇒ a `⊤` grant (the degenerate default / Trusted).
+    owned_schemas: Vec<String>,
+    extension_allowlist: Vec<String>,
+    raw_island_role: bool,
+    skip_static_guard: bool,
+    require_rls: bool,
+    destructive_ops: DestructiveOps,
+}
+
+impl PolicyInputs {
+    /// A confined posture over `project_schema` (empty ⇒ the degenerate `⊤` default):
+    /// no vendor caps, cross-schema/creation scoped to the project schema, no
+    /// operator relaxations.
+    fn confined(project_schema: &str, extensions: &[String]) -> Self {
+        let owned_schemas = if project_schema.is_empty() {
+            Vec::new()
+        } else {
+            vec![project_schema.to_string()]
+        };
+        Self {
+            caps: VendorCapabilities::confined(),
+            owned_schemas,
+            extension_allowlist: extensions.to_vec(),
+            raw_island_role: false,
+            skip_static_guard: false,
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
+        }
+    }
+
+    /// The platform posture: the full vendor capability set, cross-schema/creation
+    /// over the `schemas` allowlist, the `core.raw_island_role` relaxation, and the
+    /// extension allowlist.
+    fn platform(schemas: &[String], extensions: &[String]) -> Self {
+        Self {
+            caps: VendorCapabilities::operator(),
+            owned_schemas: schemas.to_vec(),
+            extension_allowlist: extensions.to_vec(),
+            raw_island_role: true,
+            skip_static_guard: false,
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
+        }
+    }
+
+    /// The trusted (dbmate-like) posture: every vendor capability, cross-schema at
+    /// `⊤` (no confinement), and the `core.skip_static_guard` belt-skip. The belt is
+    /// skipped entirely so the scoped grants are never consulted; `core.raw_island_role`
+    /// is deliberately OMITTED (the raw-island body backstop still denies role/
+    /// search_path needles under Trusted — the vendor-lower matrix locks this).
+    fn trusted() -> Self {
+        Self {
+            caps: VendorCapabilities::operator(),
+            owned_schemas: Vec::new(),
+            extension_allowlist: Vec::new(),
+            raw_island_role: false,
+            skip_static_guard: true,
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
+        }
+    }
+
+    /// Read the composition inputs back out of an already-composed policy, so a
+    /// tightening builder can recompose. Every field is a PDP read; there is no
+    /// separate posture cache.
+    fn from_effective(effective: &EffectivePolicy) -> Self {
+        let w = global_witness();
+        let mut caps = VendorCapabilities::confined();
+        caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_PG_ROLE, &w);
+        caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_PG_GRANT, &w);
+        caps.allow_extension =
+            grant_bool_from_effective(effective, policy_registry::KEY_PG_EXTENSION, &w);
+        caps.allow_schema =
+            grant_bool_from_effective(effective, policy_registry::KEY_PG_SCHEMA, &w)
+                || grant_bool_from_effective(effective, policy_registry::KEY_CORE_CREATE_SCHEMA, &w);
+        caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_PG_POLICY, &w);
+        caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_PG_RLS, &w);
+        caps.allow_partition =
+            grant_bool_from_effective(effective, policy_registry::KEY_PG_PARTITION, &w);
+        caps.allow_function =
+            grant_bool_from_effective(effective, policy_registry::KEY_PG_FUNCTION, &w);
+        caps.allow_raw_sql =
+            grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_SQL, &w);
+        caps.allow_raw_view_body =
+            grant_bool_from_effective(effective, policy_registry::KEY_CORE_RAW_VIEW_BODY, &w);
+        caps.allow_materialized_view =
+            grant_bool_from_effective(effective, policy_registry::KEY_PG_MATERIALIZED_VIEW, &w);
+        let owned_schemas = owned_schemas_from_effective(effective);
+        caps.allow_cross_schema =
+            grant_bool_from_effective(effective, policy_registry::KEY_CORE_CROSS_SCHEMA, &w);
+        caps.schemas = owned_schemas.clone();
+        Self {
+            caps,
+            owned_schemas,
+            extension_allowlist: grant_str_set_from_effective(
+                effective,
+                policy_registry::KEY_PG_EXTENSIONS,
+            ),
+            raw_island_role: grant_bool_from_effective(
+                effective,
+                policy_registry::KEY_CORE_RAW_ISLAND_ROLE,
+                &w,
+            ),
+            skip_static_guard: grant_bool_from_effective(
+                effective,
+                policy_registry::KEY_CORE_SKIP_STATIC_GUARD,
+                &w,
+            ),
+            require_rls: require_rls_from_effective(effective),
+            destructive_ops: destructive_ops_from_effective(effective),
+        }
+    }
+
+    fn with_extensions(mut self, extensions: Vec<String>) -> Self {
+        self.extension_allowlist = extensions;
+        self
+    }
+
+    fn with_owned_schemas(mut self, owned_schemas: Vec<String>) -> Self {
+        self.caps.schemas = owned_schemas.clone();
+        self.owned_schemas = owned_schemas;
+        self
+    }
+
+    fn with_data_security(mut self, require_rls: bool, destructive_ops: DestructiveOps) -> Self {
+        self.require_rls = require_rls;
+        self.destructive_ops = destructive_ops;
+        self
+    }
+
+    /// Compose these inputs into the unforgeable [`EffectivePolicy`]. Total: any
+    /// failure in the fixed-literal build fails closed to [`EffectivePolicy::deny_all`].
+    fn compose(&self) -> EffectivePolicy {
+        let registry = policy_registry::builtin_registry();
+
+        // ⊤-scope grant/require rules, plus the schema-scoped cross-schema/creation
+        // grants, as a JSON policy document (JSON so names/values escape safely).
+        let mut grant_rules: Vec<serde_json::Value> = Vec::new();
+        let mut require_rules: Vec<serde_json::Value> = Vec::new();
+
+        let mut grant_bool = |key: &str, on: bool| {
+            if on {
+                grant_rules.push(serde_json::json!({ "key": key, "value": true, "scope": "all" }));
+            }
+        };
+
+        // ── vendor capabilities → their builtin knob keys ──────────────────────
+        grant_bool(policy_registry::KEY_PG_ROLE, self.caps.allow_role);
+        grant_bool(policy_registry::KEY_PG_GRANT, self.caps.allow_grant);
+        grant_bool(policy_registry::KEY_PG_EXTENSION, self.caps.allow_extension);
+        // Schema-create carries both spellings; grant both under the same bit.
+        grant_bool(policy_registry::KEY_PG_SCHEMA, self.caps.allow_schema);
+        grant_bool(policy_registry::KEY_CORE_CREATE_SCHEMA, self.caps.allow_schema);
+        grant_bool(policy_registry::KEY_PG_POLICY, self.caps.allow_policy);
+        grant_bool(policy_registry::KEY_PG_RLS, self.caps.allow_rls);
+        grant_bool(policy_registry::KEY_PG_PARTITION, self.caps.allow_partition);
+        grant_bool(policy_registry::KEY_PG_FUNCTION, self.caps.allow_function);
+        grant_bool(policy_registry::KEY_CORE_RAW_SQL, self.caps.allow_raw_sql);
+        grant_bool(policy_registry::KEY_CORE_RAW_VIEW_BODY, self.caps.allow_raw_view_body);
+        grant_bool(policy_registry::KEY_PG_MATERIALIZED_VIEW, self.caps.allow_materialized_view);
+
+        // ── operator-posture relaxations ───────────────────────────────────────
+        grant_bool(policy_registry::KEY_CORE_RAW_ISLAND_ROLE, self.raw_island_role);
+        grant_bool(policy_registry::KEY_CORE_SKIP_STATIC_GUARD, self.skip_static_guard);
+
+        // ── cross-schema + namespace-authority creation-gating (II.2.6a) ───────
+        // `core.cross_schema` (the confinement) + `core.create_table`/`core.rename_into`
+        // (creation-gating) are all scoped to the OWNED schemas: a confined migration
+        // may reference/create/rename in its own project schema(s) but nowhere else.
+        // An empty owned set grants `all` (the degenerate default / Trusted — which
+        // skips the belt anyway, so the grant is never consulted).
+        {
+            let scope = if self.owned_schemas.is_empty() {
+                serde_json::json!("all")
+            } else {
+                serde_json::json!({ "include": self.owned_schemas })
+            };
+            for key in [
+                policy_registry::KEY_CORE_CROSS_SCHEMA,
+                policy_registry::KEY_CORE_CREATE_TABLE,
+                policy_registry::KEY_CORE_RENAME_INTO,
+            ] {
+                grant_rules.push(serde_json::json!({
+                    "key": key,
+                    "value": true,
+                    "scope": scope,
+                }));
+            }
+        }
+
+        // ── CREATE EXTENSION name allowlist (StrSet) ───────────────────────────
+        if !self.extension_allowlist.is_empty() {
+            grant_rules.push(serde_json::json!({
+                "key": policy_registry::KEY_PG_EXTENSIONS,
+                "value": self.extension_allowlist,
+                "scope": "all",
+            }));
+        }
+
+        // ── data-security posture ──────────────────────────────────────────────
+        if self.require_rls {
+            require_rules.push(serde_json::json!({
+                "key": policy_registry::KEY_SEC_REQUIRE_RLS,
+                "value": true,
+                "scope": "all",
+            }));
+        }
+        let destructive_variant = match self.destructive_ops {
+            DestructiveOps::Allow => Some("allow"),
+            DestructiveOps::Warn => Some("warn"),
+            // Forbid is the deny default; RequireApproval is projected to Forbid by
+            // the builder. Neither needs an explicit grant.
+            DestructiveOps::Forbid | DestructiveOps::RequireApproval => None,
+        };
+        if let Some(variant) = destructive_variant {
+            grant_rules.push(serde_json::json!({
+                "key": policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
+                "value": variant,
+                "scope": "all",
+            }));
+        }
+
+        // No rules ⇒ the deny-all floor (confined). Avoids composing an empty ceiling.
+        if grant_rules.is_empty() && require_rules.is_empty() {
+            return EffectivePolicy::deny_all(&registry);
+        }
+
+        // GRANTS compose DOWN (draft is the tightest layer, bounded by the ceiling);
+        // REQUIRES compose UP (ceiling ∪ draft). So the capability grants live in the
+        // DRAFT (`draft ⊑ ceiling` holds by equality), and the obligation lives in
+        // the ceiling only. Any failure fails closed to deny_all.
+        let ceiling_doc = serde_json::json!({
+            "policy_version": 1,
+            "grant": grant_rules,
+            "require": require_rules,
+        });
+        let draft_doc = serde_json::json!({
+            "policy_version": 1,
+            "grant": grant_rules,
+        });
+
+        let composed =
+            zero_migrate_policy::RootCeiling::parse_json(&ceiling_doc.to_string(), &registry)
+                .ok()
+                .and_then(|ceiling| {
+                    let draft = zero_migrate_policy::PolicyDoc::parse_json(
+                        &draft_doc.to_string(),
+                        &registry,
+                        zero_migrate_policy::LoadContext::NonRootLayer,
+                    )
+                    .ok()?;
+                    zero_migrate_policy::compose_strict(&ceiling, &draft, &registry).ok()
+                });
+        composed.unwrap_or_else(|| EffectivePolicy::deny_all(&registry))
     }
 }
 
-/// Like [`effective_policy_from_caps`], additionally folding the data-security
-/// posture (`require_rls` obligation + `destructive_ops` grant) into the effective
-/// policy. Used by [`GuardConfig::with_data_security`].
-fn effective_policy_from_posture(
-    caps: &VendorCapabilities,
-    allowlist: &[String],
-    schemas: &SchemaScope,
+/// A confined effective policy over `project_schema`, folding the data-security
+/// posture. This is the sole confined-constructor composition helper.
+fn confined_effective_policy(
+    project_schema: &str,
+    extensions: &[String],
     require_rls: bool,
     destructive_ops: DestructiveOps,
 ) -> EffectivePolicy {
-    let registry = policy_registry::builtin_registry();
+    PolicyInputs::confined(project_schema, extensions)
+        .with_data_security(require_rls, destructive_ops)
+        .compose()
+}
 
-    // Collect the ⊤-scope grant/require rules this posture asserts, as a JSON
-    // policy document (JSON so extension names / values escape safely).
-    let mut grant_rules: Vec<serde_json::Value> = Vec::new();
-    let mut require_rules: Vec<serde_json::Value> = Vec::new();
+/// The platform posture as a composed effective policy.
+fn platform_effective_policy(schemas: &[String], extensions: &[String]) -> EffectivePolicy {
+    PolicyInputs::platform(schemas, extensions).compose()
+}
 
-    let mut grant_bool = |key: &str, on: bool| {
-        if on {
-            grant_rules.push(serde_json::json!({ "key": key, "value": true, "scope": "all" }));
-        }
-    };
-
-    // ── vendor capabilities → their builtin knob keys ──────────────────────────
-    grant_bool(policy_registry::KEY_PG_ROLE, caps.allow_role);
-    grant_bool(policy_registry::KEY_PG_GRANT, caps.allow_grant);
-    grant_bool(policy_registry::KEY_PG_EXTENSION, caps.allow_extension);
-    // Schema-create carries both spellings; grant both under the same bit.
-    grant_bool(policy_registry::KEY_PG_SCHEMA, caps.allow_schema);
-    grant_bool(policy_registry::KEY_CORE_CREATE_SCHEMA, caps.allow_schema);
-    grant_bool(policy_registry::KEY_PG_POLICY, caps.allow_policy);
-    grant_bool(policy_registry::KEY_PG_RLS, caps.allow_rls);
-    grant_bool(policy_registry::KEY_PG_PARTITION, caps.allow_partition);
-    grant_bool(policy_registry::KEY_PG_FUNCTION, caps.allow_function);
-    grant_bool(policy_registry::KEY_CORE_RAW_SQL, caps.allow_raw_sql);
-    grant_bool(policy_registry::KEY_CORE_RAW_VIEW_BODY, caps.allow_raw_view_body);
-    grant_bool(policy_registry::KEY_PG_MATERIALIZED_VIEW, caps.allow_materialized_view);
-    grant_bool(policy_registry::KEY_CORE_CROSS_SCHEMA, caps.allow_cross_schema);
-
-    // ── namespace-authority creation-gating (II.2.6a) ──────────────────────────
-    // Creation is default-deny; a posture that legitimately creates/moves tables
-    // GRANTS `core.create_table` + `core.rename_into` over the region it owns (its
-    // project schema(s)), so an existing confined/platform `CREATE TABLE` in-scope
-    // stays an effective allow while a create OUTSIDE that scope is now denied.
-    {
-        let create_scope = match creation_grant_schemas(schemas) {
-            Some(list) => serde_json::json!({ "include": list }),
-            None => serde_json::json!("all"),
-        };
-        for key in [
-            policy_registry::KEY_CORE_CREATE_TABLE,
-            policy_registry::KEY_CORE_RENAME_INTO,
-        ] {
-            grant_rules.push(serde_json::json!({
-                "key": key,
-                "value": true,
-                "scope": create_scope,
-            }));
-        }
-    }
-
-    // ── CREATE EXTENSION name allowlist (StrSet) ───────────────────────────────
-    if !allowlist.is_empty() {
-        grant_rules.push(serde_json::json!({
-            "key": policy_registry::KEY_PG_EXTENSIONS,
-            "value": allowlist,
-            "scope": "all",
-        }));
-    }
-
-    // ── data-security posture ──────────────────────────────────────────────────
-    if require_rls {
-        // The obligation is PerTable; a ⊤-scope require covers every table.
-        require_rules.push(serde_json::json!({
-            "key": policy_registry::KEY_SEC_REQUIRE_RLS,
-            "value": true,
-            "scope": "all",
-        }));
-    }
-    // The destructive-op posture is a grant; only author a non-default (looser than
-    // `forbid`) posture — the knob default is already `forbid`.
-    let destructive_variant = match destructive_ops {
-        DestructiveOps::Allow => Some("allow"),
-        DestructiveOps::Warn => Some("warn"),
-        // Forbid is the deny default; RequireApproval was already projected to
-        // Forbid by `with_data_security`. Neither needs an explicit grant.
-        DestructiveOps::Forbid | DestructiveOps::RequireApproval => None,
-    };
-    if let Some(variant) = destructive_variant {
-        grant_rules.push(serde_json::json!({
-            "key": policy_registry::KEY_SEC_DESTRUCTIVE_OPS,
-            "value": variant,
-            "scope": "all",
-        }));
-    }
-
-    // No rules ⇒ the deny-all floor (confined). Avoids composing an empty ceiling.
-    if grant_rules.is_empty() && require_rules.is_empty() {
-        return EffectivePolicy::deny_all(&registry);
-    }
-
-    // GRANTS compose DOWN: the effective grant is the DRAFT's grant (the tightest
-    // layer), bounded by the ceiling. So the capability grants must live in the
-    // DRAFT, with the ceiling granting ≥ the draft (here: the same grants, so
-    // `draft ⊑ ceiling` holds by equality). REQUIRES compose UP (ceiling ∪ draft),
-    // so the obligation lives in the ceiling ONLY — it survives union-up once.
-    let ceiling_doc = serde_json::json!({
-        "policy_version": 1,
-        "grant": grant_rules,
-        "require": require_rules,
-    });
-    let draft_doc = serde_json::json!({
-        "policy_version": 1,
-        "grant": grant_rules,
-    });
-
-    // Compose the draft (carrying the grants) against the ceiling (grants ⊇ draft +
-    // the obligations). `draft ⊑ ceiling` holds by equality; the effective policy
-    // grants exactly the capabilities and carries the ceiling's obligations. Any
-    // failure is a programming error in the fixed literals → fail closed to deny_all.
-    let composed = zero_migrate_policy::RootCeiling::parse_json(&ceiling_doc.to_string(), &registry)
-        .ok()
-        .and_then(|ceiling| {
-            let draft = zero_migrate_policy::PolicyDoc::parse_json(
-                &draft_doc.to_string(),
-                &registry,
-                zero_migrate_policy::LoadContext::NonRootLayer,
-            )
-            .ok()?;
-            zero_migrate_policy::compose_strict(&ceiling, &draft, &registry).ok()
-        });
-    composed.unwrap_or_else(|| EffectivePolicy::deny_all(&registry))
+/// The trusted (dbmate-like) posture as a composed effective policy.
+fn trusted_effective_policy() -> EffectivePolicy {
+    PolicyInputs::trusted().compose()
 }
 
 /// T8 — the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
@@ -1009,43 +903,31 @@ fn effective_policy_from_posture(
 /// exercises exactly the boundary an external consumer of this crate sits behind.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal — the
-/// fields are private, so a privileged profile can never be forged by a literal
-/// (shown for both privileged profiles). This MUST fail to compile:
+/// fields (`dialect`, `effective`) are private, so a privileged profile can never
+/// be forged by a literal (the `EffectivePolicy` is itself unforgeable). This MUST
+/// fail to compile:
 ///
 /// ```compile_fail
 /// use zero_migrate_guard::guard::GuardConfig;
-/// use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
 /// let _ = GuardConfig {
-///     trust: TrustProfile::Platform,
-///     schemas: SchemaScope::Allowlist(vec!["zero_migrate".into()]),
-///     extension_allowlist: vec![],
+///     dialect: zero_migrate_ir::dialect::SqlDialect::Postgres,
+///     effective: unimplemented!(),
 /// };
 /// ```
 ///
+/// (2) The only unforgeable input to a privileged `GuardConfig` is a composed
+/// `EffectivePolicy` — an external crate cannot construct one by a literal (its
+/// fields are private and it has no public constructor other than `deny_all`). This
+/// MUST fail to compile:
+///
 /// ```compile_fail
-/// use zero_migrate_guard::guard::GuardConfig;
-/// use zero_migrate_ir::policy::{SchemaScope, TrustProfile};
-/// let _ = GuardConfig {
-///     trust: TrustProfile::Trusted,
-///     schemas: SchemaScope::Allowlist(vec![]),
-///     extension_allowlist: vec![],
+/// let _ = zero_migrate_policy::EffectivePolicy {
+///     registry: unimplemented!(),
+///     grants: unimplemented!(),
+///     requires: vec![],
+///     injects: vec![],
+///     validates: vec![],
 /// };
-/// ```
-///
-/// (2) `TrustProfile` is `#[non_exhaustive]`, so an external crate cannot
-/// exhaustively match it (it must add a wildcard) — it can never assume it has
-/// seen every variant. This MUST fail to compile:
-///
-/// ```compile_fail
-/// use zero_migrate_ir::policy::TrustProfile;
-/// fn _exhaustive(t: TrustProfile) -> u8 {
-///     match t {
-///         TrustProfile::Confined => 0,
-///         TrustProfile::Platform => 1,
-///         TrustProfile::Trusted => 2,
-///         // no wildcard arm — rejected because the enum is #[non_exhaustive].
-///     }
-/// }
 /// ```
 ///
 /// (3) The privileged `GuardConfig::platform` / `trusted` constructors take an
@@ -2168,7 +2050,7 @@ impl SqlGuard {
     /// Deny any explicit reference to a schema other than the project schema,
     /// found ANYWHERE in the full parse tree (Root Cause 2 fix).
     fn check_cross_schema(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
-        if let Some(schema) = foreign_schema_in_tree(json, &self.cfg.schemas) {
+        if let Some(schema) = foreign_schema_in_tree(json, &|s| self.cfg.grants_cross_schema(s)) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -2195,7 +2077,7 @@ impl SqlGuard {
             .collect();
         if parts.len() >= 2 {
             let schema = parts[0];
-            if !self.cfg.schemas.permits(schema) {
+            if !self.cfg.grants_cross_schema(schema) {
                 return Err(GuardError::CrossSchema {
                     schema: schema.to_string(),
                     statement: raw.to_string(),
@@ -2314,7 +2196,7 @@ impl SqlGuard {
                     None => return false,
                 }
             };
-            if self.cfg.schemas.permits(&schema) {
+            if self.cfg.grants_cross_schema(&schema) {
                 return false;
             }
             // Concrete object target — Object-slot policy: no shared-schema
@@ -2457,12 +2339,12 @@ impl SqlGuard {
         if body_contains_superuser_role_escalation(&lower) {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
-        // The role-management body needles are relaxed under PLATFORM only — this
-        // is a posture-marker decision, NOT the capability gate (Trusted holds every
-        // capability yet its raw-island body backstop still denies these needles, a
-        // behavior the vendor-lower matrix locks). Left on `trust()`; Step 2a moves
-        // only the capability/data-security reads onto the PDP.
-        let allow_role = self.cfg.trust() == TrustProfile::Platform;
+        // The role-management body needles are relaxed under the PLATFORM posture
+        // only, now a `core.raw_island_role` PDP grant (the platform ceiling grants
+        // it; confined omits it, and Trusted — which holds every capability — omits
+        // it too, so its raw-island body backstop still denies these needles, a
+        // behaviour the vendor-lower matrix locks).
+        let allow_role = self.cfg.grants_global_bool(policy_registry::KEY_CORE_RAW_ISLAND_ROLE);
         let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {
@@ -2491,7 +2373,7 @@ impl SqlGuard {
         //     project schema is a cross-tenant reference the body re-parse
         //     could not surface (PL/pgSQL BEGIN/END wrappers don't parse as
         //     plain SQL). Deny-by-default.
-        if let Some(schema) = foreign_schema_in_body(body, &self.cfg.schemas) {
+        if let Some(schema) = foreign_schema_in_body(body, &|s| self.cfg.grants_cross_schema(s)) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -2505,7 +2387,7 @@ impl SqlGuard {
         //     uses an `%I` identifier template — any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
-        if let Some(schema) = foreign_schema_literal_in_body(body, &self.cfg.schemas) {
+        if let Some(schema) = foreign_schema_literal_in_body(body, &|s| self.cfg.grants_cross_schema(s)) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -2530,21 +2412,20 @@ pub fn check_raw_view_body_text(
     raw: &str,
     scope: Option<&SchemaScope>,
 ) -> Result<(), GuardError> {
-    let schemas = scope
-        .cloned()
-        .unwrap_or_else(|| SchemaScope::Allowlist(Vec::new()));
-    let capabilities = VendorCapabilities::confined();
-    let guard = SqlGuard::new(GuardConfig::from_parts(
-        effective_policy_from_caps(&capabilities, &[], &schemas),
-        SqlDialect::Postgres,
-        TrustProfile::Confined,
-        capabilities,
-        false,
-        schemas,
-        Vec::new(),
-        false,
-        DestructiveOps::Allow,
-    ));
+    // The view-body scanner runs under a Confined posture pinned to the caller's
+    // owned schemas. Map the (transitional) `SchemaScope` onto the owned-schema
+    // include set the confined effective policy grants `core.cross_schema` over:
+    //   - `Single(s)`      ⇒ `[s]` (a single owned project schema);
+    //   - `Allowlist(v)`   ⇒ `v` (the platform allowlist);
+    //   - `Unconfined`/None ⇒ empty ⇒ a `⊤` cross-schema grant (no confinement).
+    let owned: Vec<String> = match scope {
+        Some(SchemaScope::Single(s)) if !s.is_empty() => vec![s.clone()],
+        Some(SchemaScope::Single(_)) | None => Vec::new(),
+        Some(SchemaScope::Allowlist(v)) => v.clone(),
+        Some(SchemaScope::Unconfined) => Vec::new(),
+    };
+    let inputs = PolicyInputs::confined("", &[]).with_owned_schemas(owned);
+    let guard = SqlGuard::new(GuardConfig::from_policy(inputs.compose(), SqlDialect::Postgres));
     guard.check_body_text(body, raw)
 }
 
@@ -2559,15 +2440,14 @@ pub fn check_raw_view_body_text(
 ///   2. If the body uses an `%I` identifier-format template (the tell of
 ///      dynamic schema/relation interpolation), any bare *identifier* literal
 ///      that is not the project schema — reaching another project's schema.
-fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
+fn foreign_schema_literal_in_body(body: &str, permits: &dyn Fn(&str) -> bool) -> Option<String> {
     let uses_ident_template = body.to_ascii_lowercase().contains("%i");
     for literal in extract_string_literals(body) {
         let lit = literal.trim();
-        // A schema the scope permits is never a violation. Under `Single(s)`
-        // this is `lit.eq_ignore_ascii_case(s)` (the project schema, case-
-        // insensitively — see `SchemaScope::permits`); under `Allowlist` an
-        // operator-supplied schema is exempt.
-        if scope.permits(lit) {
+        // A schema the PDP admits (`grants(core.cross_schema, lit)`) is never a
+        // violation — the project schema(s) a confined/platform posture owns, plus
+        // any operator-supplied schema.
+        if permits(lit) {
             continue;
         }
         // (1) platform schema named directly. The `PLATFORM_SCHEMAS` lexical
@@ -2620,7 +2500,7 @@ fn looks_like_schema_name(s: &str) -> bool {
 /// project's own role/pinned-search_path is the runtime confinement for the
 /// rest. `project_schema` is excluded so a project legitimately naming its own
 /// schema in a body is fine.
-fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
+fn foreign_schema_in_body(body: &str, permits: &dyn Fn(&str) -> bool) -> Option<String> {
     let bytes = body.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -2633,12 +2513,11 @@ fn foreign_schema_in_body(body: &str, scope: &SchemaScope) -> Option<String> {
             }
             if bytes.get(i + 1).copied().is_some_and(is_ident_byte) {
                 let schema = &body[s..i];
-                // A scope-permitted schema is never a violation (`Single(s)` ⇒
-                // `schema.eq_ignore_ascii_case(s)` — the project schema, case-
-                // insensitively). The
-                // `PLATFORM_SCHEMAS` backstop fires for any non-permitted schema
-                // in PLATFORM_SCHEMAS (the port schemas are not in it).
-                if !scope.permits(schema)
+                // A PDP-admitted schema is never a violation (the project schema(s)
+                // a confined/platform posture owns). The `PLATFORM_SCHEMAS` backstop
+                // fires for any non-permitted schema in PLATFORM_SCHEMAS (the port
+                // schemas are not in it).
+                if !permits(schema)
                     && denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, schema)
                 {
                     return Some(schema.to_string());
@@ -3058,10 +2937,13 @@ fn table_key_for_policy(
     schema: &Option<String>,
     table: &str,
 ) -> (String, String) {
-    let effective_schema = schema.clone().unwrap_or_else(|| match &cfg.schemas {
-        SchemaScope::Single(project_schema) => project_schema.clone(),
-        SchemaScope::Allowlist(list) if list.len() == 1 => list[0].clone(),
-        _ => String::new(),
+    let effective_schema = schema.clone().unwrap_or_else(|| {
+        // An unqualified table resolves to the config's sole owned schema (the pinned
+        // project schema); no unique owned schema ⇒ empty.
+        match owned_schemas_from_effective(&cfg.effective).as_slice() {
+            [one] => one.clone(),
+            _ => String::new(),
+        }
     });
     (effective_schema, table.to_string())
 }
@@ -3735,11 +3617,14 @@ fn regproc_leading_ident(lit: &str) -> &str {
 /// [`SqlGuard::check_func_def_target`] with NO shared-schema exemption
 /// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
 ///
-/// Returns the first foreign schema found.
-fn foreign_schema_in_tree(v: &Value, scope: &SchemaScope) -> Option<String> {
+/// Returns the first foreign schema found. `permits` is the PDP cross-schema
+/// decision (`grants(core.cross_schema, schema)`); the per-slot well-known-schema
+/// exemptions ([`slot_exempts_schema`]) remain a FIXED guard hard-rule applied
+/// AFTER the PDP admission, keyed off the reference-slot kind.
+fn foreign_schema_in_tree(v: &Value, permits: &dyn Fn(&str) -> bool) -> Option<String> {
     let mut found: Option<String> = None;
     walk_schema_names(v, &mut |schema, slot| {
-        if schema.is_empty() || scope.permits(schema) {
+        if schema.is_empty() || permits(schema) {
             return false;
         }
         if slot_exempts_schema(slot, schema) {
