@@ -43,11 +43,17 @@ use std::path::{Path, PathBuf};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::guard::GuardConfig;
 use zero_migrate::{
-    resolve_create_table_policy, Approval, ApprovalScope, ExecutorConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, MigrationId, MigrationIr, PlanStep, PolicyProfile, PostgresBackend,
-    RenameStep, SqlDialect,
+    effective_policy_from_ceiling_toml, resolve_create_table_policy, Approval, ApprovalScope,
+    ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationId, MigrationIr,
+    PlanStep, PostgresBackend, RenameStep, SqlDialect,
 };
 use zero_migrate_ir::capability::OperatorCapability;
+use zero_migrate_policy::EffectivePolicy as PdpPolicy;
+
+/// The platform (author-owned, no-inject) ceiling. `resolve_create_table_policy` over
+/// its composed effective policy is a pass-through (no injects); the guard's
+/// privileged posture comes from `GuardConfig::platform`.
+const PLATFORM_CEILING_TOML: &str = include_str!("../policies/platform.policy.toml");
 
 use crate::CompioPgSession;
 
@@ -252,7 +258,7 @@ struct LowerCtx {
     project_schema: String,
     owner_app: &'static str,
     guard_cfg: GuardConfig,
-    policy_profile: PolicyProfile,
+    policy: PdpPolicy,
 }
 
 impl LowerCtx {
@@ -264,7 +270,8 @@ impl LowerCtx {
             project_schema: project_schema.to_string(),
             owner_app: PLATFORM_OWNER_APP,
             guard_cfg: GuardConfig::platform(&cap, schemas, extensions),
-            policy_profile: PolicyProfile::platform(),
+            policy: effective_policy_from_ceiling_toml(PLATFORM_CEILING_TOML)
+                .expect("embedded platform ceiling composes"),
         }
     }
 }
@@ -302,7 +309,7 @@ fn author_and_lower_file(
 
     // (3) fold the Platform table-shape profile into every createTable BEFORE the
     // fail-closed load gate. Non-createTable ops pass through untouched.
-    let bytes = resolve_shape(&envelope, &ctx.policy_profile, &file)?;
+    let bytes = resolve_shape(&envelope, &ctx.policy, &file)?;
 
     // (4) fail-closed load gate + guarded lower under the Platform guard.
     let ir_author = IrAuthor::new(&ctx.project_schema, ctx.owner_app, SqlDialect::Postgres);
@@ -317,7 +324,6 @@ fn author_and_lower_file(
             &state.registry,
             &state.live_schema,
             &ctx.guard_cfg,
-            Some(&ctx.policy_profile),
         )
         .map_err(|e| PlatformMigrateError::Lower {
             file,
@@ -623,10 +629,13 @@ pub async fn run_platform_migrations(
     Ok(report)
 }
 
-/// Fold the Platform table-shape profile into an envelope's createTable ops.
+/// Fold the Platform table-shape policy into an envelope's createTable ops. The
+/// platform posture is author-owned (no injects), so this is a pass-through today; it
+/// stays on the shared resolver so a future platform ceiling that DOES inject a shape
+/// is honoured without a code change.
 fn resolve_shape(
     envelope: &str,
-    profile: &PolicyProfile,
+    policy: &PdpPolicy,
     file: &str,
 ) -> Result<String, PlatformMigrateError> {
     let ir: MigrationIr =
@@ -635,7 +644,7 @@ fn resolve_shape(
             message: format!("deserialize IR envelope: {e}"),
         })?;
     let resolved =
-        resolve_create_table_policy(&ir, profile).map_err(|e| PlatformMigrateError::Shape {
+        resolve_create_table_policy(&ir, policy).map_err(|e| PlatformMigrateError::Shape {
             file: file.to_string(),
             message: format!("resolve table-shape policy: {e}"),
         })?;

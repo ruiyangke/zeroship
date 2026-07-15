@@ -20,10 +20,52 @@
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, PolicyProfile, PostgresBackend, SqlDialect,
+    effective_policy_from_ceiling_toml, resolve_create_table_policy, Approval, ExecutorConfig,
+    GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect,
 };
 use zeroship_migrate_adapter::CompioPgSession;
+
+/// The confined table-shape ceiling (the seven system columns + three indexes +
+/// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCeiling` document composed
+/// into an `EffectivePolicy` via the engine's `effective_policy_from_ceiling_toml`.
+/// (The old `PolicyProfile::confined()` is gone; the confined shape is now policy data.)
+const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
+
+[[grant]]
+key = "core.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "core.rename_into"
+value = true
+scope = "all"
+
+[[grant]]
+key = "sec.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id",         type = "text",        nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false },
+  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_by", type = "text",        nullable = true  },
+  { name = "updated_by", type = "text",        nullable = true  },
+  { name = "version",    type = "integer",     nullable = false },
+  { name = "deleted_at", type = "timestamptz", nullable = true  },
+]
+indexes = [
+  { name = "ix_deleted_at", columns = ["deleted_at"] },
+  { name = "ix_updated_at", columns = ["updated_at"] },
+  { name = "ix_created_by", columns = ["created_by"] },
+]
+"#;
 
 const PROJECT: &str = "prj_smoke";
 const APP: &str = "app_smoke";
@@ -76,8 +118,9 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// untouched.
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
-    let resolved =
-        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+    let confined =
+        effective_policy_from_ceiling_toml(CONFINED_CEILING_TOML).expect("confined ceiling composes");
+    let resolved = resolve_create_table_policy(&ir, &confined).expect("test IR resolves");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -141,7 +184,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     // (b→c) The REAL fail-closed gate + lower, Postgres dialect.
     let author = IrAuthor::new(&cfg.project_schema, APP, SqlDialect::Postgres);
     let migrations = author
-        .load_and_lower(&ir, APP, &Default::default(), &LiveSchema::default(), None)
+        .load_and_lower(&ir, APP, &Default::default(), &LiveSchema::default())
         .expect("a valid IR envelope must lower on Postgres");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
