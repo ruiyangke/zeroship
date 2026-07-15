@@ -4,11 +4,11 @@
 #
 # This is a `RootCeiling` document (loaded `LoadContext::RootCeiling` — the only
 # layer allowed a `mandatory = true` inject). The managed server composes an
-# untrusted creator draft against it via `compose_strict`: the draft may only
+# untrusted creator draft against it via `admit`: the draft may only
 # TIGHTEN (a looser grant than this ceiling permits is rejected, not clamped).
 #
 # The grants are authored at `scope = "all"` because the per-app SCHEMA pin is the
-# guard's job (`GuardConfig::confined(app_schema)` derives the `core.cross_schema`
+# guard's job (`GuardConfig::confined(app_schema)` derives the `schema.cross_schema`
 # confinement from the app id); this ceiling governs the table-SHAPE injection +
 # the creation/destructive posture a confined app gets.
 #
@@ -20,12 +20,12 @@ policy_version = 1
 
 # ── creation / movement authority (default-deny; the app may create + name tables) ──
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = "all"
 
@@ -33,7 +33,7 @@ scope = "all"
 # server gates them behind operator approval at preflight, not at the policy floor).
 # A creator draft may tighten this to `warn` or `forbid`.
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
@@ -41,12 +41,12 @@ scope = "all"
 # any value up to this ceiling (never above; the hard floor 1 forbids the indefinite
 # lock 0). 30s is a generous confined migration ceiling; a creator tightens within it.
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 30000
 scope = "all"
 
 [[grant]]
-key = "op.statement_timeout_ms"
+key = "runtime.statement_timeout_ms"
 value = 300000
 scope = "all"
 

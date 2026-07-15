@@ -12,7 +12,7 @@
 //!   inject). The default ceiling is the monorepo-owned CONFINED document embedded
 //!   below; named tiers add more ceilings to the [`ProfileCatalog`].
 //! - the CREATOR DRAFT is an untrusted [`PolicyDoc`] loaded [`LoadContext::NonRootLayer`].
-//! - the EFFECTIVE policy is [`compose_strict`]`(ceiling, draft)` — operator ⊓ creator
+//! - the EFFECTIVE policy is [`admit`]`(ceiling, draft)` — operator ⊓ creator
 //!   with ESCALATION-REJECT (a draft grant looser than the ceiling permits is
 //!   rejected, never clamped). This is the direct replacement for `meet_ceiling_draft`.
 //! - the SEAL is the `zero-migrate-policy` HMAC over the composed [`EffectivePolicy`]
@@ -31,10 +31,10 @@ use uuid::Uuid;
 use zero_migrate::{effective_policy_from_ceiling_toml, seal, DestructiveOps, SealError, SealedPolicy};
 use zero_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zero_migrate_ir::policy_registry::{
-    builtin_registry, KEY_PG_EXTENSIONS, KEY_SEC_DESTRUCTIVE_OPS, KEY_SEC_REQUIRE_RLS,
+    builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
 };
 use zero_migrate_policy::{
-    compose_strict, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
+    admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
     LoadError, ObjectName, PolicyDoc, RootCeiling,
 };
 
@@ -80,7 +80,7 @@ impl ManagedPolicyConfig {
     /// [`PolicyDoc`] of grant/inject/require/validate rules, composed by the engine PDP.
     ///
     /// Approval is a NORMAL sealed obligation now — a creator (or the operator ceiling)
-    /// authors `[[require]] key = "sec.require_approval"` like any other knob; there is
+    /// authors `[[require]] key = "safety.require_approval"` like any other knob; there is
     /// no managed-only overlay to strip. The engine's `deny_unknown_fields` loader
     /// validates the whole draft.
     pub fn parse_draft(&self, draft: &CreatorPolicyDraft<'_>) -> Result<ParsedDraft, ManagedPolicyError> {
@@ -94,7 +94,7 @@ impl ManagedPolicyConfig {
 
     /// Compose the operator ceiling ⊓ the (optional) creator draft into the effective
     /// managed policy. A draft that escalates beyond the ceiling is REJECTED here
-    /// (`compose_strict`), not clamped.
+    /// (`admit`), not clamped.
     pub fn compose_effective_for_app(
         &self,
         app_id: &Uuid,
@@ -103,7 +103,10 @@ impl ManagedPolicyConfig {
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(app_id, tier);
         let policy = match draft {
-            Some(draft) => compose_strict(ceiling.root(), &draft.doc, &builtin_registry())
+            // The `ceiling` operand is a finalized ceiling: `RootCeiling` itself is a
+            // valid finalized single-layer ceiling (it implements `AdmitCeiling`), so
+            // it may be `admit`'s ceiling directly.
+            Some(draft) => admit(ceiling.root(), &draft.doc, &builtin_registry())
                 .map_err(ManagedPolicyError::Compose)?,
             None => ceiling.effective()?,
         };
@@ -191,7 +194,7 @@ impl EffectivePolicy {
         Self { ceiling_id, ceiling_version, policy, managed }
     }
 
-    /// The effective `sec.require_approval` obligation level for this app's schema —
+    /// The effective `safety.require_approval` obligation level for this app's schema —
     /// the SEALED approval obligation (`never`/`on_destructive`/`always`) the engine
     /// only DECLARES. Resolved at the object the app owns (`app_schema`); the host
     /// enforces it as the state machine. Replaces the deleted `require_approval`
@@ -215,7 +218,7 @@ impl EffectivePolicy {
 
 /// The managed knobs the confined per-app guard is tightened with. Read out of the
 /// composed engine policy so there is a single source of truth. Approval is NOT one of
-/// these — it is the separate sealed `sec.require_approval` obligation the host
+/// these — it is the separate sealed `safety.require_approval` obligation the host
 /// enforces (see [`EffectivePolicy::approval_level`]), never a `destructive_ops` state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedPosture {
@@ -227,14 +230,14 @@ pub struct ManagedPosture {
 impl ManagedPosture {
     /// Derive the managed posture from the composed engine policy's decision queries.
     ///
-    /// `destructive_ops` maps the engine's `sec.destructive_ops` OrderedEnum
+    /// `destructive_ops` maps the engine's `safety.destructive_ops` OrderedEnum
     /// (`forbid`/`warn`/`allow`) back onto [`DestructiveOps`]. Approval is composed
-    /// SEPARATELY as the `sec.require_approval` obligation (see
+    /// SEPARATELY as the `safety.require_approval` obligation (see
     /// [`EffectivePolicy::approval_level`]) — it is not folded into this posture.
     fn from_policy(policy: &PdpPolicy) -> Self {
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
         let destructive_ops = match policy
-            .grants(&key(KEY_SEC_DESTRUCTIVE_OPS), &all)
+            .grants(&key(KEY_SAFETY_DESTRUCTIVE_OPS), &all)
         {
             Some(KnobValue::Str(v)) if v == "allow" => DestructiveOps::Allow,
             Some(KnobValue::Str(v)) if v == "warn" => DestructiveOps::Warn,
@@ -244,8 +247,10 @@ impl ManagedPosture {
         let require_rls = policy
             .obligations(&all)
             .into_iter()
-            .any(|(k, v)| k.as_str() == KEY_SEC_REQUIRE_RLS && matches!(v, KnobValue::Bool(true)));
-        let extensions = match policy.grants(&key(KEY_PG_EXTENSIONS), &schema_object("public")) {
+            .any(|(k, v)| k.as_str() == KEY_SAFETY_REQUIRE_RLS && matches!(v, KnobValue::Bool(true)));
+        // `code.extension` is a Global StrSet grant (the allowlist IS the capability);
+        // query it at any in-scope object.
+        let extensions = match policy.grants(&key(KEY_CODE_EXTENSION), &all) {
             Some(KnobValue::StrSet(names)) => names,
             _ => Vec::new(),
         };
@@ -365,7 +370,7 @@ pub struct CreatorPolicyDraft<'a> {
 }
 
 /// A parsed creator draft: the PDP [`PolicyDoc`] the engine composes. Approval rides
-/// inside it as a normal `sec.require_approval` obligation — there are no managed-only
+/// inside it as a normal `safety.require_approval` obligation — there are no managed-only
 /// out-of-band directives.
 #[derive(Debug, Clone)]
 pub struct ParsedDraft {
@@ -475,7 +480,7 @@ mod tests {
         // The default confined ceiling grants destructive `allow` and injects the
         // system shape.
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
-        // No `sec.require_approval` obligation on the default confined ceiling.
+        // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
     }
 
@@ -488,7 +493,7 @@ mod tests {
         let draft_toml = r#"policy_version = 1
 
 [[require]]
-key = "sec.require_approval"
+key = "safety.require_approval"
 value = "always"
 scope = "all"
 "#;
@@ -513,12 +518,12 @@ scope = "all"
         let draft_toml = r#"policy_version = 1
 
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "forbid"
 scope = "all"
 
 [[grant]]
-key = "op.lock_timeout_ms"
+key = "runtime.lock_timeout_ms"
 value = 1000
 scope = "all"
 "#;
@@ -537,12 +542,12 @@ scope = "all"
     fn draft_permission_escalation_is_rejected_not_clamped() {
         let cfg = config();
         let app_id = Uuid::new_v4();
-        // The confined ceiling does NOT grant `core.raw_sql`; a draft that does
+        // The confined ceiling does NOT grant `sql.raw`; a draft that does
         // escalates beyond the ceiling.
         let draft_toml = r#"policy_version = 1
 
 [[grant]]
-key = "core.raw_sql"
+key = "sql.raw"
 value = true
 scope = "all"
 "#;
@@ -565,7 +570,7 @@ scope = "all"
             .parse_draft(&CreatorPolicyDraft {
                 filename: MIGRATE_POLICY_FILENAME,
                 // an unknown field → deny_unknown_fields parse error.
-                body: "policy_version = 1\n[[grant]]\nkez = \"core.raw_sql\"\nvalue = true\nscope = \"all\"\n",
+                body: "policy_version = 1\n[[grant]]\nkez = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
             })
             .expect_err("unknown policy key must be a parse error");
 
@@ -601,9 +606,9 @@ scope = "all"
         let ceiling = ManagedCeiling::platform(1).expect("platform ceiling loads");
         let policy = ceiling.effective().expect("platform ceiling composes");
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
-        // pg.role is granted (privileged posture) — proves the platform grants loaded.
+        // access.role is granted (privileged posture) — proves the platform grants loaded.
         assert!(matches!(
-            policy.grants(&key(zero_migrate_ir::policy_registry::KEY_PG_ROLE), &all),
+            policy.grants(&key(zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE), &all),
             Some(KnobValue::Bool(true))
         ));
     }

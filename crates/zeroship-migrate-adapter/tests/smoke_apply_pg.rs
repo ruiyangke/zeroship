@@ -32,17 +32,17 @@ use zeroship_migrate_adapter::CompioPgSession;
 const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = "all"
 
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = "all"
 
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
