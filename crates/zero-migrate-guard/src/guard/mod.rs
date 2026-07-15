@@ -1159,14 +1159,35 @@ impl SqlGuard {
     /// visit EVERY node, including the slots `pg_query::nodes()` skips (column
     /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, …).
     fn check_node(&self, node: &NodeEnum, json: &Value, raw: &str) -> Result<(), GuardError> {
+        // 0. Scoped-raw-SQL refusals (II.2.5) run FIRST, but ONLY under a Scoped
+        //    (non-⊤) `core.raw_sql` grant — the posture that HAS relaxed raw SQL, so
+        //    the refined namespace refusal (SearchPathUnderScopedRawSql /
+        //    OpaqueBodyUnderScopedRawSql / UnqualifiedNameUnderScopedRawSql) owns the
+        //    diagnostic instead of the deny-list belt. Under the plain confined path
+        //    (raw_sql Ungranted) this is a no-op and the belt keeps its codes.
+        if self.cfg.raw_sql_region() == GrantRegion::Scoped {
+            self.check_scoped_raw_sql(node, raw)?;
+        }
+
         // 1. Statement-kind gate: DENY-BY-DEFAULT. Only an enumerated set of
         //    known-safe migration statements passes; everything else is denied.
         self.check_statement_kind(node, raw)?;
 
         // 2. Cross-schema confinement — any explicit foreign schema, anywhere
         //    in the full tree (RangeVar, SET SCHEMA newschema, CreateSchema,
-        //    trigger/CALL funcname, COMMENT object, INHERIT target, …).
+        //    trigger/CALL funcname, COMMENT object, INHERIT target, …). Owns the
+        //    diagnostic for a foreign-schema reference (`CrossSchema`), so it runs
+        //    before the namespace creation-gating below — a cross-tenant `CREATE TABLE
+        //    other.t` is a cross-schema violation first, not a creation-gating one.
         self.check_cross_schema(json, raw)?;
+
+        // 2c. NAMESPACE-authority structural gate (II.2.5 raw-SQL create/rename
+        //     classification / II.2.6 creation-gating + injected-shape immutability):
+        //     a raw create must pass `core.create_table` and is denied in any inject
+        //     scope; a rename/move needs `core.rename_into` and is denied into an
+        //     inject scope; an alter/drop of an injected shape element is immutable.
+        //     Runs AFTER cross-schema so a foreign-schema target reports `CrossSchema`.
+        self.check_namespace_structural(node, raw)?;
 
         // 2b. System-catalog relation reads/writes — `pg_catalog.pg_authid`,
         //     unqualified `pg_shadow`/`pg_user`, `information_schema.*`. These
@@ -1203,15 +1224,6 @@ impl SqlGuard {
         //     (least-priv `migrator` role) defense, same limit as `set_config`.
         self.check_sql_string_arg_calls(json, raw)?;
 
-        // 3f. NAMESPACE-authority (II.2.5 raw-SQL classification / II.2.6
-        //     creation-gating + injected-shape immutability). A raw statement must
-        //     ALSO clear the structured gate for whatever it does: a raw create must
-        //     pass `core.create_table` and is denied in any inject scope; a raw
-        //     rename-into is denied; a raw alter of an injected shape is immutable;
-        //     and unqualified names / SET search_path / opaque bodies are denied
-        //     under any non-⊤ `core.raw_sql` grant. Fail-closed throughout.
-        self.check_namespace_authority(node, raw)?;
-
         // 4. Recurse into DO blocks and function bodies — the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
@@ -1219,41 +1231,35 @@ impl SqlGuard {
         Ok(())
     }
 
-    /// NAMESPACE-authority enforcement (Phase 2 Step 2b — II.2.5 raw-SQL
-    /// classification + II.2.6 creation-gating / injected-shape immutability).
+    /// NAMESPACE-authority STRUCTURAL gate (Phase 2 Step 2b — II.2.5 raw create/
+    /// rename classification + II.2.6 creation-gating / injected-shape immutability).
+    /// The scoped-raw-SQL refusals (`SET search_path` / opaque body / unqualified
+    /// name) are a SEPARATE method ([`Self::check_scoped_raw_sql`]) run earlier, only
+    /// under a Scoped `core.raw_sql` grant.
     ///
     /// A raw statement the guard sees via [`SqlGuard::check`] must ALSO clear the
     /// structured gate for whatever it does. Injection is an IR transform that cannot
     /// rewrite raw text, so every rule here fails closed. Dispatch is by parsed shape:
     ///
     /// - a **create** (`CreateStmt` incl. `LIKE`/`INHERITS`/`PARTITION OF`,
-    ///   `CreateTableAsStmt` = CTAS / `SELECT INTO` / `CREATE TABLE AS EXECUTE`) must
-    ///   pass `core.create_table` at the target AND is denied wherever any inject rule
-    ///   covers it (`RawCreateInInjectScope`);
+    ///   `CreateTableAsStmt` = CTAS / `CREATE TABLE AS EXECUTE`, `SelectStmt` with an
+    ///   `into_clause` = `SELECT … INTO`) must pass `core.create_table` at the target
+    ///   AND is denied wherever any inject rule covers it (`RawCreateInInjectScope`);
     /// - a `CreateSchemaStmt` must pass `core.create_schema`;
     /// - a `RenameStmt`/`AlterObjectSchemaStmt` that moves a table checks
     ///   `core.rename_into` and is denied into any inject scope
     ///   (`RawRenameIntoInjectScope`); a `RENAME COLUMN` of an injected column is
     ///   immutable;
-    /// - an `AlterTableStmt` touching an injected column/PK/index is immutable
-    ///   (`InjectedShapeImmutable`/`InjectedPrimaryKeyImmutable`/`InjectedIndexImmutable`);
-    /// - `SET search_path`, unqualified names, and opaque-body constructs are denied
-    ///   under a **Scoped** (non-⊤) `core.raw_sql` grant.
-    fn check_namespace_authority(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
-        // Scoped-raw-SQL rules (II.2.5) — only under a Scoped (non-⊤, non-empty)
-        // `core.raw_sql` grant. Ungranted (the plain confined/platform DDL path) and
-        // Top (fully-trusted raw) both skip them, preserving existing behaviour.
-        if self.cfg.raw_sql_region() == GrantRegion::Scoped {
-            self.check_scoped_raw_sql(node, raw)?;
-        }
-
+    /// - an `AlterTableStmt` touching an injected column/PK is immutable
+    ///   (`InjectedShapeImmutable`/`InjectedPrimaryKeyImmutable`).
+    fn check_namespace_structural(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
         match node {
             // ── raw create: CREATE TABLE (incl. LIKE / INHERITS / PARTITION OF) ──
             NodeEnum::CreateStmt(c) => {
                 let target = self.resolve_relation_target(c.relation.as_ref(), raw)?;
                 self.gate_raw_create(&target, raw)?;
             }
-            // ── CTAS / SELECT INTO / CREATE TABLE AS EXECUTE ────────────────────
+            // ── CTAS / CREATE TABLE AS EXECUTE ──────────────────────────────────
             NodeEnum::CreateTableAsStmt(cta) => {
                 // A materialized view is not a table create; only OBJECT_TABLE /
                 // SELECT INTO bring a table into existence. Other objtypes fall
@@ -1261,6 +1267,16 @@ impl SqlGuard {
                 if cta.objtype == ObjectType::ObjectTable as i32 || cta.is_select_into {
                     let rel = cta.into.as_ref().and_then(|i| i.rel.as_ref());
                     let target = self.resolve_relation_target(rel, raw)?;
+                    self.gate_raw_create(&target, raw)?;
+                }
+            }
+            // ── SELECT … INTO <table> ───────────────────────────────────────────
+            // pg_query parses `SELECT … INTO t` as a `SelectStmt` carrying an
+            // `into_clause`, NOT a `CreateTableAsStmt`. It still brings a table into
+            // existence, so it is a raw create and gets the same gate.
+            NodeEnum::SelectStmt(s) => {
+                if let Some(into) = s.into_clause.as_ref() {
+                    let target = self.resolve_relation_target(into.rel.as_ref(), raw)?;
                     self.gate_raw_create(&target, raw)?;
                 }
             }
