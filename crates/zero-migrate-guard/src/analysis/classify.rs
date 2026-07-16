@@ -857,20 +857,18 @@ fn collect_touched(node: &NodeEnum, out: &mut Vec<TouchedRelation>) {
                 }
             }
         }
-        NodeEnum::DropStmt(d) => {
-            // Only DROP TABLE keys the table-ownership map. The object is a List
-            // of String nodes [schema?, table]; the LAST element is the relname.
-            if d.remove_type == ObjectType::ObjectTable as i32 {
-                for obj in &d.objects {
-                    if let Some(NodeEnum::List(list)) = obj.node.as_ref() {
-                        if let Some(last) = list
-                            .items
-                            .iter()
-                            .filter_map(|i| string_value(i.node.as_ref()))
-                            .next_back()
-                        {
-                            push_touched(out, &last, OwnershipNeed::RequiresOwnershipForDrop);
-                        }
+        // Only DROP TABLE keys the table-ownership map. The object is a List
+        // of String nodes [schema?, table]; the LAST element is the relname.
+        NodeEnum::DropStmt(d) if d.remove_type == ObjectType::ObjectTable as i32 => {
+            for obj in &d.objects {
+                if let Some(NodeEnum::List(list)) = obj.node.as_ref() {
+                    if let Some(last) = list
+                        .items
+                        .iter()
+                        .filter_map(|i| string_value(i.node.as_ref()))
+                        .next_back()
+                    {
+                        push_touched(out, &last, OwnershipNeed::RequiresOwnershipForDrop);
                     }
                 }
             }

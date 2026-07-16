@@ -194,7 +194,11 @@ impl GuardConfig {
         dialect: SqlDialect,
         guard_mode: GuardMode,
     ) -> Self {
-        Self { dialect, effective, guard_mode }
+        Self {
+            dialect,
+            effective,
+            guard_mode,
+        }
     }
 
     /// Construct a **Confined** guard whose PDP is a caller-composed
@@ -315,15 +319,13 @@ impl GuardConfig {
     /// This builder is safe to expose because it can only add validation/denial
     /// obligations to whatever posture the caller can already construct.
     #[must_use]
-    pub fn with_data_security(
-        self,
-        require_rls: bool,
-        destructive_ops: DestructiveOps,
-    ) -> Self {
+    pub fn with_data_security(self, require_rls: bool, destructive_ops: DestructiveOps) -> Self {
         let inputs = PolicyInputs::from_effective(&self.effective);
         let dialect = self.dialect;
         Self::from_policy(
-            inputs.with_data_security(require_rls, destructive_ops).compose(),
+            inputs
+                .with_data_security(require_rls, destructive_ops)
+                .compose(),
             dialect,
         )
     }
@@ -357,7 +359,11 @@ impl GuardConfig {
     /// still derived.
     #[must_use]
     pub fn trusted(_cap: &OperatorCapability) -> Self {
-        Self::from_policy_with_mode(trusted_effective_policy(), SqlDialect::Postgres, GuardMode::Off)
+        Self::from_policy_with_mode(
+            trusted_effective_policy(),
+            SqlDialect::Postgres,
+            GuardMode::Off,
+        )
     }
 
     /// PHASE 4 — the target SQL dialect this guard config vets.
@@ -444,7 +450,10 @@ impl GuardConfig {
         let Some(k) = KnobKey::parse(key).ok() else {
             return false;
         };
-        matches!(self.effective.grants(&k, object), Some(KnobValue::Bool(true)))
+        matches!(
+            self.effective.grants(&k, object),
+            Some(KnobValue::Bool(true))
+        )
     }
 
     /// Whether the effective policy admits a DROP object class beyond
@@ -574,7 +583,10 @@ impl GuardConfig {
         let Some(object) = normalize_pg_identifier(schema) else {
             return false;
         };
-        matches!(self.effective.grants(&k, &object), Some(KnobValue::Bool(true)))
+        matches!(
+            self.effective.grants(&k, &object),
+            Some(KnobValue::Bool(true))
+        )
     }
 }
 
@@ -618,7 +630,9 @@ fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
     let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
         return Vec::new();
     };
-    effective.grant_literal_schema_includes(&k).unwrap_or_default()
+    effective
+        .grant_literal_schema_includes(&k)
+        .unwrap_or_default()
 }
 
 fn destructive_ops_from_effective(effective: &EffectivePolicy) -> DestructiveOps {
@@ -728,20 +742,23 @@ impl PolicyInputs {
     fn from_effective(effective: &EffectivePolicy) -> Self {
         let w = global_witness();
         let mut caps = VendorCapabilities::confined();
-        caps.allow_role = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_ROLE, &w);
-        caps.allow_grant = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_GRANT, &w);
+        caps.allow_role =
+            grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_ROLE, &w);
+        caps.allow_grant =
+            grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_GRANT, &w);
         caps.allow_extension =
-            !grant_str_set_from_effective(effective, policy_registry::KEY_CODE_EXTENSION).is_empty();
+            !grant_str_set_from_effective(effective, policy_registry::KEY_CODE_EXTENSION)
+                .is_empty();
         caps.allow_schema =
             grant_bool_from_effective(effective, policy_registry::KEY_SCHEMA_CREATE_SCHEMA, &w);
-        caps.allow_policy = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_POLICY, &w);
+        caps.allow_policy =
+            grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_POLICY, &w);
         caps.allow_rls = grant_bool_from_effective(effective, policy_registry::KEY_ACCESS_RLS, &w);
         caps.allow_partition =
             grant_bool_from_effective(effective, policy_registry::KEY_SCHEMA_PARTITION, &w);
         caps.allow_function =
             grant_bool_from_effective(effective, policy_registry::KEY_CODE_FUNCTION, &w);
-        caps.allow_raw_sql =
-            grant_bool_from_effective(effective, policy_registry::KEY_SQL_RAW, &w);
+        caps.allow_raw_sql = grant_bool_from_effective(effective, policy_registry::KEY_SQL_RAW, &w);
         caps.allow_raw_view_body =
             grant_bool_from_effective(effective, policy_registry::KEY_SQL_RAW_VIEW_BODY, &w);
         caps.allow_materialized_view =
@@ -798,14 +815,26 @@ impl PolicyInputs {
         // ── vendor capabilities → their builtin knob keys ──────────────────────
         grant_bool(policy_registry::KEY_ACCESS_ROLE, self.caps.allow_role);
         grant_bool(policy_registry::KEY_ACCESS_GRANT, self.caps.allow_grant);
-        grant_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, self.caps.allow_schema);
+        grant_bool(
+            policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
+            self.caps.allow_schema,
+        );
         grant_bool(policy_registry::KEY_ACCESS_POLICY, self.caps.allow_policy);
         grant_bool(policy_registry::KEY_ACCESS_RLS, self.caps.allow_rls);
-        grant_bool(policy_registry::KEY_SCHEMA_PARTITION, self.caps.allow_partition);
+        grant_bool(
+            policy_registry::KEY_SCHEMA_PARTITION,
+            self.caps.allow_partition,
+        );
         grant_bool(policy_registry::KEY_CODE_FUNCTION, self.caps.allow_function);
         grant_bool(policy_registry::KEY_SQL_RAW, self.caps.allow_raw_sql);
-        grant_bool(policy_registry::KEY_SQL_RAW_VIEW_BODY, self.caps.allow_raw_view_body);
-        grant_bool(policy_registry::KEY_CODE_MATERIALIZED_VIEW, self.caps.allow_materialized_view);
+        grant_bool(
+            policy_registry::KEY_SQL_RAW_VIEW_BODY,
+            self.caps.allow_raw_view_body,
+        );
+        grant_bool(
+            policy_registry::KEY_CODE_MATERIALIZED_VIEW,
+            self.caps.allow_materialized_view,
+        );
 
         // ── cross-schema + namespace-authority creation-gating (II.2.6a) ───────
         // `schema.cross_schema` (the confinement) + `schema.create_table`/`schema.rename`
@@ -1345,10 +1374,10 @@ impl SqlGuard {
                 };
                 match obj {
                     Some(schema_obj) => {
-                        if !self
-                            .cfg
-                            .grants_namespace_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, &schema_obj)
-                        {
+                        if !self.cfg.grants_namespace_bool(
+                            policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
+                            &schema_obj,
+                        ) {
                             return Err(namespace_denied(
                                 namespace_rule::CREATE_SCHEMA_NOT_GRANTED,
                                 raw,
@@ -1458,10 +1487,9 @@ impl SqlGuard {
                 && self
                     .cfg
                     .is_injected_shape(&source, &ShapeElement::Column(col))
-                && !self.cfg.grants_namespace_bool(
-                    policy_registry::KEY_SCHEMA_ALTER_INJECTED,
-                    &source,
-                )
+                && !self
+                    .cfg
+                    .grants_namespace_bool(policy_registry::KEY_SCHEMA_ALTER_INJECTED, &source)
             {
                 return Err(namespace_denied(
                     namespace_rule::INJECTED_SHAPE_IMMUTABLE,
@@ -1610,7 +1638,9 @@ impl SqlGuard {
             // pinned by a covering inject rule, a DROP CONSTRAINT is immutable
             // (fail-closed) unless granted.
             if matches!(AlterTableType::try_from(c.subtype), Ok(A::AtDropConstraint))
-                && self.cfg.is_injected_shape(&target, &ShapeElement::PrimaryKey)
+                && self
+                    .cfg
+                    .is_injected_shape(&target, &ShapeElement::PrimaryKey)
                 && !granted
             {
                 return Err(namespace_denied(
@@ -1642,9 +1672,7 @@ impl SqlGuard {
             // SET search_path (and role/session_authorization name-resolution GUCs).
             NodeEnum::VariableSetStmt(s) => {
                 let name = s.name.to_ascii_lowercase();
-                if name == "search_path"
-                    || raw.to_ascii_lowercase().contains("search_path")
-                {
+                if name == "search_path" || raw.to_ascii_lowercase().contains("search_path") {
                     return Err(namespace_denied(
                         namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
                         raw,
@@ -1652,13 +1680,13 @@ impl SqlGuard {
                 }
             }
             // ALTER ROLE / ALTER DATABASE … SET search_path — a persisted GUC.
-            NodeEnum::AlterRoleSetStmt(_) | NodeEnum::AlterDatabaseSetStmt(_) => {
-                if raw.to_ascii_lowercase().contains("search_path") {
-                    return Err(namespace_denied(
-                        namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
-                        raw,
-                    ));
-                }
+            NodeEnum::AlterRoleSetStmt(_) | NodeEnum::AlterDatabaseSetStmt(_)
+                if raw.to_ascii_lowercase().contains("search_path") =>
+            {
+                return Err(namespace_denied(
+                    namespace_rule::SEARCH_PATH_UNDER_SCOPED_RAW_SQL,
+                    raw,
+                ));
             }
             _ => {}
         }
@@ -1692,8 +1720,7 @@ impl SqlGuard {
             }
             let mut unqualified = false;
             walk_range_vars(&json, &mut |schema, relname| {
-                let is_pg_catalog =
-                    relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
+                let is_pg_catalog = relname.len() >= 3 && relname[..3].eq_ignore_ascii_case("pg_");
                 if schema.trim().is_empty() && !relname.trim().is_empty() && !is_pg_catalog {
                     unqualified = true;
                     return true;
@@ -2371,7 +2398,9 @@ impl SqlGuard {
         // body backstop (which reaches here with `Off`) still DENIES these needles, a
         // behaviour the vendor-lower matrix locks.
         let allow_role = !self.cfg.skips_denylist_belt()
-            && self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
+            && self
+                .cfg
+                .grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {
@@ -2414,7 +2443,9 @@ impl SqlGuard {
         //     uses an `%I` identifier template — any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
-        if let Some(schema) = foreign_schema_literal_in_body(body, &|s| self.cfg.grants_cross_schema(s)) {
+        if let Some(schema) =
+            foreign_schema_literal_in_body(body, &|s| self.cfg.grants_cross_schema(s))
+        {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -2452,7 +2483,10 @@ pub fn check_raw_view_body_text(
         Some(SchemaScope::Unconfined) => Vec::new(),
     };
     let inputs = PolicyInputs::confined("", &[]).with_owned_schemas(owned);
-    let guard = SqlGuard::new(GuardConfig::from_policy(inputs.compose(), SqlDialect::Postgres));
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        inputs.compose(),
+        SqlDialect::Postgres,
+    ));
     guard.check_body_text(body, raw)
 }
 

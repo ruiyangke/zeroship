@@ -25,7 +25,7 @@ use super::{Difference, Scope};
 
 // ── Universe of concrete names ────────────────────────────────────────────────
 
-const ALPHABET: [u8; 3] = [b'a', b'b', b'_'];
+const ALPHABET: [u8; 3] = *b"ab_";
 const MAX_SEG_LEN: usize = 3;
 
 /// All non-empty byte strings over the alphabet up to `MAX_SEG_LEN`.
@@ -125,8 +125,8 @@ fn pattern_pool() -> Vec<Pattern> {
         SegGlob::literal(b"a".to_vec()),
         SegGlob::literal(b"b".to_vec()),
         SegGlob::literal(b"a_".to_vec()),
-        SegGlob::infix(b"a".to_vec(), Vec::new()),  // a*
-        SegGlob::infix(Vec::new(), b"a".to_vec()),  // *a
+        SegGlob::infix(b"a".to_vec(), Vec::new()),    // a*
+        SegGlob::infix(Vec::new(), b"a".to_vec()),    // *a
         SegGlob::infix(b"a".to_vec(), b"a".to_vec()), // a*a
     ];
     let mut out = Vec::new();
@@ -173,10 +173,13 @@ fn scope_universe() -> Vec<Scope> {
     if let Ok(s) = Scope::include(two_inc.clone()) {
         out.push(s);
     }
-    if let Ok(s) = Scope::of(two_inc, vec![Pattern::table(
-        SegGlob::literal(b"a".to_vec()),
-        SegGlob::literal(b"a".to_vec()),
-    )]) {
+    if let Ok(s) = Scope::of(
+        two_inc,
+        vec![Pattern::table(
+            SegGlob::literal(b"a".to_vec()),
+            SegGlob::literal(b"a".to_vec()),
+        )],
+    ) {
         out.push(s);
     }
 
@@ -186,10 +189,13 @@ fn scope_universe() -> Vec<Scope> {
 /// A small exclude pattern pool.
 fn excl_pool() -> Vec<Pattern> {
     vec![
-        Pattern::schema(SegGlob::literal(b"a".to_vec())),          // a.*
-        Pattern::table(SegGlob::literal(b"a".to_vec()), SegGlob::literal(b"a".to_vec())), // a.a
-        Pattern::table(SegGlob::star(), SegGlob::infix(b"a".to_vec(), Vec::new())),       // *.a*
-        Pattern::schema(SegGlob::infix(b"a".to_vec(), Vec::new())),                        // a*.*
+        Pattern::schema(SegGlob::literal(b"a".to_vec())), // a.*
+        Pattern::table(
+            SegGlob::literal(b"a".to_vec()),
+            SegGlob::literal(b"a".to_vec()),
+        ), // a.a
+        Pattern::table(SegGlob::star(), SegGlob::infix(b"a".to_vec(), Vec::new())), // *.a*
+        Pattern::schema(SegGlob::infix(b"a".to_vec(), Vec::new())), // a*.*
     ]
 }
 
@@ -226,7 +232,11 @@ fn oracle_lattice_properties_hold_over_bounded_universe() {
     // Guard against the universe silently degenerating to something trivial (which
     // would make every assertion vacuous). These are floors, not exact counts.
     assert!(univ.len() >= 500, "name universe too small: {}", univ.len());
-    assert!(scopes.len() >= 100, "scope universe too small: {}", scopes.len());
+    assert!(
+        scopes.len() >= 100,
+        "scope universe too small: {}",
+        scopes.len()
+    );
 
     // Precompute ground-truth object sets once.
     let obj: Vec<BTreeSet<usize>> = scopes.iter().map(|s| objects(s, &univ)).collect();
@@ -306,7 +316,8 @@ fn oracle_intersect_seg_is_exact() {
                 let truth = a.matches(w) && b.matches(w);
                 let got = result.iter().any(|g| g.matches(w));
                 assert_eq!(
-                    truth, got,
+                    truth,
+                    got,
                     "∩seg not exact on segment {:?}:\n a={a:?}\n b={b:?}\n result={result:?}",
                     String::from_utf8_lossy(w)
                 );
@@ -323,7 +334,10 @@ fn oracle_intersect_seg_is_exact() {
 fn seg_intersect_rendered(a: &str, b: &str) -> BTreeSet<String> {
     let ga = SegGlob::parse(a).unwrap();
     let gb = SegGlob::parse(b).unwrap();
-    intersect_seg(&ga, &gb).iter().map(SegGlob::render).collect()
+    intersect_seg(&ga, &gb)
+        .iter()
+        .map(SegGlob::render)
+        .collect()
 }
 
 fn rendered(items: &[&str]) -> BTreeSet<String> {
@@ -333,7 +347,10 @@ fn rendered(items: &[&str]) -> BTreeSet<String> {
 #[test]
 fn pinned_a_star_x() {
     // a_* ∩seg *_x  →  { a_x, a_*_x }
-    assert_eq!(seg_intersect_rendered("a_*", "*_x"), rendered(&["a_x", "a_*_x"]));
+    assert_eq!(
+        seg_intersect_rendered("a_*", "*_x"),
+        rendered(&["a_x", "a_*_x"])
+    );
 }
 
 #[test]
@@ -368,7 +385,10 @@ fn pinned_a_a_shared_overlap() {
     // Pin the LITERAL corrected H2 vector (drift guard — not a recompute).
     assert_eq!(set, rendered(&["a_a_a", "a_a_a_a", "a_a_*_a_a"]));
     // And it must NOT contain the too-short "a_a" (H1 length floor).
-    assert!(!set.contains("a_a"), "H2 set must exclude the too-short literal a_a");
+    assert!(
+        !set.contains("a_a"),
+        "H2 set must exclude the too-short literal a_a"
+    );
 }
 
 fn all_segments_len_upto(max: usize) -> Vec<Vec<u8>> {
@@ -475,7 +495,10 @@ fn pinned_difference_exclude_counterexample_stays_reject() {
     .unwrap();
 
     // Also the subset direction: A ⋢ B (A would grant app_tmp_* that B forbids).
-    assert!(!a.subset(&b), "A ⊑ B must be FALSE (escalation) — B excludes app_tmp_*");
+    assert!(
+        !a.subset(&b),
+        "A ⊑ B must be FALSE (escalation) — B excludes app_tmp_*"
+    );
 
     let diff = a.difference(&b);
     match diff {
@@ -484,7 +507,11 @@ fn pinned_difference_exclude_counterexample_stays_reject() {
             // Must be non-empty and retain app_tmp_* objects (the region B carved
             // out that A\B keeps). An empty result would wrongly accept the
             // escalation.
-            assert_ne!(d, Scope::Nothing, "A ∖ B must be non-empty, else escalation accepted");
+            assert_ne!(
+                d,
+                Scope::Nothing,
+                "A ∖ B must be non-empty, else escalation accepted"
+            );
             assert!(
                 d.objects_membership(&ObjectName::table(b"app_tmp_x".to_vec(), b"t".to_vec())),
                 "A ∖ B must retain app_tmp_* — got {d:?}"

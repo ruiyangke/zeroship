@@ -5470,7 +5470,6 @@ fn render_sqlite_trigger_stmt(
         )),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,
-            message: _,
             ..
         } => Ok("SELECT RAISE(IGNORE)".to_string()),
         TriggerStmt::Raise { level, message, .. } => Ok(format!(
@@ -9981,10 +9980,7 @@ mod tests {
         let [PlanStep::Ddl(migration)] = plan.steps.as_slice() else {
             panic!("expected one DDL step, got {:?}", plan.steps);
         };
-        assert_eq!(
-            migration.preconditions,
-            std::slice::from_ref(&precondition)
-        );
+        assert_eq!(migration.preconditions, std::slice::from_ref(&precondition));
         assert_eq!(plan.preconditions, [precondition]);
     }
 
