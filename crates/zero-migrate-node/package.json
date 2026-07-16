@@ -57,6 +57,6 @@
     "test": "node __test__/mock_apply.mjs && node __test__/status_ir.mjs && node __test__/gen_artifacts.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.0.0"
+    "@napi-rs/cli": "^3.7.3"
   }
 }
