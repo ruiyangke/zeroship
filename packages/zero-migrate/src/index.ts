@@ -39,6 +39,8 @@ export {
   byteValue,
   dialect,
   now,
+  uuidV4,
+  uuidV7,
   genRandomUuid,
   currentSetting,
   currentUser,

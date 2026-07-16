@@ -22,7 +22,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
@@ -54,6 +54,28 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
+    }
+
+    async fn verify_database_requirements(
+        &self,
+        requirements: &DatabaseRequirements,
+    ) -> Result<(), ApplyError> {
+        if requirements.is_empty() {
+            return Ok(());
+        }
+        let actual = session::server_version_num(self.conn).await?;
+        for feature in requirements.iter() {
+            let minimum = feature.minimum_postgres_version_num();
+            if actual < minimum {
+                let minimum_major = minimum / 10_000;
+                return Err(ApplyError::Backend(format!(
+                    "{} requires PostgreSQL {minimum_major} or newer \
+                     (server_version_num >= {minimum}); connected server reports {actual}",
+                    feature.description()
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn ddl_is_transactional(&self) -> bool {
@@ -586,7 +608,8 @@ mod recording_session_genericity {
     use crate::approval::{Approval, ApprovalScope};
     use crate::driver::{Bind, DbError, Row, Value};
     use crate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
-    use crate::model::migration::{Checksum, ChecksumInput, MigrationFlags};
+    use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
+    use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
     use crate::render::step::PlanStep;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -647,6 +670,7 @@ mod recording_session_genericity {
         canned_progress: RefCell<Vec<Row>>,
         progress_table_exists: bool,
         progress_checksum_exists: bool,
+        server_version_num: i32,
     }
 
     impl RecordingSession {
@@ -659,6 +683,14 @@ mod recording_session_genericity {
                 canned_progress: RefCell::new(Vec::new()),
                 progress_table_exists: false,
                 progress_checksum_exists: false,
+                server_version_num: 180_000,
+            }
+        }
+
+        fn with_server_version(server_version_num: i32) -> Self {
+            Self {
+                server_version_num,
+                ..Self::new()
             }
         }
 
@@ -685,7 +717,12 @@ mod recording_session_genericity {
         /// which yields an empty-but-valid decode — enough to drive every path
         /// end-to-end without feeding a wrong-shaped row into a decoder.
         fn rows_for(&self, sql: &str) -> Vec<Row> {
-            if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
+            if sql.contains("current_setting('server_version_num')") {
+                vec![Row::new(
+                    vec!["server_version_num".into()],
+                    vec![Value::Text(self.server_version_num.to_string())],
+                )]
+            } else if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
                 self.canned_journal.borrow().clone()
             } else if sql.contains("AS table_exists") && sql.contains("pg_catalog.pg_attribute") {
                 vec![Row::new(
@@ -975,6 +1012,124 @@ mod recording_session_genericity {
                 .iter()
                 .any(|entry| entry.contains("UPDATE users SET ready")),
             "drift must abort before the earlier update"
+        );
+    }
+
+    fn requirements(feature: DatabaseFeature) -> DatabaseRequirements {
+        let mut requirements = DatabaseRequirements::default();
+        requirements.require(feature);
+        requirements
+    }
+
+    #[compio::test]
+    async fn uuid_generation_requirements_gate_postgres_server_versions() {
+        let empty = RecordingSession::with_server_version(120_000);
+        let empty_backend = PostgresBackend::new_generic(&empty);
+        empty_backend
+            .verify_database_requirements(&DatabaseRequirements::default())
+            .await
+            .expect("an empty requirement set performs no version gate");
+        assert!(
+            empty.log.borrow().is_empty(),
+            "empty requirements must not query the server"
+        );
+
+        for (feature, rejected, accepted, expected) in [
+            (
+                DatabaseFeature::UuidV4Generation,
+                120_000,
+                130_000,
+                "PostgreSQL 13",
+            ),
+            (
+                DatabaseFeature::UuidV7Generation,
+                170_000,
+                180_000,
+                "PostgreSQL 18",
+            ),
+        ] {
+            let old = RecordingSession::with_server_version(rejected);
+            let old_backend = PostgresBackend::new_generic(&old);
+            let error = old_backend
+                .verify_database_requirements(&requirements(feature))
+                .await
+                .expect_err("an older PostgreSQL server must fail closed");
+            let message = error.to_string();
+            assert!(message.contains(expected), "got: {message}");
+            assert!(
+                message.contains(&rejected.to_string()),
+                "actual server version must be reported: {message}"
+            );
+
+            let current = RecordingSession::with_server_version(accepted);
+            PostgresBackend::new_generic(&current)
+                .verify_database_requirements(&requirements(feature))
+                .await
+                .expect("the minimum supported PostgreSQL version must pass");
+            assert!(current
+                .log
+                .borrow()
+                .iter()
+                .any(|entry| { entry.contains("current_setting('server_version_num')") }));
+        }
+    }
+
+    #[compio::test]
+    async fn plan_requirement_refuses_before_authored_sql_runs() {
+        let rec = RecordingSession::with_server_version(170_000);
+        let backend = PostgresBackend::new_generic(&rec);
+        let flags = MigrationFlags::default();
+        let up = "CREATE TABLE authored_uuid_v7 (id uuid DEFAULT uuidv7())";
+        let checksum = Checksum::of(&ChecksumInput {
+            up,
+            down: None,
+            flags: &flags,
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        let migration = Migration {
+            version: MigrationId::generate(),
+            name: "authored UUIDv7 table".into(),
+            up: up.into(),
+            down: None,
+            checksum,
+            flags,
+            owner_app: "app_test".into(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+        };
+        let mut plan = AppliedPlan::single_step(migration);
+        plan.database_requirements
+            .require(DatabaseFeature::UuidV7Generation);
+
+        let result = MigrationEngine::new()
+            .apply_applied_plan_with_touched_and_depends(
+                &plan,
+                &[],
+                &[],
+                Approval::None,
+                &backend,
+                &ExecutorConfig::new("prj_x", "proj_x"),
+                "tester",
+                LockMode::Acquire,
+            )
+            .await;
+        let error = result.expect_err("PostgreSQL 17 must refuse UUIDv7 generation");
+        assert!(error.to_string().contains("PostgreSQL 18"), "{error}");
+        let log = rec.log.borrow();
+        assert!(
+            log.iter()
+                .any(|entry| entry.contains("current_setting('server_version_num')")),
+            "the version preflight must run: {log:?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|entry| entry.contains("CREATE TABLE authored_uuid_v7")),
+            "authored DDL must not run after a capability refusal: {log:?}"
         );
     }
 

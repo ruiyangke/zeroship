@@ -155,8 +155,8 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "strftime",
     "typeof",
     "hex",
-    // `randomblob` is emitted only by the engine's SQLite fnSynth UUID renderer:
-    // `lower(hex(randomblob(16)))`. It is a SQLite builtin with no extension load
+    // `randomblob` is emitted only by the engine's exact SQLite UUIDv4 renderer.
+    // It is a SQLite builtin with no extension load
     // or tenant escape; without it, a legitimate DB-evaluated UUID insert fails at
     // prepare time under CreatorUp.
     "randomblob",

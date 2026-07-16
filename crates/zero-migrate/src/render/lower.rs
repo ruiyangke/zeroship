@@ -24,7 +24,7 @@
 //! ([`Op`]/[`IrColumn`]/[`ColType`]/[`IrDefault`]) onto the descriptor shape the
 //! shared builder consumes ([`FieldDescriptor`]). This is a pure structural
 //! translation. Literal defaults and sentinels still stay in the shared builder;
-//! the closed synth default pair (`now`/`genRandomUuid`) is overlaid after the
+//! structured expression defaults (`now`/exact UUID generators) are overlaid after the
 //! descriptor bridge because descriptors cannot carry apply-time functions.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,7 +51,7 @@ use crate::render::declarative::{
     json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
     DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
 };
-use crate::render::plan::AppliedPlan;
+use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::step::{BindValue, PlanStep, RenameStep};
 use crate::schema::query::SqlDialect;
@@ -1439,6 +1439,430 @@ impl LoweredArtifact {
     }
 }
 
+/// Derive apply-time server requirements from the resolved, typed IR.
+/// PostgreSQL UUID generation is version-gated; MySQL UUIDv4 generation also
+/// requires a sufficiently new InnoDB server with row-based replication.
+/// SQLite's synthesized UUIDv4 expression has no live-server capability gate,
+/// and UUIDv7 is rejected by MySQL/SQLite structural validation before lowering.
+fn database_requirements_for_ir(ir: &MigrationIr, dialect: SqlDialect) -> DatabaseRequirements {
+    let mut requirements = DatabaseRequirements::default();
+    if dialect == SqlDialect::Sqlite {
+        return requirements;
+    }
+    for op in &ir.ops {
+        collect_op_database_requirements(op, dialect, &mut requirements);
+    }
+    requirements
+}
+
+fn collect_op_database_requirements(
+    op: &Op,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    match op {
+        Op::CreateTable {
+            columns,
+            constraints,
+            indexes,
+            ..
+        } => {
+            for column in columns {
+                collect_column_database_requirements(column, dialect, requirements);
+            }
+            for constraint in constraints {
+                collect_constraint_database_requirements(&constraint.kind, dialect, requirements);
+            }
+            for index in indexes {
+                collect_index_database_requirements(index, dialect, requirements);
+            }
+        }
+        Op::AddColumn {
+            default, generated, ..
+        } => {
+            if let Some(default) = default {
+                collect_default_database_requirements(default, dialect, requirements);
+            }
+            if let Some(generated) = generated {
+                collect_expr_database_requirements(&generated.expr, dialect, requirements);
+            }
+        }
+        Op::CreateIndex {
+            columns, r#where, ..
+        } => {
+            for element in columns {
+                collect_index_element_database_requirements(element, dialect, requirements);
+            }
+            if let Some(predicate) = r#where {
+                collect_expr_database_requirements(predicate, dialect, requirements);
+            }
+        }
+        Op::SetColumnType { using, .. } => {
+            if let Some(expr) = using {
+                collect_expr_database_requirements(expr, dialect, requirements);
+            }
+        }
+        Op::SetColumnDefault { value, .. } => {
+            collect_default_database_requirements(value, dialect, requirements);
+        }
+        Op::AddConstraint { constraint, .. } => {
+            collect_constraint_database_requirements(&constraint.kind, dialect, requirements);
+        }
+        Op::Insert {
+            rows, on_conflict, ..
+        } => {
+            for row in rows {
+                for value in row {
+                    collect_value_database_requirements(value, dialect, requirements);
+                }
+            }
+            if let Some(assignments) = on_conflict
+                .as_ref()
+                .and_then(|conflict| conflict.do_update.as_ref())
+            {
+                for value in assignments.values() {
+                    collect_value_database_requirements(value, dialect, requirements);
+                }
+            }
+        }
+        Op::Update { set, r#where, .. } => {
+            for value in set.values() {
+                collect_value_database_requirements(value, dialect, requirements);
+            }
+            if let Some(predicate) = r#where {
+                collect_expr_database_requirements(predicate, dialect, requirements);
+            }
+        }
+        Op::Delete { r#where, .. } => {
+            collect_expr_database_requirements(r#where, dialect, requirements);
+        }
+        Op::Backfill { set, filter, .. } => {
+            for value in set.values() {
+                collect_value_database_requirements(value, dialect, requirements);
+            }
+            if let Some(predicate) = filter {
+                collect_expr_database_requirements(predicate, dialect, requirements);
+            }
+        }
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match dialect {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(selected) = own.or(default.as_deref()) {
+                for inner in selected {
+                    collect_op_database_requirements(inner, dialect, requirements);
+                }
+            }
+        }
+        Op::CreateView { query, .. } => {
+            if let ViewQuery::Structured { select } = query {
+                collect_select_database_requirements(select, dialect, requirements);
+            }
+        }
+        Op::CreateDomain { check, default, .. } => {
+            if let Some(check) = check {
+                collect_expr_database_requirements(check, dialect, requirements);
+            }
+            if let Some(default) = default {
+                collect_default_database_requirements(default, dialect, requirements);
+            }
+        }
+        Op::CreatePolicy {
+            using, with_check, ..
+        } => {
+            collect_expr_database_requirements(using, dialect, requirements);
+            if let Some(check) = with_check {
+                collect_expr_database_requirements(check, dialect, requirements);
+            }
+        }
+        Op::CreateTrigger { action, when, .. } => {
+            if let Some(when) = when {
+                collect_expr_database_requirements(when, dialect, requirements);
+            }
+            if let TriggerAction::Body { statements } = action {
+                for statement in statements {
+                    collect_trigger_statement_database_requirements(
+                        statement,
+                        dialect,
+                        requirements,
+                    );
+                }
+            }
+        }
+        Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. }
+        | Op::SetTableOptions { .. }
+        | Op::DropTable { .. }
+        | Op::RenameTable { .. }
+        | Op::DropColumn { .. }
+        | Op::Comment { .. }
+        | Op::DropIndex { .. }
+        | Op::SetColumnNotNull { .. }
+        | Op::DropColumnNotNull { .. }
+        | Op::DropColumnDefault { .. }
+        | Op::RenameColumn { .. }
+        | Op::ValidateConstraint { .. }
+        | Op::DropConstraint { .. }
+        | Op::DropView { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::SetRls { .. }
+        | Op::DropPolicy { .. }
+        | Op::DropTrigger { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. } => {}
+    }
+}
+
+fn collect_column_database_requirements(
+    column: &IrColumn,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if let Some(default) = &column.default {
+        collect_default_database_requirements(default, dialect, requirements);
+    }
+    if let Some(generated) = &column.generated {
+        collect_expr_database_requirements(&generated.expr, dialect, requirements);
+    }
+}
+
+fn collect_default_database_requirements(
+    default: &IrDefault,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if let IrDefault::Expr { expr } = default {
+        collect_expr_database_requirements(expr, dialect, requirements);
+    }
+}
+
+fn collect_value_database_requirements(
+    value: &crate::model::ir::IrValue,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if let crate::model::ir::IrValue::Expr(expr) = value {
+        collect_expr_database_requirements(expr, dialect, requirements);
+    }
+}
+
+fn collect_constraint_database_requirements(
+    kind: &IrConstraintKind,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    match kind {
+        IrConstraintKind::Check { expr, .. } => {
+            collect_expr_database_requirements(expr, dialect, requirements);
+        }
+        IrConstraintKind::Exclusion {
+            elements,
+            where_predicate,
+            ..
+        } => {
+            for element in elements {
+                if let ColumnOrExpr::Expr { expr } = &element.target {
+                    collect_expr_database_requirements(expr, dialect, requirements);
+                }
+            }
+            if let Some(predicate) = where_predicate {
+                collect_expr_database_requirements(predicate, dialect, requirements);
+            }
+        }
+        IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {}
+    }
+}
+
+fn collect_index_database_requirements(
+    index: &IrIndex,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    for element in &index.columns {
+        collect_index_element_database_requirements(element, dialect, requirements);
+    }
+    if let Some(predicate) = &index.r#where {
+        collect_expr_database_requirements(predicate, dialect, requirements);
+    }
+}
+
+fn collect_index_element_database_requirements(
+    element: &IndexElement,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if let IndexElement::Expr { expr } = element {
+        collect_expr_database_requirements(expr, dialect, requirements);
+    }
+}
+
+fn collect_select_database_requirements(
+    select: &SelectAst,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    for item in &select.projection {
+        if let SelectItem::Expr { expr, .. } = item {
+            collect_expr_database_requirements(expr, dialect, requirements);
+        }
+    }
+    for join in &select.joins {
+        collect_expr_database_requirements(&join.on, dialect, requirements);
+    }
+    if let Some(predicate) = &select.r#where {
+        collect_expr_database_requirements(predicate, dialect, requirements);
+    }
+    for expr in &select.group_by {
+        collect_expr_database_requirements(expr, dialect, requirements);
+    }
+    if let Some(predicate) = &select.having {
+        collect_expr_database_requirements(predicate, dialect, requirements);
+    }
+    if let Some(order_by) = &select.order_by {
+        for item in order_by {
+            if let OrderItem::Expr { expr, .. } = item {
+                collect_expr_database_requirements(expr, dialect, requirements);
+            }
+        }
+    }
+}
+
+fn collect_trigger_statement_database_requirements(
+    statement: &TriggerStmt,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    match statement {
+        TriggerStmt::Insert { rows, .. } => {
+            for row in rows {
+                for value in row {
+                    collect_value_database_requirements(value, dialect, requirements);
+                }
+            }
+        }
+        TriggerStmt::Update { set, r#where, .. } => {
+            for value in set.values() {
+                collect_value_database_requirements(value, dialect, requirements);
+            }
+            if let Some(predicate) = r#where {
+                collect_expr_database_requirements(predicate, dialect, requirements);
+            }
+        }
+        TriggerStmt::Delete { r#where, .. } => {
+            collect_expr_database_requirements(r#where, dialect, requirements);
+        }
+        TriggerStmt::Select { expr } => {
+            collect_expr_database_requirements(expr, dialect, requirements);
+        }
+        TriggerStmt::Raise { .. } => {}
+    }
+}
+
+fn collect_expr_database_requirements(
+    expr: &Expr,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    match expr {
+        Expr::UuidV4 => requirements.require(DatabaseFeature::UuidV4Generation),
+        Expr::UuidV7 if dialect == SqlDialect::Postgres => {
+            requirements.require(DatabaseFeature::UuidV7Generation);
+        }
+        Expr::UuidV7 => {}
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_expr_database_requirements(lhs, dialect, requirements);
+            collect_expr_database_requirements(rhs, dialect, requirements);
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Cast { operand, .. } => {
+            collect_expr_database_requirements(operand, dialect, requirements);
+        }
+        Expr::Case { branches, r#else } => {
+            for branch in branches {
+                collect_expr_database_requirements(&branch.when, dialect, requirements);
+                collect_expr_database_requirements(&branch.then, dialect, requirements);
+            }
+            if let Some(r#else) = r#else {
+                collect_expr_database_requirements(r#else, dialect, requirements);
+            }
+        }
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            for arg in args {
+                collect_expr_database_requirements(arg, dialect, requirements);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expr_database_requirements(operand, dialect, requirements);
+            collect_expr_database_requirements(low, dialect, requirements);
+            collect_expr_database_requirements(high, dialect, requirements);
+        }
+        Expr::Like { operand, pattern } => {
+            collect_expr_database_requirements(operand, dialect, requirements);
+            collect_expr_database_requirements(pattern, dialect, requirements);
+        }
+        Expr::DistinctFrom { left, right } => {
+            collect_expr_database_requirements(left, dialect, requirements);
+            collect_expr_database_requirements(right, dialect, requirements);
+        }
+        Expr::Agg { arg, delimiter, .. } => {
+            if let Some(arg) = arg {
+                collect_expr_database_requirements(arg, dialect, requirements);
+            }
+            if let Some(delimiter) = delimiter {
+                collect_expr_database_requirements(delimiter, dialect, requirements);
+            }
+        }
+        Expr::InList { expr, .. }
+        | Expr::PgRegexMatch { expr, .. }
+        | Expr::PgColumnSize { expr } => {
+            collect_expr_database_requirements(expr, dialect, requirements);
+        }
+        Expr::Extract { from, .. } | Expr::PgExtract { from, .. } => {
+            collect_expr_database_requirements(from, dialect, requirements);
+        }
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match dialect {
+                SqlDialect::Postgres => pg.as_deref(),
+                SqlDialect::Sqlite => sqlite.as_deref(),
+                SqlDialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(selected) = own.or(default.as_deref()) {
+                collect_expr_database_requirements(selected, dialect, requirements);
+            }
+        }
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => {}
+    }
+}
+
 impl IrAuthor {
     /// Construct an IR author bound to a project schema + deploying app, for a
     /// target dialect. The deploying app is the `owner_app` stamped on every
@@ -1775,6 +2199,7 @@ impl IrAuthor {
             version,
             name: ir.name.clone(),
             steps,
+            database_requirements: database_requirements_for_ir(ir, self.dialect),
             checksum: anchor,
             // The plan exposes the same authored overrides that were merged onto
             // every journaled DDL Migration below. The authoritative checksum also
@@ -6548,7 +6973,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             Expr::ColRef { name, .. } => {
                 out.insert(name.clone());
             }
-            Expr::Literal { .. } => {}
+            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 => {}
             Expr::BinOp { lhs, rhs, .. } => {
                 collect_col_refs(lhs, out);
                 collect_col_refs(rhs, out);
@@ -6762,6 +7187,177 @@ mod tests {
                 args: Vec::new(),
             },
         }
+    }
+
+    fn uuid_v4_default() -> IrDefault {
+        IrDefault::Expr { expr: Expr::UuidV4 }
+    }
+
+    fn uuid_column(name: &str, expr: Expr) -> TIrColumn {
+        TIrColumn {
+            name: name.into(),
+            ty: ColType::Uuid,
+            nullable: Some(false),
+            default: Some(IrDefault::Expr { expr }),
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
+    fn insert_uuid_expr(expr: Expr) -> Op {
+        Op::Insert {
+            table: "events".into(),
+            columns: vec!["id".into()],
+            rows: vec![vec![crate::model::ir::IrValue::Expr(expr)]],
+            on_conflict: None,
+            schema: None,
+        }
+    }
+
+    #[test]
+    fn postgres_plan_records_uuid_default_server_requirements() {
+        let ir = create_table_ir(
+            "events",
+            vec![
+                uuid_column("v4_id", Expr::UuidV4),
+                uuid_column("v7_id", Expr::UuidV7),
+            ],
+        );
+
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("PostgreSQL UUID defaults lower");
+
+        assert_eq!(
+            plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![
+                DatabaseFeature::UuidV4Generation,
+                DatabaseFeature::UuidV7Generation,
+            ]
+        );
+        assert_eq!(
+            DatabaseFeature::UuidV4Generation.minimum_postgres_version_num(),
+            130_000
+        );
+        assert_eq!(
+            DatabaseFeature::UuidV7Generation.minimum_postgres_version_num(),
+            180_000
+        );
+    }
+
+    #[test]
+    fn postgres_plan_records_uuid_v7_dml_server_requirement() {
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "seed_events".into(),
+            owner_app: "app_a".into(),
+            ops: vec![insert_uuid_expr(Expr::UuidV7)],
+            flags: IrFlagsOverride::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("PostgreSQL UUIDv7 DML lowers");
+
+        assert_eq!(
+            plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UuidV7Generation]
+        );
+        assert!(matches!(plan.steps.as_slice(), [PlanStep::Dml { .. }]));
+    }
+
+    #[test]
+    fn mysql_plan_records_uuid_v4_requirement_but_sqlite_does_not() {
+        let ir = create_table_ir("events", vec![uuid_column("id", Expr::UuidV4)]);
+
+        let mysql_plan = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("MySQL UUIDv4 defaults lower");
+        assert_eq!(
+            mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UuidV4Generation]
+        );
+
+        let sqlite_plan = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("SQLite UUIDv4 defaults lower");
+        assert!(
+            sqlite_plan.database_requirements.is_empty(),
+            "SQLite's engine-owned UUIDv4 expression has no live capability gate"
+        );
+    }
+
+    #[test]
+    fn postgres_plan_requirements_follow_selected_dialectal_legs() {
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "dialectal_events".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::Dialectal {
+                default: Some(vec![insert_uuid_expr(Expr::UuidV7)]),
+                pg: Some(vec![insert_uuid_expr(Expr::UuidV4)]),
+                sqlite: None,
+                mysql: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("the selected PostgreSQL dialectal legs lower");
+
+        assert_eq!(
+            plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UuidV4Generation],
+            "inactive op and expression fallback legs must not raise the PostgreSQL floor"
+        );
+
+        let mut expression_requirements = DatabaseRequirements::default();
+        collect_expr_database_requirements(
+            &Expr::Dialectal {
+                default: Some(Box::new(Expr::UuidV7)),
+                pg: Some(Box::new(Expr::UuidV4)),
+                sqlite: None,
+                mysql: None,
+            },
+            SqlDialect::Postgres,
+            &mut expression_requirements,
+        );
+        assert_eq!(
+            expression_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UuidV4Generation],
+            "the explicit PostgreSQL expression leg wins over the fallback"
+        );
+
+        let mut fallback_requirements = DatabaseRequirements::default();
+        collect_expr_database_requirements(
+            &Expr::Dialectal {
+                default: Some(Box::new(Expr::UuidV7)),
+                pg: None,
+                sqlite: None,
+                mysql: None,
+            },
+            SqlDialect::Postgres,
+            &mut fallback_requirements,
+        );
+        assert_eq!(
+            fallback_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UuidV7Generation],
+            "the expression fallback is selected when no PostgreSQL leg exists"
+        );
     }
 
     fn platform_guard() -> GuardConfig {
@@ -8612,7 +9208,7 @@ mod tests {
         );
     }
 
-    // The closed author-supplied SYNTH defaults (`now()`/`genRandomUuid()`) render
+    // The closed author-supplied expression defaults (`now()`/`uuidV4()`) render
     // on PG instead of being silently mapped away by the descriptor bridge.
     #[test]
     fn synth_default_on_user_column_renders_on_pg_not_silently_dropped() {
@@ -8665,7 +9261,7 @@ mod tests {
             create_migrations[0].up
         );
 
-        // addColumn with a synth `genRandomUuid()` default — same fail-closed.
+        // addColumn with an exact `uuidV4()` default — same fail-closed.
         let ir_add = MigrationIr {
             ir_version: 1,
             name: "m".into(),
@@ -8675,7 +9271,7 @@ mod tests {
                 column: "token".into(),
                 ty: ColType::Uuid,
                 nullable: Some(false),
-                default: Some(synth_default(crate::model::expr::SynthFn::GenRandomUuid)),
+                default: Some(uuid_v4_default()),
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -8697,7 +9293,7 @@ mod tests {
             .expect("an addColumn synth default lowers on PG");
         assert!(
             add_migrations[0].up.contains("DEFAULT gen_random_uuid()"),
-            "addColumn synth genRandomUuid default must render, got {}",
+            "addColumn uuidV4 default must render, got {}",
             add_migrations[0].up
         );
 

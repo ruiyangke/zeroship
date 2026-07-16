@@ -51,6 +51,43 @@ use super::MysqlSessionSnapshot;
 /// first's committed journal and no-ops.
 const PROJECT_LOCK_TIMEOUT_SECS: i64 = 10;
 
+/// Live MySQL settings required to safely use a nondeterministic UUIDv4
+/// expression default.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DatabaseCapabilities {
+    pub(crate) server_version: String,
+    pub(crate) default_storage_engine: String,
+    pub(crate) innodb_support: Option<String>,
+    pub(crate) global_binlog_format: String,
+    pub(crate) session_binlog_format: String,
+}
+
+/// Read the server/version, storage-engine, and replication settings that form
+/// the MySQL UUIDv4 database-generation capability contract.
+pub(crate) async fn database_capabilities<D: SqlSession>(
+    conn: &D,
+) -> Result<DatabaseCapabilities, ApplyError> {
+    let row = conn
+        .query_one(
+            "SELECT VERSION() AS server_version,
+                    @@SESSION.default_storage_engine AS default_storage_engine,
+                    (SELECT SUPPORT
+                       FROM information_schema.ENGINES
+                      WHERE ENGINE = 'InnoDB') AS innodb_support,
+                    @@GLOBAL.binlog_format AS global_binlog_format,
+                    @@SESSION.binlog_format AS session_binlog_format",
+            &[],
+        )
+        .await?;
+    Ok(DatabaseCapabilities {
+        server_version: row.try_get("server_version")?,
+        default_storage_engine: row.try_get("default_storage_engine")?,
+        innodb_support: row.try_get("innodb_support")?,
+        global_binlog_format: row.try_get("global_binlog_format")?,
+        session_binlog_format: row.try_get("session_binlog_format")?,
+    })
+}
+
 /// Derive the MySQL named-lock string for a project id.
 ///
 /// MySQL lock names are capped at 64 characters (since 5.7.5); a project id can be

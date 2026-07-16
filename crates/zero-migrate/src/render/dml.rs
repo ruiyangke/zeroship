@@ -1049,7 +1049,7 @@ fn select_dialect_leg<'a>(
 fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
     Ok(match expr {
         Expr::ColRef { name, .. } => name == column,
-        Expr::Literal { .. } | Expr::PgInterval { .. } => false,
+        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => false,
         Expr::BinOp { lhs, rhs, .. } => {
             mysql_expr_references_column(lhs, column)? || mysql_expr_references_column(rhs, column)?
         }
@@ -1244,6 +1244,8 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             render_scalar_fn_call(*r#fn, &rs, ctx.dialect)
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
+        Expr::UuidV4 => crate::render::renderer::renderer(ctx.dialect).uuid_v4(),
+        Expr::UuidV7 => crate::render::renderer::renderer(ctx.dialect).uuid_v7()?,
         Expr::Cast { operand, target } => {
             let o = render_expr_bound(operand, ctx)?;
             format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
@@ -1323,8 +1325,9 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
 }
 
 /// Render a `FnSynth` in the parameterized path. `concatWs` and `splitPart` lower
-/// per dialect via the portable-helper renderers; `now` /
-/// `genRandomUuid` render to the apply-time DB scalar.
+/// per dialect via the portable-helper renderers; `now` renders to the apply-time
+/// DB scalar. Exact UUID generators are direct expression variants rather than
+/// synthesized-function tokens.
 fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<String, DmlError> {
     match f {
         SynthFn::ConcatWs => {
@@ -1335,7 +1338,6 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
             Ok(render_concat_ws(&rs, ctx.dialect))
         }
         SynthFn::Now => Ok(crate::render::renderer::renderer(ctx.dialect).synth_now()),
-        SynthFn::GenRandomUuid => Ok(crate::render::renderer::renderer(ctx.dialect).synth_uuid()),
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
             // in-AST sub-expression — render it (binding any nested Literals), then
@@ -1473,8 +1475,9 @@ where
                 render_concat_ws(&rs?, dialect)
             }
             SynthFn::Now => crate::render::renderer::renderer(dialect).synth_now(),
-            SynthFn::GenRandomUuid => crate::render::renderer::renderer(dialect).synth_uuid(),
         },
+        Expr::UuidV4 => crate::render::renderer::renderer(dialect).uuid_v4(),
+        Expr::UuidV7 => crate::render::renderer::renderer(dialect).uuid_v7()?,
         Expr::Cast { operand, target } => {
             format!(
                 "CAST({} AS {})",
@@ -3336,7 +3339,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_renders_fnsynth_value_without_bind_pg() {
+    fn insert_renders_exact_uuid_v4_without_bind_pg() {
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Postgres,
@@ -3347,10 +3350,7 @@ mod tests {
                     r#fn: SynthFn::Now,
                     args: vec![],
                 }),
-                IrValue::Expr(Expr::FnSynth {
-                    r#fn: SynthFn::GenRandomUuid,
-                    args: vec![],
-                }),
+                IrValue::Expr(Expr::UuidV4),
             ]],
             None,
         )
@@ -3361,12 +3361,12 @@ mod tests {
         );
         assert!(
             a.binds.is_empty(),
-            "fnSynth insert value is DB-evaluated, not a bind"
+            "UUIDv4 insert value is DB-evaluated, not a bind"
         );
     }
 
     #[test]
-    fn insert_renders_fnsynth_value_without_bind_mysql() {
+    fn insert_renders_exact_uuid_v4_without_uuid_v1_mysql() {
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Mysql,
@@ -3377,26 +3377,40 @@ mod tests {
                     r#fn: SynthFn::Now,
                     args: vec![],
                 }),
-                IrValue::Expr(Expr::FnSynth {
-                    r#fn: SynthFn::GenRandomUuid,
-                    args: vec![],
-                }),
+                IrValue::Expr(Expr::UuidV4),
             ]],
             None,
         )
         .unwrap();
-        assert_eq!(
-            a.template,
-            "INSERT INTO `app_proj`.`events` (`created_at`, `id`) VALUES (CURRENT_TIMESTAMP(6), UUID())"
+        assert!(
+            a.template.contains("random_bytes"),
+            "MySQL UUIDv4 must be synthesized from random bytes: {}",
+            a.template
+        );
+        assert!(
+            a.template.contains("hex((ord(random_bytes(1)) & 15) | 64)"),
+            "MySQL UUIDv4 must pin the version bits to 0100: {}",
+            a.template
+        );
+        assert!(
+            a.template
+                .contains("hex((ord(random_bytes(1)) & 63) | 128)"),
+            "MySQL UUIDv4 must pin the RFC variant bits to 10: {}",
+            a.template
+        );
+        assert!(
+            !a.template.contains("UUID()"),
+            "MySQL UUID() generates UUIDv1 and must never lower UUIDv4: {}",
+            a.template
         );
         assert!(
             a.binds.is_empty(),
-            "fnSynth insert value is DB-evaluated, not a bind"
+            "UUIDv4 insert value is DB-evaluated, not a bind"
         );
     }
 
     #[test]
-    fn insert_renders_fnsynth_value_without_bind_sqlite() {
+    fn insert_renders_exact_uuid_v4_without_bind_sqlite() {
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Sqlite,
@@ -3407,22 +3421,73 @@ mod tests {
                     r#fn: SynthFn::Now,
                     args: vec![],
                 }),
-                IrValue::Expr(Expr::FnSynth {
-                    r#fn: SynthFn::GenRandomUuid,
-                    args: vec![],
-                }),
+                IrValue::Expr(Expr::UuidV4),
             ]],
             None,
         )
         .unwrap();
-        assert_eq!(
-            a.template,
-            "INSERT INTO \"events\" (\"created_at\", \"id\") VALUES (CURRENT_TIMESTAMP, lower(hex(randomblob(16))))"
+        assert!(
+            a.template.contains("'-4'"),
+            "SQLite UUIDv4 must pin the version nibble: {}",
+            a.template
+        );
+        assert!(
+            a.template.contains("substr('89ab'"),
+            "SQLite UUIDv4 must pin the RFC variant nibble: {}",
+            a.template
         );
         assert!(
             a.binds.is_empty(),
-            "fnSynth insert value is DB-evaluated, not a bind"
+            "UUIDv4 insert value is DB-evaluated, not a bind"
         );
+    }
+
+    #[test]
+    fn sqlite_uuid_v4_samples_have_canonical_rfc_bits() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let expr = render_expr_inline(&Expr::UuidV4, SqlDialect::Sqlite).unwrap();
+        let sql = format!("SELECT {expr}");
+
+        for _ in 0..128 {
+            let value: String = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
+            let bytes = value.as_bytes();
+            assert_eq!(
+                bytes.len(),
+                36,
+                "UUID must have canonical text length: {value}"
+            );
+            assert_eq!(&value[8..9], "-");
+            assert_eq!(&value[13..14], "-");
+            assert_eq!(&value[18..19], "-");
+            assert_eq!(&value[23..24], "-");
+            assert_eq!(bytes[14], b'4', "UUIDv4 version nibble: {value}");
+            assert!(
+                matches!(bytes[19], b'8' | b'9' | b'a' | b'b'),
+                "UUID RFC variant nibble: {value}"
+            );
+            assert!(
+                bytes.iter().enumerate().all(|(index, byte)| {
+                    matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit()
+                }),
+                "UUID must contain only hexadecimal digits and separators: {value}"
+            );
+            assert_eq!(value, value.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn uuid_v7_is_native_postgres_and_fails_closed_elsewhere() {
+        assert_eq!(
+            render_expr_inline(&Expr::UuidV7, SqlDialect::Postgres).unwrap(),
+            "uuidv7()"
+        );
+        for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+            let error = render_expr_inline(&Expr::UuidV7, dialect).unwrap_err();
+            assert!(
+                matches!(error, DmlError::UnrenderableExpr(ref message) if message.contains("uuidV7") && message.contains("unsupported")),
+                "unexpected {dialect:?} UUIDv7 error: {error:?}"
+            );
+        }
     }
 
     #[test]

@@ -11,8 +11,8 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast | Between | Like | DistinctFrom | Agg | InList | PgRegexMatch |
-//! PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
+//! UuidV4 | UuidV7 | Cast | Between | Like | DistinctFrom | Agg | InList |
+//! PgRegexMatch | PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -144,9 +144,8 @@ pub enum ScalarFn {
 /// The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
 /// engine pins. CLOSED. `splitPart` is admitted only within its pinned
 /// single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
-/// `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
-/// are apply-time DB-evaluated scalars (the structured replacement for a frozen
-/// `Date.now()` / UUID literal).
+/// `concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated
+/// scalar (the structured replacement for a frozen `Date.now()` literal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SynthFn {
@@ -156,8 +155,6 @@ pub enum SynthFn {
     SplitPart,
     /// `now()` / current timestamp, evaluated at apply time.
     Now,
-    /// `gen_random_uuid()`, evaluated at apply time.
-    GenRandomUuid,
 }
 
 /// The closed cast-target set, aligned to scalar `ColType` tokens. A
@@ -357,6 +354,14 @@ pub enum Expr {
         /// args, validated in-envelope structurally).
         args: Vec<Self>,
     },
+    /// Generate an exact RFC 9562 UUIDv4 in the database. The dialect renderer
+    /// owns the concrete expression and must preserve the `0100` version nibble
+    /// and `10` RFC variant bits.
+    UuidV4,
+    /// Generate an exact RFC 9562 UUIDv7 in the database. Unsupported database
+    /// targets or server versions must fail closed rather than substituting a
+    /// different UUID version.
+    UuidV7,
     /// A cast to a portable type (`.cast({ to: "int" })`).
     Cast {
         /// The expression being cast.
@@ -485,7 +490,7 @@ pub enum Expr {
     /// engine renders the leg matching the render's TARGET dialect — the
     /// dialect's own leg if present, else `default`. This is `dialect({ default?,
     /// pg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:
-    /// c.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).
+    /// uuidV4(), sqlite: …, mysql: uuidV4() }))`).
     ///
     /// The node tag on the wire is `"dialect"` (`#[serde(rename)]`); the four
     /// legs serialize in declaration order (`default, pg, sqlite, mysql`) — the

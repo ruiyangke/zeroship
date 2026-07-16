@@ -725,8 +725,8 @@ async fn apply_ir_with_locked_backend<B: MigrationBackend>(
             }
         };
         let outcome = MigrationEngine::new()
-            .apply_plan_with_touched_and_depends(
-                &artifact.plan.steps,
+            .apply_applied_plan_with_touched_and_depends(
+                &artifact.plan,
                 &artifact.touched_tables,
                 &artifact.depends_on,
                 approval,

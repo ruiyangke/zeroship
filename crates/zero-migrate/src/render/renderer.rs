@@ -142,7 +142,8 @@ pub(crate) trait DmlRenderer {
     fn render_concat_ws(&self, rendered: &[String]) -> String;
     fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError>;
     fn synth_now(&self) -> String;
-    fn synth_uuid(&self) -> String;
+    fn uuid_v4(&self) -> String;
+    fn uuid_v7(&self) -> Result<String, DmlError>;
     fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError>;
     fn view_create_prefix(&self, materialized: bool, replace: bool)
         -> Result<String, IrLowerError>;
@@ -222,8 +223,12 @@ impl DmlRenderer for PostgresDmlRenderer {
         "now()".to_string()
     }
 
-    fn synth_uuid(&self) -> String {
+    fn uuid_v4(&self) -> String {
         "gen_random_uuid()".to_string()
+    }
+
+    fn uuid_v7(&self) -> Result<String, DmlError> {
+        Ok("uuidv7()".to_string())
     }
 
     fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
@@ -403,8 +408,23 @@ impl DmlRenderer for SqliteDmlRenderer {
         "CURRENT_TIMESTAMP".to_string()
     }
 
-    fn synth_uuid(&self) -> String {
-        "lower(hex(randomblob(16)))".to_string()
+    fn uuid_v4(&self) -> String {
+        // SQLite has no native UUID generator. Build each canonical group from
+        // random bytes, pin the version nibble to `4`, and choose the variant
+        // nibble from `8..b` (binary `10xx`). The outer lower() canonicalizes
+        // hex(randomblob(...)), whose native spelling is uppercase.
+        "(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || \
+         substr(hex(randomblob(2)), 2, 3) || '-' || \
+         substr('89ab', ((instr('0123456789ABCDEF', \
+         substr(hex(randomblob(1)), 1, 1)) - 1) % 4) + 1, 1) || \
+         substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6))))"
+            .to_string()
+    }
+
+    fn uuid_v7(&self) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "uuidV7 database generation is unsupported on SQLite".to_string(),
+        ))
     }
 
     fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
@@ -511,8 +531,22 @@ impl DmlRenderer for MysqlDmlRenderer {
         "CURRENT_TIMESTAMP(6)".to_string()
     }
 
-    fn synth_uuid(&self) -> String {
-        "UUID()".to_string()
+    fn uuid_v4(&self) -> String {
+        // UUID() is UUIDv1 on MySQL and must never implement the UUIDv4
+        // contract. Consume 16 random bytes across the canonical groups and
+        // mask the relevant octets: version = 0100xxxx, variant = 10xxxxxx.
+        // Parentheses make this valid in MySQL's expression-default grammar.
+        "(lower(concat(hex(random_bytes(4)), '-', hex(random_bytes(2)), '-', \
+         hex((ord(random_bytes(1)) & 15) | 64), hex(random_bytes(1)), '-', \
+         hex((ord(random_bytes(1)) & 63) | 128), hex(random_bytes(1)), '-', \
+         hex(random_bytes(6)))))"
+            .to_string()
+    }
+
+    fn uuid_v7(&self) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "uuidV7 database generation is unsupported on MySQL".to_string(),
+        ))
     }
 
     fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {

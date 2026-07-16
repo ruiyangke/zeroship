@@ -315,7 +315,9 @@ pub use model::validate::{
 // EXECUTION artifact + its steps.
 pub use model::backfill::BackfillSpec;
 pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
-pub use render::plan::{AppliedPlan, NotSingleStep, SqliteRebuildSpec};
+pub use render::plan::{
+    AppliedPlan, DatabaseFeature, DatabaseRequirements, NotSingleStep, SqliteRebuildSpec,
+};
 pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, RenameStep};
 // The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already

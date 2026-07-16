@@ -33,6 +33,8 @@ export {
   decimal,
   byteValue,
   now,
+  uuidV4,
+  uuidV7,
   genRandomUuid,
   currentSetting,
   currentUser,

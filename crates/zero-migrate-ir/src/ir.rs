@@ -5156,24 +5156,34 @@ mod tests {
     }
 
     #[test]
-    fn ir_default_expr_accepts_now_and_gen_random_uuid() {
-        for (wire, want) in [
-            (r#"{"expr":{"node":"fnSynth","fn":"now","args":[]}}"#, "now"),
-            (
-                r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#,
-                "genRandomUuid",
-            ),
+    fn ir_default_expr_accepts_now_and_exact_uuid_generators() {
+        let now_wire = r#"{"expr":{"node":"fnSynth","fn":"now","args":[]}}"#;
+        let now: IrDefault = serde_json::from_str(now_wire).unwrap();
+        assert!(matches!(
+            &now,
+            IrDefault::Expr {
+                expr: Expr::FnSynth {
+                    r#fn: crate::expr::SynthFn::Now,
+                    args
+                }
+            } if args.is_empty()
+        ));
+        assert_eq!(serde_json::to_string(&now).unwrap(), now_wire);
+
+        for (wire, expected) in [
+            (r#"{"expr":{"node":"uuidV4"}}"#, Expr::UuidV4),
+            (r#"{"expr":{"node":"uuidV7"}}"#, Expr::UuidV7),
         ] {
-            let d: IrDefault = serde_json::from_str(wire).unwrap();
-            assert!(matches!(
-                &d,
-                IrDefault::Expr {
-                    expr: Expr::FnSynth { r#fn: _, args }
-                } if args.is_empty()
-            ));
-            assert_eq!(serde_json::to_value(&d).unwrap()["expr"]["fn"], want);
-            assert_eq!(serde_json::to_string(&d).unwrap(), wire);
+            let default: IrDefault = serde_json::from_str(wire).unwrap();
+            assert_eq!(default, IrDefault::Expr { expr: expected });
+            assert_eq!(serde_json::to_string(&default).unwrap(), wire);
         }
+
+        let legacy_synth = r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#;
+        assert!(
+            serde_json::from_str::<IrDefault>(legacy_synth).is_err(),
+            "genRandomUuid is a source alias only and must not survive as an IR token"
+        );
     }
 
     #[test]

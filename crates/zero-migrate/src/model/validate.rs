@@ -3123,7 +3123,7 @@ fn validate_default_expr(
             dialect: target_dialect,
             reason,
             suggested_fix: Some(
-                "use only literals, CASE, immutable scalar helpers, and now()/genRandomUuid() in column defaults"
+                "use only literals, CASE, immutable scalar helpers, now(), uuidV4(), and uuidV7() in column defaults"
                     .to_string(),
             ),
         }
@@ -3179,7 +3179,7 @@ fn validate_default_expr(
                 op_index,
                 ts_location,
             )),
-            Expr::Literal { .. } => Ok(()),
+            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 => Ok(()),
             Expr::BinOp { lhs, rhs, .. } => {
                 walk(lhs, target_dialect, op_index, ts_location)?;
                 walk(rhs, target_dialect, op_index, ts_location)
@@ -4415,7 +4415,7 @@ mod tests {
     }
 
     // ── (b') the remaining SynthFn arities — structural backstop ───────────
-    // now/genRandomUuid take ZERO args; concatWs takes >=2 (a delimiter + >=1
+    // now takes ZERO args; concatWs takes >=2 (a delimiter + >=1
     // value). Independent of the (not-yet-existing) render seam, the validator
     // is the structural backstop. RED before the check_synth arity fix.
 
@@ -4451,23 +4451,21 @@ mod tests {
     }
 
     #[test]
-    fn gen_random_uuid_with_args_is_rejected() {
-        // genRandomUuid(args) is genuinely malformed → unconditional
-        // CODE_UNSUPPORTED on both dialects.
+    fn exact_uuid_generator_dialect_support_is_validated() {
         let sc = TargetScope::structural_only("t");
-        let e = synth(SynthFn::GenRandomUuid, vec![Expr::col("x"), Expr::col("y")]);
-        for d in [Dialect::Postgres, Dialect::Sqlite] {
-            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
-            assert_eq!(err.code, CODE_UNSUPPORTED);
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            assert!(
+                validate_expr(&Expr::UuidV4, dialect, &sc, 0, None).is_ok(),
+                "UUIDv4 has an exact database lowering on {dialect:?}"
+            );
         }
-        assert!(validate_expr(
-            &synth(SynthFn::GenRandomUuid, vec![]),
-            Dialect::Postgres,
-            &sc,
-            0,
-            None
-        )
-        .is_ok());
+
+        assert!(validate_expr(&Expr::UuidV7, Dialect::Postgres, &sc, 0, None).is_ok());
+        for dialect in [Dialect::Mysql, Dialect::Sqlite] {
+            let error = validate_expr(&Expr::UuidV7, dialect, &sc, 0, None).unwrap_err();
+            assert_eq!(error.code, CODE_EXPR_NOT_PORTABLE);
+            assert!(error.reason.contains("PostgreSQL 18+"), "got: {error}");
+        }
     }
 
     #[test]

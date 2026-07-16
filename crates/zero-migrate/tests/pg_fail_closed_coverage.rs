@@ -7,7 +7,7 @@ use zero_migrate::model::ir::{
 };
 use zero_migrate::model::validate::{
     validate_expr, validate_ir_scoped, Dialect, TargetScope, CODE_DIALECT_UNSUPPORTED,
-    CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+    CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::{IrAuthor, LiveSchema, SchemaScope, SqlDialect};
@@ -18,6 +18,7 @@ const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "PgColumnSize",
     "PgExtract",
     "PgInterval",
+    "UuidV7",
 ];
 
 const EXPECTED_PG_VENDOR_OP_KINDS: &[&str] = &[
@@ -50,6 +51,7 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::ColRef { .. }
         | Expr::Literal { .. }
+        | Expr::UuidV4
         | Expr::BinOp { .. }
         | Expr::UnaryOp { .. }
         | Expr::Case { .. }
@@ -62,6 +64,7 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
         | Expr::InList { .. }
         | Expr::Extract { .. }
         | Expr::Dialectal { .. } => None,
+        Expr::UuidV7 => Some("UuidV7"),
         Expr::FnCall { r#fn, .. } => match r#fn {
             ScalarFn::Coalesce
             | ScalarFn::Nullif
@@ -116,6 +119,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
                 seconds: None,
             },
         },
+        Expr::UuidV7,
     ]
 }
 
@@ -147,10 +151,12 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
             let err = validate_expr(&expr, dialect, &scope, 0, None)
                 .expect_err("PG-only expression must refuse off Postgres");
-            assert_eq!(
-                err.code, CODE_UNSUPPORTED,
-                "{kind} on {dialect:?} must fail closed as UNSUPPORTED, got {err:?}"
-            );
+            let expected_code = if kind == "UuidV7" {
+                CODE_EXPR_NOT_PORTABLE
+            } else {
+                CODE_UNSUPPORTED
+            };
+            assert_eq!(err.code, expected_code, "{kind} on {dialect:?} got {err:?}");
         }
     }
 

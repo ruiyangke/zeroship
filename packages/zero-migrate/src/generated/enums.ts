@@ -50,11 +50,10 @@ export type ScalarFn =
  * The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
  * engine pins. CLOSED. `splitPart` is admitted only within its pinned
  * single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
- * `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
- * are apply-time DB-evaluated scalars (the structured replacement for a frozen
- * `Date.now()` / UUID literal).
+ * `concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated
+ * scalar (the structured replacement for a frozen `Date.now()` literal).
  */
-export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
+export type SynthFn = "concatWs" | "splitPart" | "now";
 
 /**
  * Empty container defaults admitted as column DEFAULTs. This is intentionally

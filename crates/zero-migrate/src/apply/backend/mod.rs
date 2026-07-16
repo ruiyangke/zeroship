@@ -73,7 +73,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
@@ -263,6 +263,28 @@ pub trait MigrationBackend {
     /// backend directly.
     fn placeholder(&self, n: usize) -> String {
         self.placeholder_style().render(n)
+    }
+
+    /// Verify the live database features required by a lowered IR plan before
+    /// any authored plan step executes. Backends opt into concrete feature
+    /// probes; an empty requirement set is universally valid, while an unknown
+    /// non-empty set fails closed by default.
+    async fn verify_database_requirements(
+        &self,
+        requirements: &DatabaseRequirements,
+    ) -> Result<(), ApplyError> {
+        if requirements.is_empty() {
+            return Ok(());
+        }
+        let features = requirements
+            .iter()
+            .map(|feature| feature.description())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(ApplyError::Backend(format!(
+            "{:?} backend cannot verify required database feature(s): {features}",
+            self.dialect()
+        )))
     }
 
     /// Whether this backend can commit DDL atomically with its journal row inside

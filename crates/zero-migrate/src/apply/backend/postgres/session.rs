@@ -80,6 +80,26 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
     Ok(())
 }
 
+/// Read PostgreSQL's machine-comparable server version number (for example,
+/// `180000` for PostgreSQL 18). Feature gates use this value instead of probing
+/// for a function name whose availability could be changed by extensions or
+/// `search_path`.
+#[cfg(pg_seam)]
+pub(crate) async fn server_version_num<D: SqlSession>(conn: &D) -> Result<i32, ApplyError> {
+    let row = conn
+        .query_one(
+            "SELECT current_setting('server_version_num') AS server_version_num",
+            &[],
+        )
+        .await?;
+    let raw: String = row.try_get("server_version_num")?;
+    raw.parse::<i32>().map_err(|error| {
+        ApplyError::Backend(format!(
+            "PostgreSQL returned invalid server_version_num {raw:?}: {error}"
+        ))
+    })
+}
+
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).

@@ -67,7 +67,7 @@ const TS = {
   ].sort(),
   // Expr node tags.
   Expr: [
-    "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
+    "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "uuidV4", "uuidV7", "cast",
     "between", "like", "distinctFrom", "agg",
     "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgExtract", "pgInterval",
     "dialect",
@@ -94,7 +94,7 @@ const TS = {
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
-  SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
+  SynthFn: ["concatWs", "splitPart", "now"].sort(),
   CastTarget: ["text", "int", "real", "boolean", "bytes", "uuid"].sort(),
   ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
   PgExtractField: [

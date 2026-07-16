@@ -373,7 +373,7 @@ const fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
 
 const fn synth_fn_volatility(f: SynthFn) -> ExprVolatility {
     match f {
-        SynthFn::Now | SynthFn::GenRandomUuid => ExprVolatility::Volatile,
+        SynthFn::Now => ExprVolatility::Volatile,
         SynthFn::ConcatWs | SynthFn::SplitPart => ExprVolatility::Immutable,
     }
 }
@@ -403,7 +403,6 @@ const fn synth_fn_name(f: SynthFn) -> &'static str {
         SynthFn::ConcatWs => "concatWs",
         SynthFn::SplitPart => "splitPart",
         SynthFn::Now => "now",
-        SynthFn::GenRandomUuid => "genRandomUuid",
     }
 }
 
@@ -430,7 +429,11 @@ const fn agg_func_is_pg_first(f: AggFunc) -> bool {
 
 fn first_aggregate(expr: &Expr) -> Option<&'static str> {
     match expr {
-        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::ColRef { .. }
+        | Expr::Literal { .. }
+        | Expr::UuidV4
+        | Expr::UuidV7
+        | Expr::PgInterval { .. } => None,
         Expr::BinOp { lhs, rhs, .. } => first_aggregate(lhs).or_else(|| first_aggregate(rhs)),
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
@@ -487,6 +490,8 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
 fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::UuidV4 => Some("uuidV4"),
+        Expr::UuidV7 => Some("uuidV7"),
         Expr::BinOp { lhs, rhs, .. } => {
             first_volatile_function(lhs).or_else(|| first_volatile_function(rhs))
         }
@@ -665,7 +670,8 @@ impl Ctx<'_> {
                 Some(_) => Ok(()),
                 None => self.check_colref(name),
             },
-            Expr::Literal { .. } => Ok(()),
+            Expr::Literal { .. } | Expr::UuidV4 => Ok(()),
+            Expr::UuidV7 => self.check_uuid_v7_generation(),
             Expr::BinOp { lhs, rhs, .. } => {
                 self.walk_depth(lhs, d)?;
                 self.walk_depth(rhs, d)
@@ -923,17 +929,15 @@ impl Ctx<'_> {
                 self.check_split_part(args)?;
                 Ok(())
             }
-            // now()/gen_random_uuid() are NULLARY apply-time scalars: no args.
-            // A non-nullary call is genuinely MALFORMED — `now()`/`gen_random_uuid()`
-            // are nullary on BOTH dialects — so it is an unconditional
+            // now() is a NULLARY apply-time scalar: no args. A non-nullary call
+            // is genuinely MALFORMED on every dialect, so it is an unconditional
             // CODE_UNSUPPORTED, never a dialect-gated portability reject.
-            SynthFn::Now | SynthFn::GenRandomUuid => {
+            SynthFn::Now => {
                 if !args.is_empty() {
                     return Err(self.malformed_synth_err(format!(
                         "c.fn.{} takes no arguments; got {}",
                         match f {
                             SynthFn::Now => "now",
-                            SynthFn::GenRandomUuid => "genRandomUuid",
                             _ => unreachable!(),
                         },
                         args.len()
@@ -982,7 +986,7 @@ impl Ctx<'_> {
     }
 
     /// A genuinely-MALFORMED synth-helper call — a shape broken on BOTH dialects
-    /// (`now(arg)`, `genRandomUuid(args)`, `concatWs` with <2 args, `splitPart`
+    /// (`now(arg)`, `concatWs` with <2 args, `splitPart`
     /// with the wrong arity). This is NOT a portability boundary: there is no
     /// dialect on which it renders, so it is an unconditional
     /// [`CODE_UNSUPPORTED`] (`kind:"expr"`), independent of `target_dialect`.
@@ -998,7 +1002,7 @@ impl Ctx<'_> {
             reason,
             Some(
                 "call the synth helper with its pinned argument shape \
-                 (now/genRandomUuid take no args; concatWs takes a delimiter + \
+                 (now takes no args; concatWs takes a delimiter + \
                  >=1 value; splitPart takes exactly (column, delim, n))"
                     .to_string(),
             ),
@@ -1089,6 +1093,28 @@ impl Ctx<'_> {
             Some(
                 "use this node only in a PostgreSQL-targeted migration, or rewrite \
                  the predicate using portable expression nodes"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    /// Database UUIDv7 generation currently has one exact lowering:
+    /// PostgreSQL 18+'s native `uuidv7()`. MySQL and SQLite must fail before
+    /// rendering rather than substituting UUIDv1, UUIDv4, or an engine-side
+    /// value. PostgreSQL server-version validation remains an apply capability
+    /// concern because the structural IR validator has no live server version.
+    fn check_uuid_v7_generation(&self) -> Result<(), AuthoringError> {
+        if matches!(self.target_dialect, Dialect::Postgres) {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            None,
+            self.target_dialect,
+            "uuidV7 database generation requires PostgreSQL 18+; MySQL and SQLite have no exact database UUIDv7 generator"
+                .to_string(),
+            Some(
+                "use an externally supplied UUIDv7 on this target, or use uuidV4() when database-generated random UUIDs are acceptable"
                     .to_string(),
             ),
         ))

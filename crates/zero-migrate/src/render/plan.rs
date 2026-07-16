@@ -32,6 +32,67 @@ use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
 use crate::render::step::{DialectScope, PlanStep};
 
+/// A database feature whose exact IR lowering has live target requirements.
+/// These are derived from the typed expression AST and carried on the complete
+/// [`AppliedPlan`] so apply can check them before any authored step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DatabaseFeature {
+    /// Exact RFC 9562 UUIDv4 database generation: PostgreSQL's core
+    /// `gen_random_uuid()` or the capability-gated MySQL synthesis.
+    UuidV4Generation,
+    /// Exact RFC 9562 UUIDv7 generation through PostgreSQL's core `uuidv7()`
+    /// function.
+    UuidV7Generation,
+}
+
+impl DatabaseFeature {
+    /// PostgreSQL's numeric server-version floor for this feature.
+    #[must_use]
+    pub const fn minimum_postgres_version_num(self) -> i32 {
+        match self {
+            Self::UuidV4Generation => 130_000,
+            Self::UuidV7Generation => 180_000,
+        }
+    }
+
+    /// Operator-facing feature description for a target-capability error.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::UuidV4Generation => "exact RFC 9562 UUIDv4 database generation",
+            Self::UuidV7Generation => "exact RFC 9562 UUIDv7 database generation",
+        }
+    }
+}
+
+/// The deduplicated database capabilities one lowered plan requires.
+///
+/// Requirements are execution metadata, not migration identity: the originating
+/// expression nodes are already folded into the canonical IR checksum, while the
+/// connected server version is an apply-time fact.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DatabaseRequirements {
+    features: std::collections::BTreeSet<DatabaseFeature>,
+}
+
+impl DatabaseRequirements {
+    /// Add one required database feature. Repeated expressions deduplicate.
+    pub fn require(&mut self, feature: DatabaseFeature) {
+        self.features.insert(feature);
+    }
+
+    /// Whether this plan needs no version-gated database feature.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.features.is_empty()
+    }
+
+    /// Iterate required features in stable order.
+    pub fn iter(&self) -> impl Iterator<Item = DatabaseFeature> + '_ {
+        self.features.iter().copied()
+    }
+}
+
 /// The fully-resolved specification for ONE table rebuild.
 #[derive(Debug, Clone)]
 pub struct SqliteRebuildSpec {
@@ -73,6 +134,9 @@ pub struct AppliedPlan {
     pub name: String,
     /// Ordered steps; `apply_plan` runs them in sequence.
     pub steps: Vec<PlanStep>,
+    /// Database features the typed IR requires the connected target to support.
+    /// Apply checks this whole-plan set before executing any authored step.
+    pub database_requirements: DatabaseRequirements,
     /// ONE checksum over the canonical artifact (for a `.sql` plan this is the
     /// single step's `Migration.checksum`; for an IR envelope it is
     /// `Checksum::of_ir` over the op list).
@@ -132,6 +196,7 @@ impl AppliedPlan {
             version,
             name,
             steps: vec![PlanStep::Ddl(migration)],
+            database_requirements: DatabaseRequirements::default(),
             checksum,
             flags,
             dialect_scope: DialectScope::Both,

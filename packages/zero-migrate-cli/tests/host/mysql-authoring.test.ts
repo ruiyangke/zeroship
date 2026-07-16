@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-cli";
-import { byteValue, decimal, table, t } from "zero-migrate";
+import { byteValue, decimal, table, t, uuidV4 } from "zero-migrate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -158,6 +158,73 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
     const lo = Number((seqRows as Array<{ lo: number | string }>)[0].lo);
     const hi = Number((seqRows as Array<{ hi: number | string }>)[0].hi);
     assert.ok(hi >= lo && lo >= 1, "event_seq is a positive monotonic native total order");
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant bits", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL UUIDv4 test skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueDatabase("mysql_uuid_v4");
+  const meta = `${database}_migrations`;
+  const migration = {
+    name: "mysql_uuid_v4_default",
+    default: {
+      up() {
+        table("uuid_samples").create({
+          columns: {
+            id: t.uuid().notNull().default(uuidV4()),
+          },
+        });
+      },
+    },
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    await apply({
+      migration,
+      ownerApp: "app_mysql_uuid_v4",
+      projectSchema: database,
+      driver: { kind: "mysql", url: MYSQL_URL },
+      registry: {},
+      approved: false,
+      appliedBy: "uuid-test",
+    });
+
+    for (let i = 0; i < 128; i += 1) {
+      await admin.query(`INSERT INTO \`${database}\`.\`uuid_samples\` () VALUES ()`);
+    }
+    const [rows] = await admin.query(
+      `SELECT id FROM \`${database}\`.\`uuid_samples\` ORDER BY id`,
+    );
+    const values = (rows as Array<{ id?: string; ID?: string }>).map(
+      (row) => (row.id ?? row.ID) as string,
+    );
+    assert.equal(values.length, 128);
+    for (const value of values) {
+      assert.match(
+        value,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        `exact lowercase RFC 9562 UUIDv4: ${value}`,
+      );
+      assert.equal(value[14], "4", `version bits are 0100: ${value}`);
+      assert.ok("89ab".includes(value[19]), `variant bits are 10: ${value}`);
+    }
   } finally {
     await admin
       .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)

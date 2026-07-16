@@ -11,7 +11,7 @@ if (typeof globalThis !== "undefined") {
     Object.defineProperty(globalThis.crypto, "randomUUID", {
       value: function randomUUID() {
         throw new Error(
-          "crypto.randomUUID() is not available in the migration recorder; use the crypto.randomUUID symbol (no parens) or genRandomUuid()"
+          "crypto.randomUUID() is not available in the migration recorder; use the crypto.randomUUID symbol (no parens) or uuidV4()"
         );
       },
       configurable: true,
@@ -60,17 +60,13 @@ function byteValue(bytes) {
     bytes: bytes instanceof Uint8Array ? bytesToBase64(bytes) : requireBase64String(bytes)
   });
 }
-function nativeFnSynthName(value) {
-  if (value === nativeDateNow) return "now";
-  if (value === nativeMathRandom) return "genRandomUuid";
+function nativeDbExprNode(value) {
+  if (value === nativeDateNow) return { node: "fnSynth", fn: "now", args: [] };
+  if (value === nativeMathRandom) return { node: "uuidV4" };
   if (nativeCryptoRandomUUID !== void 0 && value === nativeCryptoRandomUUID) {
-    return "genRandomUuid";
+    return { node: "uuidV4" };
   }
   return void 0;
-}
-function nativeFnSynthNode(value) {
-  const fn = nativeFnSynthName(value);
-  return fn === void 0 ? void 0 : { node: "fnSynth", fn, args: [] };
 }
 var INVALID_FUNCTION_VALUE_MESSAGE = "function values are not valid here; only the supported native symbols Date.now / Math.random / crypto.randomUUID translate to DB-evaluated scalars";
 function rejectFunctionValue(value) {
@@ -640,7 +636,7 @@ function toIrScalar(value) {
   );
 }
 function toIrValue(value) {
-  const synth = nativeFnSynthNode(value);
+  const synth = nativeDbExprNode(value);
   if (synth !== void 0) return synth;
   rejectFunctionValue(value);
   if (value instanceof ExprChainImpl) return value.__node;
@@ -686,7 +682,6 @@ var DEFAULT_SCALAR_FNS = /* @__PURE__ */ new Set([
 ]);
 var DEFAULT_SYNTH_FNS = /* @__PURE__ */ new Set([
   "now",
-  "genRandomUuid",
   "concatWs",
   "splitPart"
 ]);
@@ -716,7 +711,7 @@ function defaultBuilder() {
 function defaultFunctionValueError() {
   return structuredError(
     "OP_INVALID",
-    "function defaults must be authored with top-level value constructors, e.g. `.default(now())` or `.default(genRandomUuid())`; the old `{ fn: ... }` and bare native-symbol default forms are removed"
+    "function defaults must be authored with top-level value constructors, e.g. `.default(now())` or `.default(uuidV4())`; the old `{ fn: ... }` and bare native-symbol default forms are removed"
   );
 }
 function rejectRemovedDefaultFunctionValue(value) {
@@ -748,6 +743,9 @@ function validateDefaultExpr(expr) {
         if (n.delimiter !== void 0 && n.delimiter !== null) walk(n.delimiter);
         return;
       case "literal":
+        return;
+      case "uuidV4":
+      case "uuidV7":
         return;
       case "fnCall": {
         if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
@@ -878,8 +876,14 @@ function nextval(name, opts = {}) {
 function now() {
   return chain({ node: "fnSynth", fn: "now", args: [] });
 }
+function uuidV4() {
+  return chain({ node: "uuidV4" });
+}
+function uuidV7() {
+  return chain({ node: "uuidV7" });
+}
 function genRandomUuid() {
-  return chain({ node: "fnSynth", fn: "genRandomUuid", args: [] });
+  return uuidV4();
 }
 function currentSetting(name, opts = {}) {
   requireString(name, "currentSetting(name)");
@@ -1210,7 +1214,7 @@ function chain(node) {
   return new ExprChainImpl(node);
 }
 function exprArg(x) {
-  const synth = nativeFnSynthNode(x);
+  const synth = nativeDbExprNode(x);
   if (synth !== void 0) return synth;
   rejectFunctionValue(x);
   if (x instanceof ExprChainImpl) return x.__node;
@@ -1581,7 +1585,7 @@ function dialect(legs) {
       "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present"
     );
   }
-  const isOpThunk = (value) => typeof value === "function" && nativeFnSynthNode(value) === void 0;
+  const isOpThunk = (value) => typeof value === "function" && nativeDbExprNode(value) === void 0;
   const firstIsThunk = isOpThunk(present[0][1]);
   for (const [, value] of present.slice(1)) {
     if (isOpThunk(value) !== firstIsThunk) {
@@ -1768,6 +1772,10 @@ function validateImmutableExpr(expr, position, opts = {}) {
       case "colRef":
       case "literal":
         return;
+      case "uuidV4":
+        rejectImmutableExpr(position, "uuidV4 is volatile");
+      case "uuidV7":
+        rejectImmutableExpr(position, "uuidV7 is volatile");
       case "agg":
         if (n.arg !== void 0 && n.arg !== null) walk(n.arg);
         if (n.delimiter !== void 0 && n.delimiter !== null) walk(n.delimiter);
@@ -1786,7 +1794,7 @@ function validateImmutableExpr(expr, position, opts = {}) {
         return;
       }
       case "fnSynth": {
-        if (n.fn === "now" || n.fn === "genRandomUuid") {
+        if (n.fn === "now") {
           rejectImmutableExpr(position, `${String(n.fn)} is volatile`);
         }
         if (typeof n.fn !== "string" || !IMMUTABLE_SYNTH_FNS.has(n.fn)) {
@@ -1885,7 +1893,7 @@ function validateImmutableExpr(expr, position, opts = {}) {
   walk(expr);
 }
 function resolveSetValue(value) {
-  const synth = nativeFnSynthNode(value);
+  const synth = nativeDbExprNode(value);
   if (synth !== void 0) return synth;
   if (typeof value === "function") return resolveExpr(value);
   return toIrValue(value);
@@ -3416,8 +3424,8 @@ function view(name, opts = {}) {
 }
 var NONDETERMINISM_PATTERNS = [
   { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or genRandomUuid()" },
-  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or genRandomUuid()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or uuidV4()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or uuidV4()" },
   { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or now()" }
 ];
 function lintDeterminism(source) {
@@ -3429,7 +3437,7 @@ function lintDeterminism(source) {
         code: "NONDETERMINISTIC_OP_ARG",
         accessor: name,
         suggested_fix: `replace ${name} with the DB-evaluated ${steer}`,
-        reason: `${name} bakes a build-time value into the artifact; use the structured FnSynth scalar`
+        reason: `${name} bakes a build-time value into the artifact; use a structured database expression`
       });
     }
   }
@@ -3449,6 +3457,6 @@ function splitPartGrammarLint(delim, n) {
   if (n < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }
 
-export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, view };
+export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
 //# sourceMappingURL=embedded-recorder.js.map
 //# sourceMappingURL=embedded-recorder.js.map

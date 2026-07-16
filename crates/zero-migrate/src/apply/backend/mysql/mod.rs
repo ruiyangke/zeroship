@@ -48,7 +48,7 @@ use crate::conn::ExecutorConfig;
 use crate::driver::{Row, SqlSession};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::{DatabaseFeature, DatabaseRequirements, SqliteRebuildSpec};
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
@@ -500,11 +500,106 @@ async fn recover_inflight_locked<D: SqlSession>(
     Ok(outcome)
 }
 
+fn parse_mysql_version(raw: &str) -> Result<[u32; 3], ApplyError> {
+    if raw.to_ascii_lowercase().contains("mariadb") {
+        return Err(ApplyError::Backend(format!(
+            "exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer; connected server reports MariaDB version {raw:?}"
+        )));
+    }
+    let core = raw.split('-').next().unwrap_or(raw);
+    let mut components = core.split('.');
+    let parsed = [
+        components.next().and_then(|value| value.parse().ok()),
+        components.next().and_then(|value| value.parse().ok()),
+        components.next().and_then(|value| value.parse().ok()),
+    ];
+    let [Some(major), Some(minor), Some(patch)] = parsed else {
+        return Err(ApplyError::Backend(format!(
+            "MySQL returned an unrecognized server version {raw:?}; exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer"
+        )));
+    };
+    Ok([major, minor, patch])
+}
+
 impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     type SessionSnapshot = MysqlSessionSnapshot;
 
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Mysql
+    }
+
+    async fn verify_database_requirements(
+        &self,
+        requirements: &DatabaseRequirements,
+    ) -> Result<(), ApplyError> {
+        if requirements.is_empty() {
+            return Ok(());
+        }
+        if requirements
+            .iter()
+            .any(|feature| feature == DatabaseFeature::UuidV7Generation)
+        {
+            return Err(ApplyError::Backend(
+                "exact RFC 9562 UUIDv7 database generation is unsupported on MySQL; generate UUIDv7 values in the application"
+                    .to_string(),
+            ));
+        }
+
+        let capabilities = session::database_capabilities(self.conn).await?;
+        let version = parse_mysql_version(&capabilities.server_version)?;
+        if version < [8, 0, 13] {
+            return Err(ApplyError::Backend(format!(
+                "exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer; connected server reports {:?}",
+                capabilities.server_version
+            )));
+        }
+        if !capabilities
+            .innodb_support
+            .as_deref()
+            .is_some_and(|support| {
+                support.eq_ignore_ascii_case("YES") || support.eq_ignore_ascii_case("DEFAULT")
+            })
+        {
+            return Err(ApplyError::Backend(format!(
+                "exact RFC 9562 UUIDv4 database generation requires InnoDB support; connected server reports information_schema.ENGINES.SUPPORT={:?}",
+                capabilities.innodb_support
+            )));
+        }
+        if !capabilities
+            .default_storage_engine
+            .eq_ignore_ascii_case("InnoDB")
+        {
+            return Err(ApplyError::Backend(format!(
+                "exact RFC 9562 UUIDv4 database generation requires @@SESSION.default_storage_engine=InnoDB; connected session reports {:?}",
+                capabilities.default_storage_engine
+            )));
+        }
+
+        for (setting, format) in [
+            (
+                "@@GLOBAL.binlog_format",
+                capabilities.global_binlog_format.as_str(),
+            ),
+            (
+                "@@SESSION.binlog_format",
+                capabilities.session_binlog_format.as_str(),
+            ),
+        ] {
+            if format.eq_ignore_ascii_case("ROW") {
+                continue;
+            }
+            let reason = if format.eq_ignore_ascii_case("STATEMENT") {
+                "statement-based replication can independently evaluate the nondeterministic default on a replica"
+            } else if format.eq_ignore_ascii_case("MIXED") {
+                "MIXED does not provide the explicit ongoing row-based deployment guarantee required by the UUID default contract"
+            } else {
+                "the UUID default contract supports only explicit row-based replication"
+            };
+            return Err(ApplyError::Backend(format!(
+                "exact RFC 9562 UUIDv4 database generation requires {setting}=ROW; connected server reports {format:?}: {reason}"
+            )));
+        }
+        Ok(())
     }
 
     fn placeholder_style(&self) -> PlaceholderStyle {
@@ -883,6 +978,11 @@ mod render_tests {
         applied: RefCell<Option<(String, String)>>,
         inflight_marker: RefCell<Option<MysqlInflightDdlMarker>>,
         table_engine: RefCell<String>,
+        server_version: String,
+        default_storage_engine: String,
+        innodb_support: Option<String>,
+        global_binlog_format: String,
+        session_binlog_format: String,
         trigger_name: RefCell<Option<String>>,
         unique_index_rows: RefCell<Vec<Row>>,
         edge_index_rows: RefCell<Vec<Row>>,
@@ -906,6 +1006,11 @@ mod render_tests {
                 applied: RefCell::new(None),
                 inflight_marker: RefCell::new(None),
                 table_engine: RefCell::new("InnoDB".to_string()),
+                server_version: "8.0.13".to_string(),
+                default_storage_engine: "InnoDB".to_string(),
+                innodb_support: Some("DEFAULT".to_string()),
+                global_binlog_format: "ROW".to_string(),
+                session_binlog_format: "ROW".to_string(),
                 trigger_name: RefCell::new(None),
                 unique_index_rows: RefCell::new(Vec::new()),
                 edge_index_rows: RefCell::new(Vec::new()),
@@ -925,6 +1030,22 @@ mod render_tests {
         fn with_table_engine(engine: &str) -> Self {
             let session = Self::new();
             *session.table_engine.borrow_mut() = engine.to_string();
+            session
+        }
+
+        fn with_uuid_capabilities(
+            version: &str,
+            default_engine: &str,
+            innodb_support: Option<&str>,
+            global_binlog_format: &str,
+            session_binlog_format: &str,
+        ) -> Self {
+            let mut session = Self::new();
+            session.server_version = version.to_string();
+            session.default_storage_engine = default_engine.to_string();
+            session.innodb_support = innodb_support.map(str::to_string);
+            session.global_binlog_format = global_binlog_format.to_string();
+            session.session_binlog_format = session_binlog_format.to_string();
             session
         }
 
@@ -1025,6 +1146,25 @@ mod render_tests {
         fn rows_for(&self, sql: &str) -> Vec<Row> {
             if sql.contains("GET_LOCK") {
                 vec![Row::new(vec!["got".to_string()], vec![Value::Int(1)])]
+            } else if sql.contains("VERSION() AS server_version") {
+                vec![Row::new(
+                    vec![
+                        "server_version".into(),
+                        "default_storage_engine".into(),
+                        "innodb_support".into(),
+                        "global_binlog_format".into(),
+                        "session_binlog_format".into(),
+                    ],
+                    vec![
+                        Value::Text(self.server_version.clone()),
+                        Value::Text(self.default_storage_engine.clone()),
+                        self.innodb_support
+                            .as_ref()
+                            .map_or(Value::Null, |value| Value::Text(value.clone())),
+                        Value::Text(self.global_binlog_format.clone()),
+                        Value::Text(self.session_binlog_format.clone()),
+                    ],
+                )]
             } else if sql.contains("@@SESSION.sql_mode") {
                 vec![Row::new(
                     vec![
@@ -1382,6 +1522,12 @@ mod render_tests {
         )
     }
 
+    fn requirements(feature: DatabaseFeature) -> DatabaseRequirements {
+        let mut requirements = DatabaseRequirements::default();
+        requirements.require(feature);
+        requirements
+    }
+
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
     /// non-transactional DDL (auto-commit ⇒ two-phase path for every migration).
     #[test]
@@ -1397,6 +1543,177 @@ mod render_tests {
         // The `?` placeholder renders positionally regardless of index.
         assert_eq!(backend.placeholder(1), "?");
         assert_eq!(backend.placeholder(7), "?");
+    }
+
+    #[compio::test]
+    async fn uuid_v4_requirements_gate_mysql_version_and_innodb() {
+        let empty = RecordingSession::with_uuid_capabilities(
+            "8.0.12",
+            "MyISAM",
+            None,
+            "STATEMENT",
+            "STATEMENT",
+        );
+        MysqlBackend::new_generic(&empty)
+            .verify_database_requirements(&DatabaseRequirements::default())
+            .await
+            .expect("empty requirements perform no MySQL capability probe");
+        assert!(
+            empty.log.borrow().is_empty(),
+            "empty requirements must not query the server"
+        );
+
+        for version in ["8.0.13", "8.4.2-commercial"] {
+            let supported = RecordingSession::with_uuid_capabilities(
+                version,
+                "InnoDB",
+                Some("DEFAULT"),
+                "ROW",
+                "ROW",
+            );
+            MysqlBackend::new_generic(&supported)
+                .verify_database_requirements(&requirements(DatabaseFeature::UuidV4Generation))
+                .await
+                .unwrap_or_else(|error| panic!("MySQL {version} should pass: {error}"));
+            assert_eq!(
+                supported
+                    .log
+                    .borrow()
+                    .iter()
+                    .filter(|entry| entry.contains("VERSION() AS server_version"))
+                    .count(),
+                1
+            );
+        }
+
+        let old = RecordingSession::with_uuid_capabilities(
+            "8.0.12",
+            "InnoDB",
+            Some("DEFAULT"),
+            "ROW",
+            "ROW",
+        );
+        let error = MysqlBackend::new_generic(&old)
+            .verify_database_requirements(&requirements(DatabaseFeature::UuidV4Generation))
+            .await
+            .expect_err("MySQL before 8.0.13 must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("8.0.13"), "got: {message}");
+        assert!(message.contains("8.0.12"), "got: {message}");
+
+        let mariadb = RecordingSession::with_uuid_capabilities(
+            "10.11.9-MariaDB",
+            "InnoDB",
+            Some("DEFAULT"),
+            "ROW",
+            "ROW",
+        );
+        let error = MysqlBackend::new_generic(&mariadb)
+            .verify_database_requirements(&requirements(DatabaseFeature::UuidV4Generation))
+            .await
+            .expect_err("MariaDB is not a supported MySQL 8 target");
+        assert!(error.to_string().contains("MariaDB"), "got: {error}");
+
+        for (default_engine, support, expected) in [
+            ("MyISAM", Some("YES"), "default_storage_engine"),
+            ("InnoDB", Some("DISABLED"), "InnoDB support"),
+            ("InnoDB", None, "InnoDB support"),
+        ] {
+            let unsupported = RecordingSession::with_uuid_capabilities(
+                "8.0.36",
+                default_engine,
+                support,
+                "ROW",
+                "ROW",
+            );
+            let error = MysqlBackend::new_generic(&unsupported)
+                .verify_database_requirements(&requirements(DatabaseFeature::UuidV4Generation))
+                .await
+                .expect_err("unsupported/default non-InnoDB engines must fail closed");
+            assert!(error.to_string().contains(expected), "got: {error}");
+        }
+    }
+
+    #[compio::test]
+    async fn uuid_v4_requirements_accept_only_row_binlog_formats() {
+        for (global, session, expected) in [
+            ("STATEMENT", "ROW", "statement-based replication"),
+            ("MIXED", "ROW", "ongoing row-based"),
+            ("ROW", "STATEMENT", "statement-based replication"),
+            ("ROW", "MIXED", "ongoing row-based"),
+        ] {
+            let unsupported = RecordingSession::with_uuid_capabilities(
+                "8.0.36",
+                "InnoDB",
+                Some("DEFAULT"),
+                global,
+                session,
+            );
+            let error = MysqlBackend::new_generic(&unsupported)
+                .verify_database_requirements(&requirements(DatabaseFeature::UuidV4Generation))
+                .await
+                .expect_err("non-ROW replication must fail closed");
+            let message = error.to_string();
+            assert!(message.contains(expected), "got: {message}");
+            assert!(
+                message.contains("binlog_format") && message.contains("ROW"),
+                "the remediation must be explicit: {message}"
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn uuid_v4_capability_failure_precedes_authored_sql() {
+        let rec = RecordingSession::with_uuid_capabilities(
+            "8.0.12",
+            "InnoDB",
+            Some("DEFAULT"),
+            "ROW",
+            "ROW",
+        );
+        let backend = MysqlBackend::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let migration = trivial_migration();
+        let authored_sql = migration.up.clone();
+        let mut plan = crate::AppliedPlan::single_step(migration);
+        plan.database_requirements
+            .require(DatabaseFeature::UuidV4Generation);
+
+        let error = crate::MigrationEngine::new()
+            .apply_applied_plan_with_touched_and_depends(
+                &plan,
+                &[],
+                &[],
+                crate::approval::Approval::None,
+                &backend,
+                &cfg,
+                "tester",
+                crate::apply::executor::LockMode::Acquire,
+            )
+            .await
+            .expect_err("the unsupported server must stop the complete plan");
+        assert!(error.to_string().contains("MySQL 8.0.13"), "got: {error}");
+        let log = rec.log.borrow();
+        assert!(
+            log.iter()
+                .any(|entry| entry.contains("VERSION() AS server_version")),
+            "the capability probe must run: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|entry| entry.contains(&authored_sql)),
+            "authored SQL must not run after capability failure: {log:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn uuid_v7_requirement_fails_without_querying_mysql() {
+        let rec = RecordingSession::new();
+        let error = MysqlBackend::new_generic(&rec)
+            .verify_database_requirements(&requirements(DatabaseFeature::UuidV7Generation))
+            .await
+            .expect_err("MySQL never provides UUIDv7 database generation");
+        assert!(error.to_string().contains("unsupported on MySQL"));
+        assert!(rec.log.borrow().is_empty());
     }
 
     #[compio::test]

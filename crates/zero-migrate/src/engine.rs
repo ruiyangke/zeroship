@@ -30,6 +30,7 @@ use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
+use crate::render::plan::AppliedPlan;
 use crate::render::step::{PlanStep, RenameStep};
 
 /// Sentinel touched-set entry meaning "this deploy touches a table I cannot
@@ -754,6 +755,65 @@ impl MigrationEngine {
             None,
         )
         .await
+    }
+
+    /// Apply a complete lowered [`AppliedPlan`], preserving its typed live-database
+    /// feature requirements. Requirements are verified under the project lock and
+    /// before any authored step runs; the existing step executor remains the one
+    /// execution path after that preflight.
+    ///
+    /// # Errors
+    /// Returns a backend capability/version error when the connected database
+    /// cannot satisfy the plan, plus the errors documented by
+    /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_applied_plan_with_touched_and_depends<B: MigrationBackend>(
+        &self,
+        plan: &AppliedPlan,
+        touched_tables: &[String],
+        depends_on: &[String],
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        let owns_lock = lock_mode == LockMode::Acquire;
+        if owns_lock {
+            backend
+                .acquire_project_lock(exec_cfg)
+                .await
+                .map_err(|error| DeclarativeApplyError::Plain(EngineError::Apply(error)))?;
+        }
+
+        let result = async {
+            backend
+                .verify_database_requirements(&plan.database_requirements)
+                .await
+                .map_err(|error| DeclarativeApplyError::Plain(EngineError::Apply(error)))?;
+            self.apply_plan_with_touched_and_depends(
+                &plan.steps,
+                touched_tables,
+                depends_on,
+                approval,
+                backend,
+                exec_cfg,
+                applied_by,
+                LockMode::AlreadyHeld,
+            )
+            .await
+        }
+        .await;
+
+        if !owns_lock {
+            return result;
+        }
+        let unlock = backend.release_project_lock(exec_cfg).await;
+        match (result, unlock) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(_), Err(error)) => Err(DeclarativeApplyError::Plain(EngineError::Apply(error))),
+            (Err(error), _) => Err(error),
+        }
     }
 
     /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but ALSO

@@ -27,6 +27,9 @@ import {
   byteValue,
   dialect,
   now,
+  uuidV4,
+  uuidV7,
+  genRandomUuid,
   currentSetting,
   currentUser,
   interval,
@@ -50,6 +53,9 @@ import {
   nextval as engNextval,
   decimal as engDecimal,
   byteValue as engByteValue,
+  uuidV4 as engUuidV4,
+  uuidV7 as engUuidV7,
+  genRandomUuid as engGenRandomUuid,
 } from "../dist/embedded-recorder.js";
 
 /** Record one phase's ops via the ambient recorder. */
@@ -67,9 +73,27 @@ async function importPlatformCorpusMigration(relativePath: string): Promise<{ up
   return import(dataUrl) as Promise<{ up(): void }>;
 }
 
-function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any; byteValue: any }) => void): any[] {
+function recordEngine(up: (api: {
+  table: any;
+  t: any;
+  nextval: any;
+  decimal: any;
+  byteValue: any;
+  uuidV4: any;
+  uuidV7: any;
+  genRandomUuid: any;
+}) => void): any[] {
   engBegin();
-  up({ table: engTable, t: engT, nextval: engNextval, decimal: engDecimal, byteValue: engByteValue });
+  up({
+    table: engTable,
+    t: engT,
+    nextval: engNextval,
+    decimal: engDecimal,
+    byteValue: engByteValue,
+    uuidV4: engUuidV4,
+    uuidV7: engUuidV7,
+    genRandomUuid: engGenRandomUuid,
+  });
   return engDrain();
 }
 
@@ -78,6 +102,8 @@ test("zero-migrate core exports enumType, pg vendor names, and omits old names",
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
   assert.equal(typeof imported.now, "function");
+  assert.equal(typeof imported.uuidV4, "function");
+  assert.equal(typeof imported.uuidV7, "function");
   assert.equal(typeof imported.genRandomUuid, "function");
   assert.equal(typeof imported.currentSetting, "function");
   assert.equal(typeof imported.currentUser, "function");
@@ -181,16 +207,45 @@ test("t.textArray() records the textArray column type", () => {
   assert.equal(col.nullable, false);
 });
 
-test("t.id() records a uuid PK + genRandomUuid default + top-level primaryKey", () => {
+test("t.id() keeps its existing shape while recording the exact UUIDv4 default", () => {
   const ops = record(() => {
     table("u").create({ columns: { id: t.id() } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "uuid");
   assert.equal(col.nullable, false);
-  assert.deepEqual(col.default, { expr: { node: "fnSynth", fn: "genRandomUuid", args: [] } });
+  assert.deepEqual(col.default, { expr: { node: "uuidV4" } });
   assert.deepEqual(ops[0].primaryKey, ["id"]);
   assert.equal(ops[0].constraints, undefined);
+});
+
+test("UUID value constructors record exact versioned nodes and the deprecated alias is UUIDv4", () => {
+  const author = (api: { table: any; t: any; uuidV4: any; uuidV7: any; genRandomUuid: any }): void => {
+    api.table("u").create({
+      columns: {
+        v4: api.t.uuid().default(api.uuidV4()),
+        v7: api.t.uuid().default(api.uuidV7()),
+        legacy: api.t.uuid().default(api.genRandomUuid()),
+      },
+    });
+    api.table("u").insert({
+      rows: [{ v4: api.uuidV4(), v7: api.uuidV7(), legacy: api.genRandomUuid() }],
+    });
+  };
+  const ops = record(() => author({ table, t, uuidV4, uuidV7, genRandomUuid }));
+  const engineOps = recordEngine(author);
+
+  assert.deepEqual(ops[0].columns.map((column: any) => column.default), [
+    { expr: { node: "uuidV4" } },
+    { expr: { node: "uuidV7" } },
+    { expr: { node: "uuidV4" } },
+  ]);
+  assert.deepEqual(ops[1].rows[0], [
+    { node: "uuidV4" },
+    { node: "uuidV7" },
+    { node: "uuidV4" },
+  ]);
+  assert.deepEqual(engineOps, ops);
 });
 
 test("default expression callbacks record IrDefault::Expr", () => {
@@ -916,7 +971,7 @@ test("non-native function values fail closed instead of recording as JSON null",
   );
 });
 
-test("supported native function symbols still record as fnSynth", () => {
+test("supported native function symbols record exact database expressions", () => {
   const rows: Record<string, unknown> = {
     at: Date.now,
     random_id: Math.random,
@@ -927,9 +982,9 @@ test("supported native function symbols still record as fnSynth", () => {
   const ops = record(() => table("t").insert({ rows: [rows] as any }));
   const values = ops[0].rows[0];
   assert.deepEqual(values[0], { node: "fnSynth", fn: "now", args: [] });
-  assert.deepEqual(values[1], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+  assert.deepEqual(values[1], { node: "uuidV4" });
   if (globalThis.crypto?.randomUUID !== undefined) {
-    assert.deepEqual(values[2], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+    assert.deepEqual(values[2], { node: "uuidV4" });
   }
 });
 
@@ -2149,11 +2204,11 @@ test("immutable-only slots reject forced volatile/vendor nodes and record aggreg
           indexes: [{
             name: "users_bad_partial_idx",
             on: ["email"],
-            where: { node: "fnSynth", fn: "genRandomUuid", args: [] } as any,
+            where: { node: "uuidV4" } as any,
           }],
         }),
       ),
-    (e: any) => e.code === "OP_INVALID" && /partial index predicate/.test(e.message) && /genRandomUuid is volatile/.test(e.message),
+    (e: any) => e.code === "OP_INVALID" && /partial index predicate/.test(e.message) && /uuidV4 is volatile/.test(e.message),
   );
 
   assert.throws(

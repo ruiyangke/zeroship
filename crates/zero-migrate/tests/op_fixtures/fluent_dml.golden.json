@@ -364,9 +364,7 @@
           ]
         },
         "token": {
-          "node": "fnSynth",
-          "fn": "genRandomUuid",
-          "args": []
+          "node": "uuidV4"
         },
         "touched": {
           "node": "fnSynth",

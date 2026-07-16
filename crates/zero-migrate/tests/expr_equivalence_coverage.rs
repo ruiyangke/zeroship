@@ -24,6 +24,7 @@ const EXPECTED_PORTABLE_EXPR_VARIANTS: &[&str] = &[
     "Like",
     "Literal",
     "UnaryOp",
+    "UuidV4",
 ];
 
 const EXPECTED_SYNTAX_ONLY_GAPS: &[&str] = &["Like"];
@@ -114,7 +115,7 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
             ),
         },
         Expr::FnSynth { r#fn, .. } => match r#fn {
-            SynthFn::ConcatWs | SynthFn::SplitPart | SynthFn::Now | SynthFn::GenRandomUuid => {
+            SynthFn::ConcatWs | SynthFn::SplitPart | SynthFn::Now => {
                 portable(
                     "FnSynth",
                     "ir_splitpart_parity_pg::split_part_apply_matches_sqlite_parity_path and ir_dml_sqlite fnSynth apply tests",
@@ -122,6 +123,15 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
                 )
             }
         },
+        Expr::UuidV4 => portable(
+            "UuidV4",
+            "render::dml::tests::sqlite_uuid_v4_samples_have_canonical_rfc_bits and insert_renders_exact_uuid_v4_without_uuid_v1_mysql",
+            ProofClaim::SemanticEquivalence,
+        ),
+        Expr::UuidV7 => vendor(
+            "UuidV7",
+            "Exact database UUIDv7 generation requires PostgreSQL 18+",
+        ),
         Expr::Cast { .. } => portable(
             "Cast",
             "render::dml::tests::cast_renders_per_dialect_type_names",
@@ -238,6 +248,8 @@ fn portable_expr_samples() -> Vec<Expr> {
             r#fn: SynthFn::ConcatWs,
             args: vec![lit_str("-"), Expr::col("first"), Expr::col("last")],
         },
+        // covered by exact per-dialect renderer assertions and live SQLite bits
+        Expr::UuidV4,
         // covered by render::dml cast tests plus this gate's render smoke
         Expr::Cast {
             operand: Box::new(Expr::col("a")),
@@ -411,6 +423,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
                 seconds: None,
             },
         },
+        Expr::UuidV7,
         Expr::Dialectal {
             default: None,
             pg: Some(Box::new(lit_str("pg"))),

@@ -34,6 +34,8 @@ import {
   decimal,
   byteValue,
   now,
+  uuidV4,
+  uuidV7,
   genRandomUuid,
   currentSetting,
   currentUser,
@@ -616,8 +618,10 @@ export function insertValueShapes(): void {
   table("users").create({
     columns: {
       created_at: t.timestamp().default(now()),
-      random_id: t.uuid().default(genRandomUuid()),
-      id: t.uuid().default(genRandomUuid()),
+      random_id: t.uuid().default(uuidV4()),
+      ordered_id: t.uuid().default(uuidV7()),
+      legacy_id: t.uuid().default(genRandomUuid()),
+      id: t.uuid().default(uuidV4()),
     },
   });
 

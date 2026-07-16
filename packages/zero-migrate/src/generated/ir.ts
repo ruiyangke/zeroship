@@ -191,6 +191,8 @@ export type Expr =
   | { node: "case"; branches: CaseBranch[]; else?: Expr | null }
   | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
+  | { node: "uuidV4" }
+  | { node: "uuidV7" }
   | { node: "cast"; operand: Expr; target: CastTarget }
   | { node: "between"; operand: Expr; low: Expr; high: Expr }
   | { node: "like"; operand: Expr; pattern: Expr }

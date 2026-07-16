@@ -3429,6 +3429,34 @@
           ]
         },
         {
+          "description": "Generate an exact RFC 9562 UUIDv4 in the database. The dialect renderer\nowns the concrete expression and must preserve the `0100` version nibble\nand `10` RFC variant bits.",
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "const": "uuidV4"
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Generate an exact RFC 9562 UUIDv7 in the database. Unsupported database\ntargets or server versions must fail closed rather than substituting a\ndifferent UUID version.",
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "const": "uuidV7"
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "additionalProperties": false
+        },
+        {
           "description": "A cast to a portable type (`.cast({ to: \"int\" })`).",
           "type": "object",
           "properties": {
@@ -3717,7 +3745,7 @@
           ]
         },
         {
-          "description": "**The one Layer-2 portability escape** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nc.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting `SQLite`. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION.** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
+          "description": "**The one Layer-2 portability escape** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nuuidV4(), sqlite: …, mysql: uuidV4() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting `SQLite`. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION.** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
           "type": "object",
           "properties": {
             "default": {
@@ -3976,7 +4004,7 @@
       ]
     },
     "SynthFn": {
-      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins. CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);\n`concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal).",
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins. CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);\n`concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated\nscalar (the structured replacement for a frozen `Date.now()` literal).",
       "oneOf": [
         {
           "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (`SQLite`).",
@@ -3992,11 +4020,6 @@
           "description": "`now()` / current timestamp, evaluated at apply time.",
           "type": "string",
           "const": "now"
-        },
-        {
-          "description": "`gen_random_uuid()`, evaluated at apply time.",
-          "type": "string",
-          "const": "genRandomUuid"
         }
       ]
     },

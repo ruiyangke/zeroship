@@ -2221,7 +2221,7 @@ fn build_table_snapshot_impl(
                 // — the NOT NULL is injected by `system_field_columns`, not carried
                 // on the field — so the fold ignoring `nullable` is correct, not a
                 // drop. A legitimate `t.id(prefix?)` carries NO user `default` (its
-                // synth `genRandomUuid` maps to `None`) and is never a column-level
+                // structured UUIDv4 default maps to `None`) and is never a column-level
                 // UNIQUE (the PK implies it), so this never fires for the real id
                 // shape — only for a modifier that would otherwise vanish.
                 if f.unique || f.default.is_some() {
@@ -7314,7 +7314,7 @@ mod snapshot_builder_refactor_safety_tests {
 
     /// **the legitimate shape STILL folds.** A clean `t.id(prefix?)` PK
     /// (`ty = "id"`, no user default, not column-unique — exactly what
-    /// `ir_column_to_field` produces, since the synth `genRandomUuid` default maps to
+    /// `ir_column_to_field` produces, since the structured UUIDv4 default maps to
     /// `None`) must fold into the single system PK with NO error and NO second column.
     /// Guards against the reject over-firing on the real id shape.
     #[test]
