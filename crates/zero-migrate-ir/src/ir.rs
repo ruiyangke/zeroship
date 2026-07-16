@@ -440,6 +440,69 @@ pub struct IrFlagsOverride {
     pub phase: Option<OnlinePhase>,
 }
 
+/// Maximum byte length of a TypeID 0.3 prefix.
+///
+/// TypeID prefixes are ASCII-only, so this is also the maximum character
+/// length. The optional separator is not part of the prefix.
+pub const TYPE_ID_MAX_PREFIX_LEN: usize = 63;
+
+/// Validate a TypeID 0.3 prefix.
+///
+/// The empty prefix is valid and means the stored value is the bare 26-character
+/// suffix. A non-empty prefix contains only lowercase ASCII letters and
+/// underscores, starts and ends with a letter, and is at most
+/// [`TYPE_ID_MAX_PREFIX_LEN`] bytes long. Consecutive underscores are valid.
+///
+/// # Errors
+///
+/// Returns a human-readable explanation when `prefix` is not canonical.
+pub fn validate_type_id_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.len() > TYPE_ID_MAX_PREFIX_LEN {
+        return Err(format!(
+            "TypeID prefix is {} bytes; the maximum is {TYPE_ID_MAX_PREFIX_LEN}",
+            prefix.len()
+        ));
+    }
+    if prefix.is_empty() {
+        return Ok(());
+    }
+
+    let bytes = prefix.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_lowercase)
+        || !bytes.last().is_some_and(u8::is_ascii_lowercase)
+    {
+        return Err(
+            "a non-empty TypeID prefix must start and end with a lowercase ASCII letter"
+                .to_string(),
+        );
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || *byte == b'_')
+    {
+        return Err(
+            "a TypeID prefix may contain only lowercase ASCII letters and underscores".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Canonical value-level format metadata, independent of physical SQL storage.
+///
+/// The enum uses serde's natural externally-tagged representation. For example,
+/// a TypeID is encoded as `{ "typeId": { "prefix": "user" } }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum ValueFormat {
+    /// TypeID 0.3, stored canonically as `<prefix>_<suffix>` or as the bare
+    /// suffix when `prefix` is empty.
+    TypeId {
+        /// Stored TypeID prefix, without the separator underscore.
+        prefix: String,
+    },
+}
+
 /// Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema
 /// enumerates exactly the supported types and the lowering is a total
 /// match. Camel-cased on the wire (`"int"`, `"bigInt"`, `"geoPoint"`, …).
@@ -1081,6 +1144,14 @@ pub struct IrColumn {
     /// Whether the column carries a single-column UNIQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
+    /// Canonical value-level format metadata. The physical storage type remains
+    /// explicit in [`Self::ty`]; validation checks the format/type pairing.
+    #[serde(
+        rename = "valueFormat",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value_format: Option<ValueFormat>,
     /// **Migration-first** — the `t.id({ prefix })` typed-id prefix, a
     /// DECLARED-ONLY hint DB introspection cannot recover (the minted
     /// `usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time
@@ -2642,6 +2713,13 @@ pub enum Op {
         /// Structured default (typed literal or synth scalar) — never raw SQL.
         #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
+        /// Canonical value-level format metadata for the added column.
+        #[serde(
+            rename = "valueFormat",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        value_format: Option<ValueFormat>,
         /// **#173** — the pgvector distance metric for a `t.vector(n, { metric })` added
         /// column (the same DECLARED-ONLY facet `IrColumn` carries on createTable).
         /// Meaningful on an added column (a vector ADD COLUMN renders the metric opclass),
@@ -4354,6 +4432,79 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn type_id_value_format_uses_natural_external_tag() {
+        let format = ValueFormat::TypeId {
+            prefix: "user".to_string(),
+        };
+        let wire = serde_json::to_value(&format).unwrap();
+        assert_eq!(wire, serde_json::json!({ "typeId": { "prefix": "user" } }));
+        assert_eq!(serde_json::from_value::<ValueFormat>(wire).unwrap(), format);
+    }
+
+    #[test]
+    fn type_id_value_format_round_trips_on_columns_and_add_column() {
+        let column_wire = serde_json::json!({
+            "name": "id",
+            "type": "text",
+            "valueFormat": { "typeId": { "prefix": "" } }
+        });
+        let column: IrColumn = serde_json::from_value(column_wire.clone()).unwrap();
+        assert_eq!(
+            column.value_format,
+            Some(ValueFormat::TypeId {
+                prefix: String::new()
+            })
+        );
+        assert_eq!(serde_json::to_value(column).unwrap(), column_wire);
+
+        let op_wire = serde_json::json!({
+            "op": "addColumn",
+            "table": "things",
+            "column": "id",
+            "type": "text",
+            "valueFormat": { "typeId": { "prefix": "thing" } }
+        });
+        let op: Op = serde_json::from_value(op_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(op).unwrap(), op_wire);
+
+        let plain: IrColumn = serde_json::from_value(serde_json::json!({
+            "name": "body",
+            "type": "text"
+        }))
+        .unwrap();
+        assert!(plain.value_format.is_none());
+        assert!(
+            serde_json::to_value(plain)
+                .unwrap()
+                .get("valueFormat")
+                .is_none(),
+            "an absent value format must remain checksum-neutral"
+        );
+    }
+
+    #[test]
+    fn type_id_prefix_validator_accepts_the_type_id_0_3_grammar() {
+        for prefix in ["", "a", "user", "my__type"] {
+            validate_type_id_prefix(prefix).unwrap_or_else(|error| {
+                panic!("canonical TypeID prefix {prefix:?} was rejected: {error}")
+            });
+        }
+        validate_type_id_prefix(&"a".repeat(TYPE_ID_MAX_PREFIX_LEN))
+            .expect("a 63-character lowercase prefix is valid");
+    }
+
+    #[test]
+    fn type_id_prefix_validator_rejects_noncanonical_prefixes() {
+        for prefix in ["_user", "user_", "User", "user1", "us-er", "týpe"] {
+            assert!(
+                validate_type_id_prefix(prefix).is_err(),
+                "noncanonical TypeID prefix {prefix:?} must be rejected"
+            );
+        }
+        assert!(validate_type_id_prefix(&"a".repeat(TYPE_ID_MAX_PREFIX_LEN + 1)).is_err());
+    }
+
     // ---- IrScalar numeric-domain — RED before the custom Deserialize ----
 
     #[test]
@@ -4461,6 +4612,7 @@ mod tests {
                 nullable: None,
                 default: Some(IrDefault::Json { value }),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -4560,6 +4712,7 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -4749,6 +4902,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -4763,6 +4917,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -4793,6 +4948,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -5004,7 +5160,8 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                // The new facets, both ABSENT (a plain `t.text()` column).
+                // The new facets, all ABSENT (a plain `t.text()` column).
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -5136,6 +5293,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -5159,6 +5317,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -5343,6 +5502,7 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: Some(false),
             vector_metric: None,
@@ -5368,6 +5528,7 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5394,6 +5555,7 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,

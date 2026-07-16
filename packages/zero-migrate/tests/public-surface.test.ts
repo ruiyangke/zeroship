@@ -65,6 +65,10 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "sequence",
   ];
   assert.equal(coreExports.has("table"), true, "table must be exported from zero-migrate root declarations");
+  assert.equal(coreExports.has("ids"), true, "ids must be exported from zero-migrate root declarations");
+  for (const name of ["IdFormats", "TypeIdOptions", "ValueFormat"]) {
+    assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
+  }
   for (const name of rootedVendorExports) {
     assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
   }
@@ -91,6 +95,8 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
 
   const runtimeRoot = await import("zero-migrate");
+  assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
+  assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");
   for (const name of rootedVendorExports) {
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }

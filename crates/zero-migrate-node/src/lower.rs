@@ -585,6 +585,7 @@ fn synthetic_rename_source_column(
         ty: ty.clone(),
         nullable: None,
         default: None,
+        value_format: None,
         vector_metric: None,
         case_sensitive: None,
         mask: None,

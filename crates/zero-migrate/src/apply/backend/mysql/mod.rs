@@ -500,11 +500,9 @@ async fn recover_inflight_locked<D: SqlSession>(
     Ok(outcome)
 }
 
-fn parse_mysql_version(raw: &str) -> Result<[u32; 3], ApplyError> {
+fn parse_mysql_version(raw: &str) -> Result<[u32; 3], String> {
     if raw.to_ascii_lowercase().contains("mariadb") {
-        return Err(ApplyError::Backend(format!(
-            "exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer; connected server reports MariaDB version {raw:?}"
-        )));
+        return Err(format!("connected server reports MariaDB version {raw:?}"));
     }
     let core = raw.split('-').next().unwrap_or(raw);
     let mut components = core.split('.');
@@ -514,9 +512,9 @@ fn parse_mysql_version(raw: &str) -> Result<[u32; 3], ApplyError> {
         components.next().and_then(|value| value.parse().ok()),
     ];
     let [Some(major), Some(minor), Some(patch)] = parsed else {
-        return Err(ApplyError::Backend(format!(
-            "MySQL returned an unrecognized server version {raw:?}; exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer"
-        )));
+        return Err(format!(
+            "MySQL returned an unrecognized server version {raw:?}"
+        ));
     };
     Ok([major, minor, patch])
 }
@@ -545,13 +543,33 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
             ));
         }
 
+        let needs_uuid_v4 = requirements
+            .iter()
+            .any(|feature| feature == DatabaseFeature::UuidV4Generation);
+        let needs_type_id = requirements
+            .iter()
+            .any(|feature| feature == DatabaseFeature::TypeIdValidation);
+
         let capabilities = session::database_capabilities(self.conn).await?;
-        let version = parse_mysql_version(&capabilities.server_version)?;
-        if version < [8, 0, 13] {
+        let (minimum, requirement) = if needs_type_id {
+            ([8, 0, 16], "canonical TypeID format validation")
+        } else {
+            ([8, 0, 13], "exact RFC 9562 UUIDv4 database generation")
+        };
+        let version = parse_mysql_version(&capabilities.server_version).map_err(|detail| {
+            ApplyError::Backend(format!(
+                "{requirement} requires MySQL {}.{}.{} or newer; {detail}",
+                minimum[0], minimum[1], minimum[2]
+            ))
+        })?;
+        if version < minimum {
             return Err(ApplyError::Backend(format!(
-                "exact RFC 9562 UUIDv4 database generation requires MySQL 8.0.13 or newer; connected server reports {:?}",
-                capabilities.server_version
+                "{requirement} requires MySQL {}.{}.{} or newer; connected server reports {:?}",
+                minimum[0], minimum[1], minimum[2], capabilities.server_version
             )));
+        }
+        if !needs_uuid_v4 {
+            return Ok(());
         }
         if !capabilities
             .innodb_support
@@ -1660,6 +1678,48 @@ mod render_tests {
                 "the remediation must be explicit: {message}"
             );
         }
+    }
+
+    #[compio::test]
+    async fn type_id_validation_requires_mysql_8_0_16_only() {
+        let old = RecordingSession::with_uuid_capabilities(
+            "8.0.15",
+            "MyISAM",
+            None,
+            "STATEMENT",
+            "STATEMENT",
+        );
+        let error = MysqlBackend::new_generic(&old)
+            .verify_database_requirements(&requirements(DatabaseFeature::TypeIdValidation))
+            .await
+            .expect_err("MySQL before enforced CHECK constraints must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("TypeID"), "got: {message}");
+        assert!(message.contains("8.0.16"), "got: {message}");
+        assert!(message.contains("8.0.15"), "got: {message}");
+
+        // TypeID validation needs enforced CHECK constraints, not UUIDv4's
+        // InnoDB/default-engine/row-replication guarantees.
+        let current = RecordingSession::with_uuid_capabilities(
+            "8.0.16",
+            "MyISAM",
+            None,
+            "STATEMENT",
+            "MIXED",
+        );
+        MysqlBackend::new_generic(&current)
+            .verify_database_requirements(&requirements(DatabaseFeature::TypeIdValidation))
+            .await
+            .expect("MySQL 8.0.16+ enforces the TypeID CHECK independently of UUID generation");
+        assert_eq!(
+            current
+                .log
+                .borrow()
+                .iter()
+                .filter(|entry| entry.contains("VERSION() AS server_version"))
+                .count(),
+            1
+        );
     }
 
     #[compio::test]

@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  ids,
   t,
   table,
   view,
@@ -187,6 +188,98 @@ test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
   assert.equal(cols[1].caseSensitive, false, "caseSensitive:false records the facet");
   assert.equal(cols[2].caseSensitive, undefined, "caseSensitive:true is byte-identical");
   assert.equal(ops[1].caseSensitive, false, "addColumn carries the text facet too");
+});
+
+test("ids.typeId records exact text + valueFormat IR and remains constraint-neutral by default", () => {
+  const ops = record(() => {
+    table("public_examples").create({
+      columns: {
+        typed_id: ids.typeId({ prefix: "example" }),
+        bare_id: ids.typeId({ prefix: "" }).notNull(),
+        key_id: ids.typeId({ prefix: "key" }).primaryKey(),
+      },
+    });
+    table("public_examples").column("candidate_id").add({
+      type: ids.typeId({ prefix: "candidate" }).notNull().unique(),
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createTable",
+      name: "public_examples",
+      columns: [
+        {
+          name: "typed_id",
+          type: "text",
+          valueFormat: { typeId: { prefix: "example" } },
+        },
+        {
+          name: "bare_id",
+          type: "text",
+          nullable: false,
+          valueFormat: { typeId: { prefix: "" } },
+        },
+        {
+          name: "key_id",
+          type: "text",
+          nullable: false,
+          valueFormat: { typeId: { prefix: "key" } },
+        },
+      ],
+      primaryKey: ["key_id"],
+    },
+    {
+      op: "addColumn",
+      table: "public_examples",
+      column: "candidate_id",
+      type: "text",
+      nullable: false,
+      valueFormat: { typeId: { prefix: "candidate" } },
+    },
+    {
+      op: "addConstraint",
+      table: "public_examples",
+      constraint: { kind: { kind: "unique", columns: ["candidate_id"] } },
+    },
+  ]);
+});
+
+test("ids.typeId validates TypeID 0.3 prefixes at authoring time", () => {
+  for (const prefix of ["", "a", "user", "user_account", "a__b", "a".repeat(63)]) {
+    assert.doesNotThrow(() => ids.typeId({ prefix }), JSON.stringify(prefix));
+  }
+
+  for (const prefix of [
+    "_user",
+    "user_",
+    "User",
+    "user1",
+    "user-id",
+    "usér",
+    "a".repeat(64),
+  ]) {
+    assert.throws(
+      () => ids.typeId({ prefix }),
+      (error: any) => error.code === "OP_INVALID" && /lowercase ASCII/.test(error.message),
+      JSON.stringify(prefix),
+    );
+  }
+
+  assert.throws(
+    () => (ids.typeId as any)(),
+    (error: any) => error.code === "OP_INVALID",
+  );
+  assert.throws(
+    () => ids.typeId({ prefix: 42 as any }),
+    (error: any) => error.code === "OP_INVALID" && /must be a string/.test(error.message),
+  );
+});
+
+test("raw DML strings are never rewritten as TypeID values by the recorder", () => {
+  const authored = "User_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+  const ops = record(() => table("public_examples").insert({ rows: { typed_id: authored } }));
+  assert.equal(ops[0].rows[0][0], authored);
 });
 
 test("public and engine recorders match for t.text({ caseSensitive:false })", () => {

@@ -183,6 +183,7 @@ mod tests {
             ty: crate::ir::ColType::Text,
             nullable: Some(true),
             default: None,
+            value_format: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,

@@ -43,6 +43,7 @@ import type {
   TableRef,
   TriggerAction,
   TriggerStmt,
+  ValueFormat,
   VectorMetric,
   ViewQuery,
 } from "./generated/ir.js";
@@ -80,6 +81,7 @@ export type {
   TableRef,
   TriggerAction,
   TriggerStmt,
+  ValueFormat,
   VectorMetric,
   ViewQuery,
 };
@@ -101,6 +103,19 @@ export type {
  *  validate time. */
 export interface IdOptions {
   prefix: string;
+}
+
+/** Options for the published TypeID 0.3 text format. The empty prefix is
+ * valid and stores the 26-character suffix without a leading underscore. */
+export interface TypeIdOptions {
+  prefix: string;
+}
+
+/** First-class, validated textual ID formats. These builders select storage
+ * and validation only; they remain nullable and carry no generator or key
+ * semantics unless the ordinary {@link ColumnDef} modifiers opt in. */
+export interface IdFormats {
+  typeId(options: TypeIdOptions): ColumnDef;
 }
 
 /** Options for `t.text({ caseSensitive })`. `false` records the portable

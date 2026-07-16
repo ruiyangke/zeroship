@@ -1164,8 +1164,42 @@ pub fn validate_op_scoped(
             // seven system fields before checksum; Platform paths do not.
             let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             let scope = TargetScope::new(name, &cols);
+            let type_id_columns = columns
+                .iter()
+                .filter(|column| {
+                    matches!(
+                        column.value_format,
+                        Some(crate::model::ir::ValueFormat::TypeId { .. })
+                    )
+                })
+                .map(|column| column.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
             for ix in indexes {
                 for element in &ix.columns {
+                    match element {
+                        IndexElement::Column {
+                            name,
+                            collation: Some(collation),
+                            ..
+                        } if type_id_columns.contains(name.as_str()) && collation != "C" => {
+                            return Err(AuthoringError {
+                                code: CODE_COLUMN_FACET_CONFLICT.to_string(),
+                                kind: None,
+                                op_index,
+                                ts_location: ts_location.map(str::to_string),
+                                dialect: target_dialect,
+                                reason: format!(
+                                    "column {name:?} declares a TypeID value format but index {:?} selects collation {collation:?}; TypeID requires the bytewise C collation",
+                                    ix.name
+                                ),
+                                suggested_fix: Some(
+                                    "remove the index collation override or use collation \"C\""
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                        _ => {}
+                    }
                     check_index_element(element, &scope)?;
                 }
                 if let Some(pred) = &ix.r#where {
@@ -1379,21 +1413,19 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        // AddColumn carries the same per-column declared facets
-        // (`vector_metric` / standalone `mask`) `createTable` columns do, so it gets the
-        // SAME fail-closed facet validation: a `vector_metric` on a non-vector added
-        // column is refused [`CODE_VECTOR_METRIC_MISPLACED`] BEFORE lower (mask/kind are
-        // already structurally bounded by their closed enums at deserialize). Build a
-        // synthetic single-column `IrColumn` view and route it through the shared
-        // [`validate_column_facets`]. (`id_prefix` cannot reach here — `Op::AddColumn` has
-        // no slot; the recorder fail-closes it — so the prefix arm of the validator is a
-        // no-op for this view.)
+        // AddColumn carries the same per-column declared facets (`value_format` /
+        // `vector_metric` / standalone `mask`) `createTable` columns do, so it gets
+        // the SAME fail-closed facet validation. Build a synthetic single-column
+        // `IrColumn` view and route it through the shared [`validate_column_facets`].
+        // (`id_prefix` cannot reach here — `Op::AddColumn` has no slot; the recorder
+        // fail-closes it — so the legacy-prefix arm is a no-op for this view.)
         Op::AddColumn {
             table,
             column,
             ty,
             nullable,
             default,
+            value_format,
             vector_metric,
             case_sensitive,
             mask,
@@ -1424,6 +1456,7 @@ pub fn validate_op_scoped(
                 nullable: *nullable,
                 default: default.clone(),
                 unique: None,
+                value_format: value_format.clone(),
                 id_prefix: None,
                 vector_metric: *vector_metric,
                 case_sensitive: *case_sensitive,
@@ -3223,9 +3256,10 @@ fn validate_default_expr(
 }
 
 /// Validate one [`IrColumn`](crate::model::ir::IrColumn)'s
-/// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
+/// declared-only facets (`value_format` / `id_prefix` / `vector_metric`) against
+/// their bounds.
 ///
-/// Two fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
+/// Three fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
 /// mind (the closed-enum + `deny_unknown_fields` design):
 ///
 /// 1. **`id_prefix`** — must be a valid typed-id prefix: the SAME `^[a-z][a-z0-9_]*$`
@@ -3236,7 +3270,10 @@ fn validate_default_expr(
 ///    hand-authored prefix keeps the compact `<prefix>_<22 base62>` typed-id shape.
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
 ///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
-/// 2. **`vector_metric`** — structurally bounded by the closed
+/// 2. **`value_format`** — TypeID prefixes obey the distinct TypeID 0.3 grammar;
+///    a TypeID format co-occurs only with exact [`ColType::Text`](crate::model::ir::ColType::Text)
+///    storage and never with `caseSensitive:false`.
+/// 3. **`vector_metric`** — structurally bounded by the closed
 ///    [`crate::model::ir::VectorMetric`] enum at deserialize; the only authoring error
 ///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
 ///    meaningless (the opclass has no vector to apply to) and is refused
@@ -3244,7 +3281,8 @@ fn validate_default_expr(
 ///    dead field in.
 ///
 /// # Errors
-/// [`CODE_INVALID_ID_PREFIX`] / [`CODE_VECTOR_METRIC_MISPLACED`] as above.
+/// [`CODE_INVALID_ID_PREFIX`] / [`CODE_INVALID_TYPE_ID_PREFIX`] /
+/// [`CODE_VECTOR_METRIC_MISPLACED`] as above.
 fn validate_column_facets(
     col: &crate::model::ir::IrColumn,
     target_dialect: Dialect,
@@ -3386,6 +3424,44 @@ fn validate_column_facets(
                     prefix.len()
                 ),
                 format!("shorten the prefix to at most {MAX_ID_PREFIX_LEN} characters"),
+            ));
+        }
+    }
+
+    if let Some(crate::model::ir::ValueFormat::TypeId { prefix }) = &col.value_format {
+        if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
+            return Err(mk(
+                CODE_INVALID_TYPE_ID_PREFIX,
+                format!(
+                    "column {:?} declares an invalid TypeID prefix {prefix:?}: {error}",
+                    col.name
+                ),
+                "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
+                    .to_string(),
+            ));
+        }
+
+        if !matches!(col.ty, crate::model::ir::ColType::Text) {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "column {:?} declares a TypeID value format on a non-text storage type; TypeID requires exact text storage",
+                    col.name
+                ),
+                "declare the column with text storage, or remove the TypeID value format"
+                    .to_string(),
+            ));
+        }
+
+        if matches!(col.case_sensitive, Some(false)) {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "column {:?} declares both a TypeID value format and caseSensitive:false; TypeID requires bytewise, case-sensitive comparison",
+                    col.name
+                ),
+                "remove caseSensitive:false so TypeID storage keeps bytewise comparison semantics"
+                    .to_string(),
             ));
         }
     }
@@ -4800,6 +4876,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -4935,6 +5012,7 @@ mod tests {
             nullable: not_null.then_some(false),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -5887,6 +5965,7 @@ mod tests {
                         nullable: None,
                         default: None,
                         unique: None,
+                        value_format: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -5900,6 +5979,7 @@ mod tests {
                         nullable: None,
                         default: None,
                         unique: None,
+                        value_format: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -6197,6 +6277,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6260,6 +6341,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6304,6 +6386,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6642,7 +6725,7 @@ mod tests {
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
 
-    use crate::model::ir::{EmptyContainerKind, IrJsonValue, VectorMetric};
+    use crate::model::ir::{EmptyContainerKind, IrJsonValue, ValueFormat, VectorMetric};
 
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
@@ -6654,6 +6737,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: Some(prefix.to_string()),
                 case_sensitive: None,
                 vector_metric: None,
@@ -6673,6 +6757,35 @@ mod tests {
         }
     }
 
+    fn create_with_type_id(prefix: &str, ty: ColType, case_sensitive: Option<bool>) -> Op {
+        Op::CreateTable {
+            name: "things".into(),
+            columns: vec![IrColumn {
+                name: "id".into(),
+                ty,
+                nullable: None,
+                default: None,
+                unique: None,
+                value_format: Some(ValueFormat::TypeId {
+                    prefix: prefix.to_string(),
+                }),
+                id_prefix: None,
+                case_sensitive,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
     fn create_with_default(ty: ColType, default: crate::model::ir::IrDefault) -> Op {
         Op::CreateTable {
             name: "docs".into(),
@@ -6682,6 +6795,7 @@ mod tests {
                 nullable: None,
                 default: Some(default),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -6716,6 +6830,120 @@ mod tests {
             validate_ir_platform(&ir, Dialect::Postgres).is_ok(),
             "a well-formed, unreserved, in-length id prefix must validate"
         );
+    }
+
+    #[test]
+    fn type_id_value_format_accepts_canonical_prefixes_on_exact_text() {
+        let max_prefix = "a".repeat(crate::model::ir::TYPE_ID_MAX_PREFIX_LEN);
+        for prefix in ["", "a", "my__type", max_prefix.as_str()] {
+            for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+                let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
+                assert!(
+                    validate_ir_platform(&ir, dialect).is_ok(),
+                    "canonical TypeID prefix {prefix:?} must validate for {dialect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn type_id_value_format_rejects_noncanonical_prefixes() {
+        let overlong = "a".repeat(crate::model::ir::TYPE_ID_MAX_PREFIX_LEN + 1);
+        for prefix in [
+            "_user",
+            "user_",
+            "User",
+            "user1",
+            "us-er",
+            "týpe",
+            overlong.as_str(),
+        ] {
+            let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
+            let error = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("a noncanonical TypeID prefix must fail closed");
+            assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX, "got: {error}");
+        }
+    }
+
+    #[test]
+    fn type_id_value_format_requires_exact_text_storage() {
+        for ty in [
+            ColType::Uuid,
+            ColType::String,
+            ColType::Encrypted {
+                of: Box::new(ColType::Text),
+            },
+        ] {
+            let ir = ir_with(vec![create_with_type_id("user", ty, None)]);
+            let error = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("TypeID metadata on non-text storage must fail closed");
+            assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+            assert!(error.reason.contains("exact text storage"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn type_id_value_format_rejects_case_insensitive_text() {
+        let ir = ir_with(vec![create_with_type_id(
+            "user",
+            ColType::Text,
+            Some(false),
+        )]);
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("TypeID plus caseSensitive:false must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+        assert!(error.reason.contains("bytewise"), "got: {error}");
+    }
+
+    #[test]
+    fn type_id_value_format_rejects_a_weakening_index_collation() {
+        let mut op = create_with_type_id("user", ColType::Text, None);
+        let Op::CreateTable { indexes, .. } = &mut op else {
+            unreachable!("helper always returns createTable");
+        };
+        indexes.push(IrIndex {
+            name: Some("things_id_ci".into()),
+            columns: vec![crate::model::ir::IndexElement::Column {
+                name: "id".into(),
+                order: None,
+                opclass: None,
+                collation: Some("und-x-icu".into()),
+            }],
+            unique: Some(true),
+            using: None,
+            r#where: None,
+            include: vec![],
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        });
+
+        let error = validate_ir_platform(&ir_with(vec![op]), Dialect::Postgres)
+            .expect_err("a non-bytewise TypeID index collation must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+        assert!(error.reason.contains("collation"), "got: {error}");
+        assert!(error.reason.contains("bytewise"), "got: {error}");
+    }
+
+    #[test]
+    fn add_column_type_id_value_format_uses_the_same_policy_gate() {
+        let valid = ir_with(vec![op_json(
+            r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
+        )]);
+        assert!(validate_ir_platform(&valid, Dialect::Postgres).is_ok());
+
+        let wrong_storage = ir_with(vec![op_json(
+            r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
+        )]);
+        let error = validate_ir_platform(&wrong_storage, Dialect::Postgres)
+            .expect_err("addColumn TypeID metadata on UUID storage must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+    }
+
+    #[test]
+    fn legacy_uuid_id_prefix_remains_valid() {
+        let ir = ir_with(vec![create_with_id_prefix("post")]);
+        assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
     }
 
     #[test]
@@ -6765,6 +6993,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
@@ -6798,6 +7027,7 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: Some(false),
                     vector_metric: None,
@@ -6901,6 +7131,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),

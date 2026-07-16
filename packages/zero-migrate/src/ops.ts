@@ -1,7 +1,7 @@
 // `zero-migrate` — the fluent-only op-builder DSL implementation.
 //
 // This is the TS authoring surface a creator imports:
-//   import { table, t } from "zero-migrate";
+//   import { ids, table, t } from "zero-migrate";
 //
 //   export default {
 //     up() {
@@ -82,6 +82,7 @@ import type {
   GeneratedColumnExprFn,
   GeneratedOptions,
   GroupByItem,
+  IdFormats,
   IdOptions,
   IdentityOptions,
   Int64Value,
@@ -123,6 +124,7 @@ import type {
   TableStrictness,
   TableRef,
   TextOptions,
+  TypeIdOptions,
   TriggerBodyBuilder,
   TriggerStmt,
   TypeLexicon,
@@ -146,6 +148,7 @@ import type {
   GrantTarget,
   MaskKind,
   Privilege,
+  ValueFormat,
   VectorMetric,
 } from "./generated/ir.js";
 
@@ -587,6 +590,20 @@ function requirePlainObject(v: unknown, what: string): asserts v is Record<strin
   }
 }
 
+/** Validate the persisted TypeID 0.3 prefix at the authoring boundary. The
+ * Rust validator repeats this check for hand-authored IR envelopes. */
+function requireTypeIdPrefix(v: unknown): asserts v is string {
+  requireString(v, "ids.typeId({ prefix })");
+  if (v.length > 63 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
+    throw structuredError(
+      "OP_INVALID",
+      "ids.typeId({ prefix }): prefix must be empty or at most 63 lowercase ASCII " +
+        "letters/underscores beginning and ending with a letter",
+      { prefix: v },
+    );
+  }
+}
+
 function requireOptionalPositiveInteger(v: unknown, what: string): number | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
@@ -727,11 +744,12 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _default: unknown;
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
-  // Declared-only facets carried on the IrColumn:
-  // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector({ dimensions, metric })`), plus a standalone column mask (`.mask({…})`).
+  // Semantic facets carried on the IrColumn: the old typed-id prefix
+  // (`t.id({prefix})`), canonical value format (`ids.typeId({prefix})`), pgvector
+  // distance metric, and the remaining standalone column facets.
   // Absent ⇒ omitted on the wire.
   readonly _idPrefix: string | undefined;
+  readonly _valueFormat: ValueFormat | undefined;
   readonly _vectorMetric: string | undefined;
   readonly _caseSensitive: boolean | undefined;
   readonly _mask: { kind: string; classification: string } | undefined;
@@ -746,6 +764,7 @@ class ColumnDefImpl implements ColumnDefType {
       primaryKey?: boolean;
       unique?: boolean;
       idPrefix?: string;
+      valueFormat?: ValueFormat;
       vectorMetric?: string;
       caseSensitive?: boolean;
       mask?: { kind: string; classification: string };
@@ -759,6 +778,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
     this._idPrefix = fields?.idPrefix;
+    this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
     this._mask = fields?.mask;
@@ -774,6 +794,7 @@ class ColumnDefImpl implements ColumnDefType {
     primaryKey?: boolean;
     unique?: boolean;
     idPrefix?: string;
+    valueFormat?: ValueFormat;
     vectorMetric?: string;
     caseSensitive?: boolean;
     mask?: { kind: string; classification: string };
@@ -786,6 +807,7 @@ class ColumnDefImpl implements ColumnDefType {
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
+      valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
       mask: "mask" in over ? over.mask : this._mask,
@@ -889,9 +911,10 @@ class ColumnDefImpl implements ColumnDefType {
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
-      // Carry the declared-only facets onto the wire IrColumn (camelCase
-      // keys `idPrefix`/`vectorMetric`/`mask`). Absent ⇒ omitted (compact), so a
+      // Carry the semantic facets onto the wire IrColumn (camelCase keys
+      // `idPrefix`/`valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
       // plain column is byte-identical to the pre-facet image (checksum-neutral).
+      valueFormat: this._valueFormat,
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
@@ -917,8 +940,9 @@ class ColumnDefImpl implements ColumnDefType {
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      // Carry the vector metric + standalone mask onto the addColumn op tail
+      // Carry the value format + remaining column facets onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
+      valueFormat: this._valueFormat,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
@@ -1428,6 +1452,18 @@ export function interval(duration: Duration): ExprChainType {
     duration: pgDuration(duration),
   });
 }
+
+/** Validated textual ID formats. These helpers select storage + format only;
+ * ordinary `ColumnDef` modifiers opt into nullability/key constraints. */
+export const ids: IdFormats = {
+  typeId: (opts: TypeIdOptions) => {
+    requirePlainObject(opts, "ids.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix);
+    return new ColumnDefImpl("text", {
+      valueFormat: { typeId: { prefix: opts.prefix } },
+    });
+  },
+};
 
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {

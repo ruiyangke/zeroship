@@ -54,6 +54,7 @@ use crate::render::declarative::{
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::step::{BindValue, PlanStep, RenameStep};
+use crate::render::value_format::column_metadata as value_format_column_metadata;
 use crate::schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op. A DDL op lowers to a list of
@@ -1478,8 +1479,14 @@ fn collect_op_database_requirements(
             }
         }
         Op::AddColumn {
-            default, generated, ..
+            default,
+            value_format,
+            generated,
+            ..
         } => {
+            if dialect == SqlDialect::Mysql && value_format.is_some() {
+                requirements.require(DatabaseFeature::TypeIdValidation);
+            }
             if let Some(default) = default {
                 collect_default_database_requirements(default, dialect, requirements);
             }
@@ -1643,6 +1650,9 @@ fn collect_column_database_requirements(
     dialect: SqlDialect,
     requirements: &mut DatabaseRequirements,
 ) {
+    if dialect == SqlDialect::Mysql && column.value_format.is_some() {
+        requirements.require(DatabaseFeature::TypeIdValidation);
+    }
     if let Some(default) = &column.default {
         collect_default_database_requirements(default, dialect, requirements);
     }
@@ -2627,6 +2637,7 @@ impl IrAuthor {
                 apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 apply_structured_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
+                self.apply_value_format_metadata(columns, &mut snap)?;
                 // keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
                 // injects `<col>_masked` from the descriptor's `mask` facet (including
@@ -2701,6 +2712,7 @@ impl IrAuthor {
                 ty,
                 nullable,
                 default,
+                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
@@ -2732,6 +2744,7 @@ impl IrAuthor {
                     nullable: *nullable,
                     default: default.clone(),
                     unique: None,
+                    value_format: value_format.clone(),
                     id_prefix: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
@@ -2746,6 +2759,7 @@ impl IrAuthor {
                     &mut col,
                     named_types,
                 )?;
+                self.apply_value_format_column_metadata(&source_col, &mut col)?;
                 // addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
                 // **F1** — the decider compares the canonical SQLite affinity (consistent
@@ -3071,6 +3085,7 @@ impl IrAuthor {
                                 nullable: None,
                                 default: None,
                                 unique: None,
+                                value_format: None,
                                 id_prefix: None,
                                 case_sensitive: None,
                                 vector_metric: None,
@@ -4561,6 +4576,7 @@ impl IrAuthor {
             // PK); the vector metric + standalone mask ARE carried so the snapshot
             // renders the metric opclass / `zero-migrate:mask` sentinel.
             unique: None,
+            value_format: None,
             id_prefix: None,
             vector_metric,
             case_sensitive,
@@ -4608,6 +4624,40 @@ impl IrAuthor {
             };
             self.apply_named_type_column_metadata(default_schema, table, source, col, named_types)?;
         }
+        Ok(())
+    }
+
+    fn apply_value_format_metadata(
+        &self,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        for source in columns {
+            let Some(_) = &source.value_format else {
+                continue;
+            };
+            let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
+                return Err(IrLowerError::UnsupportedOp(
+                    "value-format column folded away",
+                ));
+            };
+            self.apply_value_format_column_metadata(source, col)?;
+        }
+        Ok(())
+    }
+
+    fn apply_value_format_column_metadata(
+        &self,
+        source: &IrColumn,
+        col: &mut ColumnSnapshot,
+    ) -> Result<(), IrLowerError> {
+        let Some(value_format) = &source.value_format else {
+            return Ok(());
+        };
+        let metadata = value_format_column_metadata(&source.name, value_format, self.dialect)
+            .map_err(DeclarativeError::Invalid)?;
+        col.ddl_type_override = Some(metadata.ddl_type);
+        col.inline_checks.push(metadata.inline_check);
         Ok(())
     }
 
@@ -7214,6 +7264,26 @@ mod tests {
             nullable: Some(false),
             default: Some(IrDefault::Expr { expr }),
             unique: None,
+            value_format: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
+    fn type_id_column(name: &str, prefix: &str) -> TIrColumn {
+        TIrColumn {
+            name: name.into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            value_format: Some(crate::model::ir::ValueFormat::TypeId {
+                prefix: prefix.into(),
+            }),
             id_prefix: None,
             vector_metric: None,
             case_sensitive: None,
@@ -7308,6 +7378,26 @@ mod tests {
             sqlite_plan.database_requirements.is_empty(),
             "SQLite's engine-owned UUIDv4 expression has no live capability gate"
         );
+    }
+
+    #[test]
+    fn mysql_plan_records_type_id_check_requirement_only_on_mysql() {
+        let ir = create_table_ir("events", vec![type_id_column("id", "event")]);
+
+        let mysql_plan = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("MySQL TypeID storage lowers");
+        assert_eq!(
+            mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::TypeIdValidation]
+        );
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let plan = IrAuthor::new("app", "app_a", dialect)
+                .lower_plan(&ir, &LiveSchema::default())
+                .expect("TypeID storage lowers without a server gate");
+            assert!(plan.database_requirements.is_empty(), "got {dialect:?}");
+        }
     }
 
     #[test]
@@ -7442,6 +7532,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7483,6 +7574,7 @@ mod tests {
                     value: crate::model::ir::IrScalar::Bytes(vec![0x00, 0x01, 0x7f, 0x80, 0xff]),
                 }),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7533,6 +7625,7 @@ mod tests {
                     value: crate::model::ir::IrScalar::Int64(9_007_199_254_740_993),
                 }),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7580,6 +7673,7 @@ mod tests {
                     ),
                 }),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7641,6 +7735,7 @@ mod tests {
                 ty: ColType::BigInt,
                 nullable: Some(false),
                 default: None,
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -7687,6 +7782,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -7735,6 +7831,7 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -7748,6 +7845,7 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -7819,6 +7917,7 @@ mod tests {
                     nullable,
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -7882,6 +7981,7 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -7895,6 +7995,7 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -7933,6 +8034,7 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8001,6 +8103,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8053,6 +8156,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8111,6 +8215,7 @@ mod tests {
                         value: IrScalar::Int(5),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8126,6 +8231,7 @@ mod tests {
                         value: IrScalar::Int(0),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8143,6 +8249,7 @@ mod tests {
                         value: IrScalar::Int64(9_007_199_254_740_993),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8158,6 +8265,7 @@ mod tests {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8173,6 +8281,7 @@ mod tests {
                         value: IrScalar::Decimal("0.25".into()),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8188,6 +8297,7 @@ mod tests {
                         value: IrScalar::Str("192.0.2.1".into()),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -8250,6 +8360,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8295,6 +8406,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8338,6 +8450,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8381,6 +8494,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8424,6 +8538,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8467,6 +8582,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8620,6 +8736,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8678,6 +8795,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8738,6 +8856,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8775,6 +8894,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -8827,6 +8947,7 @@ mod tests {
                     value: crate::model::ir::IrScalar::Str(nasty.into()),
                 }),
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9068,6 +9189,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -9145,6 +9267,7 @@ mod tests {
                             kind: EmptyContainerKind::Object,
                         }),
                         unique: None,
+                        value_format: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9160,6 +9283,7 @@ mod tests {
                             kind: EmptyContainerKind::Array,
                         }),
                         unique: None,
+                        value_format: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9175,6 +9299,7 @@ mod tests {
                             kind: EmptyContainerKind::Array,
                         }),
                         unique: None,
+                        value_format: None,
                         id_prefix: None,
                         case_sensitive: None,
                         vector_metric: None,
@@ -9242,6 +9367,7 @@ mod tests {
                     nullable: None,
                     default: Some(IrDefault::Json { value }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -9313,6 +9439,7 @@ mod tests {
                     nullable: None,
                     default: Some(IrDefault::Json { value }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -9377,6 +9504,7 @@ mod tests {
                     nullable: None,
                     default: Some(synth_default(crate::model::expr::SynthFn::Now)),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -9422,6 +9550,7 @@ mod tests {
                 ty: ColType::Uuid,
                 nullable: Some(false),
                 default: Some(uuid_v4_default()),
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -9461,6 +9590,7 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::model::ir::IrScalar::Str("x".into()),
                 }),
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -10069,6 +10199,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10143,6 +10274,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10191,6 +10323,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10207,6 +10340,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,
@@ -10705,6 +10839,7 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
+                value_format: None,
                 id_prefix: None,
                 case_sensitive: None,
                 vector_metric: None,

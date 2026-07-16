@@ -22,6 +22,7 @@ fn col_with_nullability(name: &str, ty: ColType, nullable: Option<bool>) -> IrCo
         nullable,
         default: None,
         unique: None,
+        value_format: None,
         id_prefix: None,
         case_sensitive: None,
         vector_metric: None,

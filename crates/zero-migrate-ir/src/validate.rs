@@ -84,6 +84,9 @@ pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
 /// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time
 /// surprise (it would otherwise mint ids colliding with platform `usr_…` ids).
 pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
+/// A TypeID value format carries a prefix that violates the TypeID 0.3 prefix
+/// grammar or its 63-byte bound.
+pub const CODE_INVALID_TYPE_ID_PREFIX: &str = "INVALID_TYPE_ID_PREFIX";
 /// A `vector_metric` carried on a column that is
 /// NOT a `ColType::Vector`. The metric is structurally bounded by the closed
 /// [`crate::model::ir::VectorMetric`] enum at deserialize; this is the co-occurrence

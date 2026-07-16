@@ -127,6 +127,10 @@ export type ColType =
   | { domain: { name: string; schema?: string } }
   | { encrypted: { of: ColType } };
 
+/** Canonical, validated value formats carried independently from physical
+ * column storage. TypeID uses externally tagged camelCase enum encoding. */
+export type ValueFormat = { typeId: { prefix: string } };
+
 /** The CLOSED pgvector distance-metric lexicon — drives the ivfflat/hnsw
  *  operator class. Camel-cased on the wire; faithful transcription of the schema
  *  `VectorMetric` `oneOf` const set. A DECLARED-ONLY hint introspection cannot
@@ -249,6 +253,9 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
+  /** Canonical value-format semantics. `ids.typeId()` stores text while this
+   *  facet carries the exact persisted TypeID prefix. Default-absent. */
+  valueFormat?: ValueFormat | null;
   /** The `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
    *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
   idPrefix?: string | null;
@@ -486,7 +493,7 @@ export type Op =
   | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; valueFormat?: ValueFormat | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";

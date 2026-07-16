@@ -59,6 +59,8 @@ export {
   raw,
   // the immutable fluent column-type lexicon
   t,
+  // validated textual ID formats (storage + validation only)
+  ids,
   // the shared `db` lexicon bridge: lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
@@ -93,6 +95,7 @@ export type {
   // authoring types
   ColumnDef,
   TypeLexicon,
+  IdFormats,
   ExprBuilder,
   ExprChain,
   ExprFn,
@@ -209,7 +212,9 @@ export type {
   MaskKind,
   Classification,
   VectorMetric,
+  ValueFormat,
   IdOptions,
+  TypeIdOptions,
   TextOptions,
   NumericOptions,
   CharOptions,

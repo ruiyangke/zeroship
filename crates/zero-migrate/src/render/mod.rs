@@ -9,4 +9,5 @@ pub mod plan;
 pub(crate) mod renderer;
 pub mod sql_preview;
 pub mod step;
+pub(crate) mod value_format;
 pub mod vendor;

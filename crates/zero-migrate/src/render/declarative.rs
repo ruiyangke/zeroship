@@ -6592,7 +6592,8 @@ impl DdlEmitter for SqliteEmitter {
         } else {
             String::new()
         };
-        let ty = if c.generated.is_some()
+        let ty = if c.ddl_type_override.is_some()
+            || c.generated.is_some()
             || c.identity.is_some()
             || matches!(c.case_sensitive, Some(false))
         {

@@ -46,6 +46,7 @@ export {
   minValue,
   maxValue,
   t,
+  ids,
   // value-position case helper
   cCase,
   // internal PG handles retained for recorder artifact tests

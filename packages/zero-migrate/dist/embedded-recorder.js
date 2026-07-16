@@ -276,6 +276,16 @@ function requirePlainObject(v, what) {
     throw structuredError("OP_INVALID", `${what} must be an object`);
   }
 }
+function requireTypeIdPrefix(v) {
+  requireString(v, "ids.typeId({ prefix })");
+  if (v.length > 63 || v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v)) {
+    throw structuredError(
+      "OP_INVALID",
+      "ids.typeId({ prefix }): prefix must be empty or at most 63 lowercase ASCII letters/underscores beginning and ending with a letter",
+      { prefix: v }
+    );
+  }
+}
 function requireOptionalPositiveInteger(v, what) {
   if (v === void 0) return void 0;
   if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
@@ -386,11 +396,12 @@ var ColumnDefImpl = class _ColumnDefImpl {
   _default;
   _primaryKey;
   _unique;
-  // Declared-only facets carried on the IrColumn:
-  // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector({ dimensions, metric })`), plus a standalone column mask (`.mask({…})`).
+  // Semantic facets carried on the IrColumn: the old typed-id prefix
+  // (`t.id({prefix})`), canonical value format (`ids.typeId({prefix})`), pgvector
+  // distance metric, and the remaining standalone column facets.
   // Absent ⇒ omitted on the wire.
   _idPrefix;
+  _valueFormat;
   _vectorMetric;
   _caseSensitive;
   _mask;
@@ -403,6 +414,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
     this._idPrefix = fields?.idPrefix;
+    this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
     this._mask = fields?.mask;
@@ -417,6 +429,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
+      valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
       mask: "mask" in over ? over.mask : this._mask,
@@ -511,9 +524,10 @@ var ColumnDefImpl = class _ColumnDefImpl {
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : void 0,
-      // Carry the declared-only facets onto the wire IrColumn (camelCase
-      // keys `idPrefix`/`vectorMetric`/`mask`). Absent ⇒ omitted (compact), so a
+      // Carry the semantic facets onto the wire IrColumn (camelCase keys
+      // `idPrefix`/`valueFormat`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
       // plain column is byte-identical to the pre-facet image (checksum-neutral).
+      valueFormat: this._valueFormat,
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
@@ -534,8 +548,9 @@ var ColumnDefImpl = class _ColumnDefImpl {
       type: this._type,
       nullable: this._nullable === false ? false : void 0,
       default: this._default,
-      // Carry the vector metric + standalone mask onto the addColumn op tail
+      // Carry the value format + remaining column facets onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
+      valueFormat: this._valueFormat,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
       mask: this._mask,
@@ -946,6 +961,15 @@ function interval(duration) {
     duration: pgDuration(duration)
   });
 }
+var ids = {
+  typeId: (opts) => {
+    requirePlainObject(opts, "ids.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix);
+    return new ColumnDefImpl("text", {
+      valueFormat: { typeId: { prefix: opts.prefix } }
+    });
+  }
+};
 var t = {
   id: (opts) => {
     let col = new ColumnDefImpl("uuid").primaryKey().default(genRandomUuid());
@@ -3554,6 +3578,6 @@ function splitPartGrammarLint(delim, n) {
   if (n < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }
 
-export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, int64, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
+export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, ids, int64, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
 //# sourceMappingURL=embedded-recorder.js.map
 //# sourceMappingURL=embedded-recorder.js.map

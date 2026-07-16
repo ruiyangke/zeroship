@@ -488,6 +488,17 @@
                 }
               ]
             },
+            "valueFormat": {
+              "description": "Canonical value-level format metadata for the added column.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ValueFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "vectorMetric": {
               "description": "**#173** — the pgvector distance metric for a `t.vector(n, { metric })` added\ncolumn (the same DECLARED-ONLY facet `IrColumn` carries on createTable).\nMeaningful on an added column (a vector ADD COLUMN renders the metric opclass),\nso it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]\ntype (`validate_column_facets`). Default-absent + `skip_serializing_if` ⇒\nbyte-identical when absent. (No `id_prefix` slot: an added column is NEVER the\nsystem PK, so a typed-id prefix is meaningless — the recorder keeps that\nfail-closed.)",
               "anyOf": [
@@ -2787,6 +2798,17 @@
             "null"
           ]
         },
+        "valueFormat": {
+          "description": "Canonical value-level format metadata. The physical storage type remains\nexplicit in [`Self::ty`]; validation checks the format/type pairing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValueFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "idPrefix": {
           "description": "**Migration-first** — the `t.id({ prefix })` typed-id prefix, a\nDECLARED-ONLY hint DB introspection cannot recover (the minted\n`usr_<base62>` id is opaque text in the catalog; the prefix is a mint-time\ninput, not a stored column attribute). Carried so gen-types — and the\nruntime, once it deletes the declared-schema cache — keep the typed-id brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image. Bounded\nat validate-time ([`crate::validate`]) to the `typed_id` charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) — the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across IR↔descriptor.",
           "type": [
@@ -4351,6 +4373,34 @@
       "additionalProperties": false,
       "required": [
         "name"
+      ]
+    },
+    "ValueFormat": {
+      "description": "Canonical value-level format metadata, independent of physical SQL storage.\n\nThe enum uses serde's natural externally-tagged representation. For example,\na TypeID is encoded as `{ \"typeId\": { \"prefix\": \"user\" } }`.",
+      "oneOf": [
+        {
+          "description": "TypeID 0.3, stored canonically as `<prefix>_<suffix>` or as the bare\nsuffix when `prefix` is empty.",
+          "type": "object",
+          "properties": {
+            "typeId": {
+              "type": "object",
+              "properties": {
+                "prefix": {
+                  "description": "Stored TypeID prefix, without the separator underscore.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "prefix"
+              ]
+            }
+          },
+          "required": [
+            "typeId"
+          ],
+          "additionalProperties": false
+        }
       ]
     },
     "VectorMetric": {

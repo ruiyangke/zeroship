@@ -26,6 +26,7 @@ import {
   colTypeFromDbField,
   dbType as dbT,
   fromDb,
+  ids,
   t,
   table,
   view,
@@ -47,6 +48,9 @@ import {
   type CheckDef,
   type DbFieldType,
   type Int64Value,
+  type IdFormats,
+  type TypeIdOptions,
+  type ValueFormat,
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
@@ -411,6 +415,25 @@ export function badColTypes(): void {
   t.numeric();
   t.char({ length: 3 });
   t.vector({ dimensions: 8, metric: "cosine" });
+
+  const typeIdOptions: TypeIdOptions = { prefix: "account" };
+  const idFormats: IdFormats = ids;
+  const valueFormat: ValueFormat = { typeId: typeIdOptions };
+  const typedId: ColumnDef = idFormats.typeId(typeIdOptions).notNull().unique().primaryKey();
+  table("accounts").create({ columns: { id: typedId } });
+  void valueFormat;
+
+  // @ts-expect-error — TypeID options are required.
+  ids.typeId();
+
+  // @ts-expect-error — TypeID requires an explicit prefix (the empty string is valid).
+  ids.typeId({});
+
+  // @ts-expect-error — a TypeID prefix is text.
+  ids.typeId({ prefix: 42 });
+
+  // @ts-expect-error — ULID is intentionally deferred to a later piece.
+  ids.ulid();
 
   // @ts-expect-error — `t.numeric` now takes a named options bag.
   t.numeric(12, 2);

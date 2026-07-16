@@ -43,6 +43,9 @@ pub enum DatabaseFeature {
     /// Exact RFC 9562 UUIDv7 generation through PostgreSQL's core `uuidv7()`
     /// function.
     UuidV7Generation,
+    /// Enforced canonical TypeID format checks on MySQL. MySQL parsed but
+    /// ignored `CHECK` constraints before 8.0.16.
+    TypeIdValidation,
 }
 
 impl DatabaseFeature {
@@ -52,6 +55,9 @@ impl DatabaseFeature {
         match self {
             Self::UuidV4Generation => 130_000,
             Self::UuidV7Generation => 180_000,
+            // Collected only for MySQL plans; PostgreSQL has enforced CHECK
+            // constraints throughout the engine's supported version range.
+            Self::TypeIdValidation => 0,
         }
     }
 
@@ -61,6 +67,7 @@ impl DatabaseFeature {
         match self {
             Self::UuidV4Generation => "exact RFC 9562 UUIDv4 database generation",
             Self::UuidV7Generation => "exact RFC 9562 UUIDv7 database generation",
+            Self::TypeIdValidation => "canonical TypeID format validation",
         }
     }
 }

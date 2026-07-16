@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-cli";
-import { byteValue, decimal, table, t, uuidV4 } from "zero-migrate";
+import { byteValue, decimal, ids, table, t, uuidV4 } from "zero-migrate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +52,45 @@ async function loadMigration() {
 function uniqueDatabase(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
+
+const VALID_BARE_TYPE_IDS = [
+  "00000000000000000000000000",
+  "00000000000000000000000001",
+  "0000000000000000000000000a",
+  "0000000000000000000000000g",
+  "00000000000000000000000010",
+  "7zzzzzzzzzzzzzzzzzzzzzzzzz",
+] as const;
+
+const VALID_PREFIXED_TYPE_IDS = [
+  ["prefixed", "prefix_0123456789abcdefghjkmnpqrs"],
+  ["prefixed", "prefix_01h455vb4pex5vsknk084sn02q"],
+  ["split", "pre_fix_00000000000000000000000000"],
+] as const;
+
+const INVALID_OFFICIAL_TYPE_IDS = [
+  "PREFIX_00000000000000000000000000",
+  "12345_00000000000000000000000000",
+  "pre.fix_00000000000000000000000000",
+  "préfix_00000000000000000000000000",
+  " prefix_00000000000000000000000000",
+  "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl_00000000000000000000000000",
+  "_00000000000000000000000000",
+  "_",
+  "prefix_1234567890123456789012345",
+  "prefix_123456789012345678901234567",
+  "prefix_1234567890123456789012345 ",
+  "prefix_0123456789ABCDEFGHJKMNPQRS",
+  "prefix_123456789-123456789-123456",
+  "prefix_ooooooiiiiiiuuuuuuulllllll",
+  "prefix_i23456789ol23456789oi23456",
+  "prefix_123456789-0123456789-0123456",
+  "prefix_8zzzzzzzzzzzzzzzzzzzzzzzzz",
+  "_prefix_00000000000000000000000000",
+  "prefix__00000000000000000000000000",
+  "",
+  "prefix_",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Live-MySQL apply — the napi addon lowers for the `mysql` dialect + applies over
@@ -158,6 +197,79 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
     const lo = Number((seqRows as Array<{ lo: number | string }>)[0].lo);
     const hi = Number((seqRows as Array<{ hi: number | string }>)[0].hi);
     assert.ok(hi >= lo && lo >= 1, "event_seq is a positive monotonic native total order");
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix form", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL TypeID fixtures skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueDatabase("mysql_type_id");
+  const meta = `${database}_migrations`;
+  const migration = {
+    name: "mysql_type_id_fixtures",
+    default: {
+      up() {
+        table("type_id_samples").create({
+          columns: {
+            bare: ids.typeId({ prefix: "" }),
+            prefixed: ids.typeId({ prefix: "prefix" }),
+            split: ids.typeId({ prefix: "pre_fix" }),
+          },
+        });
+      },
+    },
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    await apply({
+      migration,
+      ownerApp: "app_mysql_type_id",
+      projectSchema: database,
+      driver: { kind: "mysql", url: MYSQL_URL },
+      registry: {},
+      approved: false,
+      appliedBy: "type-id-test",
+    });
+
+    for (const value of VALID_BARE_TYPE_IDS) {
+      await admin.query(
+        `INSERT INTO \`${database}\`.\`type_id_samples\` (bare) VALUES (?)`,
+        [value],
+      );
+    }
+    for (const [column, value] of VALID_PREFIXED_TYPE_IDS) {
+      await admin.query(
+        `INSERT INTO \`${database}\`.\`type_id_samples\` (\`${column}\`) VALUES (?)`,
+        [value],
+      );
+    }
+    await admin.query(`INSERT INTO \`${database}\`.\`type_id_samples\` () VALUES ()`);
+
+    for (const value of INVALID_OFFICIAL_TYPE_IDS) {
+      await assert.rejects(
+        admin.query(
+          `INSERT INTO \`${database}\`.\`type_id_samples\` (prefixed) VALUES (?)`,
+          [value],
+        ),
+        `invalid official TypeID fixture was accepted: ${JSON.stringify(value)}`,
+      );
+    }
   } finally {
     await admin
       .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)

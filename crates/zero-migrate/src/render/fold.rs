@@ -72,6 +72,7 @@ use crate::render::lower::{
     render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
 };
 use crate::render::renderer::{Capability, DialectSupports};
+use crate::render::value_format::column_metadata as value_format_column_metadata;
 use crate::schema::query::SqlDialect;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
@@ -613,6 +614,7 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
+                apply_fold_value_format_metadata(columns, &mut snap, dialect)?;
                 fold_create_table_specs(
                     name,
                     project_schema,
@@ -766,6 +768,7 @@ pub fn fold_ops_onto(
                 ty,
                 nullable,
                 default,
+                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
@@ -805,6 +808,7 @@ pub fn fold_ops_onto(
                     nullable: *nullable,
                     default: default.clone(),
                     unique: None,
+                    value_format: value_format.clone(),
                     id_prefix: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
@@ -821,6 +825,7 @@ pub fn fold_ops_onto(
                     dialect,
                     project_schema,
                 )?;
+                apply_fold_value_format_column_metadata(&source_col, &mut col, dialect)?;
                 snap.columns.push(col);
                 if let Some(sibling) = masked_sibling {
                     snap.columns.push(sibling);
@@ -994,6 +999,7 @@ pub fn fold_ops_onto(
                                 nullable: None,
                                 default: None,
                                 unique: None,
+                                value_format: None,
                                 id_prefix: None,
                                 case_sensitive: None,
                                 vector_metric: None,
@@ -1499,6 +1505,7 @@ fn add_column_snapshot(
         // `id_prefix` stays `None` (an added column is never the system PK);
         // the vector metric + standalone mask ARE threaded so the snapshot renders them.
         unique: None,
+        value_format: None,
         id_prefix: None,
         vector_metric,
         case_sensitive,
@@ -1673,6 +1680,40 @@ fn apply_fold_named_type_metadata(
             project_schema,
         )?;
     }
+    Ok(())
+}
+
+fn apply_fold_value_format_metadata(
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    for source in columns {
+        if source.value_format.is_none() {
+            continue;
+        }
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|col| col.name == source.name)
+            .ok_or(FoldError::Unsupported("value-format column folded away"))?;
+        apply_fold_value_format_column_metadata(source, col, dialect)?;
+    }
+    Ok(())
+}
+
+fn apply_fold_value_format_column_metadata(
+    source: &IrColumn,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    let Some(value_format) = &source.value_format else {
+        return Ok(());
+    };
+    let metadata = value_format_column_metadata(&source.name, value_format, dialect)
+        .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
+    col.ddl_type_override = Some(metadata.ddl_type);
+    col.inline_checks.push(metadata.inline_check);
     Ok(())
 }
 
@@ -2565,6 +2606,7 @@ pub fn fold_to_field_defs(
                 ty,
                 nullable,
                 default,
+                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
@@ -2584,6 +2626,7 @@ pub fn fold_to_field_defs(
                         nullable: *nullable,
                         default: default.clone(),
                         unique: None,
+                        value_format: value_format.clone(),
                         id_prefix: None,
                         case_sensitive: *case_sensitive,
                         vector_metric: *vector_metric,
@@ -3107,6 +3150,7 @@ pub fn descriptors_to_create_ops(
                 nullable,
                 default,
                 unique: if f.unique { Some(true) } else { None },
+                value_format: None,
                 id_prefix: f.id_prefix.clone(),
                 vector_metric,
                 case_sensitive: f.case_sensitive,
@@ -3370,6 +3414,7 @@ mod tests {
             nullable: Some(nullable),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -3570,6 +3615,7 @@ mod tests {
             ty,
             nullable: Some(nullable),
             default: None,
+            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -4005,6 +4051,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(true),
                 default: None,
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -4206,6 +4253,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5091,6 +5139,7 @@ mod tests {
             nullable: Some(nullable),
             default,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5133,6 +5182,7 @@ mod tests {
                         value: IrScalar::Str("beta".to_string()),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -5152,6 +5202,7 @@ mod tests {
                         value: IrScalar::Int(7),
                     }),
                     unique: None,
+                    value_format: None,
                     id_prefix: None,
                     case_sensitive: None,
                     vector_metric: None,
@@ -5246,6 +5297,7 @@ mod tests {
                 ty: encrypted_text(),
                 nullable: Some(true),
                 default: None,
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -5349,6 +5401,7 @@ mod tests {
             nullable: Some(false),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: Some("post".into()),
             case_sensitive: None,
             vector_metric: None,
@@ -5375,6 +5428,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: Some(crate::model::ir::VectorMetric::InnerProduct),
@@ -5407,6 +5461,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5443,6 +5498,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5481,6 +5537,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(true),
                 default: None,
+                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: Some(crate::model::ir::IrMask {
@@ -5516,6 +5573,7 @@ mod tests {
             nullable: Some(false),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,
@@ -5697,6 +5755,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
+            value_format: None,
             id_prefix: None,
             case_sensitive: None,
             vector_metric: None,

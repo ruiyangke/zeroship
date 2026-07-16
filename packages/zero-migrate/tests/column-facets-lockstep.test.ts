@@ -1,5 +1,6 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): `t.id({ prefix })`, `t.vector({ dimensions, metric })`, standalone
+// generated/identity): `t.id({ prefix })`, `ids.typeId({ prefix })`,
+// `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
 // The recorder twin was collapsed: there is no longer a hand-kept
@@ -10,7 +11,7 @@
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
 // two recorded op lists are byte-identical — proving the shipped engine artifact
-// records the EXACT camelCase wire form (`idPrefix` / `vectorMetric` /
+// records the EXACT camelCase wire form (`idPrefix` / `valueFormat` / `vectorMetric` /
 // `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
 // the source authors, with no compile-time drift.
 
@@ -20,6 +21,7 @@ import { test } from "node:test";
 import {
   __begin as pubBegin,
   __drain as pubDrain,
+  ids as pubIds,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
   t as pubT,
@@ -31,6 +33,7 @@ import {
 import {
   __begin as engBegin,
   __drain as engDrain,
+  ids as engIds,
   maxValue as engMaxValue,
   minValue as engMinValue,
   t as engT,
@@ -42,6 +45,7 @@ type Rec = {
   drain: () => any[];
   table: any;
   t: any;
+  ids: any;
   minValue: any;
   maxValue: any;
 };
@@ -50,6 +54,7 @@ const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
   t: pubT,
+  ids: pubIds,
   table: pubTable,
   minValue: pubMinValue,
   maxValue: pubMaxValue,
@@ -58,6 +63,7 @@ const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
   t: engT,
+  ids: engIds,
   table: engTable,
   minValue: engMinValue,
   maxValue: engMaxValue,
@@ -65,10 +71,11 @@ const ENGINE: Rec = {
 
 /** Author a facet-bearing migration against the given recorder + lexicon, return
  *  the recorded op list. The SAME author body runs against both impls. */
-function authorWith({ begin, drain, t, table }: Rec): any[] {
+function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
   //  - t.id({ prefix })            → IrColumn.idPrefix
+  //  - ids.typeId({ prefix })      → IrColumn.valueFormat.typeId
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
   //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
@@ -76,6 +83,8 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   table("documents").create({
     columns: {
       id: t.id({ prefix: "doc" }),
+      public_id: ids.typeId({ prefix: "document" }).notNull().unique(),
+      opaque_id: ids.typeId({ prefix: "" }),
       seq: t.bigInt().identity({ always: true }),
       shard: t.smallInt(),
       qty: t.int(),
@@ -94,6 +103,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   });
   // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
+  table("documents").column("external_id").add({ type: ids.typeId({ prefix: "external" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
     type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
@@ -122,6 +132,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(byName("shard").type, "smallInt");
   assert.equal(byName("ratio").type, "real");
   assert.equal(byName("source_ip").type, "inet");
+  assert.deepEqual(byName("public_id").valueFormat, { typeId: { prefix: "document" } });
+  assert.deepEqual(byName("opaque_id").valueFormat, { typeId: { prefix: "" } });
 
   // standalone .mask({ kind, classification }) → mask:{kind,classification}
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });
@@ -143,11 +155,13 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 
   // a facet-less column carries NONE of the facet keys (checksum-neutral).
   const title = byName("title");
-  assert.ok(!("idPrefix" in title) && !("vectorMetric" in title) && !("mask" in title) && !("generated" in title) && !("identity" in title));
+  assert.ok(!("idPrefix" in title) && !("valueFormat" in title) && !("vectorMetric" in title) && !("mask" in title) && !("generated" in title) && !("identity" in title));
 
   // addColumn carries vectorMetric + mask + generated + identity on the op tail.
   const addVec = ops.find((o: any) => o.op === "addColumn" && o.column === "summary_vec");
   assert.equal(addVec.vectorMetric, "innerProduct");
+  const addTypeId = ops.find((o: any) => o.op === "addColumn" && o.column === "external_id");
+  assert.deepEqual(addTypeId.valueFormat, { typeId: { prefix: "external" } });
   const addPhone = ops.find((o: any) => o.op === "addColumn" && o.column === "phone");
   assert.deepEqual(addPhone.mask, { kind: "last4", classification: "pii" });
   const addGenerated = ops.find((o: any) => o.op === "addColumn" && o.column === "added_total");

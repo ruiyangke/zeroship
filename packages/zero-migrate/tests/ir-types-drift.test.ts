@@ -147,7 +147,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // column facets + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
-  addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
+  addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "valueFormat", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
@@ -359,6 +359,34 @@ test("createTable primaryKey is present in the schema and hand-authored ir.ts", 
   assert.ok(schemaFields.createTable.includes("primaryKey"));
   const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
   assert.match(irTs, /primaryKey:\s*string\[\]\s*\|\s*null/);
+});
+
+test("TypeID ValueFormat shape and column placements match the hand-authored IR mirror", () => {
+  const valueFormat = schema.$defs.ValueFormat;
+  assert.ok(valueFormat, "schema must define ValueFormat");
+  const typeId = valueFormat.oneOf.find((branch: any) => branch.required?.includes("typeId"));
+  assert.ok(typeId, "ValueFormat must include the externally tagged typeId variant");
+  assert.equal(typeId.additionalProperties, false);
+  assert.deepEqual(typeId.required, ["typeId"]);
+  assert.deepEqual(typeId.properties.typeId.required, ["prefix"]);
+  assert.deepEqual(Object.keys(typeId.properties.typeId.properties), ["prefix"]);
+  assert.equal(typeId.properties.typeId.properties.prefix.type, "string");
+
+  const irColumnFormat = schema.$defs.IrColumn.properties.valueFormat;
+  assert.match(JSON.stringify(irColumnFormat), /#\/\$defs\/ValueFormat/);
+  const addColumn = schema.$defs.Op.oneOf.find(
+    (branch: any) => branch.properties?.op?.const === "addColumn",
+  );
+  assert.ok(addColumn, "schema must define addColumn");
+  assert.match(JSON.stringify(addColumn.properties.valueFormat), /#\/\$defs\/ValueFormat/);
+
+  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+  assert.match(irTs, /export type ValueFormat\s*=\s*\{\s*typeId:\s*\{\s*prefix:\s*string\s*\}\s*\}/);
+  assert.equal(
+    irTs.match(/valueFormat\?:\s*ValueFormat\s*\|\s*null/g)?.length,
+    2,
+    "IrColumn and addColumn must both carry optional ValueFormat",
+  );
 });
 
 // Explicit assertion that the removed native `ifExists` is GONE from
