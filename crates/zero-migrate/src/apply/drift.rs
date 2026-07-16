@@ -781,7 +781,9 @@ pub async fn snapshot_schema<D: SqlSession>(
     // (see [`canonical_extension_type`]). T13.
     let col_rows = conn
         .query(
-            "SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, \
+            "SELECT c.table_name, c.column_name, c.data_type, \
+                    c.udt_schema, c.udt_name, c.domain_schema, c.domain_name, \
+                    column_type.typtype::text AS type_kind, c.is_nullable, \
                     c.character_maximum_length, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
                     pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
@@ -790,6 +792,7 @@ pub async fn snapshot_schema<D: SqlSession>(
              JOIN pg_namespace n ON n.nspname = c.table_schema \
              JOIN pg_class rel ON rel.relname = c.table_name AND rel.relnamespace = n.oid \
              JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name \
+             JOIN pg_type column_type ON column_type.oid = a.atttypid \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.table_name, c.column_name",
@@ -801,7 +804,11 @@ pub async fn snapshot_schema<D: SqlSession>(
         if let Some(t) = tables.get_mut(&table) {
             let nullable: String = r.try_get("is_nullable")?;
             let data_type: String = r.try_get("data_type")?;
+            let udt_schema: String = r.try_get("udt_schema")?;
             let udt_name: String = r.try_get("udt_name")?;
+            let domain_schema: Option<String> = r.try_get("domain_schema")?;
+            let domain_name: Option<String> = r.try_get("domain_name")?;
+            let type_kind: String = r.try_get("type_kind")?;
             let format_type: String = r.try_get("format_type")?;
             let is_citext = data_type.eq_ignore_ascii_case("USER-DEFINED")
                 && (is_citext_extension_type(&format_type)
@@ -809,7 +816,23 @@ pub async fn snapshot_schema<D: SqlSession>(
             // For a `USER-DEFINED` (extension) type, recover the precise spelling
             // from `format_type` and canonicalise it to the engine's DDL form so
             // it round-trips against the desired snapshot.
-            let data_type = if data_type.eq_ignore_ascii_case("USER-DEFINED") {
+            let data_type = if type_kind == "e" {
+                // `format_type` is an exact DDL spelling, not a comparison key:
+                // quoted/mixed-case names appear as `"Schema"."Type"`. Keep
+                // the unquoted information_schema identity for structural
+                // comparison and retain `format_type` separately below.
+                format!("{udt_schema}.{udt_name}")
+            } else if type_kind == "d" {
+                // For a domain, information_schema exposes the domain identity
+                // through domain_schema/domain_name while udt_* names its base
+                // type. The actual column type is the domain, so compare that
+                // catalog identity rather than the underlying type.
+                format!(
+                    "{}.{}",
+                    domain_schema.as_deref().unwrap_or(&udt_schema),
+                    domain_name.as_deref().unwrap_or(&udt_name)
+                )
+            } else if data_type.eq_ignore_ascii_case("USER-DEFINED") {
                 canonical_extension_type(&format_type)
             } else if data_type.eq_ignore_ascii_case("ARRAY")
                 && (udt_name == "_text" || format_type.eq_ignore_ascii_case("text[]"))
@@ -833,6 +856,10 @@ pub async fn snapshot_schema<D: SqlSession>(
                 name: r.try_get("column_name")?,
                 data_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
+                // Preserve PostgreSQL's canonical, modifier-aware DDL spelling
+                // for operations such as online rename that must reproduce the
+                // exact live type rather than information_schema's base family.
+                ddl_type_override: Some(format_type),
                 // Defaults and inline encryption sentinels are emission-only.
                 // COMMENT-based runtime sentinels are classified into
                 // `comment_sentinel` so they do not drift against user-authored

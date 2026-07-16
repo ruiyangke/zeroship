@@ -22,7 +22,7 @@
 
 #![allow(dead_code)] // Not every test binary uses every helper.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;
 use postgres::types::{Format, IsNull, Kind, ToSql, Type};
@@ -68,6 +68,7 @@ macro_rules! skip_if_no_pg {
 /// connection (the seam's single-connection contract).
 pub struct PgDevSession {
     client: RefCell<Client>,
+    fail_next_resolved_pending_contract_insert: Cell<bool>,
 }
 
 impl PgDevSession {
@@ -83,7 +84,17 @@ impl PgDevSession {
             .unwrap_or_else(|e| panic!("PgDevSession: connect to {dsn} failed: {e}"));
         Self {
             client: RefCell::new(client),
+            fail_next_resolved_pending_contract_insert: Cell::new(false),
         }
+    }
+
+    /// Fail the next append of a resolved pending-contract event.
+    ///
+    /// This leaves all preceding database work untouched, which lets live tests
+    /// reproduce a connection failure between resolver cleanup and its terminal
+    /// tombstone without adding a production failpoint.
+    pub fn fail_next_resolved_pending_contract_insert(&self) {
+        self.fail_next_resolved_pending_contract_insert.set(true);
     }
 }
 
@@ -392,6 +403,16 @@ impl SqlSession for PgDevSession {
     }
 
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError> {
+        if sql.contains(".schema_pending_contracts")
+            && sql.contains("VALUES ('resolved'")
+            && self
+                .fail_next_resolved_pending_contract_insert
+                .replace(false)
+        {
+            return Err(DbError::message(
+                "test fault: resolved pending-contract append failed",
+            ));
+        }
         let holders = bind_holders(binds);
         let refs = holder_refs(&holders);
         self.client

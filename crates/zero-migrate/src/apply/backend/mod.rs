@@ -56,7 +56,10 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 #[cfg(pg_seam)]
-pub use mysql::MysqlBackend;
+pub use mysql::{
+    MysqlBackend, MysqlInflightDdlMarker, MysqlInflightRecoveryError, MysqlInflightRecoveryOutcome,
+    MysqlInflightResolution,
+};
 #[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
 
@@ -68,7 +71,7 @@ use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
 use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
-use crate::model::migration::Migration;
+use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
@@ -112,6 +115,23 @@ pub enum PlaceholderStyle {
     Question,
 }
 
+/// Read-only progress evidence for one resumable plan backfill.
+///
+/// `version` is the stable journal/progress identity of the lowered backfill
+/// step. `checksum` is optional for compatibility with progress tables created
+/// before the checksum column existed; a missing value is treated as drift by
+/// plan-status reconciliation. `complete` does not by itself mean applied: the
+/// ordinary `schema_migrations` completed event remains the source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillProgressEntry {
+    /// Stable plan-step identity stored as `backfill_id`.
+    pub version: String,
+    /// Authoritative artifact checksum recorded when the backfill began.
+    pub checksum: Option<String>,
+    /// Whether the progress row reached its tail.
+    pub complete: bool,
+}
+
 impl PlaceholderStyle {
     /// Render the `n`-th (1-based) positional bind placeholder in this style.
     /// `$n` for [`Numbered`](Self::Numbered); `?` for [`Question`](Self::Question)
@@ -143,6 +163,20 @@ pub trait CrossDeployObligations {
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::PendingContract>>;
 
+    /// Read terminal pending-contract tombstones for status and dependency
+    /// enforcement.
+    fn resolved_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>>;
+
+    /// Inspect the live table shape before destructive resolution SQL runs.
+    fn pending_contract_shape<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        contract: &'a journal::PendingContract,
+    ) -> JournalFuture<'a, journal::PendingContractShape>;
+
     /// Open a `pending` cross-deploy obligation AND, when a
     /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
     /// deploy-scoped recovery marker — in ONE transaction. No-op iff
@@ -152,7 +186,7 @@ pub trait CrossDeployObligations {
         cfg: &'a ExecutorConfig,
         rec: journal::PendingContractRecord<'a>,
         scope: Option<journal::DeployRecoveryScope<'a>>,
-    ) -> JournalFuture<'a, ()>;
+    ) -> JournalFuture<'a, bool>;
 
     /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
     /// history is append-only). No-op iff [`MigrationBackend::pending_contracts`]
@@ -261,10 +295,18 @@ pub trait MigrationBackend {
     async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError>;
 
     /// Snapshot the session settings the apply will override, for restore on exit.
+    ///
+    /// The supplied session must be dedicated to zero-migrate for the duration of
+    /// the call and must not carry caller-owned transactional work. A backend that
+    /// can detect an active transaction must reject it here, before any session
+    /// setting or author SQL is executed. If this method fails, the generic
+    /// executor releases any lock it acquired and aborts the apply.
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError>;
 
     /// Restore the settings captured by [`snapshot_session`](Self::snapshot_session).
     /// Includes the leading unconditional role reset where the backend has roles.
+    /// A restoration error is surfaced when the apply itself otherwise succeeded,
+    /// so a connection with leaked settings is never reported as a clean success.
     async fn restore_session(&self, snap: &Self::SessionSnapshot) -> Result<(), ApplyError>;
 
     /// Drop any per-apply privilege confinement back to the connecting role,
@@ -282,7 +324,8 @@ pub trait MigrationBackend {
     ///   COMMIT`;
     /// - non-transactional-DDL OR `transactional:false`: two-phase `started`
     ///   marker → run the confined `<up>` → immutable `completed` row + clear
-    ///   marker, with idempotent crash recovery when `had_inflight`.
+    ///   marker. When `had_inflight`, the backend must either prove replay safe
+    ///   and recover, or preserve the marker and fail closed for audited repair.
     ///
     /// Returns `true` iff a two-phase apply recovered a prior inflight marker.
     async fn apply_one(
@@ -307,11 +350,12 @@ pub trait MigrationBackend {
 
     // -- parse-time validation ----------------------------------------------
 
-    /// Validate that a **non-transactional** migration's `up` is idempotent
-    /// (re-runnable by crash recovery). PG parses with `pg_query` and enforces
+    /// Validate the recovery contract for a **non-transactional** migration's
+    /// `up`. PG parses with `pg_query` and enforces
     /// `IF NOT EXISTS` on `CREATE INDEX CONCURRENTLY` / `ALTER TYPE … ADD VALUE`
-    /// and forbids bare DML; a SQLite backend rejects `transaction:false`
-    /// outright (no non-txn DDL exists on SQLite).
+    /// and forbids bare DML; MySQL preserves ambiguous inflight state and fails
+    /// closed instead of replaying generated DDL; a SQLite backend rejects
+    /// `transaction:false` outright (no non-txn DDL exists on SQLite).
     fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError>;
 
     // -- journal row I/O (dialect-neutral owned rows) -----------------------
@@ -321,6 +365,20 @@ pub trait MigrationBackend {
 
     /// The net-applied + lone-`started` journal entries (the drift/pending input).
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError>;
+
+    /// Versions whose latest journal event is a rollback, ordered by version.
+    async fn net_rolled_back_versions(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<String>, JournalError>;
+
+    /// Read resumable backfill progress rows, if the backend has created its
+    /// progress table. An absent table returns an empty list. The reader must not
+    /// bootstrap or otherwise mutate progress state because status is read-only.
+    async fn backfill_progress(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<BackfillProgressEntry>, JournalError>;
 
     /// The versions covered by a net-applied squash (the supersession net-state).
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError>;
@@ -455,17 +513,16 @@ pub trait MigrationBackend {
     /// PG.
     ///
     /// **Per-version approval scope (executor-layer defense in depth).** A
-    /// standalone batched backfill is a NON-destructive data transform
-    /// ([`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)
-    /// returns `None` for `Backfill`), so the per-version scope never refuses it — the
-    /// `scope` is threaded for seam-signature symmetry with the destructive seam
-    /// methods (and forward-proofing) and consulted only if a backfill ever becomes
-    /// scope-gated. The data-mutating EXPAND backfill rides
+    /// standalone batched backfill rewrites existing data, so it requires explicit
+    /// approval and `scope` must admit its stable `version`. The data-mutating
+    /// EXPAND backfill rides
     /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online),
     /// NOT this method.
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,
+        version: &MigrationId,
+        checksum: &Checksum,
         spec: &BackfillSpec,
         approval: crate::approval::Approval,
         scope: &crate::approval::ApprovalScope,
@@ -499,11 +556,8 @@ pub trait MigrationBackend {
     /// `version` is refused with [`ApplyError::ApprovalNotScoped`] BEFORE the template
     /// executes — the executor-layer mirror of the engine's per-version scope gate.
     ///
-    /// `owner_app` is the declaring app's identity — it is folded into the journal
-    /// [`ChecksumInput`](crate::model::migration::ChecksumInput) so two DML steps with an
-    /// identical `(template, binds)` authored by DIFFERENT apps hash to DIFFERENT
-    /// journal checksums (correct multi-tenant journal identity/attribution for
-    /// the creator-DML assembler).
+    /// `checksum` is the authoritative checksum of the complete IR artifact. It
+    /// includes typed bind values, so a same-version edit is refused as drift.
     ///
     /// Returns `true` if the step was applied this run, `false` if it was already
     /// net-applied (skipped).
@@ -517,10 +571,15 @@ pub trait MigrationBackend {
     async fn run_dml_step(
         &self,
         cfg: &ExecutorConfig,
-        version: &crate::model::migration::MigrationId,
+        version: &MigrationId,
+        checksum: &Checksum,
         name: &str,
         template: &str,
         binds: &[BindValue],
+        target_schema: &str,
+        target_table: &str,
+        conflict_target: Option<&[String]>,
+        mutates_data: bool,
         destructive: bool,
         owner_app: &str,
         approval: crate::approval::Approval,

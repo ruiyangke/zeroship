@@ -875,12 +875,28 @@ fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
     }
 }
 
+/// Render an author string in an expression/default/check position. MySQL gets
+/// UTF-8 hex with a character-set introducer so inherited backslash modes cannot
+/// reinterpret the value; PostgreSQL and SQLite retain standard quote doubling.
+fn schema_string_literal(value: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Mysql => format!("_utf8mb4 X'{}'", hex::encode(value.as_bytes())),
+        SqlDialect::Postgres | SqlDialect::Sqlite => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+    }
+}
+
 fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     let values = def.get("enum")?.as_array()?;
     let mut rendered = Vec::with_capacity(values.len());
     for value in values {
         let s = value.as_str()?;
-        rendered.push(format!("'{}'", s.replace('\'', "''")));
+        // MySQL's ENUM value grammar accepts a bare hex literal but rejects the
+        // `_utf8mb4 X'…'` introduced form used in expression positions. The
+        // column's utf8mb4 character set consumes these UTF-8 bytes while the hex
+        // spelling remains independent of `NO_BACKSLASH_ESCAPES`.
+        rendered.push(format!("X'{}'", hex::encode(s.as_bytes())));
     }
     if rendered.is_empty() {
         None
@@ -2276,6 +2292,62 @@ pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> 
     encryption_sentinel_body_for_field(def).map(|body| format!("/* {body} */"))
 }
 
+/// Validate the author-controlled atoms embedded in an encryption sentinel.
+/// The inline form is a SQL block comment, so each atom must belong to the
+/// sentinel's closed grammar before the body can be emitted verbatim. In
+/// particular, a key id may never carry `*/`, `:`, whitespace, or SQL text.
+pub(crate) fn validate_encryption_sentinel_for_field(
+    def: &serde_json::Value,
+) -> Result<(), QueryError> {
+    let Some(raw) = def.get("encrypted") else {
+        return Ok(());
+    };
+    let enc = raw.as_object().ok_or_else(|| {
+        QueryError::InvalidFilter("encrypted must be an options object".to_string())
+    })?;
+
+    let mode = match enc.get("mode") {
+        None => "randomised",
+        Some(value) => value.as_str().ok_or_else(|| {
+            QueryError::InvalidFilter("encrypted.mode must be a string".to_string())
+        })?,
+    };
+    if !matches!(mode, "randomised" | "randomized" | "deterministic") {
+        return Err(QueryError::InvalidFilter(format!(
+            "encrypted.mode must be randomised or deterministic, got {mode:?}"
+        )));
+    }
+    let wraps = match enc.get("wraps") {
+        None => "string",
+        Some(value) => value.as_str().ok_or_else(|| {
+            QueryError::InvalidFilter("encrypted.wraps must be a string".to_string())
+        })?,
+    };
+    if !matches!(wraps, "string" | "number" | "bytes") {
+        return Err(QueryError::InvalidFilter(format!(
+            "encrypted.wraps must be string, number, or bytes, got {wraps:?}"
+        )));
+    }
+    let key_id = match enc.get("keyId") {
+        None => "default",
+        Some(value) => value.as_str().ok_or_else(|| {
+            QueryError::InvalidFilter("encrypted.keyId must be a string".to_string())
+        })?,
+    };
+    if key_id.is_empty()
+        || !key_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(QueryError::InvalidFilter(
+            "encrypted.keyId must be a non-empty ASCII token using only letters, digits, '.', \
+             '_', or '-'"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
@@ -2322,6 +2394,7 @@ fn field_to_column_for_dialect(
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_field_name_for_declaration(field)?;
+    validate_encryption_sentinel_for_field(def)?;
     // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
@@ -2458,7 +2531,7 @@ fn emit_union_variant_checks(
             _ => {
                 // string discriminator
                 let s = lit.as_str().unwrap_or("");
-                format!("'{}'", s.replace('\'', "''"))
+                schema_string_literal(s, dialect)
             }
         };
 
@@ -2778,7 +2851,7 @@ fn def_to_constraints_for_dialect(
         match def.get("type").and_then(|t| t.as_str()) {
             Some("string") => {
                 if let Some(s) = default.as_str() {
-                    parts.push(format!("DEFAULT '{}'", s.replace('\'', "''")));
+                    parts.push(format!("DEFAULT {}", schema_string_literal(s, dialect)));
                 }
             }
             Some("number") => {
@@ -2831,7 +2904,7 @@ fn def_to_constraints_for_dialect(
     if def.get("type").and_then(|t| t.as_str()) == Some("literal") {
         if let Some(lit) = def.get("literalValue") {
             let lit_sql = match lit {
-                serde_json::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+                serde_json::Value::String(s) => Some(schema_string_literal(s, dialect)),
                 serde_json::Value::Number(n) => Some(n.to_string()),
                 serde_json::Value::Bool(b) => Some(b.to_string()),
                 _ => None,
@@ -2852,7 +2925,7 @@ fn def_to_constraints_for_dialect(
             .iter()
             .filter_map(|v| {
                 if let Some(s) = v.as_str() {
-                    Some(format!("'{}'", s.replace('\'', "''")))
+                    Some(schema_string_literal(s, dialect))
                 } else if let Some(n) = v.as_i64() {
                     Some(n.to_string())
                 } else if let Some(n) = v.as_f64() {
@@ -3875,10 +3948,90 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("`status` ENUM('active', 'paused') NOT NULL"),
+            sql.contains("`status` ENUM(X'616374697665', X'706175736564') NOT NULL"),
             "{sql}"
         );
         assert!(!sql.contains("CHECK (`status` IN"), "{sql}");
+    }
+
+    #[test]
+    fn mysql_direct_builder_hex_encodes_every_author_string_context() {
+        let hostile = "a\\b'雪";
+        let schema = json!({
+            "status": {
+                "type": "string",
+                "enum": [hostile, "雪"]
+            },
+            "defaulted": {
+                "type": "string",
+                "default": hostile
+            },
+            "literal_only": {
+                "type": "literal",
+                "literalValue": hostile
+            },
+            "mixed_enum": {
+                "type": "string",
+                "enum": [hostile, 7]
+            },
+            "kind": {
+                "type": "string",
+                "enum": [hostile],
+                "discriminator": "__discriminator__",
+                "variants": [{
+                    "kind": {
+                        "type": "literal",
+                        "literalValue": hostile,
+                        "required": true
+                    },
+                    "variant_detail": { "type": "string", "required": true }
+                }]
+            },
+            "variant_detail": { "type": "string" }
+        });
+
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "literal_modes",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Mysql,
+        )
+        .expect("direct MySQL builder emits DDL");
+
+        let expression_literal = "_utf8mb4 X'615c6227e99baa'";
+        assert!(
+            sql.contains("`status` ENUM(X'615c6227e99baa', X'e99baa')"),
+            "native ENUM values use the grammar-compatible bare hex form: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("DEFAULT {expression_literal}")),
+            "string defaults must be mode-independent: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("CHECK (`literal_only` = {expression_literal})")),
+            "literal checks must be mode-independent: {sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "CHECK (`mixed_enum` IN ({expression_literal}, 7))"
+            )),
+            "mixed enum checks must be mode-independent: {sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "`kind` <> {expression_literal} OR (`variant_detail` IS NOT NULL)"
+            )),
+            "union discriminator checks must be mode-independent: {sql}"
+        );
+        assert!(
+            !sql.contains(hostile),
+            "author text must not appear raw: {sql}"
+        );
+        assert!(
+            !sql.contains('雪'),
+            "UTF-8 author text must be hex encoded: {sql}"
+        );
     }
 
     #[test]
@@ -5030,6 +5183,37 @@ mod tests {
             "kind=none must NOT emit a sibling: {sql}"
         );
         assert!(sql.contains("\"ssn\" BYTEA"), "parent still present: {sql}");
+    }
+
+    #[test]
+    fn encryption_sentinel_rejects_comment_terminator_before_mysql_ddl() {
+        let hostile = json!({
+            "type": "string",
+            "encrypted": {
+                "mode": "randomised",
+                "keyId": "k*/ VARCHAR(255); DROP TABLE users; /*",
+                "wraps": "string"
+            }
+        });
+        let error = field_to_column_for_dialect("secret", &hostile, SqlDialect::Mysql)
+            .expect_err("hostile sentinel atom must be refused");
+        assert!(
+            error.to_string().contains("encrypted.keyId"),
+            "the refusal should identify the unsafe atom: {error}"
+        );
+
+        let valid = json!({
+            "type": "string",
+            "encrypted": {
+                "mode": "deterministic",
+                "keyId": "pii-key.v2",
+                "wraps": "bytes"
+            }
+        });
+        assert!(
+            field_to_column_for_dialect("secret", &valid, SqlDialect::Mysql).is_ok(),
+            "documented safe key-id punctuation remains valid"
+        );
     }
 
     // -----------------------------------------------------------------

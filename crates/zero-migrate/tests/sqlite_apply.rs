@@ -127,6 +127,42 @@ async fn apply_create_table_then_idempotent_rerun() {
     );
 }
 
+#[compio::test]
+async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
+    let p = paths("empty_anchor");
+    let be = backend(&p);
+    let ir: zero_migrate::MigrationIr = serde_json::from_value(serde_json::json!({
+        "ir_version": 1,
+        "name": "empty_accounts_plan",
+        "owner_app": "app_test",
+        "ops": []
+    }))
+    .expect("empty IR parses");
+    let plan = zero_migrate::IrAuthor::new("app", "app_test", zero_migrate::SqlDialect::Sqlite)
+        .lower_plan(&ir, &zero_migrate::LiveSchema::default())
+        .expect("empty IR lowers to a journal anchor");
+    let anchor = match plan.steps.as_slice() {
+        [zero_migrate::PlanStep::Ddl(migration)] => migration,
+        other => panic!("expected one journal anchor, got {other:?}"),
+    };
+
+    let first = be
+        .apply_one_additive(anchor, "deployer")
+        .await
+        .expect("first anchor apply");
+    assert!(first);
+    let repeated = be
+        .apply_one_additive(anchor, "deployer")
+        .await
+        .expect("repeated anchor apply");
+    assert!(!repeated, "the journal makes the empty plan idempotent");
+
+    let entries = be.applied_sqlite().await.expect("read anchor journal");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].version, anchor.version.as_str());
+    assert_eq!(entries[0].checksum, anchor.checksum.as_str());
+}
+
 // ---------------------------------------------------------------------------
 // Regression: an UNqualified `CREATE TABLE users(...)` lands in main = the
 // app FILE and PERSISTS. We apply on one backend, drop it (closing the file),

@@ -1411,17 +1411,23 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
 /// plugin-db's `'{}'` formatting in `def_to_constraints` (`s.replace('\'', "''")`).
-fn sql_str(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+fn sql_str(s: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        // Declarative string defaults and enum members occupy MySQL grammar
+        // positions where a quoted token is required. The backend pins
+        // NO_BACKSLASH_ESCAPES before author DDL, making quote doubling stable.
+        SqlDialect::Mysql => crate::render::dml::mysql_grammar_string_literal(s),
+        SqlDialect::Postgres | SqlDialect::Sqlite => crate::render::dml::sql_string_literal(s),
+    }
 }
 
 /// Render a JSON scalar as a SQL literal for a CHECK / IN clause: a string is
 /// single-quoted, a number is its canonical form, a boolean is `true`/`false`.
 /// `None` for a non-scalar (null/array/object) — those never reach a literal/enum
 /// CHECK in plugin-db.
-fn json_scalar_sql(v: &serde_json::Value) -> Option<String> {
+fn json_scalar_sql(v: &serde_json::Value, dialect: SqlDialect) -> Option<String> {
     match v {
-        serde_json::Value::String(s) => Some(sql_str(s)),
+        serde_json::Value::String(s) => Some(sql_str(s, dialect)),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
@@ -1444,7 +1450,11 @@ fn json_scalar_sql(v: &serde_json::Value) -> Option<String> {
 /// byte round-trip of the body is not attempted; the constraint's PRESENCE and
 /// enforcement are what round-trip cleanly, matching plugin-db, which never
 /// re-diffs a CHECK).
-fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSnapshot> {
+fn field_check_constraints(
+    table: &str,
+    f: &FieldDescriptor,
+    dialect: SqlDialect,
+) -> Vec<ConstraintSnapshot> {
     let mut out = Vec::new();
     let col = quote_ident(&f.name);
 
@@ -1468,7 +1478,11 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
 
     // literal-pin.
     if f.ty == "literal" {
-        if let Some(rendered) = f.literal_value.as_ref().and_then(json_scalar_sql) {
+        if let Some(rendered) = f
+            .literal_value
+            .as_ref()
+            .and_then(|value| json_scalar_sql(value, dialect))
+        {
             out.push(ConstraintSnapshot {
                 name: check_constraint_name(table, &f.name, "lit"),
                 kind: "CHECK".into(),
@@ -1480,7 +1494,10 @@ fn field_check_constraints(table: &str, f: &FieldDescriptor) -> Vec<ConstraintSn
 
     // enum membership.
     if let Some(values) = &f.enum_values {
-        let rendered: Vec<String> = values.iter().filter_map(json_scalar_sql).collect();
+        let rendered: Vec<String> = values
+            .iter()
+            .filter_map(|value| json_scalar_sql(value, dialect))
+            .collect();
         if !rendered.is_empty() {
             out.push(ConstraintSnapshot {
                 name: check_constraint_name(table, &f.name, "enum"),
@@ -1535,30 +1552,56 @@ fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<String> {
+fn field_default_expr(
+    f: &FieldDescriptor,
+    dialect: SqlDialect,
+    synth_json_defaults: bool,
+) -> Result<Option<String>, DeclarativeError> {
     if let Some(default) = &f.default {
-        return match f.ty.as_str() {
-            "string" | "char" | "inet" => default.as_str().map(sql_str),
+        let rendered = match f.ty.as_str() {
+            "string" | "char" | "inet" => default.as_str().map(|s| sql_str(s, dialect)),
             // `int` (`t.int()`/`t.bigInt()`) and `number` (`t.double()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.
             "int" | "smallInt" | "bigInt" | "number" | "real" => numeric_default_literal(default),
             "boolean" => default.as_bool().map(|b| b.to_string()),
+            "bytes" => match default.as_str() {
+                Some(encoded) => {
+                    use base64::Engine as _;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|error| {
+                            DeclarativeError::Invalid(format!(
+                                "bytes default for column {:?} is not canonical base64: {error}",
+                                f.name
+                            ))
+                        })?;
+                    Some(
+                        crate::render::dml::inline_literal(
+                            &crate::model::ir::IrScalar::Bytes(bytes),
+                            dialect,
+                        )
+                        .map_err(|error| DeclarativeError::Invalid(error.to_string()))?,
+                    )
+                }
+                None => None,
+            },
             "json" | "object" => Some("'{}'::jsonb".into()),
             "array" => Some("'[]'::jsonb".into()),
             _ => None,
         };
+        return Ok(rendered);
     }
     if !synth_json_defaults {
-        return None;
+        return Ok(None);
     }
     // Confined "default defaults" for JSON-backed types (matches plugin-db's else arm).
-    match f.ty.as_str() {
+    Ok(match f.ty.as_str() {
         "json" | "object" => Some("'{}'::jsonb".into()),
         "array" => Some("'[]'::jsonb".into()),
         _ => None,
-    }
+    })
 }
 
 /// Explicit empty-container defaults from the migration IR. These spellings must
@@ -1614,15 +1657,13 @@ fn json_value_default_expr(value: &IrJsonValue, dialect: SqlDialect) -> String {
             format!("{}::jsonb", crate::render::dml::sql_string_literal(&json))
         }
         SqlDialect::Sqlite => crate::render::dml::sql_string_literal(&json),
-        // MySQL's default `sql_mode` treats a backslash as a string-literal escape,
-        // so a JSON string value containing a backslash (e.g. an escaped `"`) must
-        // have its backslashes DOUBLED as well, or `CAST(... AS JSON)` sees corrupt
-        // JSON. Single quotes are still doubled. (Scoped to this json render path so
-        // the shared `sql_string_literal` primitive stays dialect-neutral.)
-        SqlDialect::Mysql => {
-            let mysql_literal = format!("'{}'", json.replace('\\', "\\\\").replace('\'', "''"));
-            format!("(CAST({mysql_literal} AS JSON))")
-        }
+        // A UTF-8 hex expression is accepted by CAST and is independent of
+        // MySQL's inherited string-escape mode. This also keeps JSON backslashes
+        // byte-exact under the backend's pinned NO_BACKSLASH_ESCAPES session.
+        SqlDialect::Mysql => format!(
+            "(CAST({} AS JSON))",
+            crate::render::dml::inline_string_literal(&json, SqlDialect::Mysql)
+        ),
     }
 }
 
@@ -1688,6 +1729,8 @@ fn column_snapshot_for_field(
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let data_type = field_data_type(f)?;
     let sdk_def = field_to_sdk_def(f);
+    crate::schema::query::validate_encryption_sentinel_for_field(&sdk_def)
+        .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
     let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel = encryption_meta_for_field(&sdk_def)
         .map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
@@ -1707,7 +1750,7 @@ fn column_snapshot_for_field(
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
-        default: field_default_expr(f, synth_json_defaults),
+        default: field_default_expr(f, dialect, synth_json_defaults)?,
         ddl_type_override,
         generated: f
             .generated
@@ -1777,7 +1820,13 @@ fn system_column_snapshot(name: &str, data_type: &str, nullable: bool) -> Column
 fn system_index_snapshots(table: &str) -> Vec<IndexSnapshot> {
     SYSTEM_INDEXED_COLS
         .iter()
-        .map(|col| IndexSnapshot::btree(non_unique_index_name(table, col), false, vec![(*col).to_string()]))
+        .map(|col| {
+            IndexSnapshot::btree(
+                non_unique_index_name(table, col),
+                false,
+                vec![(*col).to_string()],
+            )
+        })
         .collect()
 }
 
@@ -2250,7 +2299,7 @@ fn build_table_snapshot_impl(
         // pg_get_constraintdef-normalised body is not byte-compared (see the
         // round-trip tests). The `definition` carries the emitted DDL clause so
         // `render_create_table` can inline it.
-        for chk in field_check_constraints(&d.name, f) {
+        for chk in field_check_constraints(&d.name, f, dialect) {
             constraints.push(chk);
         }
         // A `unique: true` field becomes a unique index (A1 rule). The
@@ -6444,7 +6493,10 @@ fn mysql_default_clause(default: Option<&str>) -> String {
             if let Some(expr) = d.strip_prefix(GENERATED_PREFIX) {
                 format!(" GENERATED ALWAYS AS ({expr}) STORED")
             } else {
-                format!(" DEFAULT {}", d.replace("::jsonb", ""))
+                // JSON container defaults are translated by the exact arms
+                // above. Never rewrite an arbitrary rendered default: a text
+                // value is allowed to contain the bytes `::jsonb` verbatim.
+                format!(" DEFAULT {d}")
             }
         }
         None => String::new(),
@@ -7029,6 +7081,27 @@ fn fk_referenced_columns(definition: &str) -> Vec<String> {
             }
         })
         .unwrap_or_else(|| vec!["id".to_string()])
+}
+
+#[cfg(test)]
+mod mysql_literal_safety_tests {
+    use super::*;
+
+    #[test]
+    fn mysql_text_default_preserves_jsonb_like_substring() {
+        assert_eq!(
+            mysql_default_clause(Some("'foo::jsonb'")),
+            " DEFAULT 'foo::jsonb'"
+        );
+        assert_eq!(
+            mysql_default_clause(Some("'{}'::jsonb")),
+            " DEFAULT (JSON_OBJECT())"
+        );
+        assert_eq!(
+            mysql_default_clause(Some("'[]'::jsonb")),
+            " DEFAULT (JSON_ARRAY())"
+        );
+    }
 }
 
 #[cfg(test)]

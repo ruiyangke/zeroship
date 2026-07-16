@@ -23,12 +23,13 @@
 
 use std::cell::RefCell;
 
-use zero_migrate::apply::executor::apply;
+use zero_migrate::apply::executor::{apply, LockMode};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
+use zero_migrate::{BindValue, MigrationEngine, PlanStep, PostgresBackend};
 
 use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
 use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
@@ -53,7 +54,62 @@ impl MockDispatch {
     /// leg) gets rows — and we return NONE (nothing applied yet), so the supplied
     /// migration is pending and gets applied. Every other read (introspection,
     /// squash, drift) gets an empty rowset — a valid empty decode.
-    const fn rows_for(&self, _sql: &str) -> Vec<JsRow> {
+    fn rows_for(&self, sql: &str) -> Vec<JsRow> {
+        if sql.contains("current_setting('statement_timeout')") {
+            return vec![JsRow {
+                columns: vec!["st".into(), "lt".into(), "sp".into()],
+                cells: vec![
+                    text_cell("0"),
+                    text_cell("0"),
+                    text_cell("\"$user\", public"),
+                ],
+            }];
+        }
+        if sql.contains("performance_schema.events_transactions_current") {
+            return vec![JsRow {
+                columns: vec![
+                    "transaction_tracking_enabled".into(),
+                    "in_transaction".into(),
+                ],
+                cells: vec![int_cell(1), int_cell(0)],
+            }];
+        }
+        if sql.contains("GET_LOCK(?, ?)") {
+            return vec![JsRow {
+                columns: vec!["got".into()],
+                cells: vec![int_cell(1)],
+            }];
+        }
+        if sql.contains("COLLATION_NAME AS collation_name")
+            && sql.contains("schema_migrations_inflight")
+        {
+            return [
+                ("schema_migrations", "version"),
+                ("schema_migrations", "checksum"),
+                ("schema_migrations_supersedes", "squash_version"),
+                ("schema_migrations_supersedes", "superseded_version"),
+                ("schema_migrations_inflight", "version"),
+                ("schema_migrations_inflight", "checksum"),
+                ("schema_migrations_recovery", "version"),
+                ("schema_migrations_recovery", "checksum"),
+            ]
+            .into_iter()
+            .map(|(table, column)| JsRow {
+                columns: vec![
+                    "table_name".into(),
+                    "column_name".into(),
+                    "character_set_name".into(),
+                    "collation_name".into(),
+                ],
+                cells: vec![
+                    text_cell(table),
+                    text_cell(column),
+                    text_cell("utf8mb4"),
+                    text_cell("utf8mb4_bin"),
+                ],
+            })
+            .collect();
+        }
         Vec::new()
     }
 }
@@ -105,9 +161,23 @@ fn text_cell(s: &str) -> JsCell {
     }
 }
 
+fn int_cell(value: i64) -> JsCell {
+    JsCell {
+        kind: "int".into(),
+        text: None,
+        int: Some(value as f64),
+        int_str: None,
+        bool: None,
+        text_array: None,
+    }
+}
+
 /// Build a trivial additive migration (a `CREATE TABLE`) with a valid checksum.
 fn trivial_migration() -> Migration {
-    let up = "CREATE TABLE mock_t (id int)";
+    migration("mock_create", "CREATE TABLE mock_t (id int)")
+}
+
+fn migration(name: &str, up: &str) -> Migration {
     let flags = MigrationFlags::default();
     let version = MigrationId::generate();
     let checksum = Checksum::of(&ChecksumInput {
@@ -121,7 +191,7 @@ fn trivial_migration() -> Migration {
     });
     Migration {
         version,
-        name: "mock_create".into(),
+        name: name.into(),
         up: up.into(),
         down: None,
         checksum,
@@ -132,6 +202,37 @@ fn trivial_migration() -> Migration {
         preconditions: Vec::new(),
         existence_guard: None,
     }
+}
+
+fn update_step() -> (PlanStep, String) {
+    let version = MigrationId::generate();
+    let version_str = version.as_str().to_string();
+    (
+        PlanStep::Dml {
+            version,
+            checksum: Checksum::of(&ChecksumInput {
+                up: "UPDATE mock_t SET label = $1 WHERE id = $2",
+                down: None,
+                flags: &MigrationFlags::default(),
+                owner_app: "app_mock",
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            }),
+            name: "set_mock_label".into(),
+            template: "UPDATE mock_t SET label = $1 WHERE id = $2".into(),
+            binds: vec![BindValue::Text("ready".into()), BindValue::Int(1)],
+            target_schema: "proj_mock".into(),
+            target_table: "mock_t".into(),
+            conflict_target: None,
+            mutates_data: true,
+            transactional: true,
+            destructive: false,
+            requires_approval: false,
+            owner_app: "app_mock".into(),
+        },
+        version_str,
+    )
 }
 
 #[test]
@@ -176,6 +277,50 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
         "nothing skipped: {:?}",
         apply_outcome.skipped
     );
+}
+
+#[test]
+fn mysql_journal_only_status_uses_only_mysql_sql() {
+    let (status, log) = futures::executor::block_on(async {
+        let session = NapiHostSession::new(MockDispatch::new());
+        let cfg = ExecutorConfig::new("prj_mysql_status", "proj_mysql_status");
+        let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+
+        let status = zero_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
+            .await
+            .expect("empty MySQL journal status succeeds through the host bridge");
+        let log = session.into_dispatch().log.into_inner();
+        (status, log)
+    });
+
+    assert!(status.applied.is_empty());
+    assert!(status.pending.is_empty());
+    assert!(
+        log.iter()
+            .any(|entry| entry.contains("performance_schema.events_transactions_current")),
+        "MySQL status must use the MySQL journal bootstrap: {log:#?}"
+    );
+    assert!(
+        log.iter().any(|entry| entry.contains("GET_LOCK(?, ?)")),
+        "MySQL status must use MySQL named locks: {log:#?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry.contains("COLLATE utf8mb4_bin")),
+        "MySQL status must use the MySQL journal query: {log:#?}"
+    );
+    for postgres_only in [
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "pg_advisory",
+        "pg_catalog",
+        "CREATE SCHEMA IF NOT EXISTS",
+        "$1",
+    ] {
+        assert!(
+            log.iter().all(|entry| !entry.contains(postgres_only)),
+            "MySQL status emitted PostgreSQL SQL {postgres_only:?}: {log:#?}"
+        );
+    }
 }
 
 #[test]
@@ -234,5 +379,104 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
     assert!(
         log.iter().any(|s| s.contains("schema_migrations")),
         "a journal write to schema_migrations was recorded: {log:#?}"
+    );
+}
+
+#[test]
+fn data_only_plan_executes_and_journals_through_the_host_bridge() {
+    let (outcome, log, dml_version) = futures::executor::block_on(async {
+        let mock = MockDispatch::new();
+        let session = NapiHostSession::new(mock);
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let (step, dml_version) = update_step();
+        let backend = PostgresBackend::new_generic(&session);
+
+        let outcome = MigrationEngine::new()
+            .apply_plan_with_touched_and_depends(
+                &[step],
+                &["mock_t".into()],
+                &[],
+                Approval::None,
+                &backend,
+                &cfg,
+                "tester",
+                LockMode::Acquire,
+            )
+            .await
+            .expect("data-only plan succeeds through the host bridge");
+        let log = session.into_dispatch().log.into_inner();
+        (outcome, log, dml_version)
+    });
+
+    assert_eq!(outcome.applied.applied, vec![dml_version]);
+    assert!(
+        log.iter().any(|entry| {
+            entry.starts_with("executeTextParams:")
+                && entry.contains("UPDATE mock_t SET label = $1 WHERE id = $2")
+        }),
+        "the parameterized update must reach the host driver: {log:#?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry.contains("INSERT INTO") && entry.contains("schema_migrations")),
+        "the data step must be journaled: {log:#?}"
+    );
+}
+
+#[test]
+fn mixed_ddl_and_dml_plan_preserves_authored_execution_order() {
+    let log = futures::executor::block_on(async {
+        let mock = MockDispatch::new();
+        let session = NapiHostSession::new(mock);
+        let cfg =
+            ExecutorConfig::new("prj_mock", "proj_mock").with_migrator_role("migrator_prj_mock");
+        let create = migration("create_mock", "CREATE TABLE mock_t (id int, label text)");
+        let create_version = create.version.as_str().to_string();
+        let (update, update_version) = update_step();
+        let alter = migration(
+            "add_mock_status",
+            "ALTER TABLE mock_t ADD COLUMN status text",
+        );
+        let alter_version = alter.version.as_str().to_string();
+        let steps = vec![PlanStep::Ddl(create), update, PlanStep::Ddl(alter)];
+        let backend = PostgresBackend::new_generic(&session);
+
+        let outcome = MigrationEngine::new()
+            .apply_plan_with_touched_and_depends(
+                &steps,
+                &["mock_t".into()],
+                &[],
+                Approval::None,
+                &backend,
+                &cfg,
+                "tester",
+                LockMode::Acquire,
+            )
+            .await
+            .expect("mixed plan succeeds through the host bridge");
+        assert_eq!(
+            outcome.applied.applied,
+            vec![
+                create_version.clone(),
+                update_version.clone(),
+                alter_version.clone()
+            ]
+        );
+
+        session.into_dispatch().log.into_inner()
+    });
+
+    let position = |needle: &str| {
+        log.iter()
+            .position(|entry| entry.contains(needle))
+            .unwrap_or_else(|| panic!("host log is missing {needle:?}: {log:#?}"))
+    };
+    let create = position("CREATE TABLE mock_t");
+    let update = position("UPDATE mock_t SET label = $1 WHERE id = $2");
+    let alter = position("ALTER TABLE mock_t ADD COLUMN status text");
+    assert!(
+        create < update && update < alter,
+        "ordered plan must execute DDL, then DML, then DDL: {log:#?}"
     );
 }

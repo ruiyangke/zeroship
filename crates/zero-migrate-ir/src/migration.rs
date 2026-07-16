@@ -447,6 +447,61 @@ impl Checksum {
         supersedes: &[MigrationId],
         preconditions: &[PreconditionCheck],
     ) -> Self {
+        let depends_on = depends_on
+            .iter()
+            .map(MigrationId::as_str)
+            .collect::<Vec<_>>();
+        let supersedes = supersedes
+            .iter()
+            .map(MigrationId::as_str)
+            .collect::<Vec<_>>();
+        Self::of_ir_version_strings(
+            ops,
+            flags,
+            owner_app,
+            &depends_on,
+            &supersedes,
+            preconditions,
+        )
+    }
+
+    /// Compute the IR checksum while preserving the exact dependency and
+    /// supersession strings carried by a [`MigrationIr`](crate::ir::MigrationIr).
+    ///
+    /// The public [`Self::of_ir`] entry accepts validated [`MigrationId`] values.
+    /// The IR load gate must checksum the complete typed envelope before status
+    /// converts its string references to ids, so it uses this exact-string peer.
+    /// Keeping the raw strings in the fold also means a malformed reference cannot
+    /// disappear from the drift anchor before a later validation error reports it.
+    #[must_use]
+    pub(crate) fn of_ir_strings(
+        ops: &crate::ir::CanonicalOpList<'_>,
+        flags: &MigrationFlags,
+        owner_app: &str,
+        depends_on: &[String],
+        supersedes: &[String],
+        preconditions: &[PreconditionCheck],
+    ) -> Self {
+        let depends_on = depends_on.iter().map(String::as_str).collect::<Vec<_>>();
+        let supersedes = supersedes.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::of_ir_version_strings(
+            ops,
+            flags,
+            owner_app,
+            &depends_on,
+            &supersedes,
+            preconditions,
+        )
+    }
+
+    fn of_ir_version_strings(
+        ops: &crate::ir::CanonicalOpList<'_>,
+        flags: &MigrationFlags,
+        owner_app: &str,
+        depends_on: &[&str],
+        supersedes: &[&str],
+        preconditions: &[PreconditionCheck],
+    ) -> Self {
         let mut hasher = Sha256::new();
         // Explicit domain tag — an IR migration's checksum is provably
         // non-colliding with a rendered-SQL migration's (`Checksum::of`)
@@ -465,7 +520,7 @@ impl Checksum {
         hasher.update((region.len() as u64).to_be_bytes());
         hasher.update(&region);
         // …then the SAME common tail.
-        fold_common(
+        fold_common_strings(
             &mut hasher,
             flags,
             owner_app,
@@ -503,6 +558,32 @@ fn fold_common(
     owner_app: &str,
     depends_on: &[MigrationId],
     supersedes: &[MigrationId],
+    preconditions: &[PreconditionCheck],
+) {
+    let depends_on = depends_on
+        .iter()
+        .map(MigrationId::as_str)
+        .collect::<Vec<_>>();
+    let supersedes = supersedes
+        .iter()
+        .map(MigrationId::as_str)
+        .collect::<Vec<_>>();
+    fold_common_strings(
+        hasher,
+        flags,
+        owner_app,
+        &depends_on,
+        &supersedes,
+        preconditions,
+    );
+}
+
+fn fold_common_strings(
+    hasher: &mut Sha256,
+    flags: &MigrationFlags,
+    owner_app: &str,
+    depends_on: &[&str],
+    supersedes: &[&str],
     preconditions: &[PreconditionCheck],
 ) {
     // flags — canonical JSON, length-prefixed. Covers transactional /
@@ -544,12 +625,11 @@ fn fold_common(
 /// fixed-width big-endian u64 count, then each version string length-prefixed in
 /// the GIVEN order. The count word means an empty list is distinct from a
 /// one-element list and no two adjacent lists can run together.
-fn fold_version_list(hasher: &mut Sha256, versions: &[MigrationId]) {
+fn fold_version_list(hasher: &mut Sha256, versions: &[&str]) {
     hasher.update((versions.len() as u64).to_be_bytes());
     for v in versions {
-        let s = v.as_str();
-        hasher.update((s.len() as u64).to_be_bytes());
-        hasher.update(s.as_bytes());
+        hasher.update((v.len() as u64).to_be_bytes());
+        hasher.update(v.as_bytes());
     }
 }
 

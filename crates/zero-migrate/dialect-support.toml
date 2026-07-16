@@ -562,7 +562,9 @@ pg = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
-# insert — portable base; onConflict is PG-only.
+# insert: exact conflict targets are native on PostgreSQL and SQLite. MySQL can
+# preserve exact row effects for guarded doUpdate, but has no exact targeted
+# doNothing form.
 [[row]]
 kind = "insert"
 variant = "base"
@@ -572,9 +574,16 @@ mysql = "portable"
 
 [[row]]
 kind = "insert"
-variant = "onConflict"
+variant = "onConflictDoUpdate"
 pg = "portable"
-sqlite = "unsupported"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "insert"
+variant = "onConflictDoNothing"
+pg = "portable"
+sqlite = "portable"
 mysql = "unsupported"
 
 # createView — a plain (non-materialized) view is portable core; materialized

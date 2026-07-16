@@ -109,7 +109,12 @@ impl ResolvedInject {
                 author_primary_key = AuthorPkPolicy::Forbid;
             }
         }
-        Self { columns, indexes, primary_key, author_primary_key }
+        Self {
+            columns,
+            indexes,
+            primary_key,
+            author_primary_key,
+        }
     }
 
     /// This object carries no injection — the resolver is a no-op for it.
@@ -239,25 +244,27 @@ fn resolve_create_table(
         *primary_key = Some(pk.clone());
     }
 
-    indexes.extend(inject.indexes.iter().map(|idx| IrIndex {
-        name: None,
-        columns: idx
-            .columns
-            .iter()
-            .map(|name| IndexElement::Column {
-                name: name.clone(),
-                order: None,
-                opclass: None,
-                collation: None,
-            })
-            .collect(),
-        unique: None,
-        using: None,
-        r#where: None,
-        include: Vec::new(),
-        with: None,
-        only: None,
-        nulls_not_distinct: None,
+    indexes.extend(inject.indexes.iter().map(|idx| {
+        IrIndex {
+            name: None,
+            columns: idx
+                .columns
+                .iter()
+                .map(|name| IndexElement::Column {
+                    name: name.clone(),
+                    order: None,
+                    opclass: None,
+                    collation: None,
+                })
+                .collect(),
+            unique: None,
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        }
     }));
 
     Ok(())
@@ -677,7 +684,11 @@ fn operator_policy_inner(
         policy_registry::KEY_SCHEMA_CREATE_TABLE,
         policy_registry::KEY_SCHEMA_RENAME,
     ] {
-        grant_rules.push(grant_rule(key, toml::Value::Boolean(true), creation_scope.clone()));
+        grant_rules.push(grant_rule(
+            key,
+            toml::Value::Boolean(true),
+            creation_scope.clone(),
+        ));
     }
     // The CREATE EXTENSION allowlist (StrSet) IS the extension capability (empty = deny
     // all). The raw-island role/search_path needle relaxation is now the guard's
@@ -822,9 +833,11 @@ indexes = [
 
     #[test]
     fn confined_prepends_system_shape_and_pk() {
-        let resolved =
-            resolve_create_table_policy(&ir(vec![text_col("title")], None), &zeroship_confined_ceiling())
-                .expect("resolve");
+        let resolved = resolve_create_table_policy(
+            &ir(vec![text_col("title")], None),
+            &zeroship_confined_ceiling(),
+        )
+        .expect("resolve");
         let Op::CreateTable {
             columns,
             primary_key,
@@ -922,7 +935,10 @@ indexes = [
             &zeroship_confined_ceiling(),
         )
         .expect_err("author PK forbidden under pinned PK");
-        assert!(matches!(err, TableShapeError::AuthorPrimaryKeyForbidden { .. }));
+        assert!(matches!(
+            err,
+            TableShapeError::AuthorPrimaryKeyForbidden { .. }
+        ));
     }
 
     fn checksum_of(ir: &MigrationIr) -> Checksum {
@@ -956,9 +972,8 @@ indexes = [
         // Sensitivity: a ceiling that injects nothing resolves to a DIFFERENT shape
         // (no system columns) ⇒ a different checksum.
         let registry = zero_migrate_policy::PolicyRegistry::empty();
-        let no_inject =
-            resolve_create_table_policy(&input, &EffectivePolicy::deny_all(&registry))
-                .expect("no-inject");
+        let no_inject = resolve_create_table_policy(&input, &EffectivePolicy::deny_all(&registry))
+            .expect("no-inject");
         assert_ne!(confined.ops, no_inject.ops);
         assert_ne!(checksum_of(&confined), checksum_of(&no_inject));
     }

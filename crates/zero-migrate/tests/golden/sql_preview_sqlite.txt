@@ -25,6 +25,6 @@ INSERT INTO "codes" ("id", "created_at", "updated_at", "version", "code", "label
 
 UPDATE "codes" SET "label" = ?1 WHERE ("code" > ?2);
 
--- [runtime-resolved] renameColumn "codes"."label" → "codes"."display_name": online rename — needs the live column structure to lower (expand-contract dual-write / SQLite rebuild); the backfill is windowed by PK and the cutover is partitioned across deploys — exact statement stream depends on live state
+-- [runtime-resolved] renameColumn "legacy_codes"."label" → "legacy_codes"."display_name": online rename needs the live column structure to lower (expand-contract dual-write / SQLite rebuild); the backfill is windowed by PK and the cutover is partitioned across deploys; exact statement stream depends on live state
 
 -- preview: 7 statement(s) rendered, 2 runtime-resolved

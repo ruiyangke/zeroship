@@ -14,8 +14,9 @@
 //! wire format) nor *return* rows/errors. The neutral types close both
 //! sides:
 //!
-//! - [`Bind`] — a field-for-field mirror of [`render::step::BindValue`](crate::render::step::BindValue),
-//!   so the IR-fold path and the seam bind path share ONE neutral shape.
+//! - [`Bind`]: the typed network-driver bind carrier. Binary DML is represented
+//!   as canonical base64 text at this seam and decoded by dialect SQL; SQLite
+//!   binds the byte vector directly through its separate in-process actor.
 //! - [`Value`] — the neutral decoded cell
 //!   (`Null`/`Text`/`Int`/`Bool`/`Decimal`/`TextArray`), text-biased to match the
 //!   SQL the apply path already emits (every timestamp is `to_char`-cast to text,
@@ -25,8 +26,7 @@
 //! - [`DbError`] — a neutral, opaque error (message + optional SQLSTATE), which
 //!   is exactly how every seam consumer treats the error (wrap as `#[source]`).
 //!
-//! Both [`Bind`] and [`Value`] carry a `Decimal(String)` variant so they cover the
-//! CLOSED IR value universe (`IrScalar` includes `Decimal`); both are
+//! Both [`Bind`] and [`Value`] carry a `Decimal(String)` variant. They are
 //! `#[non_exhaustive]` so a driver author matches with a wildcard arm.
 //!
 //! The napi host (`zero-migrate-node`'s `NapiHostSession`) is the production
@@ -90,10 +90,10 @@ pub trait SqlSession {
 
 /// A typed scalar bound into a parameterized `exec`/`query`/`query_one` call.
 ///
-/// Mirrors [`render::step::BindValue`](crate::render::step::BindValue) exactly so
-/// the IR-fold path and the seam bind path share ONE neutral shape.
-/// `#[non_exhaustive]`: the enum covers the closed IR value universe; a driver
-/// author matches with a wildcard arm.
+/// Covers the scalar values sent directly across the network seam. Binary DML
+/// values cross as [`Bind::Text`] containing canonical base64 and are decoded in
+/// the rendered PostgreSQL/MySQL statement. `#[non_exhaustive]` lets a driver
+/// author keep a wildcard arm for future additions.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Bind {

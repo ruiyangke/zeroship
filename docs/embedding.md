@@ -39,9 +39,16 @@ selected by your application.
 | `ExecutorConfig` | Project identity, schema, timeouts, and PostgreSQL role settings |
 | `Approval` | Coarse destructive-change approval |
 | `ApprovalScope` | Approval limited to selected migration versions |
+| `Resolution` | Keep the destination (`Applied`) or source (`Aborted`) for a pending PostgreSQL rename |
+| `PendingContract` | One outstanding PostgreSQL online rename and its stable resolution key |
+| `PendingContractStatus` | Status view of an outstanding rename, including orphan diagnosis |
+| `BlockedPlan` | A plan waiting on a dependency's pending rename |
+| `AppliedPlanStatus` | Plan-aware status, including `applied`, `pending`, `aborted`, plan details, and pending contracts |
+| `ReconciledPlanState` | Plan state: applied, aborted, pending, partial, drifted, blocked, or unknown dependency |
+| `PlanStatusStepState` | Step state: pending, inflight, applied, aborted, or drifted |
 | `PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
 | `apply::backend::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
-| `SqliteBackend` | In-process SQLite execution |
+| `SqliteBackend` | SQLite execution from a Rust host |
 | `SchemaSnapshot` | Captured schema used for explicit structural drift |
 
 ## Plan and apply PostgreSQL
@@ -97,6 +104,35 @@ let mysql =
     zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
 ```
 
+Give each operation a dedicated, idle session. In particular, never pass a
+MySQL connection that contains caller-owned transaction work: zero-migrate
+enables autocommit while schema SQL runs and rejects an active transaction before
+making that change. The MySQL account must be able to read Performance Schema's
+transaction tracking tables, with the `transaction` instrument and
+`events_transactions_current` consumer enabled; verification fails closed when
+that evidence is unavailable.
+
+An interrupted, auto-committing MySQL schema migration is resolved through the
+typed recovery API rather than direct journal edits:
+
+```rust
+use zero_migrate::apply::backend::MysqlInflightResolution;
+
+mysql
+    .recover_inflight_ddl(
+        &config,
+        &reviewed_migration,
+        MysqlInflightResolution::MarkAppliedAfterVerification,
+        "operator@example.com",
+        "verified the complete intended schema shape",
+    )
+    .await?;
+```
+
+Choose `ClearForRetryAfterRollback` instead only after restoring and verifying
+the full pre-migration shape. The exact migration identity is checked and the
+decision is recorded in immutable recovery history.
+
 The public trait has five asynchronous operations:
 
 ```rust
@@ -140,8 +176,16 @@ Use different files for application data and the migration journal. SQLite apply
 is currently Rust-only.
 
 The SQLite backend supports transactional DDL, schema snapshots, table rebuilds,
-one-shot DML, and batched backfill. It rejects non-transactional migrations and
-does not coordinate a project lock across separate processes.
+insert, update, delete, and batched backfill. It rejects non-transactional
+migrations. Rust apply coordinates zero-migrate processes that use the same
+application database, and it refuses to open for migration when crash-safe
+application and journal settings cannot be established.
+
+SQLite backfills require the table's non-null, single-column primary key with
+declared `INTEGER` or `TEXT` affinity. Every live cursor value must use the
+matching SQLite storage class. Unique-only or composite cursors and other or
+mixed storage classes are rejected before that backfill changes rows. `WITHOUT
+ROWID` tables are supported when their primary key meets these rules.
 
 ## Backend capabilities
 
@@ -149,10 +193,10 @@ does not coordinate a project lock across separate processes.
 | --- | --- | --- | --- |
 | Versioned DDL apply | Yes | Yes | Yes |
 | Atomic DDL + journal event | Transactional changes | No | Yes |
-| Schema snapshots | Yes | No | Yes |
+| Schema snapshots | Yes | Limited: tables, columns, and ordered indexes | Yes |
 | Preconditions | Yes | No | Empty only |
-| DML plan steps | Yes | No | Yes |
-| Batched backfill | No | No | Yes |
+| Insert/update/delete | Yes | Yes, on trigger-free InnoDB | Yes |
+| Batched backfill | Yes, with a complete single-column primary key and no enabled user trigger | Yes, on trigger-free InnoDB with a complete single-column primary key | Yes, with an `INTEGER` or `TEXT` single-column primary key and no user trigger |
 | Baseline | Yes | No | Yes |
 | Pending expand/contract state | Yes | No | No |
 
@@ -193,6 +237,19 @@ integration. See [Policy model](policy.md) for the public policy types.
 
 Apply checks the plan again before executing it.
 
+Schema and data steps execute in authored order. Every executable step receives
+a stable journal identity tied to the complete migration checksum. Backfills
+require approval and the table's complete, non-null, single-column primary key
+as their cursor. Approval is preflighted across the complete plan before any
+authored step runs. A backfill captures a fixed terminal cursor before its first
+batch, commits bounded batches, resumes after the last committed cursor, and
+stops at its original boundary. Rows inserted after capture are not guaranteed
+to be included and need a later migration.
+
+MySQL structured insert, update, delete, and backfill additionally require an
+InnoDB target without user triggers. Apply refuses the operation when it cannot
+prove that target and journal effects stay transactionally consistent.
+
 For a reviewed migration set, `apply_verified` compares a trusted
 `ManifestHash` before apply. Keep the expected manifest outside the submitted
 migration bundle. `apply_verified_scoped` also accepts an `ApprovalScope` so a
@@ -201,17 +258,74 @@ host can approve only selected destructive versions.
 Declarative and structured plan APIs are available for Rust hosts that need
 schema diffs, DML steps, expand/contract obligations, or touched-table metadata.
 
+## Resolve a PostgreSQL online rename
+
+Rust hosts can resolve a pending rename with the public `Resolution` type and
+`MigrationEngine::resolve_pending_contract`:
+
+```rust
+use zero_migrate::{Approval, MigrationEngine, Resolution};
+
+engine
+    .resolve_pending_contract(
+        pending_version,
+        Resolution::Applied,
+        "app_demo",
+        Approval::Approved,
+        &backend,
+        &config,
+        "deploy:rename-finish",
+    )
+    .await?;
+```
+
+`Resolution::Applied` keeps the destination column and drops the source.
+`Resolution::Aborted` keeps the source and drops the destination. Both require
+`Approval::Approved`. The host should choose `Applied` only after every
+application instance and database consumer has moved to the destination, or
+choose `Aborted` only after moving them back to the source.
+
+The initial rename requires a matching live source type and `id` as the
+complete, non-null, single-column primary key with a supported cursor type. It
+also requires no pre-existing enabled user triggers and row-level policy that
+allows every selected update. In a PostgreSQL migration, the rename must be the
+only operation targeting its table; other tables may still have operations in
+that migration. Apply same-table follow-up work only from a later migration and
+only after resolution.
+
+The destination is nullable but otherwise keeps the source's exact live
+PostgreSQL type and modifiers. Equivalent built-in aliases are accepted without
+discarding modifiers, while modifier drift is refused during resolution. Review
+and recreate required defaults, constraints, indexes, comments, and dependent
+objects after resolution. Source dependencies can block resolution and must be
+audited before rollout. `PendingContract`,
+`PendingContractStatus`, `BlockedPlan`, and
+`AppliedPlanStatus` expose the public status needed to retain and monitor the
+obligation. Resolution cleanup is all-or-nothing. A failure leaves both columns
+and the managed rename trigger intact and keeps the obligation pending, so retry
+the same action after correcting the cause.
+
+A successful apply or abort makes the original rename identity terminal. Exact
+replay cannot reopen it; after abort, author a new migration name to try again.
+`AppliedPlanStatus.aborted` contains terminal aborted plan IDs, and the matching
+`ReconciledPlanState` and deferred `PlanStatusStepState` values are `Aborted`.
+An aborted plan does not satisfy `depends_on`, so dependent work remains
+blocked until it points to a replacement migration identity.
+
 ## Status, history, and drift
 
 Rust hosts can:
 
 - call `status_via_backend` with the complete migration set;
 - read PostgreSQL append-only history with the public `history` helper;
-- rely on automatic checksum/kind checks during apply;
+- reconcile every schema, data, and backfill step and rely on automatic
+  checksum/kind checks during apply;
 - capture `SchemaSnapshot` values and compare them explicitly.
 
 Structural drift is not checked automatically on every apply. PostgreSQL and
-SQLite support snapshots; MySQL currently does not.
+SQLite support structural snapshots for explicit comparison. MySQL returns a
+limited snapshot of tables, columns, and ordered indexes so a host can prepare
+live-dependent work; it is not a complete MySQL structural-drift view.
 
 ## Rollback
 
@@ -223,16 +337,20 @@ orchestration. Prefer a reviewed forward-fix migration.
 ## JavaScript boundary
 
 The public `zero-migrate-engine` API is the supported JavaScript integration.
-It exposes `apply`, `plan`, `validate`, `status`, `history`, and
+It exposes `apply`, `resolvePending`, `plan`, `validate`, `status`, `history`, and
 `currentIrVersion`.
 
 Current JavaScript boundaries:
 
-- apply supports PostgreSQL and MySQL DDL, not SQLite;
-- authored `insert`, `update`, `delete`, and `backfill` steps are not executed by
-  the public JavaScript apply path;
+- apply supports complete ordered schema and data migrations on PostgreSQL and
+  MySQL, not SQLite;
+- pending deletes and backfills require Node `approved: true` or CLI
+  `--approve`;
+- PostgreSQL online rename returns `pendingContracts` from `apply()` and uses
+  `resolvePending()` or CLI `resolve-pending` for approved completion or abort;
 - plan/validate are offline checks, not full Rust engine plans;
-- status/history are PostgreSQL-only in practice;
+- status is plan-aware on PostgreSQL and MySQL when supplied the ordered
+  migration set; history remains PostgreSQL-only;
 - custom policy can drive Rust planning and host decisions, but a general
   end-to-end custom-policy executor configuration is not public yet;
 - scoped approvals are Rust integration features.

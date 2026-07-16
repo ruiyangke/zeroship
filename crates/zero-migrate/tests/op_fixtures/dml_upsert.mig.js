@@ -1,11 +1,6 @@
-// op.* migration fixture — `insert { onConflict }` (the PG-only upsert facet).
-// Authored via the fluent table() surface. This pins the `onConflict`
-// wire shape on `Op::Insert` and is the corpus member behind the op-level PG-only
-// portability boundary: the IDENTICAL IR envelope LOADS on BOTH dialects (the load
-// gate / structural `validate_op` does NOT inspect `Op::Insert.onConflict`), then
-// renders on target_dialect=Postgres but is a HARD reject at LOWER on
-// target_dialect=Sqlite. Exercised end-to-end in `crates/zero-migrate/tests/
-// ir_dml_*` (PG render + SQLite lower reject).
+// `insert { onConflict }` fixture authored through the fluent table() surface.
+// It pins the closed `Op::Insert.onConflict` wire shape shared by PostgreSQL,
+// SQLite, and MySQL.
 import { table } from "zero-migrate";
 
 export const name = "dml_upsert";

@@ -249,10 +249,9 @@ async fn run_rebuild_txn(
     match result {
         Ok(()) => {
             actor
-                .set_mode(Mode::EngineJournal)
+                .commit_or_cleanup("SQLite table rebuild")
                 .await
                 .map_err(|e| step_err(table, e))?;
-            actor.exec("COMMIT").await.map_err(|e| step_err(table, e))?;
             Ok(())
         }
         Err(e) => {

@@ -27,6 +27,10 @@ pub mod rebuild_sql;
 mod rollback_sql;
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
@@ -49,6 +53,10 @@ pub use rebuild_sql::RebuildError;
 #[derive(Debug)]
 pub struct SqliteBackend {
     actor: MigrationActor,
+    /// OS-backed whole-plan lock shared by every process opening this app file.
+    project_lock: File,
+    project_lock_path: PathBuf,
+    project_lock_held: Mutex<bool>,
 }
 
 impl SqliteBackend {
@@ -61,12 +69,26 @@ impl SqliteBackend {
     ///
     /// # Errors
     /// [`SqliteActorError`] on a failed open / hardening / sub-floor SQLite.
-    pub fn open(
-        app_path: &std::path::Path,
-        journal_path: &std::path::Path,
-    ) -> Result<Self, SqliteActorError> {
+    pub fn open(app_path: &Path, journal_path: &Path) -> Result<Self, SqliteActorError> {
+        let actor = MigrationActor::open(app_path, journal_path)?;
+        let project_lock_path = project_lock_path(app_path)?;
+        let project_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&project_lock_path)
+            .map_err(|error| {
+                SqliteActorError::Open(format!(
+                    "open project lock {}: {error}",
+                    project_lock_path.display()
+                ))
+            })?;
         Ok(Self {
-            actor: MigrationActor::open(app_path, journal_path)?,
+            actor,
+            project_lock,
+            project_lock_path,
+            project_lock_held: Mutex::new(false),
         })
     }
 
@@ -137,6 +159,7 @@ impl SqliteBackend {
             filter,
             applied_by,
             max_batches,
+            None,
         )
         .await
     }
@@ -340,6 +363,28 @@ impl SqliteBackend {
     }
 }
 
+/// Choose the file used for the process-wide migration lock. On Unix we lock the
+/// database inode itself, so symlinks and hard links cannot create separate lock
+/// identities. Other platforms keep the canonical sidecar behavior.
+fn project_lock_path(app_path: &Path) -> Result<PathBuf, SqliteActorError> {
+    let canonical = std::fs::canonicalize(app_path).map_err(|error| {
+        SqliteActorError::Open(format!(
+            "canonicalize app path {} for project lock: {error}",
+            app_path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        Ok(canonical)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut path = canonical.into_os_string();
+        path.push(".zero-migrate.lock");
+        Ok(PathBuf::from(path))
+    }
+}
+
 /// Map a SQLite actor error onto the dialect-neutral `Backend` arm of [`ApplyError`].
 fn apply_err(e: SqliteActorError) -> ApplyError {
     ApplyError::Backend(e.to_string())
@@ -362,15 +407,72 @@ impl MigrationBackend for SqliteBackend {
     }
 
     // -- connection / session I/O -------------------------------------------
-    // The in-process lock is the single-actor serialization itself: one
-    // writer, one flume queue. Cross-process serialization is NOT built here. So the
-    // lock methods are honest no-ops — structural serialization already holds.
+    // The actor serializes statements within one process. The sidecar file lock
+    // extends that boundary across processes for the complete migration plan, so
+    // catalog probes, DDL, DML, progress updates, and journal writes cannot
+    // interleave with another zero-migrate process targeting the same app file.
 
-    async fn acquire_project_lock(&self, _cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+    async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        let mut held = self.project_lock_held.lock().map_err(|_| {
+            ApplyError::Backend(format!(
+                "sqlite project lock state poisoned for {}",
+                self.project_lock_path.display()
+            ))
+        })?;
+        if *held {
+            return Err(ApplyError::Backend(format!(
+                "sqlite project lock is already held for {}",
+                self.project_lock_path.display()
+            )));
+        }
+        let timeout = Duration::from_millis(cfg.lock_timeout_ms());
+        let started = Instant::now();
+        loop {
+            match self.project_lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if started.elapsed() >= timeout => {
+                    return Err(ApplyError::Backend(format!(
+                        "timed out after {} ms acquiring sqlite project lock {}",
+                        cfg.lock_timeout_ms(),
+                        self.project_lock_path.display()
+                    )));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    std::thread::sleep(remaining.min(Duration::from_millis(10)));
+                }
+                Err(error) => {
+                    return Err(ApplyError::Backend(format!(
+                        "acquire sqlite project lock {}: {error}",
+                        self.project_lock_path.display()
+                    )));
+                }
+            }
+        }
+        *held = true;
         Ok(())
     }
 
     async fn release_project_lock(&self, _cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        let mut held = self.project_lock_held.lock().map_err(|_| {
+            ApplyError::Backend(format!(
+                "sqlite project lock state poisoned for {}",
+                self.project_lock_path.display()
+            ))
+        })?;
+        if !*held {
+            return Err(ApplyError::Backend(format!(
+                "sqlite project lock is not held for {}",
+                self.project_lock_path.display()
+            )));
+        }
+        self.project_lock.unlock().map_err(|error| {
+            ApplyError::Backend(format!(
+                "release sqlite project lock {}: {error}",
+                self.project_lock_path.display()
+            ))
+        })?;
+        *held = false;
         Ok(())
     }
 
@@ -502,6 +604,24 @@ impl MigrationBackend for SqliteBackend {
         journal_sql::applied(&self.actor).await.map_err(journal_err)
     }
 
+    async fn net_rolled_back_versions(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<String>, JournalError> {
+        journal_sql::net_rolled_back_versions(&self.actor)
+            .await
+            .map_err(journal_err)
+    }
+
+    async fn backfill_progress(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::apply::backend::BackfillProgressEntry>, JournalError> {
+        backfill_sql::read_progress_entries(&self.actor)
+            .await
+            .map_err(journal_err)
+    }
+
     async fn superseded_versions(
         &self,
         _cfg: &ExecutorConfig,
@@ -610,7 +730,7 @@ impl MigrationBackend for SqliteBackend {
         // the same rule as `PlanStep::approval_scope_version`. So a direct seam caller
         // driving `rebuild_one` cannot bypass the per-version scope. Refuse BEFORE
         // touching the table, so a non-scoped rebuild rebuilds NOTHING.
-        if m.flags.destructive && !scope.admits(m.version.as_str()) {
+        if (m.flags.destructive || m.flags.requires_approval) && !scope.admits(m.version.as_str()) {
             return Err(ApplyError::ApprovalNotScoped {
                 version: m.version.as_str().to_string(),
             });
@@ -629,9 +749,11 @@ impl MigrationBackend for SqliteBackend {
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
+        version: &crate::model::migration::MigrationId,
+        checksum: &crate::model::migration::Checksum,
         spec: &crate::model::backfill::BackfillSpec,
         approval: crate::approval::Approval,
-        _scope: &crate::approval::ApprovalScope,
+        scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
@@ -642,13 +764,37 @@ impl MigrationBackend for SqliteBackend {
         // `BEGIN IMMEDIATE … COMMIT` on the single hardened connection, resumable
         // from the committed progress cursor in `_mig`.
         //
-        // Gate — approval (defense-in-depth), mirroring the PG
-        // `run_backfill`'s own Gate 1: a backfill mutates table data, so it requires
-        // Approval::Approved. Refuse BEFORE any batch runs. `_lock_mode` is moot on
-        // SQLite (the single actor serializes every statement structurally; there is
-        // no project advisory lock to re-apply).
+        if let Some(entry) = journal_sql::applied(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .find(|entry| entry.version == version.as_str())
+        {
+            if entry.checksum != checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: checksum.as_str().to_string(),
+                });
+            }
+            return Ok(crate::apply::executor::ApplyOutcome {
+                applied: Vec::new(),
+                skipped: vec![version.as_str().to_string()],
+                recovered: Vec::new(),
+            });
+        }
+        // A pending backfill mutates table data and requires explicit approval.
+        // A completed matching step above is an idempotent skip and does not need
+        // renewed approval.
         if approval != crate::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
+        }
+        if !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
         }
         let outcome = backfill_sql::run_backfill_bounded(
             &self.actor,
@@ -657,13 +803,25 @@ impl MigrationBackend for SqliteBackend {
             spec.filter.as_deref(),
             applied_by,
             None,
+            Some(backfill_sql::PlanBackfillIdentity { version, checksum }),
         )
         .await
-        .map_err(|e| ApplyError::Backend(format!("sqlite backfill step failed: {e}")))?;
+        .map_err(|error| match error {
+            crate::apply::backend::BackfillError::ChecksumDrift {
+                version,
+                recorded,
+                expected,
+            } => ApplyError::ChecksumDrift {
+                version,
+                recorded,
+                expected,
+            },
+            other => ApplyError::Backend(format!("sqlite backfill step failed: {other}")),
+        })?;
         // Surface the backfill's name as an applied version only on completion
         // (a resumed-but-incomplete backfill reports nothing applied), mirroring PG.
         let applied = if outcome.complete {
-            vec![spec.name.clone()]
+            vec![version.as_str().to_string()]
         } else {
             Vec::new()
         };
@@ -678,11 +836,16 @@ impl MigrationBackend for SqliteBackend {
         &self,
         _cfg: &ExecutorConfig,
         version: &crate::model::migration::MigrationId,
+        checksum: &crate::model::migration::Checksum,
         name: &str,
         template: &str,
         binds: &[crate::render::step::BindValue],
+        _target_schema: &str,
+        _target_table: &str,
+        _conflict_target: Option<&[String]>,
+        _mutates_data: bool,
         destructive: bool,
-        owner_app: &str,
+        _owner_app: &str,
         approval: crate::approval::Approval,
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,
@@ -691,34 +854,34 @@ impl MigrationBackend for SqliteBackend {
         // The SQLite one-shot DML executor. The `template` carries `?n`
         // placeholders; the binds are bound NATIVELY (never interpolated).
         //
-        // Defense-in-depth: a destructive DML (a `delete`) needs explicit approval,
-        // mirroring the per-Migration gate + the PG `run_dml_step`. Refuse BEFORE
-        // touching the journal or running the statement, so a refused destructive
-        // DML applies NOTHING.
-        if destructive && approval != crate::approval::Approval::Approved {
-            return Err(ApplyError::ApprovalRequired);
-        }
-        // **Per-version scope (executor-layer defense in depth).** Mirrors the PG
-        // `run_dml_step`: even under blanket `Approval::Approved`, a destructive DML
-        // runs ONLY if `scope` admits its `version`, keyed on the same rule as
-        // `PlanStep::approval_scope_version`. So a direct seam caller cannot bypass the
-        // per-version scope. Fail-closed: refuse BEFORE the journal or the statement.
-        if destructive && !scope.admits(version.as_str()) {
-            return Err(ApplyError::ApprovalNotScoped {
-                version: version.as_str().to_string(),
-            });
-        }
         // Net-applied-skip: if this sub-version is already journaled `completed`,
         // the re-run is a no-op (idempotency).
-        let already: bool = journal_sql::applied(&self.actor)
+        let completed = journal_sql::applied(&self.actor)
             .await
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
             .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
-            .any(|e| e.version == version.as_str());
-        if already {
+            .find(|e| e.version == version.as_str());
+        if let Some(entry) = completed {
+            if entry.checksum != checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: checksum.as_str().to_string(),
+                });
+            }
             return Ok(false);
+        }
+        if destructive && approval != crate::approval::Approval::Approved {
+            return Err(ApplyError::ApprovalRequired);
+        }
+        // Per-version scope defense in depth. A pending destructive DML runs only
+        // when the operator approved this exact stable step identity.
+        if destructive && !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
         }
         // Map the plan binds to the transport-safe SQLite bind mirror (the shared
         // `?n`-binding seam — `SqliteBind::from_bind`).
@@ -729,10 +892,10 @@ impl MigrationBackend for SqliteBackend {
         journal_sql::run_dml(
             &self.actor,
             version.as_str(),
+            checksum,
             name,
             template,
             &sqlite_binds,
-            owner_app,
             applied_by,
         )
         .await
@@ -786,5 +949,86 @@ impl MigrationBackend for SqliteBackend {
         journal_sql::baseline(&self.actor, m, applied_by)
             .await
             .map_err(|e| BaselineError::Backend(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[compio::test]
+    async fn project_lock_excludes_a_second_backend_for_the_same_app() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join("app.sqlite");
+        let journal = dir.path().join("journal.sqlite");
+        let first = SqliteBackend::open(&app, &journal).expect("first backend");
+        let second = SqliteBackend::open(&app, &journal).expect("second backend");
+        let cfg = ExecutorConfig::new("project", "main");
+
+        first
+            .acquire_project_lock(&cfg)
+            .await
+            .expect("acquire first lock");
+        let contention = second
+            .project_lock
+            .try_lock()
+            .expect_err("a separate file handle cannot acquire the held project lock");
+        assert!(matches!(contention, std::fs::TryLockError::WouldBlock));
+
+        first
+            .release_project_lock(&cfg)
+            .await
+            .expect("release first lock");
+        second
+            .project_lock
+            .try_lock()
+            .expect("lock becomes available after release");
+        second.project_lock.unlock().expect("unlock direct probe");
+    }
+
+    #[compio::test]
+    async fn project_lock_respects_the_configured_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join("app.sqlite");
+        let first =
+            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
+        let second = SqliteBackend::open(&app, &dir.path().join("journal-b.sqlite"))
+            .expect("second backend");
+        let mut cfg = ExecutorConfig::new("project", "main");
+        cfg.pg.lock_timeout = Duration::from_millis(25);
+
+        first.acquire_project_lock(&cfg).await.expect("first lock");
+        let started = Instant::now();
+        let error = second
+            .acquire_project_lock(&cfg)
+            .await
+            .expect_err("the second backend must time out");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "lock acquisition must remain bounded"
+        );
+        first.release_project_lock(&cfg).await.expect("release");
+    }
+
+    #[cfg(unix)]
+    #[compio::test]
+    async fn project_lock_cannot_be_bypassed_with_a_hard_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = dir.path().join("app.sqlite");
+        let first =
+            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
+        let alias = dir.path().join("app-alias.sqlite");
+        std::fs::hard_link(&app, &alias).expect("hard link app database");
+        let second = SqliteBackend::open(&alias, &dir.path().join("journal-b.sqlite"))
+            .expect("hard-link backend");
+        let cfg = ExecutorConfig::new("project", "main");
+
+        first.acquire_project_lock(&cfg).await.expect("first lock");
+        assert!(matches!(
+            second.project_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        first.release_project_lock(&cfg).await.expect("release");
     }
 }

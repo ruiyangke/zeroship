@@ -225,7 +225,12 @@ fn unsupported_reason(
                 }
                 _ => NEVER_REFUSED,
             },
-            Op::Insert { .. } => "insert onConflict is PostgreSQL-only in the current engine",
+            Op::Insert { .. } => match variant {
+                "onConflictDoNothing" => {
+                    "MySQL cannot express targeted onConflict DO NOTHING without firing update triggers or suppressing unrelated errors"
+                }
+                _ => NEVER_REFUSED,
+            },
             Op::CreateView { .. } => match variant {
                 "materializedReplace" => {
                     "createView replace+materialized is unsupported in the current engine"
@@ -506,14 +511,21 @@ fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
         }
         Op::DropConstraint { .. } => ("dropConstraint", "base"),
         Op::ValidateConstraint { .. } => ("validateConstraint", "base"),
-        Op::Insert { on_conflict, .. } => (
-            "insert",
-            if on_conflict.is_some() {
-                "onConflict"
-            } else {
-                "base"
-            },
-        ),
+        Op::Insert { on_conflict, .. } => {
+            let variant = match on_conflict {
+                None => "base",
+                Some(conflict)
+                    if conflict
+                        .do_update
+                        .as_ref()
+                        .is_some_and(|set| !set.is_empty()) =>
+                {
+                    "onConflictDoUpdate"
+                }
+                Some(_) => "onConflictDoNothing",
+            };
+            ("insert", variant)
+        }
         Op::Update { .. } => ("update", "base"),
         Op::Delete { .. } => ("delete", "base"),
         Op::Backfill { .. } => ("backfill", "base"),

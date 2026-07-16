@@ -138,12 +138,13 @@ impl PgConfinement {
 /// The engine-agnostic fields (project identity + trust posture) live directly
 /// on this struct; the **PG-specific confinement parameters** are grouped under
 /// [`pg`](Self::pg) (a [`PgConfinement`]) so the neutral core is not PG-shaped
-/// at the type level. A non-PG backend (SQLite, which confines via a runtime
-/// mode-flip) never reads `pg` (part of the multi-engine abstraction).
+/// at the type level. SQLite ignores the PG schema and role settings but reuses
+/// the lock-acquisition budget for its application-file lock.
 ///
 /// The PG `statement_timeout` + `lock_timeout` under [`pg`](Self::pg) are
 /// **mandatory** (no indefinite locks / `DoS`). They are applied per
-/// migration before its SQL runs.
+/// migration before its SQL runs. SQLite uses `lock_timeout` when acquiring its
+/// process-wide migration lock.
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// The project id (`prj_…`) — its bytes seed the apply-serializing advisory
@@ -154,10 +155,9 @@ pub struct ExecutorConfig {
     /// confinement target.
     pub project_schema: String,
     /// The **Postgres confinement parameters** (meta schema, migrator role,
-    /// timeouts, extension-resolution schemas). PG-shaped by construction; read
-    /// ONLY by the PG apply leaf. A SQLite-backed [`ExecutorConfig`] carries the
-    /// inert [`PgConfinement::new`] default and never consults this — its
-    /// confinement is the runtime authorizer mode-flip.
+    /// timeouts, extension-resolution schemas). PG-shaped by construction.
+    /// SQLite ignores the role, schema, and statement settings, but reuses
+    /// `lock_timeout` for its application-file lock.
     pub pg: PgConfinement,
     /// PRIVATE (`pub(crate)`). The composed policy every executor-path guard uses.
     /// Confined configs carry a no-inject policy with project-scoped
@@ -347,17 +347,20 @@ impl ExecutorConfig {
     /// well-formed `ExecutorConfig`).
     pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
         let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
-        if policy_grants_bool(&self.effective, zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE) {
+        if policy_grants_bool(
+            &self.effective,
+            zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE,
+        ) {
             if let Some(schemas) = policy_literal_schema_includes(
                 &self.effective,
                 zero_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
             ) {
                 if !schemas.is_empty() {
                     return schemas
-                    .iter()
-                    .map(|s| quote(s))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|parts| parts.join(", "));
+                        .iter()
+                        .map(|s| quote(s))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|parts| parts.join(", "));
                 }
             }
         }
@@ -381,7 +384,8 @@ impl ExecutorConfig {
         u64::try_from(self.pg.statement_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// `lock_timeout` in whole milliseconds (the unit `SET` takes).
+    /// Lock-acquisition timeout in whole milliseconds. PostgreSQL sends this to
+    /// `SET lock_timeout`; SQLite uses it for the application-file lock.
     #[must_use]
     pub fn lock_timeout_ms(&self) -> u64 {
         u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
@@ -393,7 +397,10 @@ fn policy_grants_bool(effective: &zero_migrate_policy::EffectivePolicy, key: &st
         return false;
     };
     matches!(
-        effective.grants(&key, &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())),
+        effective.grants(
+            &key,
+            &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())
+        ),
         Some(zero_migrate_policy::KnobValue::Bool(true))
     )
 }

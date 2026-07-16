@@ -33,7 +33,9 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
     apply, check_checksum_drift, ensure_journal, history, snapshot_schema, status, ApplyError,
-    Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, PostgresBackend,
+    Approval, ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError, EngineError,
+    ExecutorConfig, ExpandContractAuthor, LockMode, Migration, MigrationEngine, MigrationFlags,
+    MigrationId, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution,
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,386 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
         .await
         .expect("table_exists probe");
     row.try_get::<_, bool>("present").expect("decode present")
+}
+
+async fn column_exists(session: &PgDevSession, schema: &str, table: &str, column: &str) -> bool {
+    use zero_migrate::driver::SqlSession;
+    let row = session
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3) AS present",
+            &[schema.into(), table.into(), column.into()],
+        )
+        .await
+        .expect("column existence query");
+    row.try_get("present").expect("present bool")
+}
+
+fn step_checksum(label: &str) -> Checksum {
+    Checksum::of(&zero_migrate::ChecksumInput {
+        up: label,
+        down: None,
+        flags: &MigrationFlags::default(),
+        owner_app: "app_test",
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    })
+}
+
+fn legacy_abort_resolution_version(pending_version: &str, ordinal: usize) -> MigrationId {
+    let mut seed = pending_version.as_bytes().to_vec();
+    seed.extend_from_slice(&(ordinal as u64).to_be_bytes());
+    MigrationId::derive("resolve_pending_abort", &seed)
+}
+
+async fn standard_conforming_strings(session: &PgDevSession) -> String {
+    use zero_migrate::driver::SqlSession;
+    session
+        .query_one("SHOW standard_conforming_strings", &[])
+        .await
+        .expect("read standard_conforming_strings")
+        .try_get(0)
+        .expect("decode standard_conforming_strings")
+}
+
+#[compio::test]
+async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".literal_safety (\
+                id bigint PRIMARY KEY, value text NOT NULL\
+            )",
+            cfg.project_schema
+        ))
+        .await
+        .expect("create literal safety table");
+    session
+        .batch("SET standard_conforming_strings = off")
+        .await
+        .expect("set hostile inherited string mode");
+    assert_eq!(standard_conforming_strings(&session).await, "off");
+
+    let dml_version = MigrationId::generate();
+    let dml_checksum = step_checksum("standard string DML");
+    let dml = format!(
+        r#"INSERT INTO "{}".literal_safety (id, value) VALUES ($1, '\n'), ($2, 'seed')"#,
+        cfg.project_schema
+    );
+    backend
+        .run_dml_step(
+            &cfg,
+            &dml_version,
+            &dml_checksum,
+            "insert literal safety rows",
+            &dml,
+            &[BindValue::Int(1), BindValue::Int(2)],
+            &cfg.project_schema,
+            "literal_safety",
+            None,
+            true,
+            false,
+            "app_test",
+            Approval::None,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("structured DML applies with standard strings");
+    let inserted: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".literal_safety WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read DML literal")
+        .try_get("value")
+        .expect("decode DML literal");
+    assert_eq!(inserted, r"\n", "backslash must remain ordinary text");
+    assert_eq!(
+        standard_conforming_strings(&session).await,
+        "off",
+        "DML commit must restore the inherited session value"
+    );
+
+    let backfill_version = MigrationId::generate();
+    let backfill_checksum = step_checksum("standard string backfill");
+    let backfill = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "literal_safety".into(),
+        cursor_column: "id".into(),
+        batch_size: 10,
+        set_clause: r#""value" = '\t'"#.into(),
+        filter: Some(r#""id" = 2"#.into()),
+        name: "backfill literal safety".into(),
+    };
+    backend
+        .run_backfill_step(
+            &cfg,
+            &backfill_version,
+            &backfill_checksum,
+            &backfill,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect("backfill applies with standard strings");
+    let backfilled: String = session
+        .query_one(
+            &format!(
+                "SELECT value FROM \"{}\".literal_safety WHERE id = 2",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read backfill literal")
+        .try_get("value")
+        .expect("decode backfill literal");
+    assert_eq!(backfilled, r"\t", "backslash must remain ordinary text");
+    assert_eq!(
+        standard_conforming_strings(&session).await,
+        "off",
+        "backfill commit must restore the inherited session value"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{schema}\".items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".items (id, value) \
+             VALUES (1, 'pending'), (2, 'pending'), (3, 'pending'); \
+             CREATE FUNCTION \"{schema}\".rewrite_value() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 NEW.value := OLD.value; \
+                 RETURN NEW; \
+             END \
+             $$; \
+             CREATE TRIGGER rewrite_value \
+             BEFORE UPDATE ON \"{schema}\".items \
+             FOR EACH ROW EXECUTE FUNCTION \"{schema}\".rewrite_value()",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create trigger-backed backfill target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("trigger rewrite backfill");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "items".into(),
+        cursor_column: "id".into(),
+        batch_size: 10,
+        set_clause: "\"value\" = 'done'".into(),
+        filter: None,
+        name: "trigger rewrite backfill".into(),
+    };
+
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("a backfill target with an enabled user trigger must be rejected");
+    assert!(
+        error.to_string().contains("enabled user trigger"),
+        "the failure should explain the trigger-free target requirement: {error}"
+    );
+
+    let rows = session
+        .query(
+            &format!(
+                "SELECT value FROM \"{}\".items ORDER BY id",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read rolled-back target rows");
+    let values = rows
+        .iter()
+        .map(|row| row.try_get::<_, String>("value").expect("decode value"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        ["pending", "pending", "pending"],
+        "trigger validation must happen before any target row is changed"
+    );
+
+    let progress_rows: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*) AS progress_rows FROM \"{}\".schema_backfills \
+                 WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("read failed backfill progress")
+        .try_get("progress_rows")
+        .expect("decode progress count");
+    assert_eq!(
+        progress_rows, 0,
+        "a rejected target must not create progress"
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let mut cfg = cfg_for(&tok);
+    let role = format!("bf_role_{tok}");
+    cfg.pg.migrator_role = Some(role.clone());
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    let backend = PostgresBackend::new_generic(&session);
+    backend.ensure_journal(&cfg).await.expect("ensure journal");
+    session
+        .batch(&format!(
+            "CREATE ROLE \"{role}\" NOLOGIN; \
+             CREATE TABLE \"{schema}\".items (\
+                 id bigint PRIMARY KEY, value text NOT NULL\
+             ); \
+             INSERT INTO \"{schema}\".items (id, value) \
+             VALUES (1, 'pending'), (2, 'pending'), (3, 'pending'); \
+             GRANT USAGE ON SCHEMA \"{schema}\" TO \"{role}\"; \
+             GRANT SELECT, UPDATE ON \"{schema}\".items TO \"{role}\"; \
+             ALTER TABLE \"{schema}\".items ENABLE ROW LEVEL SECURITY; \
+             CREATE POLICY select_all ON \"{schema}\".items \
+                 FOR SELECT TO \"{role}\" USING (true); \
+             CREATE POLICY update_except_second ON \"{schema}\".items \
+                 FOR UPDATE TO \"{role}\" USING (id <> 2) WITH CHECK (true)",
+            schema = cfg.project_schema
+        ))
+        .await
+        .expect("create row-policy-backed backfill target");
+
+    let version = MigrationId::generate();
+    let checksum = step_checksum("row policy suppression backfill");
+    let spec = BackfillSpec {
+        schema: cfg.project_schema.clone(),
+        table: "items".into(),
+        cursor_column: "id".into(),
+        batch_size: 10,
+        set_clause: "\"value\" = 'done'".into(),
+        filter: None,
+        name: "row policy suppression backfill".into(),
+    };
+
+    let error = backend
+        .run_backfill_step(
+            &cfg,
+            &version,
+            &checksum,
+            &spec,
+            Approval::Approved,
+            &ApprovalScope::All,
+            "tester",
+            LockMode::AlreadyHeld,
+        )
+        .await
+        .expect_err("an UPDATE policy must not silently shorten the batch");
+    assert!(
+        error.to_string().contains("selected 3 rows but updated 2"),
+        "the failure should explain the unsafe short update: {error}"
+    );
+
+    let rows = session
+        .query(
+            &format!(
+                "SELECT value FROM \"{}\".items ORDER BY id",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read rolled-back target rows");
+    let values = rows
+        .iter()
+        .map(|row| row.try_get::<_, String>("value").expect("decode value"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        ["pending", "pending", "pending"],
+        "the policy-shortened UPDATE must roll back the whole batch"
+    );
+
+    let progress = session
+        .query_one(
+            &format!(
+                "SELECT last_cursor, complete FROM \"{}\".schema_backfills \
+                 WHERE backfill_id = $1",
+                cfg.pg.meta_schema
+            ),
+            &[version.as_str().into()],
+        )
+        .await
+        .expect("read failed backfill progress");
+    assert_eq!(
+        progress
+            .try_get::<_, Option<String>>("last_cursor")
+            .expect("decode last cursor"),
+        None
+    );
+    assert!(!progress
+        .try_get::<_, bool>("complete")
+        .expect("decode complete"));
+
+    drop_schemas(&session, &cfg).await;
+    session
+        .batch(&format!("DROP ROLE \"{role}\""))
+        .await
+        .expect("drop backfill test role");
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +913,60 @@ async fn snapshot_schema_reflects_the_live_catalog() {
     drop_schemas(&session, &cfg).await;
 }
 
+#[compio::test]
+async fn snapshot_schema_preserves_quoted_named_type_identity() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let mut cfg = cfg_for(&tok);
+    cfg.project_schema = format!("AppSpace_{tok}");
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+
+    session
+        .batch(&format!(
+            "CREATE TYPE \"{}\".\"MoodState\" AS ENUM ('ready', 'done'); \
+             CREATE DOMAIN \"{}\".\"StateCode\" AS text CHECK (VALUE <> ''); \
+             CREATE TABLE \"{}\".named_values (\
+                 mood \"{}\".\"MoodState\", \
+                 code \"{}\".\"StateCode\"\
+             )",
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema
+        ))
+        .await
+        .expect("create quoted enum/domain fixture");
+
+    let snap = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot quoted named types");
+    let table = &snap.tables["named_values"];
+    for (column_name, type_name) in [("mood", "MoodState"), ("code", "StateCode")] {
+        let column = table
+            .columns
+            .iter()
+            .find(|column| column.name == column_name)
+            .expect("named type column is introspected");
+        assert_eq!(
+            column.data_type,
+            format!("{}.{}", cfg.project_schema, type_name),
+            "named type comparison uses unquoted catalog identity"
+        );
+        assert_eq!(
+            column.ddl_type_override.as_deref(),
+            Some(format!("\"{}\".\"{}\"", cfg.project_schema, type_name).as_str()),
+            "named type emission retains exact quoted DDL spelling"
+        );
+    }
+
+    drop_schemas(&session, &cfg).await;
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 5 — concurrency / lock contention
 // ---------------------------------------------------------------------------
@@ -844,6 +1280,1178 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
         applied.is_empty(),
         "a denied batch applies NOTHING (all-up-front guard): {applied:?}"
     );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn limited_delete_honors_its_cap_across_partitions() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".events (id bigint, code bigint) PARTITION BY RANGE (id); \
+             CREATE TABLE \"{}\".events_low PARTITION OF \"{}\".events FOR VALUES FROM (0) TO (10); \
+             CREATE TABLE \"{}\".events_high PARTITION OF \"{}\".events FOR VALUES FROM (10) TO (20); \
+             INSERT INTO \"{}\".events VALUES (1, -1), (11, -1)",
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema
+        ))
+        .await
+        .expect("create partitioned delete fixture");
+
+    let predicate: zero_migrate::model::expr::Expr = serde_json::from_value(serde_json::json!({
+        "node": "binOp",
+        "op": "lt",
+        "lhs": { "node": "colRef", "name": "code" },
+        "rhs": { "node": "literal", "value": 0 }
+    }))
+    .expect("parse delete predicate");
+    let assembled = zero_migrate::render::dml::assemble_delete(
+        &cfg.project_schema,
+        zero_migrate::SqlDialect::Postgres,
+        "events",
+        &predicate,
+        Some(1),
+    )
+    .expect("assemble limited delete");
+    assert!(assembled.template.contains("(tableoid, ctid)"));
+    let changed = session
+        .exec_text(
+            &assembled.template,
+            &[Some("0".to_string()), Some("1".to_string())],
+        )
+        .await
+        .expect("execute limited delete");
+    assert_eq!(changed, 1, "LIMIT 1 must delete exactly one physical row");
+    let remaining: i64 = session
+        .query_one(
+            &format!(
+                "SELECT count(*)::bigint AS n FROM \"{}\".events",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("count remaining rows")
+        .try_get("n")
+        .expect("decode count");
+    assert_eq!(remaining, 1);
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn pending_online_renames_can_be_completed_or_aborted_safely() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".apply_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".apply_users VALUES (1, 'apply@example.test'); \
+             CREATE TABLE \"{}\".abort_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".abort_users VALUES (1, 'abort@example.test'); \
+             CREATE TABLE \"{}\".abort_partial_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".abort_partial_users VALUES (1, 'partial@example.test'); \
+             CREATE TABLE \"{}\".drift_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".drift_users VALUES (1, 'preserve@example.test'); \
+             CREATE TABLE \"{}\".numeric_users (id bigint PRIMARY KEY, amount numeric(10,2)); \
+             INSERT INTO \"{}\".numeric_users VALUES (1, 12.34); \
+             CREATE TABLE \"{}\".timestamp_users (id bigint PRIMARY KEY, created_at timestamp with time zone); \
+             INSERT INTO \"{}\".timestamp_users VALUES (1, '2026-01-02 03:04:05+00'); \
+             CREATE TYPE \"{}\".item_state AS ENUM ('ready', 'done'); \
+             CREATE TABLE \"{}\".enum_users (id bigint PRIMARY KEY, state \"{}\".item_state); \
+             INSERT INTO \"{}\".enum_users VALUES (1, 'ready'); \
+             CREATE DOMAIN \"{}\".state_code AS text CHECK (VALUE <> ''); \
+             CREATE TABLE \"{}\".domain_users (id bigint PRIMARY KEY, state \"{}\".state_code); \
+             INSERT INTO \"{}\".domain_users VALUES (1, 'ready'); \
+             CREATE TABLE \"{}\".direct_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".direct_users VALUES (1, 'direct@example.test')",
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema,
+            cfg.project_schema
+        ))
+        .await
+        .expect("create rename fixtures");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let apply_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "apply_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author forward-completion rename");
+    let apply_pending = apply_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                apply_plan,
+            ))],
+            &["apply_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand apply_users rename");
+
+    assert!(column_exists(&session, &cfg.project_schema, "apply_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "apply_users",
+            "email_address"
+        )
+        .await
+    );
+
+    let unapproved = engine
+        .resolve_pending_contract(
+            &apply_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::None,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("completion requires explicit approval");
+    assert!(matches!(
+        unapproved,
+        DeclarativeApplyError::Plain(EngineError::ApprovalRequired)
+    ));
+    let wrong_owner = engine
+        .resolve_pending_contract(
+            &apply_pending,
+            Resolution::Applied,
+            "another_app",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("a different owner must not reproduce contract ids");
+    assert!(matches!(
+        wrong_owner,
+        DeclarativeApplyError::Plain(EngineError::PendingContractIdentityMismatch { .. })
+    ));
+
+    engine
+        .resolve_pending_contract(
+            &apply_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("complete apply_users rename");
+    assert!(!column_exists(&session, &cfg.project_schema, "apply_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "apply_users",
+            "email_address"
+        )
+        .await
+    );
+
+    let direct_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "direct_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author direct contract rename");
+    let direct_contract: Vec<PlanStep> = direct_plan
+        .contract
+        .iter()
+        .cloned()
+        .map(PlanStep::Ddl)
+        .collect();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                direct_plan,
+            ))],
+            &["direct_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand direct contract rename");
+    session
+        .batch(&format!(
+            "CREATE VIEW \"{}\".direct_users_old_email AS \
+             SELECT email FROM \"{}\".direct_users",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("block direct source drop");
+    engine
+        .apply_plan_with_touched_and_depends(
+            &direct_contract,
+            &["direct_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("direct contract cleanup must roll back atomically");
+    let direct_trigger_count: i64 = session
+        .query_one(
+            "SELECT count(*)::bigint AS n
+               FROM pg_trigger trigger
+               JOIN pg_class target ON target.oid = trigger.tgrelid
+               JOIN pg_namespace namespace ON namespace.oid = target.relnamespace
+              WHERE namespace.nspname = $1
+                AND target.relname = 'direct_users'
+                AND NOT trigger.tgisinternal",
+            &[(&cfg.project_schema).into()],
+        )
+        .await
+        .expect("count direct rename triggers")
+        .try_get("n")
+        .expect("decode direct rename trigger count");
+    assert_eq!(direct_trigger_count, 1);
+    session
+        .batch(&format!(
+            "DROP VIEW \"{}\".direct_users_old_email",
+            cfg.project_schema
+        ))
+        .await
+        .expect("remove direct source dependency");
+    session.fail_next_resolved_pending_contract_insert();
+    let append_failure = engine
+        .apply_plan_with_touched_and_depends(
+            &direct_contract,
+            &["direct_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("direct cleanup commits before the injected tombstone append fault");
+    assert!(
+        append_failure
+            .to_string()
+            .contains("resolved pending-contract append failed"),
+        "the direct path must surface the append failure: {append_failure}"
+    );
+    assert!(!column_exists(&session, &cfg.project_schema, "direct_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "direct_users",
+            "email_address"
+        )
+        .await
+    );
+    engine
+        .apply_plan_with_touched_and_depends(
+            &direct_contract,
+            &["direct_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("direct contract retry appends the missing tombstone");
+
+    let abort_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "abort_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author abort rename");
+    let abort_pending = abort_plan.trigger_version.as_str().to_string();
+    let aborted_plan_version = abort_plan
+        .plan_version
+        .clone()
+        .unwrap_or_else(|| abort_plan.expand[0].version.clone());
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                abort_plan.clone(),
+            ))],
+            &["abort_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand abort_users rename");
+    engine
+        .resolve_pending_contract(
+            &abort_pending,
+            Resolution::Aborted,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("abort abort_users rename");
+    assert!(column_exists(&session, &cfg.project_schema, "abort_users", "email").await);
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "abort_users",
+            "email_address"
+        )
+        .await
+    );
+    assert!(backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read outstanding contracts")
+        .is_empty());
+
+    let replay = engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                abort_plan,
+            ))],
+            &["abort_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("replaying an aborted migration is a terminal no-op");
+    assert!(
+        replay.pending_contract.is_empty(),
+        "a resolved migration must not reopen its pending contract"
+    );
+    assert!(column_exists(&session, &cfg.project_schema, "abort_users", "email").await);
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "abort_users",
+            "email_address"
+        )
+        .await
+    );
+    assert!(backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read outstanding contracts after replay")
+        .is_empty());
+
+    let mut dependent = mig(
+        MigrationId::derive("aborted_dependency", b"dependent"),
+        "dependent_on_aborted_rename",
+        &format!(
+            "CREATE TABLE \"{}\".must_not_exist (id bigint PRIMARY KEY)",
+            cfg.project_schema
+        ),
+    );
+    dependent.depends_on = vec![aborted_plan_version.clone()];
+    dependent.recompute_checksum();
+    let blocked = engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::Ddl(dependent)],
+            &[],
+            &[aborted_plan_version.as_str().to_string()],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect_err("an aborted plan must not satisfy a dependency");
+    assert!(matches!(
+        blocked,
+        DeclarativeApplyError::Plain(EngineError::DependencyAbortedContract { .. })
+    ));
+    let dependent_table_exists: bool = session
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                  WHERE table_schema = $1 AND table_name = 'must_not_exist'
+             ) AS ex",
+            &[(&cfg.project_schema).into()],
+        )
+        .await
+        .expect("check dependent table")
+        .try_get("ex")
+        .expect("decode dependent table check");
+    assert!(!dependent_table_exists);
+
+    let partial_abort_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "abort_partial_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author partial abort rename");
+    let partial_abort_pending = partial_abort_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                partial_abort_plan,
+            ))],
+            &["abort_partial_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand partial abort rename");
+    session
+        .batch(&format!(
+            "CREATE VIEW \"{}\".abort_partial_users_new_email AS \
+             SELECT email_address FROM \"{}\".abort_partial_users",
+            cfg.project_schema, cfg.project_schema
+        ))
+        .await
+        .expect("block destination-column drop");
+    engine
+        .resolve_pending_contract(
+            &partial_abort_pending,
+            Resolution::Aborted,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("the dependent view must interrupt abort cleanup");
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "abort_partial_users",
+            "email_address"
+        )
+        .await
+    );
+    session
+        .batch(&format!(
+            "DROP VIEW \"{}\".abort_partial_users_new_email",
+            cfg.project_schema
+        ))
+        .await
+        .expect("remove destination-column dependency");
+    engine
+        .resolve_pending_contract(
+            &partial_abort_pending,
+            Resolution::Aborted,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("retry the same abort action");
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "abort_partial_users",
+            "email"
+        )
+        .await
+    );
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "abort_partial_users",
+            "email_address"
+        )
+        .await
+    );
+
+    let drift_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "drift_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author drift rename");
+    let drift_pending = drift_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                drift_plan,
+            ))],
+            &["drift_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand drift rename");
+    session
+        .batch(&format!(
+            "ALTER TABLE \"{}\".drift_users DROP COLUMN email_address",
+            cfg.project_schema
+        ))
+        .await
+        .expect("simulate out-of-band destination loss");
+    let unsafe_resolution = engine
+        .resolve_pending_contract(
+            &drift_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("missing destination must fail closed");
+    assert!(matches!(
+        unsafe_resolution,
+        DeclarativeApplyError::Plain(EngineError::PendingContractShapeMismatch { .. })
+    ));
+    let preserved: String = session
+        .query_one(
+            &format!(
+                "SELECT email FROM \"{}\".drift_users WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read preserved source value")
+        .try_get("email")
+        .expect("decode preserved source value");
+    assert_eq!(preserved, "preserve@example.test");
+
+    let numeric_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "numeric_users".into(),
+            from: "amount".into(),
+            to: "amount_new".into(),
+            ty: "numeric(10,2)".into(),
+        })
+        .expect("author numeric rename");
+    let numeric_pending = numeric_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                numeric_plan,
+            ))],
+            &["numeric_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand numeric rename");
+    session
+        .batch(&format!(
+            "ALTER TABLE \"{}\".numeric_users \
+                 ALTER COLUMN amount TYPE numeric(10,1), \
+                 ALTER COLUMN amount_new TYPE numeric(10,1)",
+            cfg.project_schema
+        ))
+        .await
+        .expect("simulate matching but incorrect type modifiers");
+    let modifier_drift = engine
+        .resolve_pending_contract(
+            &numeric_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("recorded type modifiers must be enforced");
+    assert!(matches!(
+        modifier_drift,
+        DeclarativeApplyError::Plain(EngineError::PendingContractShapeMismatch { .. })
+    ));
+    assert!(column_exists(&session, &cfg.project_schema, "numeric_users", "amount").await);
+    assert!(column_exists(&session, &cfg.project_schema, "numeric_users", "amount_new").await);
+
+    let timestamp_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "timestamp_users".into(),
+            from: "created_at".into(),
+            to: "recorded_at".into(),
+            ty: "timestamptz".into(),
+        })
+        .expect("author timestamp rename with PostgreSQL type alias");
+    let timestamp_pending = timestamp_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                timestamp_plan,
+            ))],
+            &["timestamp_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("expand timestamp rename");
+    engine
+        .resolve_pending_contract(
+            &timestamp_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("resolve timestamptz against timestamp with time zone catalog spelling");
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "timestamp_users",
+            "created_at"
+        )
+        .await
+    );
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "timestamp_users",
+            "recorded_at"
+        )
+        .await
+    );
+    let retained_timestamp: String = session
+        .query_one(
+            &format!(
+                "SELECT recorded_at::text AS recorded_at \
+                   FROM \"{}\".timestamp_users WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read renamed timestamp value")
+        .try_get("recorded_at")
+        .expect("decode renamed timestamp value");
+    assert!(retained_timestamp.starts_with("2026-01-02 03:04:05"));
+
+    for (table, named_type) in [
+        (
+            "enum_users",
+            format!("\"{}\".\"item_state\"", cfg.project_schema),
+        ),
+        (
+            "domain_users",
+            format!("\"{}\".\"state_code\"", cfg.project_schema),
+        ),
+    ] {
+        let named_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+            .author(&OnlineIntent::RenameColumn {
+                table: table.to_string(),
+                from: "state".into(),
+                to: "status".into(),
+                ty: named_type,
+            })
+            .expect("author named type rename");
+        let named_pending = named_plan.trigger_version.as_str().to_string();
+        engine
+            .apply_plan_with_touched_and_depends(
+                &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                    named_plan,
+                ))],
+                &[table.to_string()],
+                &[],
+                Approval::Approved,
+                &backend,
+                &cfg,
+                "app_test",
+                LockMode::Acquire,
+            )
+            .await
+            .expect("expand named type rename");
+        engine
+            .resolve_pending_contract(
+                &named_pending,
+                Resolution::Applied,
+                "app_test",
+                Approval::Approved,
+                &backend,
+                &cfg,
+                "operator",
+            )
+            .await
+            .expect("resolve named type rename");
+        assert!(!column_exists(&session, &cfg.project_schema, table, "state").await);
+        assert!(column_exists(&session, &cfg.project_schema, table, "status").await);
+        let retained: String = session
+            .query_one(
+                &format!(
+                    "SELECT status::text AS status FROM \"{}\".\"{}\" WHERE id = 1",
+                    cfg.project_schema, table
+                ),
+                &[],
+            )
+            .await
+            .expect("read renamed named type value")
+            .try_get("status")
+            .expect("decode renamed named type value");
+        assert_eq!(retained, "ready");
+    }
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn a_partially_journaled_resolution_cannot_switch_actions() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".legacy_apply_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".legacy_apply_users VALUES (1, 'apply@example.test'); \
+             CREATE TABLE \"{}\".legacy_abort_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".legacy_abort_users VALUES (1, 'abort@example.test')",
+            cfg.project_schema, cfg.project_schema, cfg.project_schema, cfg.project_schema,
+        ))
+        .await
+        .expect("create legacy partial-resolution fixtures");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let author = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test");
+
+    let apply_intent = OnlineIntent::RenameColumn {
+        table: "legacy_apply_users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+        ty: "text".into(),
+    };
+    let apply_plan = author
+        .author(&apply_intent)
+        .expect("author legacy apply fixture");
+    let apply_pending = apply_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                apply_plan.clone(),
+            ))],
+            &["legacy_apply_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("open legacy apply fixture");
+
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&apply_plan.contract[0]),
+        Approval::Approved,
+        "legacy_operator",
+    )
+    .await
+    .expect("run and journal only legacy apply C1");
+
+    let switch_to_abort = engine
+        .resolve_pending_contract(
+            &apply_pending,
+            Resolution::Aborted,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("a partially applied contract must not switch to abort");
+    assert!(matches!(
+        switch_to_abort,
+        DeclarativeApplyError::Plain(EngineError::PendingContractResolutionConflict {
+            ref version,
+            started: "apply",
+        }) if version == &apply_pending
+    ));
+    assert!(column_exists(&session, &cfg.project_schema, "legacy_apply_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "legacy_apply_users",
+            "email_address"
+        )
+        .await
+    );
+
+    engine
+        .resolve_pending_contract(
+            &apply_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("retry the partially started apply action");
+    assert!(!column_exists(&session, &cfg.project_schema, "legacy_apply_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "legacy_apply_users",
+            "email_address"
+        )
+        .await
+    );
+
+    let abort_intent = OnlineIntent::RenameColumn {
+        table: "legacy_abort_users".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+        ty: "text".into(),
+    };
+    let abort_plan = author
+        .author(&abort_intent)
+        .expect("author legacy abort fixture");
+    let abort_pending = abort_plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                abort_plan,
+            ))],
+            &["legacy_abort_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("open legacy abort fixture");
+
+    let mut abort_c1 = author
+        .author_abort(&abort_intent)
+        .expect("author legacy abort cleanup")
+        .remove(0);
+    abort_c1.version = legacy_abort_resolution_version(&abort_pending, 0);
+    abort_c1.recompute_checksum();
+    apply(
+        &session,
+        &cfg,
+        std::slice::from_ref(&abort_c1),
+        Approval::Approved,
+        "legacy_operator",
+    )
+    .await
+    .expect("run and journal only legacy abort C1");
+
+    let switch_to_apply = engine
+        .resolve_pending_contract(
+            &abort_pending,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("a partially aborted contract must not switch to apply");
+    assert!(matches!(
+        switch_to_apply,
+        DeclarativeApplyError::Plain(EngineError::PendingContractResolutionConflict {
+            ref version,
+            started: "abort",
+        }) if version == &abort_pending
+    ));
+    assert!(column_exists(&session, &cfg.project_schema, "legacy_abort_users", "email").await);
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "legacy_abort_users",
+            "email_address"
+        )
+        .await
+    );
+
+    engine
+        .resolve_pending_contract(
+            &abort_pending,
+            Resolution::Aborted,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("retry the partially started abort action");
+    assert!(column_exists(&session, &cfg.project_schema, "legacy_abort_users", "email").await);
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "legacy_abort_users",
+            "email_address"
+        )
+        .await
+    );
+
+    drop_schemas(&session, &cfg).await;
+}
+
+#[compio::test]
+async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    ensure_project_schema(&session, &cfg).await;
+    session
+        .batch(&format!(
+            "CREATE TABLE \"{}\".tombstone_retry_users (id bigint PRIMARY KEY, email text); \
+             INSERT INTO \"{}\".tombstone_retry_users VALUES (1, 'retry@example.test')",
+            cfg.project_schema, cfg.project_schema,
+        ))
+        .await
+        .expect("create tombstone retry fixture");
+
+    let backend = PostgresBackend::new_generic(&session);
+    let engine = MigrationEngine::new();
+    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        .author(&OnlineIntent::RenameColumn {
+            table: "tombstone_retry_users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author tombstone retry rename");
+    let pending_version = plan.trigger_version.as_str().to_string();
+    engine
+        .apply_plan_with_touched_and_depends(
+            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))],
+            &["tombstone_retry_users".into()],
+            &[],
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("open tombstone retry obligation");
+
+    session.fail_next_resolved_pending_contract_insert();
+    let append_failure = engine
+        .resolve_pending_contract(
+            &pending_version,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect_err("the injected tombstone append fault must surface");
+    assert!(
+        append_failure
+            .to_string()
+            .contains("resolved pending-contract append failed"),
+        "the injected append failure should be preserved: {append_failure}"
+    );
+
+    assert!(
+        !column_exists(
+            &session,
+            &cfg.project_schema,
+            "tombstone_retry_users",
+            "email"
+        )
+        .await
+    );
+    assert!(
+        column_exists(
+            &session,
+            &cfg.project_schema,
+            "tombstone_retry_users",
+            "email_address"
+        )
+        .await
+    );
+    let atomic_version =
+        MigrationId::derive("resolve_pending_apply_atomic", pending_version.as_bytes());
+    let journal = zero_migrate::applied(&session, &cfg)
+        .await
+        .expect("read journal after append fault");
+    assert!(
+        journal
+            .iter()
+            .any(|entry| entry.version == atomic_version.as_str()),
+        "atomic cleanup must be journaled before the tombstone append fails"
+    );
+    let outstanding = backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read obligation after append fault");
+    assert_eq!(outstanding.len(), 1);
+    assert_eq!(outstanding[0].pending_version, pending_version);
+
+    engine
+        .resolve_pending_contract(
+            &pending_version,
+            Resolution::Applied,
+            "app_test",
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "operator",
+        )
+        .await
+        .expect("same-action retry should append the missing tombstone");
+
+    assert!(backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .outstanding_pending_contracts(&cfg)
+        .await
+        .expect("read obligations after retry")
+        .is_empty());
+    let resolved = backend
+        .pending_contracts()
+        .expect("PostgreSQL pending-contract capability")
+        .resolved_pending_contracts(&cfg)
+        .await
+        .expect("read terminal tombstone after retry");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].contract.pending_version, pending_version);
+    assert_eq!(resolved[0].resolution, Resolution::Applied);
+
+    let retained: String = session
+        .query_one(
+            &format!(
+                "SELECT email_address FROM \"{}\".tombstone_retry_users WHERE id = 1",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read retained destination value")
+        .try_get("email_address")
+        .expect("decode retained destination value");
+    assert_eq!(retained, "retry@example.test");
 
     drop_schemas(&session, &cfg).await;
 }

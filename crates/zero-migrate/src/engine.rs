@@ -28,7 +28,7 @@ use crate::apply::executor::{self, ApplyError, ApplyOutcome, LockMode, RollbackE
 pub use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardConfig, GuardError, GuardOutcome};
-use crate::model::migration::Migration;
+use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
 use crate::render::step::{PlanStep, RenameStep};
 
@@ -152,6 +152,74 @@ pub enum EngineError {
     /// deadlock): applying A's contract unblocks B.
     #[error("{0}")]
     DependencyPendingContract(crate::plan::pending::DependencyPendingContract),
+    /// A declared dependency was explicitly aborted and therefore can never be
+    /// satisfied by replaying its authored migration.
+    #[error(
+        "migration '{blocked}' depends on aborted plan '{dependency}' (pending contract '{pending_version}'); author a new migration instead"
+    )]
+    DependencyAbortedContract {
+        /// Best available identity of the blocked migration.
+        blocked: String,
+        /// Stable plan version that was aborted.
+        dependency: String,
+        /// Durable resolver key for operator diagnostics.
+        pending_version: String,
+    },
+    /// The selected backend has no online-rename pending-contract capability.
+    #[error("pending-contract resolution is supported only for PostgreSQL online renames")]
+    PendingContractsUnsupported,
+    /// The requested key is not currently outstanding.
+    #[error("no outstanding pending contract has version '{version}'")]
+    PendingContractNotFound {
+        /// The user-supplied pending-contract key.
+        version: String,
+    },
+    /// Re-authoring with the supplied app identity did not reproduce the durable
+    /// contract ids. Nothing was changed.
+    #[error(
+        "owner app '{owner_app}' does not match pending contract '{version}'; use the same ownerApp that authored the rename"
+    )]
+    PendingContractIdentityMismatch {
+        /// The durable pending-contract key.
+        version: String,
+        /// The app identity supplied to resolution.
+        owner_app: String,
+    },
+    /// A legacy obligation has no recorded owner and its stamped identities do
+    /// not match the old direct authoring scheme, so ownership cannot be proven.
+    #[error(
+        "pending contract '{version}' predates owner tracking and cannot be resolved automatically"
+    )]
+    PendingContractOwnerUnavailable {
+        /// The durable pending-contract key.
+        version: String,
+    },
+    /// The immutable obligation carries an invalid or incomplete durable id set.
+    #[error("pending contract '{version}' has malformed durable step identities")]
+    PendingContractMalformed {
+        /// The durable pending-contract key.
+        version: String,
+    },
+    /// Cleanup for the opposite resolution has already committed. Switching
+    /// actions after a partial cleanup could remove the surviving column.
+    #[error(
+        "pending contract '{version}' has already started resolution as '{started}'; retry that action"
+    )]
+    PendingContractResolutionConflict {
+        /// The durable pending-contract key.
+        version: String,
+        /// The action whose journal entries have already committed.
+        started: &'static str,
+    },
+    /// The live table no longer satisfies the invariants captured by the
+    /// pending obligation. Destructive cleanup is refused.
+    #[error("pending contract '{version}' cannot be resolved safely: {reason}")]
+    PendingContractShapeMismatch {
+        /// The durable pending-contract key.
+        version: String,
+        /// The failed live invariant.
+        reason: &'static str,
+    },
 }
 
 /// A failure from [`MigrationEngine::rollback`].
@@ -883,6 +951,356 @@ impl MigrationEngine {
         result
     }
 
+    /// Complete or abort one outstanding PostgreSQL online rename.
+    ///
+    /// The durable pending-contract row is the source of truth. Under the project
+    /// lock, this method finds the requested obligation, re-authors the exact
+    /// cleanup from its recorded table/column/type facts, verifies its recorded
+    /// owner, restores its durable step identities, and applies the cleanup with
+    /// the normal guard, journal, and approval gates.
+    ///
+    /// `Resolution::Applied` keeps the destination column and drops the source.
+    /// `Resolution::Aborted` keeps the source column and drops the destination.
+    /// A failed cleanup leaves the obligation outstanding, so retrying is safe.
+    ///
+    /// # Errors
+    /// Returns [`EngineError::ApprovalRequired`] without taking the lock when
+    /// approval is absent; otherwise returns a pending-contract lookup/identity
+    /// error or the normal guarded apply failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_pending_contract<B: MigrationBackend>(
+        &self,
+        pending_version: &str,
+        resolution: crate::apply::journal::Resolution,
+        owner_app: &str,
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        self.resolve_pending_contract_with_lock(
+            pending_version,
+            resolution,
+            owner_app,
+            approval,
+            backend,
+            exec_cfg,
+            applied_by,
+            LockMode::Acquire,
+        )
+        .await
+    }
+
+    /// Resolve an online rename with an explicit project-lock ownership mode.
+    /// Host adapters use `AlreadyHeld` so they can include the final outstanding
+    /// contract read in the same lock bracket as the cleanup.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_pending_contract_with_lock<B: MigrationBackend>(
+        &self,
+        pending_version: &str,
+        resolution: crate::apply::journal::Resolution,
+        owner_app: &str,
+        approval: Approval,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+        applied_by: &str,
+        lock_mode: LockMode,
+    ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        if approval != Approval::Approved {
+            return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
+        }
+
+        let we_hold_lock = lock_mode == LockMode::Acquire;
+        if we_hold_lock {
+            backend
+                .acquire_project_lock(exec_cfg)
+                .await
+                .map_err(|error| DeclarativeApplyError::Plain(EngineError::Apply(error)))?;
+        }
+
+        let result = async {
+            backend.ensure_journal(exec_cfg).await.map_err(|error| {
+                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(error)))
+            })?;
+            let pending = backend.pending_contracts().ok_or_else(|| {
+                DeclarativeApplyError::Plain(EngineError::PendingContractsUnsupported)
+            })?;
+            let obligation = pending
+                .outstanding_pending_contracts(exec_cfg)
+                .await
+                .map_err(|error| {
+                    DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(error)))
+                })?
+                .into_iter()
+                .find(|contract| contract.pending_version == pending_version)
+                .ok_or_else(|| {
+                    DeclarativeApplyError::Plain(EngineError::PendingContractNotFound {
+                        version: pending_version.to_string(),
+                    })
+                })?;
+
+            let intent = crate::render::expand_contract::OnlineIntent::RenameColumn {
+                table: obligation.table.clone(),
+                from: obligation.from_col.clone(),
+                to: obligation.to_col.clone(),
+                ty: obligation.ty.clone(),
+            };
+            let author = crate::render::expand_contract::ExpandContractAuthor::new(
+                exec_cfg.project_schema.clone(),
+                owner_app,
+            );
+            let mut forward = author.author(&intent).map_err(|error| {
+                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
+                    error.to_string(),
+                )))
+            })?;
+            if forward.contract.len() != obligation.contract_versions.len() {
+                return Err(DeclarativeApplyError::Plain(
+                    EngineError::PendingContractMalformed {
+                        version: obligation.pending_version.clone(),
+                    },
+                ));
+            }
+            let abort_template = author.author_abort(&intent).map_err(|error| {
+                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
+                    error.to_string(),
+                )))
+            })?;
+            let direct_identity = forward.trigger_version.as_str() == obligation.pending_version
+                && forward
+                    .contract
+                    .iter()
+                    .map(|migration| migration.version.as_str())
+                    .eq(obligation.contract_versions.iter().map(String::as_str));
+            match obligation.owner_app.as_deref() {
+                Some(stored) if stored == owner_app => {}
+                Some(_) => {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractIdentityMismatch {
+                            version: obligation.pending_version.clone(),
+                            owner_app: owner_app.to_string(),
+                        },
+                    ));
+                }
+                None if direct_identity => {}
+                None => {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractOwnerUnavailable {
+                            version: obligation.pending_version.clone(),
+                        },
+                    ));
+                }
+            }
+            let applied_entries = backend.applied(exec_cfg).await.map_err(|error| {
+                DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(error)))
+            })?;
+            let completed_versions: std::collections::HashSet<&str> = applied_entries
+                .iter()
+                .filter(|entry| entry.phase == crate::apply::journal::Phase::Completed)
+                .map(|entry| entry.version.as_str())
+                .collect();
+            let legacy_apply_started = obligation
+                .contract_versions
+                .iter()
+                .any(|version| completed_versions.contains(version.as_str()));
+            let legacy_apply_finished = obligation
+                .contract_versions
+                .iter()
+                .all(|version| completed_versions.contains(version.as_str()));
+            let legacy_abort_versions: Vec<MigrationId> = (0..abort_template.len())
+                .map(|ordinal| {
+                    crate::render::expand_contract::resolve_pending_abort_version(
+                        &obligation.pending_version,
+                        ordinal,
+                    )
+                })
+                .collect();
+            let legacy_abort_started = legacy_abort_versions
+                .iter()
+                .any(|version| completed_versions.contains(version.as_str()));
+            let legacy_abort_finished = legacy_abort_versions
+                .iter()
+                .all(|version| completed_versions.contains(version.as_str()));
+            let apply_atomic_version =
+                crate::render::expand_contract::resolve_pending_apply_atomic_version(
+                    &obligation.pending_version,
+                );
+            let abort_atomic_version =
+                crate::render::expand_contract::resolve_pending_abort_atomic_version(
+                    &obligation.pending_version,
+                );
+            let apply_atomic_finished =
+                completed_versions.contains(apply_atomic_version.as_str());
+            let abort_atomic_finished =
+                completed_versions.contains(abort_atomic_version.as_str());
+            let apply_started = legacy_apply_started || apply_atomic_finished;
+            let abort_started = legacy_abort_started || abort_atomic_finished;
+            let apply_finished = legacy_apply_finished || apply_atomic_finished;
+            let abort_finished = legacy_abort_finished || abort_atomic_finished;
+            match resolution {
+                crate::apply::journal::Resolution::Aborted if apply_started => {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractResolutionConflict {
+                            version: obligation.pending_version.clone(),
+                            started: "apply",
+                        },
+                    ));
+                }
+                crate::apply::journal::Resolution::Applied if abort_started => {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractResolutionConflict {
+                            version: obligation.pending_version.clone(),
+                            started: "abort",
+                        },
+                    ));
+                }
+                _ => {}
+            }
+            let action_finished = match resolution {
+                crate::apply::journal::Resolution::Applied => apply_finished,
+                crate::apply::journal::Resolution::Aborted => abort_finished,
+            };
+            if !action_finished {
+                let shape = pending
+                    .pending_contract_shape(exec_cfg, &obligation)
+                    .await
+                    .map_err(|error| {
+                        DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Journal(
+                            error,
+                        )))
+                    })?;
+                let reason = if !shape.columns_compatible {
+                    Some(
+                        "both recorded columns must exist with the same declared PostgreSQL type, including modifiers",
+                    )
+                } else if !shape.values_synchronized {
+                    Some("source and destination values are no longer synchronized")
+                } else if !(apply_started || abort_started || shape.trigger_ready) {
+                    Some("the managed dual-write trigger is missing or disabled")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractShapeMismatch {
+                            version: obligation.pending_version.clone(),
+                            reason,
+                        },
+                    ));
+                }
+            }
+
+            // IR-authored plans restamp the online substeps onto the logical IR
+            // plan identity. The durable obligation therefore owns the executable
+            // C1/C2 ids. Re-author the trusted SQL from the immutable intent facts,
+            // then restore those recorded ids and their dependency chain.
+            let trigger_version = MigrationId::parse(&obligation.pending_version).map_err(|_| {
+                DeclarativeApplyError::Plain(EngineError::PendingContractMalformed {
+                    version: obligation.pending_version.clone(),
+                })
+            })?;
+            let ir_anchor = if direct_identity {
+                None
+            } else {
+                let checksum = applied_entries
+                    .iter()
+                    .find(|entry| {
+                        entry.version == obligation.pending_version
+                            && entry.phase == crate::apply::journal::Phase::Completed
+                    })
+                    .map(|entry| entry.checksum.clone())
+                    .ok_or_else(|| {
+                        DeclarativeApplyError::Plain(EngineError::PendingContractMalformed {
+                            version: obligation.pending_version.clone(),
+                        })
+                    })?;
+                Some(
+                    serde_json::from_value::<Checksum>(serde_json::Value::String(checksum))
+                        .map_err(|_| {
+                            DeclarativeApplyError::Plain(
+                                EngineError::PendingContractMalformed {
+                                    version: obligation.pending_version.clone(),
+                                },
+                            )
+                        })?,
+                )
+            };
+            if !direct_identity {
+                let anchor = ir_anchor.as_ref().ok_or_else(|| {
+                    DeclarativeApplyError::Plain(EngineError::PendingContractMalformed {
+                        version: obligation.pending_version.clone(),
+                    })
+                })?;
+                let mut prior_contract = None;
+                for (migration, durable_version) in forward
+                    .contract
+                    .iter_mut()
+                    .zip(&obligation.contract_versions)
+                {
+                    let parsed = MigrationId::parse(durable_version).map_err(|_| {
+                        DeclarativeApplyError::Plain(EngineError::PendingContractMalformed {
+                            version: obligation.pending_version.clone(),
+                        })
+                    })?;
+                    migration.version = parsed.clone();
+                    migration.depends_on = match prior_contract {
+                        Some(previous) => vec![trigger_version.clone(), previous],
+                        None => vec![trigger_version.clone()],
+                    };
+                    migration.recompute_checksum();
+                    migration.checksum = anchor.clone();
+                    prior_contract = Some(parsed);
+                }
+            }
+
+            let templates = match resolution {
+                crate::apply::journal::Resolution::Applied => forward.contract,
+                crate::apply::journal::Resolution::Aborted => abort_template,
+            };
+            let steps = if action_finished {
+                Vec::new()
+            } else {
+                vec![PlanStep::Ddl(
+                    atomic_pending_resolution_migration(
+                        &exec_cfg.project_schema,
+                        &obligation,
+                        &templates,
+                        resolution,
+                    )
+                    .map_err(DeclarativeApplyError::Plain)?,
+                )]
+            };
+            let explicit_resolution = vec![(obligation.clone(), resolution)];
+            self.apply_plan_resolving(
+                &steps,
+                std::slice::from_ref(&obligation.table),
+                &[],
+                &explicit_resolution,
+                approval,
+                &crate::approval::ApprovalScope::All,
+                backend,
+                exec_cfg,
+                applied_by,
+                LockMode::AlreadyHeld,
+                None,
+            )
+            .await
+        }
+        .await;
+
+        if !we_hold_lock {
+            return result;
+        }
+        let release = backend.release_project_lock(exec_cfg).await;
+        match (result, release) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(_), Err(error)) => Err(DeclarativeApplyError::Plain(EngineError::Apply(error))),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+
     /// The plan body, run with the project lock already held (either because the
     /// outer declarative caller owns it, or because [`apply_plan`](Self::apply_plan)
     /// acquired it up front for an `Acquire`-mode standalone call). Every sub-step
@@ -924,6 +1342,18 @@ impl MigrationEngine {
             .await
             .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
 
+        // Reconcile every approval-gated step against the journal before the
+        // authored-order loop can execute anything. Per-step DML/backfill gates
+        // are still required as defense in depth, but they are too late to make a
+        // mixed plan atomic at the approval boundary: an additive step before an
+        // unapproved delete/backfill may already have committed by the time the
+        // later seam refuses. This read runs under the project lock acquired by
+        // `apply_plan_resolving`, so journal/progress evidence cannot change
+        // between this decision and the step loop.
+        let completed_gated = self
+            .preflight_plan_approval(steps, approval, scope, backend, exec_cfg)
+            .await?;
+
         // **Cross-deploy pending-contract READ-BACK + FAIL-CLOSED REFUSE.**
         //
         // The obligation table is bootstrapped (above), and the project advisory
@@ -962,14 +1392,20 @@ impl MigrationEngine {
         // an obligation is DISCHARGED after the steps apply (a `resolved='applied'` row
         // appended), not refused — applying the REAL contract is exactly
         // how the table becomes clear.
-        let outstanding = if let Some(pending_contracts) = backend.pending_contracts() {
-            pending_contracts
-                .outstanding_pending_contracts(exec_cfg)
-                .await
-                .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?
-        } else {
-            Vec::new()
-        };
+        let (outstanding, resolved_contracts) =
+            if let Some(pending_contracts) = backend.pending_contracts() {
+                let outstanding = pending_contracts
+                    .outstanding_pending_contracts(exec_cfg)
+                    .await
+                    .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+                let resolved = pending_contracts
+                    .resolved_pending_contracts(exec_cfg)
+                    .await
+                    .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
+                (outstanding, resolved)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         // **Discharge hardening: re-author-compare, not version-id alone.**
         // The `up` SQL each `Ddl` step carries, keyed by version. The contract-apply
         // recognition below re-authors the obligation's C1/C2 from its stored identity
@@ -1165,6 +1601,103 @@ impl MigrationEngine {
             }
         }
 
+        // An aborted plan is terminal but does not satisfy `depends_on`.
+        // Status reports the same edge as blocked; enforce it under the apply
+        // lock so a dependent cannot run merely because no obligation remains
+        // outstanding.
+        if !resolved_contracts.is_empty() {
+            let mut declared_deps: std::collections::BTreeSet<&str> =
+                depends_on.iter().map(String::as_str).collect();
+            for step in steps {
+                if let PlanStep::Ddl(migration) = step {
+                    declared_deps.extend(
+                        migration
+                            .depends_on
+                            .iter()
+                            .map(crate::model::migration::MigrationId::as_str),
+                    );
+                }
+            }
+            if let Some(terminal) = resolved_contracts.iter().find(|terminal| {
+                terminal.resolution == crate::apply::journal::Resolution::Aborted
+                    && declared_deps.contains(terminal.contract.plan_version.as_str())
+            }) {
+                let blocked = steps
+                    .iter()
+                    .find_map(|step| match step {
+                        PlanStep::Ddl(migration) => {
+                            Some(migration.version.as_str().to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| applied_by.to_string());
+                return Err(DeclarativeApplyError::Plain(
+                    EngineError::DependencyAbortedContract {
+                        blocked,
+                        dependency: terminal.contract.plan_version.clone(),
+                        pending_version: terminal.contract.pending_version.clone(),
+                    },
+                ));
+            }
+        }
+
+        if let Some(pending_contracts) = backend.pending_contracts() {
+            let resolution_journal = backend
+                .applied(exec_cfg)
+                .await
+                .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+            for contract in &discharging {
+                let atomic_apply =
+                    crate::render::expand_contract::resolve_pending_apply_atomic_version(
+                        &contract.pending_version,
+                    );
+                let atomic_cleanup_finished = resolution_journal.iter().any(|entry| {
+                    entry.phase == crate::apply::journal::Phase::Completed
+                        && entry.version == atomic_apply.as_str()
+                });
+                let cleanup_finished = atomic_cleanup_finished
+                    || contract
+                        .contract_versions
+                        .iter()
+                        .all(|version| completed_gated.contains(version));
+                if cleanup_finished {
+                    // Cleanup and its journal record committed, but a previous
+                    // terminal append may have failed in the following
+                    // transaction. The physical pre-cleanup shape is no longer
+                    // expected; the step loop will skip the completed cleanup and
+                    // append the missing tombstone.
+                    continue;
+                }
+                let shape = pending_contracts
+                    .pending_contract_shape(exec_cfg, contract)
+                    .await
+                    .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+                let cleanup_started = contract
+                    .contract_versions
+                    .iter()
+                    .any(|version| completed_gated.contains(version));
+                let reason = if !shape.columns_compatible {
+                    Some(
+                        "both recorded columns must exist with the same declared PostgreSQL type, including modifiers",
+                    )
+                } else if !shape.values_synchronized {
+                    Some("source and destination values are no longer synchronized")
+                } else if !cleanup_started && !shape.trigger_ready {
+                    Some("the managed dual-write trigger is missing or disabled")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return Err(DeclarativeApplyError::Plain(
+                        EngineError::PendingContractShapeMismatch {
+                            version: contract.pending_version.clone(),
+                            reason,
+                        },
+                    ));
+                }
+            }
+        }
+
         let mut applied = ApplyOutcome {
             applied: Vec::new(),
             skipped: Vec::new(),
@@ -1193,26 +1726,93 @@ impl MigrationEngine {
         // no-rebuild PG path; matches the earlier behavior which read `applied`
         // only when `plan.rebuilds` was non-empty).
         let mut rebuild_already: Option<std::collections::HashSet<String>> = None;
+        let mut atomic_direct_resolutions = std::collections::BTreeSet::new();
 
         let mut i = 0usize;
         while i < steps.len() {
             match &steps[i] {
                 PlanStep::Ddl(_) => {
                     // Coalesce the maximal run of consecutive Ddl steps into one
-                    // batch (byte-identical to the declarative plain-set apply).
-                    let start = i;
+                    // batch. A completed matching destructive DDL was approved in
+                    // an earlier apply and is a journal-backed no-op now, so omit it
+                    // before the executor's coarse batch gate. This preserves
+                    // no-approval idempotency without weakening that direct seam's
+                    // independent approval check.
+                    let mut batch: Vec<Migration> = Vec::new();
+                    let mut batch_scope = scope.clone();
                     while i < steps.len() && matches!(steps[i], PlanStep::Ddl(_)) {
+                        let PlanStep::Ddl(m) = &steps[i] else {
+                            unreachable!("coalesced run is all Ddl");
+                        };
+                        let direct_contract = discharging.iter().find(|contract| {
+                            contract
+                                .contract_versions
+                                .iter()
+                                .any(|version| version == m.version.as_str())
+                        });
+                        if let Some(contract) = direct_contract {
+                            if completed_gated.contains(m.version.as_str()) {
+                                applied.skipped.push(m.version.as_str().to_string());
+                            }
+                            let fully_completed = contract
+                                .contract_versions
+                                .iter()
+                                .all(|version| completed_gated.contains(version));
+                            if !fully_completed
+                                && atomic_direct_resolutions
+                                    .insert(contract.pending_version.clone())
+                            {
+                                let owner = contract
+                                    .owner_app
+                                    .as_deref()
+                                    .unwrap_or(applied_by);
+                                let intent =
+                                    crate::render::expand_contract::OnlineIntent::RenameColumn {
+                                        table: contract.table.clone(),
+                                        from: contract.from_col.clone(),
+                                        to: contract.to_col.clone(),
+                                        ty: contract.ty.clone(),
+                                    };
+                                let templates = crate::render::expand_contract::ExpandContractAuthor::new(
+                                    exec_cfg.project_schema.clone(),
+                                    owner,
+                                )
+                                .author(&intent)
+                                .map_err(|error| {
+                                    EngineError::Apply(ApplyError::Backend(error.to_string()))
+                                })?
+                                .contract;
+                                let atomic = atomic_pending_resolution_migration(
+                                    &exec_cfg.project_schema,
+                                    contract,
+                                    &templates,
+                                    crate::apply::journal::Resolution::Applied,
+                                )?;
+                                if let crate::approval::ApprovalScope::Versions(versions) =
+                                    &mut batch_scope
+                                {
+                                    versions.insert(atomic.version.as_str().to_string());
+                                }
+                                batch.push(atomic);
+                            }
+                        } else if completed_gated.contains(m.version.as_str()) {
+                            applied.skipped.push(m.version.as_str().to_string());
+                        } else {
+                            batch.push(m.clone());
+                        }
                         i += 1;
                     }
-                    let batch: Vec<Migration> = steps[start..i]
-                        .iter()
-                        .map(|s| match s {
-                            PlanStep::Ddl(m) => m.clone(),
-                            _ => unreachable!("coalesced run is all Ddl"),
-                        })
-                        .collect();
+                    if batch.is_empty() {
+                        continue;
+                    }
                     let outcome = crate::apply::executor::apply_with_lock_backend(
-                        backend, exec_cfg, &batch, approval, scope, applied_by, next_lock,
+                        backend,
+                        exec_cfg,
+                        &batch,
+                        approval,
+                        &batch_scope,
+                        applied_by,
+                        next_lock,
                     )
                     .await
                     .map_err(EngineError::Apply)?;
@@ -1224,6 +1824,12 @@ impl MigrationEngine {
                     // Re-expresses the declarative `plan.rebuilds` loop
                     // (`engine.rs:491-503`): approval gate + net-applied-skip +
                     // `rebuild_one`.
+                    let version = rebuild.migration.version.as_str().to_string();
+                    if completed_gated.contains(version.as_str()) {
+                        applied.skipped.push(version);
+                        i += 1;
+                        continue;
+                    }
                     if approval != Approval::Approved {
                         return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
                     }
@@ -1246,7 +1852,6 @@ impl MigrationEngine {
                                 .collect(),
                         );
                     }
-                    let version = rebuild.migration.version.as_str().to_string();
                     if rebuild_already
                         .as_ref()
                         .is_some_and(|set| set.contains(&version))
@@ -1297,7 +1902,11 @@ impl MigrationEngine {
                             ),
                         )));
                     };
-                    // **Per-version scope (anti-bypass).** A PG online rename's
+                    let scope_version = steps[i]
+                        .approval_scope_version()
+                        .expect("PgExpandContract is always approval-gated");
+                    let was_completed = completed_gated.contains(scope_version);
+                    // **Per-version scope (anti-bypass).** A pending PG online rename's
                     // EXPAND mutates data (the dual-write backfill mirrors every
                     // pre-existing row into the new column), so it is an
                     // approval-gated op (`run_expand_pg` already requires
@@ -1312,22 +1921,34 @@ impl MigrationEngine {
                     // The scope version comes from the SINGLE source of truth
                     // [`PlanStep::approval_scope_version`] so the gate and the
                     // reviewer-facing "what needs approval" list never drift.
-                    if let Some(v) = steps[i].approval_scope_version() {
-                        if !scope.admits(v) {
-                            return Err(DeclarativeApplyError::Plain(
-                                EngineError::ApprovalNotScoped {
-                                    version: v.to_string(),
-                                },
-                            ));
-                        }
-                    }
+                    // A fully completed, checksum-matching expand is historical
+                    // evidence, not pending work, so an idempotent retry must not
+                    // require that version to remain in a newly supplied scope.
+                    enforce_online_scope_if_pending(was_completed, scope_version, scope)?;
+                    // A fully completed matching expand is an idempotent rerun.
+                    // Let the online seam re-read and skip its sub-migrations while
+                    // still rebuilding/surfacing the durable pending-contract
+                    // obligation. The lock-held preflight proved every expand
+                    // journal row matches, so this internal approval cannot
+                    // authorize pending work.
+                    let completed_scope = crate::approval::ApprovalScope::All;
+                    let step_approval = if was_completed {
+                        Approval::Approved
+                    } else {
+                        approval
+                    };
+                    let step_scope = if was_completed {
+                        &completed_scope
+                    } else {
+                        scope
+                    };
                     let outcome = online
                         .run_online(
                             &rename.intent,
                             &rename.expand,
                             &rename.backfill,
-                            approval,
-                            scope,
+                            step_approval,
+                            step_scope,
                             // Thread the E2 `trigger_version` so the
                             // executor-layer scope gate resolves its key UNCONDITIONALLY
                             // (E1 else `trigger_version`) — an empty expand chain no
@@ -1341,7 +1962,6 @@ impl MigrationEngine {
                     applied.applied.extend(outcome.applied);
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
-                    pending_contract.extend(rename.contract.iter().cloned());
 
                     // **Write the DURABLE pending-contract
                     // obligation.** The transient `pending_contract` return value is
@@ -1378,9 +1998,14 @@ impl MigrationEngine {
                     // empty expand chain (an internal invariant violation): fall back
                     // to the pending_version so the obligation still records SOME
                     // stable key rather than panicking the deploy.
-                    let plan_version = rename.expand.first().map_or_else(
-                        || pending_version.clone(),
-                        |e1| e1.version.as_str().to_string(),
+                    let plan_version = rename.plan_version.as_ref().map_or_else(
+                        || {
+                            rename.expand.first().map_or_else(
+                                || pending_version.clone(),
+                                |e1| e1.version.as_str().to_string(),
+                            )
+                        },
+                        |version| version.as_str().to_string(),
                     );
                     let already_outstanding = outstanding
                         .iter()
@@ -1390,7 +2015,19 @@ impl MigrationEngine {
                         // duplicate `pending` row from two same-version EXPAND steps in
                         // one deploy; net state was already correct via DISTINCT ON).
                         || recorded_this_deploy.contains(&pending_version);
-                    if !already_outstanding {
+                    if already_outstanding {
+                        pending_contract.extend(rename.contract.iter().cloned());
+                    } else {
+                        let obligation_owner = rename
+                            .expand
+                            .first()
+                            .map(|migration| migration.owner_app.clone())
+                            .ok_or_else(|| {
+                                EngineError::Apply(ApplyError::Backend(
+                                    "online rename has no expand migration to identify its owner"
+                                        .to_string(),
+                                ))
+                            })?;
                         let contract_versions: Vec<String> = rename
                             .contract
                             .iter()
@@ -1403,11 +2040,12 @@ impl MigrationEngine {
                         // obligation-vs-marker crash window structurally. `None` on the
                         // routine path is identical to the plain single autocommit
                         // INSERT.
-                        if let Some(pending_contracts) = backend.pending_contracts() {
-                            pending_contracts
+                        if let Some(pending_contracts_backend) = backend.pending_contracts() {
+                            let opened = pending_contracts_backend
                                 .record_pending_contract_with_recovery(
                                     exec_cfg,
                                     crate::apply::journal::PendingContractRecord {
+                                        owner_app: &obligation_owner,
                                         table,
                                         from_col: from,
                                         to_col: to,
@@ -1421,27 +2059,47 @@ impl MigrationEngine {
                                 )
                                 .await
                                 .map_err(|e| EngineError::Apply(ApplyError::Journal(e)))?;
-                            recorded_this_deploy.insert(pending_version.clone());
+                            if opened {
+                                recorded_this_deploy.insert(pending_version.clone());
+                                pending_contract.extend(rename.contract.iter().cloned());
+                                // Surface the full obligation descriptor so the
+                                // control loop can safely recover this deploy.
+                                opened_obligations.push(
+                                    crate::apply::journal::PendingContract {
+                                        owner_app: Some(obligation_owner),
+                                        table: (*table).clone(),
+                                        from_col: (*from).clone(),
+                                        to_col: (*to).clone(),
+                                        ty: (*ty).clone(),
+                                        pending_version: pending_version.clone(),
+                                        plan_version: plan_version.clone(),
+                                        contract_versions,
+                                    },
+                                );
+                            }
+                        } else {
+                            // Backends without a durable obligation capability can
+                            // still return the authored cleanup to an embedding host.
+                            pending_contract.extend(rename.contract.iter().cloned());
                         }
-                        // Surface the FULL obligation descriptor so the
-                        // control loop's same-deploy recovery can re-author its abort
-                        // from these exact identity facts (table/from/to/ty + versions),
-                        // never a second journal read.
-                        opened_obligations.push(crate::apply::journal::PendingContract {
-                            table: (*table).clone(),
-                            from_col: (*from).clone(),
-                            to_col: (*to).clone(),
-                            ty: (*ty).clone(),
-                            pending_version: pending_version.clone(),
-                            plan_version: plan_version.clone(),
-                            contract_versions,
-                        });
                     }
                     i += 1;
                 }
-                PlanStep::Backfill(spec) => {
+                PlanStep::Backfill {
+                    version,
+                    checksum,
+                    spec,
+                } => {
+                    if completed_gated.contains(version.as_str()) {
+                        applied.skipped.push(version.as_str().to_string());
+                        i += 1;
+                        continue;
+                    }
                     let outcome = backend
-                        .run_backfill_step(exec_cfg, spec, approval, scope, applied_by, next_lock)
+                        .run_backfill_step(
+                            exec_cfg, version, checksum, spec, approval, scope, applied_by,
+                            next_lock,
+                        )
                         .await
                         .map_err(EngineError::Apply)?;
                     applied.applied.extend(outcome.applied);
@@ -1451,46 +2109,42 @@ impl MigrationEngine {
                 }
                 PlanStep::Dml {
                     version,
+                    checksum,
                     name,
                     template,
                     binds,
+                    target_schema,
+                    target_table,
+                    conflict_target,
+                    mutates_data,
                     destructive,
+                    requires_approval,
                     owner_app,
                     ..
                 } => {
-                    // **Destructive-DML approval gate.** A destructive DML
-                    // (a `delete`) needs explicit approval, mirroring the per-Migration
-                    // gate the DDL spine runs in `apply_with_lock_backend`. We wire the
-                    // step's own destructiveness via `PlanStep::is_destructive()` (its
-                    // sole live call site) and refuse BEFORE the executor runs the
-                    // template, so a destructive DML applies NOTHING under
-                    // `Approval::None`. The DDL spine is gated downstream; the
-                    // `OnlineRename(SqliteRebuild)` arm above is gated likewise; this
-                    // closes the same hole for the net-new DML surface.
-                    // The executor-layer `run_dml_step` re-runs this gate as defense
-                    // in depth.
-                    if steps[i].is_destructive() && approval != Approval::Approved {
-                        return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
+                    if completed_gated.contains(version.as_str()) {
+                        applied.skipped.push(version.as_str().to_string());
+                        i += 1;
+                        continue;
                     }
-                    // **Per-version scope (anti-bypass).** A destructive DML (a
-                    // `delete`) under `ApprovalScope::Versions` runs ONLY if the
-                    // operator individually reviewed its version-id. `All` ⇒ vacuously
-                    // true. Fail-closed.
-                    if steps[i].is_destructive() && !scope.admits(version.as_str()) {
-                        return Err(DeclarativeApplyError::Plain(
-                            EngineError::ApprovalNotScoped {
-                                version: version.as_str().to_string(),
-                            },
-                        ));
-                    }
+                    // The backend checks journal state before approval. This lets a
+                    // completed matching step remain an idempotent skip without
+                    // requiring operators to reapprove historical data changes.
+                    // A pending destructive step still fails closed before touching
+                    // application data.
                     let ran = backend
                         .run_dml_step(
                             exec_cfg,
                             version,
+                            checksum,
                             name,
                             template,
                             binds,
-                            *destructive,
+                            target_schema,
+                            target_table,
+                            conflict_target.as_deref(),
+                            *mutates_data,
+                            *destructive || *requires_approval,
                             owner_app,
                             approval,
                             scope,
@@ -1549,6 +2203,116 @@ impl MigrationEngine {
             pending_contract,
             opened_obligations,
         })
+    }
+
+    /// Lock-held approval preflight for an authored plan.
+    ///
+    /// Returns the approval-gated step versions that are already completed with
+    /// the expected checksum. Those steps may be skipped without renewed
+    /// approval. Any matching inflight/progress evidence remains pending and is
+    /// gated before the authored-order loop starts; any checksum disagreement is
+    /// drift and wins over the approval error.
+    async fn preflight_plan_approval<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        approval: Approval,
+        scope: &crate::approval::ApprovalScope,
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<std::collections::BTreeSet<String>, DeclarativeApplyError> {
+        if !steps
+            .iter()
+            .any(|step| step.approval_scope_version().is_some())
+        {
+            return Ok(std::collections::BTreeSet::new());
+        }
+
+        let journal = backend
+            .applied(exec_cfg)
+            .await
+            .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?;
+        let progress = if steps
+            .iter()
+            .any(|step| matches!(step, PlanStep::Backfill { .. }))
+        {
+            backend
+                .backfill_progress(exec_cfg)
+                .await
+                .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?
+        } else {
+            Vec::new()
+        };
+
+        let mut completed = std::collections::BTreeSet::new();
+        let mut pending = Vec::new();
+        for step in steps {
+            let Some(scope_version) = step.approval_scope_version() else {
+                continue;
+            };
+            let is_completed = match step {
+                PlanStep::Ddl(m) => journal_completed_for_approval(
+                    &journal,
+                    m.version.as_str(),
+                    m.checksum.as_str(),
+                    m.flags.repeatable,
+                )?,
+                PlanStep::Dml {
+                    version, checksum, ..
+                } => journal_completed_for_approval(
+                    &journal,
+                    version.as_str(),
+                    checksum.as_str(),
+                    false,
+                )?,
+                PlanStep::Backfill {
+                    version, checksum, ..
+                } => backfill_completed_for_approval(
+                    &journal,
+                    &progress,
+                    version.as_str(),
+                    checksum.as_str(),
+                )?,
+                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
+                    journal_completed_for_approval(
+                        &journal,
+                        rebuild.migration.version.as_str(),
+                        rebuild.migration.checksum.as_str(),
+                        false,
+                    )?
+                }
+                PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
+                    let mut all_completed = !rename.expand.is_empty();
+                    for migration in &rename.expand {
+                        all_completed &= journal_completed_for_approval(
+                            &journal,
+                            migration.version.as_str(),
+                            migration.checksum.as_str(),
+                            false,
+                        )?;
+                    }
+                    all_completed
+                }
+            };
+            if is_completed {
+                completed.insert(scope_version.to_string());
+            } else {
+                pending.push(scope_version.to_string());
+            }
+        }
+
+        // Check every checksum first. A stale/tampered completed or inflight row
+        // is drift even when another pending step also lacks approval.
+        if !pending.is_empty() && approval != Approval::Approved {
+            return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
+        }
+        if let Some(version) = pending.iter().find(|version| !scope.admits(version)) {
+            return Err(DeclarativeApplyError::Plain(
+                EngineError::ApprovalNotScoped {
+                    version: version.clone(),
+                },
+            ));
+        }
+        Ok(completed)
     }
 
     /// Apply a plan through the gate.
@@ -1903,6 +2667,152 @@ impl MigrationEngine {
     }
 }
 
+fn journal_completed_for_approval(
+    journal: &[crate::apply::journal::AppliedEntry],
+    version: &str,
+    expected: &str,
+    supplied_repeatable: bool,
+) -> Result<bool, DeclarativeApplyError> {
+    let Some(entry) = journal.iter().find(|entry| entry.version == version) else {
+        return Ok(false);
+    };
+    let completed = matches!(entry.phase, crate::apply::journal::Phase::Completed);
+    let journaled_repeatable = entry
+        .kind
+        .is_some_and(crate::apply::journal::JournaledKind::is_repeatable);
+    let repeatable_kind_mismatch = completed && journaled_repeatable != supplied_repeatable;
+    let changed_genuine_repeatable = completed && journaled_repeatable && supplied_repeatable;
+    if repeatable_kind_mismatch || (entry.checksum != expected && !changed_genuine_repeatable) {
+        return Err(DeclarativeApplyError::Plain(EngineError::Apply(
+            ApplyError::ChecksumDrift {
+                version: version.to_string(),
+                recorded: entry.checksum.clone(),
+                expected: expected.to_string(),
+            },
+        )));
+    }
+    // A genuine repeatable whose checksum changed is pending by design; its
+    // executor phase re-applies it after approval.
+    Ok(completed && entry.checksum == expected)
+}
+
+/// Classify a backfill's approval evidence with the same precedence status uses:
+/// an exact completed journal event is authoritative over mutable progress.
+fn backfill_completed_for_approval(
+    journal: &[crate::apply::journal::AppliedEntry],
+    progress: &[crate::apply::backend::BackfillProgressEntry],
+    version: &str,
+    expected: &str,
+) -> Result<bool, DeclarativeApplyError> {
+    if journal_completed_for_approval(journal, version, expected, false)? {
+        return Ok(true);
+    }
+    if let Some(entry) = progress.iter().find(|entry| entry.version == version) {
+        let recorded = entry.checksum.as_deref().unwrap_or("<missing>");
+        if recorded != expected {
+            return Err(DeclarativeApplyError::Plain(EngineError::Apply(
+                ApplyError::ChecksumDrift {
+                    version: version.to_string(),
+                    recorded: recorded.to_string(),
+                    expected: expected.to_string(),
+                },
+            )));
+        }
+    }
+    Ok(false)
+}
+
+/// Enforce per-version review only while an online expand still has work to do.
+/// A completed, checksum-matching expand is an idempotent replay and therefore
+/// does not need to remain in a later approval scope.
+fn enforce_online_scope_if_pending(
+    was_completed: bool,
+    version: &str,
+    scope: &crate::approval::ApprovalScope,
+) -> Result<(), EngineError> {
+    if !was_completed && !scope.admits(version) {
+        return Err(EngineError::ApprovalNotScoped {
+            version: version.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Build one transactional resolver migration from the trusted cleanup
+/// templates. The first three statements acquire a table lock through `ALTER
+/// TABLE` and prove both columns still contain identical values. Cleanup and
+/// the destructive column drop then commit with one journal row, eliminating
+/// the old gap between separate C1 and C2 transactions.
+fn atomic_pending_resolution_migration(
+    project_schema: &str,
+    obligation: &crate::apply::journal::PendingContract,
+    templates: &[Migration],
+    resolution: crate::apply::journal::Resolution,
+) -> Result<Migration, EngineError> {
+    let mut migration = templates.last().cloned().ok_or_else(|| {
+        EngineError::PendingContractMalformed {
+            version: obligation.pending_version.clone(),
+        }
+    })?;
+    let version = match resolution {
+        crate::apply::journal::Resolution::Applied => {
+            crate::render::expand_contract::resolve_pending_apply_atomic_version(
+                &obligation.pending_version,
+            )
+        }
+        crate::apply::journal::Resolution::Aborted => {
+            crate::render::expand_contract::resolve_pending_abort_atomic_version(
+                &obligation.pending_version,
+            )
+        }
+    };
+    let constraint_name = format!(
+        "zs_sync_{}",
+        version.as_str().trim_start_matches("mig_")
+    );
+    let table = crate::render::expand_contract::qualified(
+        project_schema,
+        &obligation.table,
+    );
+    let from = crate::render::expand_contract::quote_ident(&obligation.from_col);
+    let to = crate::render::expand_contract::quote_ident(&obligation.to_col);
+    let constraint = crate::render::expand_contract::quote_ident(&constraint_name);
+    let mut statements = vec![
+        format!(
+            "ALTER TABLE {table} ADD CONSTRAINT {constraint} \
+             CHECK (({from})::text IS NOT DISTINCT FROM ({to})::text) NOT VALID"
+        ),
+        format!("ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}"),
+        format!("ALTER TABLE {table} DROP CONSTRAINT {constraint}"),
+    ];
+    statements.extend(templates.iter().map(|template| template.up.clone()));
+
+    migration.version = version;
+    migration.name = match resolution {
+        crate::apply::journal::Resolution::Applied => {
+            format!("resolve_apply_{}", obligation.pending_version)
+        }
+        crate::apply::journal::Resolution::Aborted => {
+            format!("resolve_abort_{}", obligation.pending_version)
+        }
+    };
+    migration.up = statements.join(";\n");
+    migration.down = None;
+    migration.depends_on = vec![
+        MigrationId::parse(&obligation.pending_version).map_err(|_| {
+            EngineError::PendingContractMalformed {
+                version: obligation.pending_version.clone(),
+            }
+        })?,
+    ];
+    migration.flags.online = true;
+    migration.flags.phase = Some(crate::model::migration::OnlinePhase::Contract);
+    migration.flags.destructive = true;
+    migration.flags.requires_approval = true;
+    migration.recompute_checksum();
+    Ok(migration)
+}
+
 /// **The SHARED contract-apply recognizer.** Decide whether a
 /// deploy whose `Ddl` steps carry `ddl_up_by_version` (version → `up` SQL) is the
 /// LEGITIMATE contract-apply for the outstanding obligation `pc` — i.e. whether
@@ -2143,6 +3053,9 @@ pub enum OnlineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apply::backend::BackfillProgressEntry;
+    use crate::apply::journal::{AppliedEntry, JournaledKind, Phase};
+    use crate::model::migration::{Checksum, MigrationId};
     use crate::plan::author::{
         AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
     };
@@ -2153,6 +3066,55 @@ mod tests {
 
     fn det() -> DeterministicAuthor {
         DeterministicAuthor::new("proj_acme", "app_acme")
+    }
+
+    #[test]
+    fn completed_journal_is_authoritative_over_stale_backfill_progress_for_approval() {
+        let version = MigrationId::derive("approval_status", b"completed_backfill");
+        let expected = Checksum::of(&crate::model::migration::ChecksumInput {
+            up: "backfill expected",
+            down: None,
+            flags: &crate::model::migration::MigrationFlags::default(),
+            owner_app: "app_acme",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        let journal = vec![AppliedEntry {
+            version: version.as_str().to_string(),
+            checksum: expected.as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(JournaledKind::Apply),
+        }];
+        let progress = vec![BackfillProgressEntry {
+            version: version.as_str().to_string(),
+            checksum: Some("stale-progress-checksum".to_string()),
+            complete: false,
+        }];
+
+        assert!(backfill_completed_for_approval(
+            &journal,
+            &progress,
+            version.as_str(),
+            expected.as_str(),
+        )
+        .expect("completed journal must win"));
+    }
+
+    #[test]
+    fn completed_online_expand_retry_does_not_require_historical_scope() {
+        let version = "mig_completed_expand";
+        let scope = crate::approval::ApprovalScope::Versions(std::collections::BTreeSet::new());
+
+        enforce_online_scope_if_pending(true, version, &scope)
+            .expect("completed expand should be an idempotent replay");
+
+        let error = enforce_online_scope_if_pending(false, version, &scope)
+            .expect_err("pending expand must remain individually scoped");
+        assert!(matches!(
+            error,
+            EngineError::ApprovalNotScoped { version: refused } if refused == version
+        ));
     }
 
     #[test]

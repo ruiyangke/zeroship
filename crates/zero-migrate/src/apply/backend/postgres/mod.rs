@@ -7,6 +7,7 @@
 
 use crate::driver::SqlSession;
 
+mod backfill_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
 /// dialect-specific SQL lives in the shared executor.
@@ -27,10 +28,10 @@ use crate::schema::query::SqlDialect;
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
-/// Generic over the [`SqlSession`] driver seam. It carries no concrete
-/// `PgOnline`/`PgShadow` harness, so `online()` / `shadow()` always report `None`
-/// — the honest v1 gap (`DryRunError::ShadowUnsupported` on the host path). The
-/// write/DDL/journal apply path never touches them.
+/// Generic over the [`SqlSession`] driver seam. Online expand-contract work uses
+/// the same generic DDL, backfill, journal, and lock primitives as ordinary host
+/// apply. Shadow-database dry runs still require a separate provisioning harness
+/// and therefore remain unavailable on this backend.
 #[cfg(pg_seam)]
 #[derive(Debug)]
 pub struct PostgresBackend<'a, D: SqlSession> {
@@ -39,8 +40,9 @@ pub struct PostgresBackend<'a, D: SqlSession> {
 
 #[cfg(pg_seam)]
 impl<'a, D: SqlSession> PostgresBackend<'a, D> {
-    /// Wrap any [`SqlSession`] driver as the Postgres backend (host-pg build — no
-    /// online/shadow harness exists to attach).
+    /// Wrap any [`SqlSession`] driver as the PostgreSQL backend. Ordinary apply,
+    /// schema snapshots, and online expand/backfill execution use this generic
+    /// session; only shadow-database provisioning needs a separate harness.
     #[must_use]
     pub fn new_generic(conn: &'a D) -> Self {
         Self { conn }
@@ -127,6 +129,22 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         journal::applied(self.conn, cfg).await
     }
 
+    async fn net_rolled_back_versions(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<String>, JournalError> {
+        journal::net_rolled_back(self.conn, cfg)
+            .await
+            .map(|entries| entries.into_iter().map(|entry| entry.version).collect())
+    }
+
+    async fn backfill_progress(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::apply::backend::BackfillProgressEntry>, JournalError> {
+        backfill_sql::read_progress_entries(self.conn, cfg).await
+    }
+
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
         journal::superseded_versions(self.conn, cfg).await
     }
@@ -195,40 +213,97 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         )))
     }
 
-    // Host-pg build: the host addon's v1 facade does not surface expand/online, so
-    // there is no online/backfill harness. A backfill step routed to the host PG
-    // backend is a routing bug (the differ never emits one on the plain apply path),
-    // so refuse it explicitly.
     async fn run_backfill_step(
         &self,
-        _cfg: &ExecutorConfig,
+        cfg: &ExecutorConfig,
+        version: &MigrationId,
+        checksum: &crate::model::migration::Checksum,
         spec: &BackfillSpec,
-        _approval: crate::approval::Approval,
-        _scope: &crate::approval::ApprovalScope,
-        _applied_by: &str,
+        approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
+        applied_by: &str,
         _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
-        Err(ApplyError::Backend(format!(
-            "postgres host-pg backend: backfill step '{}' requested — the online/backfill \
-             path is native-pg-only (not surfaced by the addon's v1 facade)",
-            spec.name
-        )))
+        if let Some(entry) = self
+            .applied(cfg)
+            .await
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .find(|entry| entry.version == version.as_str())
+        {
+            if entry.checksum != checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: checksum.as_str().to_string(),
+                });
+            }
+            return Ok(crate::apply::executor::ApplyOutcome {
+                applied: Vec::new(),
+                skipped: vec![version.as_str().to_string()],
+                recovered: Vec::new(),
+            });
+        }
+        if approval != crate::approval::Approval::Approved {
+            return Err(ApplyError::ApprovalRequired);
+        }
+        if !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
+        }
+        let outcome = backfill_sql::run_backfill(
+            self.conn, cfg, version, checksum, spec, approval, None, applied_by,
+        )
+        .await?;
+        Ok(crate::apply::executor::ApplyOutcome {
+            applied: outcome
+                .complete
+                .then(|| version.as_str().to_string())
+                .into_iter()
+                .collect(),
+            skipped: Vec::new(),
+            recovered: Vec::new(),
+        })
     }
 
     async fn run_dml_step(
         &self,
         cfg: &ExecutorConfig,
         version: &MigrationId,
+        checksum: &crate::model::migration::Checksum,
         name: &str,
         template: &str,
         binds: &[BindValue],
+        _target_schema: &str,
+        _target_table: &str,
+        _conflict_target: Option<&[String]>,
+        _mutates_data: bool,
         destructive: bool,
-        owner_app: &str,
+        _owner_app: &str,
         approval: crate::approval::Approval,
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,
         _lock_mode: crate::apply::executor::LockMode,
     ) -> Result<bool, ApplyError> {
+        let completed = self
+            .applied(cfg)
+            .await
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
+            .find(|e| e.version == version.as_str());
+        if let Some(entry) = completed {
+            if entry.checksum != checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: checksum.as_str().to_string(),
+                });
+            }
+            return Ok(false);
+        }
         if destructive && approval != crate::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
@@ -237,33 +312,22 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                 version: version.as_str().to_string(),
             });
         }
-        let already = self
-            .applied(cfg)
-            .await
-            .map_err(ApplyError::Journal)?
-            .into_iter()
-            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
-            .any(|e| e.version == version.as_str());
-        if already {
-            return Ok(false);
-        }
         session::apply_dml_transactional(
             self.conn,
             cfg,
             version.as_str(),
+            checksum,
             name,
             template,
             binds,
-            owner_app,
             applied_by,
         )
         .await?;
         Ok(true)
     }
 
-    // Host-pg build: no online harness → always `None`.
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
-        None
+        Some(self)
     }
 
     // Host-pg build: no shadow harness → always `None`, so
@@ -287,6 +351,141 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 }
 
+impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
+    fn run_online<'a>(
+        &'a self,
+        intent: &'a crate::render::expand_contract::OnlineIntent,
+        expand: &'a [Migration],
+        backfill: &'a BackfillSpec,
+        approval: crate::approval::Approval,
+        scope: &'a crate::approval::ApprovalScope,
+        trigger_version: &'a MigrationId,
+        cfg: &'a ExecutorConfig,
+        applied_by: &'a str,
+        lock_mode: crate::apply::executor::LockMode,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::apply::executor::ApplyOutcome,
+                        crate::engine::OnlineError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            use crate::apply::executor::LockMode;
+
+            if approval != crate::approval::Approval::Approved {
+                return Err(crate::engine::OnlineError::Approval);
+            }
+            let scope_version = expand
+                .first()
+                .map_or_else(|| trigger_version.as_str(), |e1| e1.version.as_str());
+            if !scope.admits(scope_version) {
+                return Err(crate::engine::OnlineError::ApprovalNotScoped {
+                    version: scope_version.to_string(),
+                });
+            }
+            let crate::render::expand_contract::OnlineIntent::RenameColumn {
+                table, from, to, ..
+            } = intent;
+            let allowed_engine_trigger =
+                crate::render::expand_contract::dual_write_trg_name(table, from, to);
+
+            let own_lock = lock_mode == LockMode::Acquire;
+            if own_lock {
+                self.acquire_project_lock(cfg).await?;
+            }
+            let result = async {
+                if expand.len() < 3 {
+                    return Err(crate::engine::OnlineError::Apply(ApplyError::Backend(
+                        "postgres online rename requires the complete expand sequence".to_string(),
+                    )));
+                }
+                let (backfill_marker, head) = expand
+                    .split_last()
+                    .expect("the complete expand sequence has a backfill marker");
+
+                let mut outcome = crate::apply::executor::apply_with_lock_backend(
+                    self,
+                    cfg,
+                    head,
+                    approval,
+                    scope,
+                    applied_by,
+                    LockMode::AlreadyHeld,
+                )
+                .await?;
+                crate::fault::trip(crate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL)?;
+
+                // E3 is the durable backfill marker. The data-step seam checks its
+                // journal state first, resumes its cursor when needed, and records
+                // completion only after the full cohort is mirrored.
+                let completed = self
+                    .applied(cfg)
+                    .await
+                    .map_err(ApplyError::Journal)?
+                    .into_iter()
+                    .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+                    .find(|entry| entry.version == backfill_marker.version.as_str());
+                if let Some(entry) = completed {
+                    if entry.checksum != backfill_marker.checksum.as_str() {
+                        return Err(crate::engine::OnlineError::Apply(
+                            ApplyError::ChecksumDrift {
+                                version: backfill_marker.version.as_str().to_string(),
+                                recorded: entry.checksum,
+                                expected: backfill_marker.checksum.as_str().to_string(),
+                            },
+                        ));
+                    }
+                    outcome
+                        .skipped
+                        .push(backfill_marker.version.as_str().to_string());
+                } else {
+                    let backfill_outcome = backfill_sql::run_backfill(
+                        self.conn,
+                        cfg,
+                        &backfill_marker.version,
+                        &backfill_marker.checksum,
+                        backfill,
+                        approval,
+                        Some(&allowed_engine_trigger),
+                        applied_by,
+                    )
+                    .await?;
+                    if backfill_outcome.complete {
+                        outcome
+                            .applied
+                            .push(backfill_marker.version.as_str().to_string());
+                    }
+                }
+                Ok::<_, crate::engine::OnlineError>(outcome)
+            }
+            .await;
+
+            if !own_lock {
+                return result;
+            }
+            let unlock = self.release_project_lock(cfg).await;
+            match result {
+                Ok(outcome) => unlock
+                    .map(|()| outcome)
+                    .map_err(crate::engine::OnlineError::Apply),
+                Err(error) => {
+                    if let Err(unlock_error) = unlock {
+                        tracing::warn!(
+                            error = %unlock_error,
+                            "zero-migrate: failed to release project lock after online rename error"
+                        );
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
 impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
     fn outstanding_pending_contracts<'a>(
         &'a self,
@@ -295,12 +494,27 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         Box::pin(async move { journal::outstanding_pending_contracts(self.conn, cfg).await })
     }
 
+    fn resolved_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>> {
+        Box::pin(async move { journal::resolved_pending_contracts(self.conn, cfg).await })
+    }
+
+    fn pending_contract_shape<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        contract: &'a journal::PendingContract,
+    ) -> JournalFuture<'a, journal::PendingContractShape> {
+        Box::pin(async move { journal::pending_contract_shape(self.conn, cfg, contract).await })
+    }
+
     fn record_pending_contract_with_recovery<'a>(
         &'a self,
         cfg: &'a ExecutorConfig,
         rec: journal::PendingContractRecord<'a>,
         scope: Option<journal::DeployRecoveryScope<'a>>,
-    ) -> JournalFuture<'a, ()> {
+    ) -> JournalFuture<'a, bool> {
         Box::pin(async move {
             journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
         })
@@ -368,7 +582,12 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 #[cfg(test)]
 mod recording_session_genericity {
     use super::*;
+    use crate::apply::executor::LockMode;
+    use crate::approval::{Approval, ApprovalScope};
     use crate::driver::{Bind, DbError, Row, Value};
+    use crate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
+    use crate::model::migration::{Checksum, ChecksumInput, MigrationFlags};
+    use crate::render::step::PlanStep;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -424,6 +643,10 @@ mod recording_session_genericity {
         in_flight: AtomicBool,
         /// Canned rows the `net_applied` journal read returns (SQL-routed).
         canned_journal: RefCell<Vec<Row>>,
+        /// Canned rows returned by the read-only backfill progress reader.
+        canned_progress: RefCell<Vec<Row>>,
+        progress_table_exists: bool,
+        progress_checksum_exists: bool,
     }
 
     impl RecordingSession {
@@ -433,6 +656,9 @@ mod recording_session_genericity {
                 binds: RefCell::new(Vec::new()),
                 in_flight: AtomicBool::new(false),
                 canned_journal: RefCell::new(Vec::new()),
+                canned_progress: RefCell::new(Vec::new()),
+                progress_table_exists: false,
+                progress_checksum_exists: false,
             }
         }
 
@@ -440,6 +666,14 @@ mod recording_session_genericity {
             let s = Self::new();
             *s.canned_journal.borrow_mut() = rows;
             s
+        }
+
+        fn with_canned_progress(rows: Vec<Row>, checksum_exists: bool) -> Self {
+            let mut session = Self::new();
+            *session.canned_progress.borrow_mut() = rows;
+            session.progress_table_exists = true;
+            session.progress_checksum_exists = checksum_exists;
+            session
         }
 
         /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
@@ -453,6 +687,16 @@ mod recording_session_genericity {
         fn rows_for(&self, sql: &str) -> Vec<Row> {
             if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
                 self.canned_journal.borrow().clone()
+            } else if sql.contains("AS table_exists") && sql.contains("pg_catalog.pg_attribute") {
+                vec![Row::new(
+                    vec!["table_exists".into(), "checksum_exists".into()],
+                    vec![
+                        Value::Bool(self.progress_table_exists),
+                        Value::Bool(self.progress_checksum_exists),
+                    ],
+                )]
+            } else if sql.contains("schema_backfills") && sql.contains("AS checksum, complete") {
+                self.canned_progress.borrow().clone()
             } else {
                 Vec::new()
             }
@@ -513,6 +757,227 @@ mod recording_session_genericity {
         )
     }
 
+    fn plan_dml_step(label: &str, destructive: bool) -> (PlanStep, MigrationId, Checksum) {
+        let version = MigrationId::generate();
+        let template = if destructive {
+            "DELETE FROM users WHERE id = $1"
+        } else {
+            "UPDATE users SET ready = $1 WHERE id = $2"
+        };
+        let checksum = Checksum::of(&ChecksumInput {
+            up: label,
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        let binds = if destructive {
+            vec![BindValue::Int(1)]
+        } else {
+            vec![BindValue::Bool(true), BindValue::Int(1)]
+        };
+        (
+            PlanStep::Dml {
+                version: version.clone(),
+                checksum: checksum.clone(),
+                name: label.to_string(),
+                template: template.to_string(),
+                binds,
+                target_schema: "proj_x".into(),
+                target_table: "users".into(),
+                conflict_target: None,
+                mutates_data: true,
+                transactional: true,
+                destructive,
+                requires_approval: destructive,
+                owner_app: "app_test".into(),
+            },
+            version,
+            checksum,
+        )
+    }
+
+    fn plan_backfill_step() -> (PlanStep, MigrationId, Checksum) {
+        let version = MigrationId::generate();
+        let checksum = Checksum::of(&ChecksumInput {
+            up: "backfill users",
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        (
+            PlanStep::Backfill {
+                version: version.clone(),
+                checksum: checksum.clone(),
+                spec: BackfillSpec {
+                    schema: "proj_x".into(),
+                    table: "users".into(),
+                    cursor_column: "id".into(),
+                    batch_size: 100,
+                    set_clause: "ready = TRUE".into(),
+                    filter: None,
+                    name: "backfill users".into(),
+                },
+            },
+            version,
+            checksum,
+        )
+    }
+
+    async fn apply_recorded_plan(
+        rec: &RecordingSession,
+        steps: &[PlanStep],
+        approval: Approval,
+        scope: &ApprovalScope,
+    ) -> Result<crate::engine::DeclarativeDeployOutcome, DeclarativeApplyError> {
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(rec);
+        MigrationEngine::new()
+            .apply_plan_with_touched_and_depends_scoped(
+                steps,
+                &["users".into()],
+                &[],
+                approval,
+                scope,
+                &backend,
+                &ExecutorConfig::new("prj_x", "proj_x"),
+                "tester",
+                LockMode::Acquire,
+                None,
+            )
+            .await
+    }
+
+    #[compio::test]
+    async fn mixed_plan_refuses_pending_delete_before_earlier_update() {
+        let rec = RecordingSession::new();
+        let (update, _, _) = plan_dml_step("update users", false);
+        let (delete, _, _) = plan_dml_step("delete users", true);
+
+        let result =
+            apply_recorded_plan(&rec, &[update, delete], Approval::None, &ApprovalScope::All).await;
+
+        assert!(matches!(
+            result,
+            Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
+        ));
+        let log = rec.log.borrow();
+        assert!(
+            !log.iter().any(|entry| {
+                entry.contains("UPDATE users SET ready")
+                    || entry.contains("DELETE FROM users WHERE id")
+            }),
+            "approval preflight must run before either target mutation: {log:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn mixed_plan_treats_partial_backfill_as_pending_before_earlier_update() {
+        let (backfill, version, checksum) = plan_backfill_step();
+        let rec = RecordingSession::with_canned_progress(
+            vec![Row::new(
+                vec!["backfill_id".into(), "checksum".into(), "complete".into()],
+                vec![
+                    Value::Text(version.as_str().to_string()),
+                    Value::Text(checksum.as_str().to_string()),
+                    Value::Bool(false),
+                ],
+            )],
+            true,
+        );
+        let (update, _, _) = plan_dml_step("update before backfill", false);
+
+        let result = apply_recorded_plan(
+            &rec,
+            &[update, backfill],
+            Approval::None,
+            &ApprovalScope::All,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
+        ));
+        let log = rec.log.borrow();
+        assert!(
+            log.iter().any(|entry| entry.contains("schema_backfills")),
+            "preflight must reconcile partial progress: {log:?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|entry| entry.contains("UPDATE users SET ready")),
+            "the earlier update must not run before a pending backfill gate: {log:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn completed_delete_skips_without_renewed_approval_but_drift_aborts_plan() {
+        let (update, update_version, _) = plan_dml_step("update users", false);
+        let (delete, delete_version, delete_checksum) = plan_dml_step("delete users", true);
+        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
+            delete_version.as_str(),
+            delete_checksum.as_str(),
+        )]);
+
+        let outcome = apply_recorded_plan(
+            &rec,
+            &[update.clone(), delete.clone()],
+            Approval::None,
+            &ApprovalScope::Versions(Default::default()),
+        )
+        .await
+        .expect("a matching completed delete is an unapproved no-op");
+        assert_eq!(outcome.applied.applied, vec![update_version.as_str()]);
+        assert_eq!(outcome.applied.skipped, vec![delete_version.as_str()]);
+        assert!(
+            !rec.log
+                .borrow()
+                .iter()
+                .any(|entry| entry.contains("DELETE FROM users WHERE id")),
+            "the completed delete must not execute again"
+        );
+
+        let stale = Checksum::of(&ChecksumInput {
+            up: "stale delete",
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "app_test",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        });
+        let drift_rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
+            delete_version.as_str(),
+            stale.as_str(),
+        )]);
+        let result = apply_recorded_plan(
+            &drift_rec,
+            &[update, delete],
+            Approval::None,
+            &ApprovalScope::All,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(DeclarativeApplyError::Plain(EngineError::Apply(
+                ApplyError::ChecksumDrift { .. }
+            )))
+        ));
+        assert!(
+            !drift_rec
+                .log
+                .borrow()
+                .iter()
+                .any(|entry| entry.contains("UPDATE users SET ready")),
+            "drift must abort before the earlier update"
+        );
+    }
+
     /// The flagship proof: `PostgresBackend::<'_, RecordingSession>::new_generic`
     /// monomorphizes, and the write/DDL/lock verbs run generically against a
     /// non-compio driver, recording the exact SQL the executor emits.
@@ -521,10 +986,10 @@ mod recording_session_genericity {
         let rec = RecordingSession::new();
         let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
 
-        // A non-native `D` reports no PG-concrete online/shadow harness.
+        // Online expand-contract work rides the same generic SqlSession seam.
         assert!(
-            backend.online().is_none(),
-            "generic D has no PgOnline harness"
+            backend.online().is_some(),
+            "generic D must expose the host-capable online runner"
         );
         assert!(
             backend.shadow().is_none(),
@@ -591,6 +1056,44 @@ mod recording_session_genericity {
             rec.log.borrow().iter().any(|s| s.starts_with("query")),
             "applied() drove a query through the neutral read seam: {:?}",
             rec.log.borrow()
+        );
+    }
+
+    #[compio::test]
+    async fn backfill_progress_reader_decodes_existing_rows_without_bootstrap() {
+        let rec = RecordingSession::with_canned_progress(
+            vec![Row::new(
+                vec!["backfill_id".into(), "checksum".into(), "complete".into()],
+                vec![
+                    Value::Text("mig_progress".into()),
+                    Value::Text("checksum_a".into()),
+                    Value::Bool(false),
+                ],
+            )],
+            true,
+        );
+        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+
+        let progress = backend
+            .backfill_progress(&cfg)
+            .await
+            .expect("progress read runs");
+
+        assert_eq!(
+            progress,
+            vec![crate::apply::backend::BackfillProgressEntry {
+                version: "mig_progress".into(),
+                checksum: Some("checksum_a".into()),
+                complete: false,
+            }]
+        );
+        assert!(
+            !rec.log
+                .borrow()
+                .iter()
+                .any(|entry| entry.contains("CREATE TABLE") && entry.contains("schema_backfills")),
+            "status must not bootstrap progress state"
         );
     }
 

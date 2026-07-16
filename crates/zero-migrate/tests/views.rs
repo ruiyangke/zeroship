@@ -270,7 +270,7 @@ fn structured_select_supports_group_by_and_having_on_all_dialects() {
     let mysql = lower_up(SqlDialect::Mysql, grouped_order_totals_view()).unwrap();
     assert_eq!(
         mysql,
-        "CREATE VIEW `app`.`order_totals` AS SELECT `customer_id`, count(*) AS `n`, sum(`amount`) AS `revenue` FROM `app`.`orders` WHERE (`status` = 'paid') GROUP BY `customer_id` HAVING (count(`id`) > 5) ORDER BY `customer_id` ASC LIMIT 10"
+        "CREATE VIEW `app`.`order_totals` AS SELECT `customer_id`, count(*) AS `n`, sum(`amount`) AS `revenue` FROM `app`.`orders` WHERE (`status` = _utf8mb4 X'70616964') GROUP BY `customer_id` HAVING (count(`id`) > 5) ORDER BY `customer_id` ASC LIMIT 10"
     );
 }
 

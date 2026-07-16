@@ -2,6 +2,10 @@
 -- plan "representative"  (dialect: mysql)
 -- ============================================================
 
+SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;
+
+SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES');
+
 CREATE TABLE `public`.`codes` (`code` INT NOT NULL, `created_at` DATETIME(6) NOT NULL, `created_by` VARCHAR(191), `deleted_at` DATETIME(6), `id` VARCHAR(191) PRIMARY KEY NOT NULL, `label` VARCHAR(191), `updated_at` DATETIME(6) NOT NULL, `updated_by` VARCHAR(191), `version` INT NOT NULL);
 
 CREATE UNIQUE INDEX `codes_code_key` ON `public`.`codes` (`code`);
@@ -27,5 +31,7 @@ INSERT INTO `public`.`codes` (`id`, `created_at`, `updated_at`, `version`, `code
 -- update DML; binds: 2 typed value(s) (bound natively, never interpolated)
 
 UPDATE `public`.`codes` SET `label` = ? WHERE (`code` > ?);
+
+SET SESSION sql_mode = @__zero_migrate_preview_saved_sql_mode;
 
 -- preview: 10 statement(s) rendered, 1 runtime-resolved

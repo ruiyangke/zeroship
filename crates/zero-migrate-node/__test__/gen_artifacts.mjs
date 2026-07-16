@@ -35,22 +35,22 @@ function assert(cond, msg) {
 const CONFINED_CEILING_TOML = `policy_version = 1
 
 [[grant]]
-key = "core.cross_schema"
+key = "schema.cross_schema"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "core.create_table"
+key = "schema.create_table"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "core.rename_into"
+key = "schema.rename"
 value = true
 scope = { include = ["app"] }
 
 [[grant]]
-key = "sec.destructive_ops"
+key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 

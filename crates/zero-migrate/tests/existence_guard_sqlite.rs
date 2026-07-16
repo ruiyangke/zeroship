@@ -63,10 +63,18 @@ fn cfg() -> ExecutorConfig {
 /// Lower a guarded IR op through the REAL `IrAuthor` (`SQLite` dialect). Returns the
 /// lowered migrations (with the `GuardProbe` stamped). The bound project schema is
 /// `main` (the `SQLite` implicit target).
+#[track_caller]
 fn lower(op: Op) -> Vec<Migration> {
+    // Each call site represents a separate migration file. Stable production
+    // identities are derived from owner + migration name, so the fixture must
+    // not reuse one name for unrelated setup and guarded operations.
+    let migration_name = format!(
+        "guard_test_{}",
+        std::panic::Location::caller().line()
+    );
     let ir = MigrationIr {
         ir_version: 2,
-        name: "guard_test".into(),
+        name: migration_name,
         owner_app: "app_test".into(),
         ops: vec![op],
         flags: Default::default(),

@@ -759,7 +759,10 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         gcfg.schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    assert!(!gcfg.skips_denylist_belt(), "Platform runs the full static belt");
+    assert!(
+        !gcfg.skips_denylist_belt(),
+        "Platform runs the full static belt"
+    );
     let ecfg = crate::conn::ExecutorConfig::platform(
         &cap,
         "platform",

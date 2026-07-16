@@ -41,7 +41,7 @@ use crate::model::ir::{
     TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::load::op_created_table;
-use crate::model::migration::Migration;
+use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
     TableSnapshot,
@@ -76,8 +76,8 @@ enum LoweredOp {
     Ddl(Vec<LoweredUnit>),
     /// An online `renameColumn` — ONE plan step, dialect-chosen.
     /// The variant's `Migration`s (PG E1..C2, or the SQLite rebuild journal mig)
-    /// already carry their own version-stable ids; the IR plan does NOT re-mint
-    /// them. Not guarded per-fragment: the expand-contract author / the differ are
+    /// are restamped with plan-relative, content-independent ids after the full
+    /// ordered plan is known. Not guarded per-fragment: the expand-contract author / the differ are
     /// the trusted, descriptor-/intent-driven producers (no untrusted raw SQL),
     /// exactly like the declarative path that produces the same shapes. Boxed: a
     /// `RenameStep::PgExpandContract` is large (the full E1..C2 plan), so boxing it
@@ -245,6 +245,36 @@ pub struct LiveSchema {
 }
 
 impl LiveSchema {
+    /// Build the live facts required by guarded IR lowering from a catalog
+    /// snapshot. Network host apply uses this for PostgreSQL and MySQL before it
+    /// lowers an existing-table migration.
+    #[must_use]
+    pub fn from_catalog_snapshot(
+        live: crate::model::snapshot::SchemaSnapshot,
+        owner_app: &str,
+    ) -> Self {
+        let unique_indexes = live
+            .tables
+            .values()
+            .flat_map(|table| table.indexes.iter())
+            .filter(|index| index.unique)
+            .map(|index| index.name.clone())
+            .collect();
+        let table_ownership = live
+            .tables
+            .keys()
+            .map(|table| (table.clone(), owner_app.to_string()))
+            .collect();
+        Self {
+            tables: live.tables.keys().cloned().collect(),
+            unique_indexes,
+            table_snapshots: live.tables,
+            sqlite_schemas: std::collections::BTreeMap::new(),
+            table_ownership,
+            partitions: live.partitions,
+        }
+    }
+
     /// A live schema with `tables` and NO known unique indexes — for a unit lower
     /// that has the live table set (FK inlining) but no introspected index facts.
     /// Drop-gating then falls back to the IR's advisory `unique` hint alone (never
@@ -439,6 +469,144 @@ impl From<&BTreeSet<String>> for LiveSchema {
     }
 }
 
+/// Recover an exact SQLite row identity from the authoritative live snapshot.
+/// A limited delete must never guess that the hidden `rowid` exists: it can be
+/// shadowed by a declared column and is absent on `WITHOUT ROWID` tables. A
+/// primary key is preferred, followed by a full non-partial UNIQUE key. Every
+/// member must be non-null so SQL row-value equality cannot turn the selected
+/// identity into an unknown comparison.
+fn sqlite_limited_delete_identity(snapshot: &TableSnapshot) -> Option<Vec<String>> {
+    for kind in ["PRIMARY KEY", "UNIQUE"] {
+        for constraint in snapshot
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.kind.eq_ignore_ascii_case(kind))
+        {
+            let Some(columns) = parse_constraint_identity_columns(&constraint.definition, kind)
+            else {
+                continue;
+            };
+            if sqlite_identity_columns_are_safe(snapshot, &columns) {
+                return Some(columns);
+            }
+        }
+    }
+
+    snapshot.indexes.iter().find_map(|index| {
+        if !index.unique || index.predicate.is_some() || index.elements.len() != index.columns.len()
+        {
+            return None;
+        }
+        let columns: Option<Vec<String>> = index
+            .elements
+            .iter()
+            .map(|element| match element {
+                IndexElementSnapshot::Column {
+                    name,
+                    opclass: None,
+                    collation: None,
+                    ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let columns = columns?;
+        if columns != index.columns || !sqlite_identity_columns_are_safe(snapshot, &columns) {
+            return None;
+        }
+        Some(columns)
+    })
+}
+
+fn sqlite_identity_columns_are_safe(snapshot: &TableSnapshot, columns: &[String]) -> bool {
+    if columns.is_empty() {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    columns.iter().all(|name| {
+        seen.insert(name.as_str())
+            && snapshot
+                .columns
+                .iter()
+                .any(|column| column.name == *name && !column.nullable)
+    })
+}
+
+/// Parse the canonical `PRIMARY KEY (...)` / `UNIQUE (...)` definitions carried
+/// by SQLite catalog snapshots. The parser accepts bare, double-quoted,
+/// backtick-quoted, and bracket-quoted identifiers, but no expressions or trailing
+/// clauses. Every result is subsequently matched to a real snapshot column.
+fn parse_constraint_identity_columns(definition: &str, kind: &str) -> Option<Vec<String>> {
+    let definition = definition.trim();
+    let prefix = definition.get(..kind.len())?;
+    if !prefix.eq_ignore_ascii_case(kind) {
+        return None;
+    }
+    let body = definition.get(kind.len()..)?.trim();
+    let inner = body.strip_prefix('(')?.strip_suffix(')')?;
+    parse_identifier_list(inner)
+}
+
+fn parse_identifier_list(input: &str) -> Option<Vec<String>> {
+    let mut chars = input.chars().peekable();
+    let mut columns = Vec::new();
+    loop {
+        while chars.next_if(|ch| ch.is_whitespace()).is_some() {}
+        let first = chars.next()?;
+        let column = match first {
+            '"' | '`' => {
+                let quote = first;
+                let mut value = String::new();
+                loop {
+                    let ch = chars.next()?;
+                    if ch == quote {
+                        if chars.next_if_eq(&quote).is_some() {
+                            value.push(quote);
+                        } else {
+                            break;
+                        }
+                    } else {
+                        value.push(ch);
+                    }
+                }
+                value
+            }
+            '[' => {
+                let mut value = String::new();
+                loop {
+                    let ch = chars.next()?;
+                    if ch == ']' {
+                        break;
+                    }
+                    value.push(ch);
+                }
+                value
+            }
+            ch => {
+                let mut value = String::from(ch);
+                while let Some(&ch) = chars.peek() {
+                    if ch == ',' {
+                        break;
+                    }
+                    value.push(ch);
+                    chars.next();
+                }
+                value.trim().to_string()
+            }
+        };
+        if column.is_empty() {
+            return None;
+        }
+        while chars.next_if(|ch| ch.is_whitespace()).is_some() {}
+        columns.push(column);
+        match chars.next() {
+            None => return Some(columns),
+            Some(',') => {}
+            Some(_) => return None,
+        }
+    }
+}
+
 /// The IR-path DDL author. Wraps a [`DeclarativeAuthor`] so it reuses the
 /// declarative render seam verbatim; the IR-specific work is the op→descriptor
 /// mapping that feeds the shared snapshot-builder.
@@ -485,6 +653,19 @@ pub enum IrLowerError {
     /// DDL ops; DML / online-intent ops compile elsewhere). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only)")]
     UnsupportedOp(&'static str),
+    /// A repeatable artifact contained a step that cannot honor run-on-change
+    /// semantics. Repeatables are replace-style DDL migrations; silently routing a
+    /// DML, backfill, or online-rename step through its once-only executor would
+    /// make a changed artifact drift or skip instead of re-applying.
+    #[error(
+        "repeatable IR artifacts support replace-style DDL only; found {0}. Split the artifact or remove flags.repeatable"
+    )]
+    RepeatableStepUnsupported(&'static str),
+    /// Authored plan metadata reached a step state machine that cannot execute
+    /// that metadata faithfully. Refuse it at lower instead of including it in
+    /// the checksum while silently ignoring it during apply.
+    #[error("IR field {0} is not supported by this executable plan shape")]
+    PlanMetadataUnsupported(&'static str),
     /// A column references a named enum/domain that has not been registered by an
     /// earlier `createEnum` / `createDomain` op in this IR stream.
     #[error("UNSUPPORTED {{ kind: {kind:?}, reason: \"unreachable use-site\", name: {name:?} }}")]
@@ -745,9 +926,9 @@ pub enum IrLowerError {
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlValidate(Box<crate::model::validate::AuthoringError>),
     /// the creator-DML assembler ([`crate::render::dml`]) rejected a DML op: a
-    /// malformed identifier, an empty/ragged insert, a SQLite `onConflict`
-    /// (`dialect_scope = PgOnly`), or a SQLite-targeted batched backfill.
-    /// All are HARD errors — a DML op is NEVER silently dropped or mis-applied.
+    /// malformed identifier, an empty/ragged insert, or a MySQL `onConflict`
+    /// shape whose authored target cannot be retained safely.
+    /// All are hard errors. A DML op is never silently dropped or misapplied.
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlAssemble(#[from] crate::render::dml::DmlError),
 }
@@ -907,10 +1088,16 @@ impl NamedTypeRegistry {
     }
 }
 
-pub(crate) fn render_enum_values(values: &[String]) -> String {
+pub(crate) fn render_enum_values(values: &[String], dialect: SqlDialect) -> String {
     values
         .iter()
-        .map(|v| crate::render::dml::sql_string_literal(v))
+        .map(|v| match dialect {
+            // MySQL's ENUM grammar rejects hex expressions. These quoted tokens
+            // are mode-independent because the backend pins
+            // NO_BACKSLASH_ESCAPES before every author DDL/data statement.
+            SqlDialect::Mysql => crate::render::dml::mysql_grammar_string_literal(v),
+            SqlDialect::Postgres | SqlDialect::Sqlite => crate::render::dml::sql_string_literal(v),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -944,8 +1131,80 @@ fn pg_type_data_type(schema: &str, name: &str) -> String {
     format!("{schema}.{name}")
 }
 
+/// Resolve the catalog-comparable and DDL spellings of a PostgreSQL named type
+/// reference carried directly by a column operation.
+///
+/// Named enum/domain references are self-describing: their [`ColType`] carries
+/// the type name and an optional schema. A missing schema means the operation's
+/// default project schema. This helper deliberately does not consult the
+/// per-envelope named-type registry, because a rename commonly references a
+/// type created by an earlier migration. The live source column remains the
+/// authority that proves the referenced type actually exists and matches.
+///
+/// # Errors
+/// Returns [`IrLowerError::DmlAssemble`] when the schema or type name is not a
+/// valid SQL identifier.
+#[doc(hidden)]
+pub fn postgres_named_type_metadata(
+    ty: &ColType,
+    default_schema: &str,
+) -> Result<Option<(String, String)>, IrLowerError> {
+    let (name, schema) = match ty {
+        ColType::Enum { name, schema } | ColType::Domain { name, schema } => {
+            (name, schema.as_deref().unwrap_or(default_schema))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((
+        pg_type_data_type(schema, name),
+        pg_type_qname(schema, name)?,
+    )))
+}
+
+/// Canonicalize PostgreSQL's built-in type aliases without discarding type
+/// modifiers. This is shared by fresh rename lowering and the live resolver so
+/// both seams accept the same equivalent spellings while keeping, for example,
+/// `numeric(20,4)` distinct from `numeric(20,2)`.
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_postgres_type_spelling(ty: &str) -> String {
+    let compact: String = ty
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    const ALIASES: &[(&str, &str)] = &[
+        ("timestampwithtimezone", "timestamptz"),
+        ("timestampwithouttimezone", "timestamp"),
+        ("timewithtimezone", "timetz"),
+        ("timewithouttimezone", "time"),
+        ("charactervarying", "varchar"),
+        ("character", "char"),
+        ("doubleprecision", "float8"),
+        ("decimal", "numeric"),
+        ("smallserial", "smallint"),
+        ("bigserial", "bigint"),
+        ("serial", "integer"),
+        ("int2", "smallint"),
+        ("int4", "integer"),
+        ("int8", "bigint"),
+        ("int", "integer"),
+        ("bool", "boolean"),
+        ("float4", "real"),
+    ];
+    for (alias, canonical) in ALIASES {
+        let Some(suffix) = compact.strip_prefix(alias) else {
+            continue;
+        };
+        if suffix.is_empty() || suffix.starts_with('(') || suffix.starts_with('[') {
+            return format!("{canonical}{suffix}");
+        }
+    }
+    compact
+}
+
 pub(crate) fn mysql_enum_type(values: &[String]) -> String {
-    format!("ENUM({})", render_enum_values(values))
+    format!("ENUM({})", render_enum_values(values, SqlDialect::Mysql))
 }
 
 pub(crate) fn enum_inline_check(
@@ -955,7 +1214,10 @@ pub(crate) fn enum_inline_check(
 ) -> Result<String, IrLowerError> {
     let col = crate::render::dml::quote_ident_for_dialect("column", column, dialect)
         .map_err(IrLowerError::DmlAssemble)?;
-    Ok(format!("CHECK ({col} IN ({}))", render_enum_values(values)))
+    Ok(format!(
+        "CHECK ({col} IN ({}))",
+        render_enum_values(values, dialect)
+    ))
 }
 
 pub(crate) fn render_ir_default(
@@ -964,7 +1226,7 @@ pub(crate) fn render_ir_default(
 ) -> Result<String, IrLowerError> {
     match default {
         IrDefault::Literal { value } => {
-            crate::render::dml::inline_literal(value).map_err(IrLowerError::DmlAssemble)
+            crate::render::dml::inline_literal(value, dialect).map_err(IrLowerError::DmlAssemble)
         }
         IrDefault::Expr { expr } => {
             crate::render::dml::render_expr_inline(expr, dialect).map_err(IrLowerError::DmlAssemble)
@@ -1087,6 +1349,17 @@ pub enum LoadAndLowerGuardedError {
     Lower(#[from] IrGuardedLowerError),
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct LoweredOpSpan {
+    /// The effective, dialect-selected non-`dialectal` operation.
+    pub op: Op,
+    /// The half-open range of plan steps emitted by this operation.
+    pub step_range: std::ops::Range<usize>,
+}
+
+type GuardedLowerParts = (Vec<PlanStep>, Vec<GuardedFragment>, Vec<LoweredOpSpan>);
+
 /// The result of [`IrAuthor::load_and_lower_guarded`]: the lowered, guard-checked
 /// migrations + the per-op guarded fragments (DX attribution) + the set of tables
 /// this artifact CREATES (its `createTable` ops). The deploy loop folds
@@ -1107,6 +1380,11 @@ pub struct LoweredArtifact {
     pub plan: AppliedPlan,
     /// The per-op guarded fragments (op-index + kind attribution).
     pub fragments: Vec<GuardedFragment>,
+    /// Effective operations paired with their emitted plan-step ranges. Host status
+    /// uses this internal projection metadata to distinguish applied operation
+    /// prefixes from pending structural tails in one envelope.
+    #[doc(hidden)]
+    pub op_spans: Vec<LoweredOpSpan>,
     /// The tables this artifact creates (its `createTable` op names), for the
     /// deploy loop to fold into the cross-file registry + live-set.
     pub created_tables: Vec<String>,
@@ -1154,7 +1432,7 @@ impl LoweredArtifact {
                 PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
                     out.push(rb.migration.clone());
                 }
-                PlanStep::Dml { .. } | PlanStep::Backfill(_) => {}
+                PlanStep::Dml { .. } | PlanStep::Backfill { .. } => {}
             }
         }
         out
@@ -1353,13 +1631,13 @@ impl IrAuthor {
             .iter()
             .filter_map(|op| op_created_table(op).map(str::to_string))
             .collect();
-        let (steps, fragments) = self
-            .lower_guarded(&ir, guard_cfg, live)
+        let (steps, fragments, op_spans) = self
+            .lower_guarded_with_op_spans(&ir, guard_cfg, live)
             .map_err(LoadAndLowerGuardedError::Lower)?;
         // Wrap the lowered steps as ONE AppliedPlan whose checksum is the
         // dialect-neutral `Checksum::of_ir` over the op list, and
-        // STAMP that same anchor onto every DDL step's journaled `Migration.checksum`
-        //: the drift anchor that enters the journal is the
+        // STAMP that same anchor onto every DDL step's journaled
+        // `Migration.checksum`: the drift anchor that enters the journal is the
         // canonical op list, NOT the per-dialect rendered SQL. So a re-deploy of
         // the SAME IR envelope on EITHER backend re-derives the SAME anchor (no
         // false drift), while editing the authoring `.ts` (⇒ a different op list)
@@ -1383,10 +1661,13 @@ impl IrAuthor {
         // contract is still pending, even when this artifact touches a different
         // table than the pending one.
         let depends_on = ir.depends_on.clone();
-        let plan = self.assemble_plan(&ir, steps);
+        let plan = self
+            .assemble_plan(&ir, steps)
+            .map_err(IrGuardedLowerError::Lower)?;
         Ok(LoweredArtifact {
             plan,
             fragments,
+            op_spans,
             created_tables,
             touched_tables,
             depends_on,
@@ -1457,44 +1738,56 @@ impl IrAuthor {
     /// The per-dialect rendered `up`/`down` still applies; only the IDENTITY anchor
     /// is the neutral op list.
     ///
-    /// An [`PlanStep::OnlineRename`] step's sub-migrations (PG E1..C2 / the SQLite
-    /// rebuild journal migration) keep their OWN author-stamped checksums and
-    /// version-stable ids — `ExpandContractAuthor` / the rebuild planner are the id
-    /// authority, the IR plan does NOT re-mint or re-anchor them. The
-    /// neutral op-list anchor is the PLAN's identity (`AppliedPlan.checksum`); the
-    /// per-DDL-step checksum stamp is the existing drift seam for plain DDL.
-    fn assemble_plan(&self, ir: &MigrationIr, mut steps: Vec<PlanStep>) -> AppliedPlan {
-        let anchor = crate::model::load::authoritative_ir_checksum(ir);
-        for s in &mut steps {
-            if let PlanStep::Ddl(m) = s {
-                m.checksum = anchor.clone();
-            }
+    /// An [`PlanStep::OnlineRename`] step's sub-migrations (PG E1..C2 or the
+    /// SQLite rebuild journal migration) receive the same authoritative checksum
+    /// and plan-relative stable identities as every other host-IR step.
+    fn assemble_plan(
+        &self,
+        ir: &MigrationIr,
+        mut steps: Vec<PlanStep>,
+    ) -> Result<AppliedPlan, IrLowerError> {
+        validate_ir_plan_execution_metadata(ir, &steps)?;
+        // A plan whose selected dialect leg emits no executable work still needs a
+        // durable journal identity. Without one, editing an already-applied step into
+        // an empty plan removes the only checksum comparison key and makes status
+        // unable to report drift. The synthetic step occupies ordinal zero, exactly
+        // where a later or earlier one-step plan lives, and runs a portable no-op.
+        if steps.is_empty() {
+            steps.push(empty_ir_plan_anchor(ir));
         }
-        // The plan-group identity: the steps keep their own per-op journal
-        // versions, so the plan `version` is a marker — the first step's version
-        // (deterministic within a deploy), or a fresh id for the degenerate empty
-        // plan (a no-op IR).
-        let version = steps
-            .first()
-            .map(plan_step_version)
-            .unwrap_or_else(crate::model::migration::MigrationId::generate);
+        let (version, anchor) = stamp_ir_plan_steps(ir, &mut steps);
+        if !ir.preconditions.is_empty() {
+            let Some(PlanStep::Ddl(first)) = steps.first_mut() else {
+                return Err(IrLowerError::PlanMetadataUnsupported("preconditions"));
+            };
+            first.preconditions.extend(ir.preconditions.iter().cloned());
+        }
         let rollbackable = AppliedPlan::compute_rollbackable(&steps);
-        AppliedPlan {
+        let mut flags = merge_ir_flags(MigrationFlags::default(), &ir.flags);
+        flags.destructive |= steps.iter().any(PlanStep::is_destructive);
+        flags.requires_approval |= steps
+            .iter()
+            .any(|step| step.approval_scope_version().is_some());
+        flags.online |= steps
+            .iter()
+            .any(|step| matches!(step, PlanStep::OnlineRename(_)));
+        Ok(AppliedPlan {
             version,
             name: ir.name.clone(),
             steps,
             checksum: anchor,
-            // Lowering emits DDL with default-derived flags; the dialect-neutral
-            // identity flags are the default set (the per-dialect transactional/
-            // concurrently divergence is a render concern, NOT the identity).
-            flags: crate::model::migration::MigrationFlags::default(),
+            // The plan exposes the same authored overrides that were merged onto
+            // every journaled DDL Migration below. The authoritative checksum also
+            // folds this override domain, so status, execution, and identity cannot
+            // disagree about (for example) repeatable or timeout semantics.
+            flags,
             dialect_scope: crate::render::step::DialectScope::Both,
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
             preconditions: ir.preconditions.clone(),
-        }
+        })
     }
 
     /// Lower a validated [`MigrationIr`]'s ops to ONE [`AppliedPlan`] — the
@@ -1513,7 +1806,7 @@ impl IrAuthor {
         live: &LiveSchema,
     ) -> Result<AppliedPlan, IrLowerError> {
         let steps = self.lower_steps(ir, live)?;
-        Ok(self.assemble_plan(ir, steps))
+        self.assemble_plan(ir, steps)
     }
 
     /// Lower a validated [`MigrationIr`]'s DDL ops to their flat [`Migration`]
@@ -1588,6 +1881,8 @@ impl IrAuthor {
                 &mut named_types,
             )?;
         }
+        validate_repeatable_ir_steps(ir, &out)?;
+        stamp_ir_plan_steps(ir, &mut out);
         Ok(out)
     }
 
@@ -1778,7 +2073,7 @@ impl IrAuthor {
                     let qname = pg_type_qname(&eff_schema, name)?;
                     let up = format!(
                         "CREATE TYPE {qname} AS ENUM ({})",
-                        render_enum_values(values)
+                        render_enum_values(values, self.dialect)
                     );
                     let down = Some(format!("DROP TYPE {qname}"));
                     vec![decl.lower_vendor_statement(&format!("create_enum_{name}"), up, down)]
@@ -2111,8 +2406,11 @@ impl IrAuthor {
                         )?;
                         Some(self.partition_collapse_dml_step(
                             op_index,
+                            &eff_schema,
+                            of,
                             &format!("partition_collapse_guard_{of}_{name}"),
                             guard_sql,
+                            false,
                             false,
                         ))
                     } else {
@@ -2179,8 +2477,11 @@ impl IrAuthor {
                     partition_state.remove_child(parent, name);
                     return Ok(LoweredOp::Dml(self.partition_collapse_dml_step(
                         op_index,
+                        &eff_schema,
+                        parent,
                         &format!("drop_partition_{parent}_{name}_collapsed"),
                         delete_sql,
+                        true,
                         true,
                     )));
                 }
@@ -2655,23 +2956,9 @@ impl IrAuthor {
                     .collect()
             }
         };
-        // deterministic, reviewable version for a SCOPE-GATED destructive
-        // DDL step.** The declarative `make()` builder stamped these with a RANDOM
-        // `MigrationId::generate()`. A per-version `ApprovalScope` keys on the
-        // version-id, so a destructive DDL op (`dropColumn` / unique-index `dropIndex`)
-        // MUST carry a STABLE id the operator can review and the apply enforces
-        // identically across lowerings. Re-stamp each destructive DDL migration's
-        // version with the deterministic `ddl_step_version` (op_index + kind + up SQL).
-        // Additive DDL keeps its random id (the scope never gates it; the journal drift
-        // anchor is the op-list `Checksum::of_ir`, unaffected by this version). The
-        // op-kind tag distinguishes two same-`up` ops at the same index in different
-        // op kinds (defensive — the up SQL already differs).
-        let kind = op_kind_tag(op);
-        for (mig, _statements) in &mut migs {
-            if mig.flags.destructive {
-                mig.version = ddl_step_version(op_index, kind, &mig.up);
-            }
-        }
+        // The complete ordered plan is stamped after every op has lowered. That
+        // final pass gives additive and destructive DDL the same stable
+        // plan-id/ordinal identity discipline and rewrites sibling dependencies.
         // stamp the existence-guard probe onto each lowered unit.
         //
         // For SINGLE-OBJECT ops (addColumn, createIndex, dropTable, dropColumn,
@@ -2854,13 +3141,13 @@ impl IrAuthor {
         if !matches!(from, PartitionBoundValue::MinValue) {
             terms.push(format!(
                 "{key_sql} >= {}",
-                render_partition_bound_literal(from)?
+                render_partition_bound_literal(from, self.dialect)?
             ));
         }
         if !matches!(to, PartitionBoundValue::MaxValue) {
             terms.push(format!(
                 "{key_sql} < {}",
-                render_partition_bound_literal(to)?
+                render_partition_bound_literal(to, self.dialect)?
             ));
         }
         Ok(if terms.is_empty() {
@@ -2882,7 +3169,7 @@ impl IrAuthor {
         }
         let values = values
             .iter()
-            .map(render_partition_bound_literal)
+            .map(|value| render_partition_bound_literal(value, self.dialect))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
         Ok(format!("{key_sql} IN ({values})"))
@@ -2962,9 +3249,6 @@ impl IrAuthor {
     ///    structural-only gate, and the engine's per-statement guard + the DB itself
     ///    remain the backstop.
     ///
-    /// Portability boundaries, all HARD errors (never silent):
-    /// - `insert { onConflict }` on **SQLite** → [`crate::render::dml::DmlError::OnConflictNotPortable`].
-    ///
     /// A **batched** `backfill` is PORTABLE on BOTH backends
     /// (PG `backfill.rs`, SQLite `apply::backend::sqlite::backfill_sql`) — it is
     /// no longer a SQLite hard error.
@@ -2973,7 +3257,7 @@ impl IrAuthor {
     /// - [`IrLowerError::DmlValidate`] — the structural validator (a)/(b)/(d) OR the
     ///   resolved rule-(c) `ColRef` check rejected an embedded expression.
     /// - [`IrLowerError::DmlAssemble`] — the assembler rejected the op (malformed
-    ///   identifier / empty insert / SQLite `onConflict` / SQLite batched backfill).
+    ///   identifier, empty insert, or a MySQL conflict shape that cannot be guarded).
     fn lower_dml_op(
         &self,
         op_index: usize,
@@ -3029,7 +3313,25 @@ impl IrAuthor {
                     oc.as_ref(),
                 )
                 .map_err(IrLowerError::DmlAssemble)?;
-                Ok(self.dml_step(op_index, table, "insert", asm, false))
+                let conflict_target = oc
+                    .as_ref()
+                    .filter(|target| {
+                        target
+                            .do_update
+                            .as_ref()
+                            .is_some_and(|assignments| !assignments.is_empty())
+                    })
+                    .map(|target| target.columns.clone());
+                Ok(self.dml_step(
+                    op_index,
+                    eff_schema,
+                    table,
+                    "insert",
+                    asm,
+                    conflict_target,
+                    true,
+                    false,
+                ))
             }
             Op::Update {
                 table,
@@ -3045,7 +3347,9 @@ impl IrAuthor {
                     r#where.as_ref(),
                 )
                 .map_err(IrLowerError::DmlAssemble)?;
-                Ok(self.dml_step(op_index, table, "update", asm, false))
+                Ok(self.dml_step(
+                    op_index, eff_schema, table, "update", asm, None, true, false,
+                ))
             }
             Op::Delete {
                 table,
@@ -3053,17 +3357,26 @@ impl IrAuthor {
                 limit,
                 ..
             } => {
-                let asm = crate::render::dml::assemble_delete(
+                let sqlite_identity = if matches!(dialect, SqlDialect::Sqlite) && limit.is_some() {
+                    live_schema
+                        .table_snapshots
+                        .get(table)
+                        .and_then(sqlite_limited_delete_identity)
+                } else {
+                    None
+                };
+                let asm = crate::render::dml::assemble_delete_with_sqlite_identity(
                     eff_schema,
                     dialect,
                     table,
                     r#where,
                     limit.map(crate::model::ir::SafeU64::get),
+                    sqlite_identity.as_deref(),
                 )
                 .map_err(IrLowerError::DmlAssemble)?;
                 // A delete is DESTRUCTIVE (data loss) — the executor's approval gate
                 // refuses it without `Approval::Approved`.
-                Ok(self.dml_step(op_index, table, "delete", asm, true))
+                Ok(self.dml_step(op_index, eff_schema, table, "delete", asm, None, true, true))
             }
             Op::Backfill {
                 table,
@@ -3089,29 +3402,36 @@ impl IrAuthor {
         }
     }
 
-    /// Build a [`PlanStep::Dml`] from an assembled one-shot statement, minting a
-    /// deterministic sub-version id from the `op_index` + owner + kind + template +
-    /// binds so a re-deploy of the SAME op is idempotent (the journal net-applied-skip
-    /// keys on this version) and a re-authored op (a changed template/binds) gets a
-    /// fresh id (no false resume). The `op_index` is what keeps two byte-identical
-    /// DML ops in the SAME migration distinct (see [`dml_step_version`]).
+    /// Build an intermediate [`PlanStep::Dml`] from an assembled one-shot
+    /// statement. [`stamp_ir_plan_steps`] replaces the provisional identity and
+    /// checksum after the complete ordered plan is known.
     fn dml_step(
         &self,
         op_index: usize,
+        schema: &str,
         table: &str,
         kind: &str,
         asm: crate::render::dml::AssembledDml,
+        conflict_target: Option<Vec<String>>,
+        mutates_data: bool,
         destructive: bool,
     ) -> PlanStep {
         let owner = self.decl.owner_app().to_string();
-        let version = dml_step_version(op_index, &owner, kind, &asm.template, &asm.binds);
+        let version = provisional_step_version(op_index, &owner, "dml");
+        let checksum = provisional_step_checksum(&asm.template, &owner);
         PlanStep::Dml {
             version,
+            checksum,
             name: format!("{kind} {table}"),
             template: asm.template,
             binds: asm.binds,
+            target_schema: schema.to_string(),
+            target_table: table.to_string(),
+            conflict_target,
+            mutates_data,
             transactional: true,
             destructive,
+            requires_approval: destructive,
             owner_app: owner,
         }
     }
@@ -3119,20 +3439,30 @@ impl IrAuthor {
     fn partition_collapse_dml_step(
         &self,
         op_index: usize,
+        schema: &str,
+        table: &str,
         name: &str,
         template: String,
+        mutates_data: bool,
         destructive: bool,
     ) -> PlanStep {
         let binds: Vec<BindValue> = Vec::new();
         let owner = self.decl.owner_app().to_string();
-        let version = dml_step_version(op_index, &owner, name, &template, &binds);
+        let version = provisional_step_version(op_index, &owner, "dml");
+        let checksum = provisional_step_checksum(&template, &owner);
         PlanStep::Dml {
             version,
+            checksum,
             name: name.to_string(),
             template,
             binds,
+            target_schema: schema.to_string(),
+            target_table: table.to_string(),
+            conflict_target: None,
+            mutates_data,
             transactional: true,
             destructive,
+            requires_approval: destructive,
             owner_app: owner,
         }
     }
@@ -3202,7 +3532,12 @@ impl IrAuthor {
             filter: clauses.filter,
             name: name.to_string(),
         };
-        Ok(PlanStep::Backfill(spec))
+        let marker = spec.backfill_id();
+        Ok(PlanStep::Backfill {
+            version: MigrationId::derive("unstamped_backfill", marker.as_bytes()),
+            checksum: provisional_step_checksum(&marker, self.decl.owner_app()),
+            spec,
+        })
     }
 
     /// **Guard-per-fragment + reassembly.** Lower the IR's DDL ops and,
@@ -3242,11 +3577,23 @@ impl IrAuthor {
         guard_cfg: &GuardConfig,
         live: &LiveSchema,
     ) -> Result<(Vec<PlanStep>, Vec<GuardedFragment>), IrGuardedLowerError> {
+        self.lower_guarded_with_op_spans(ir, guard_cfg, live)
+            .map(|(steps, fragments, _op_spans)| (steps, fragments))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn lower_guarded_with_op_spans(
+        &self,
+        ir: &MigrationIr,
+        guard_cfg: &GuardConfig,
+        live: &LiveSchema,
+    ) -> Result<GuardedLowerParts, IrGuardedLowerError> {
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
         let guard_scope = guard_cfg.schema_scope();
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
+        let mut op_spans: Vec<LoweredOpSpan> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
@@ -3271,6 +3618,7 @@ impl IrAuthor {
                 &mut plan_index,
                 &mut steps,
                 &mut fragments,
+                &mut op_spans,
                 &mut live_tables,
                 &mut partition_state,
                 live,
@@ -3281,7 +3629,9 @@ impl IrAuthor {
                 guard_cfg.skips_denylist_belt(),
             )?;
         }
-        Ok((steps, fragments))
+        validate_repeatable_ir_steps(ir, &steps)?;
+        stamp_ir_plan_steps(ir, &mut steps);
+        Ok((steps, fragments, op_spans))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3291,6 +3641,7 @@ impl IrAuthor {
         plan_index: &mut usize,
         steps: &mut Vec<PlanStep>,
         fragments: &mut Vec<GuardedFragment>,
+        op_spans: &mut Vec<LoweredOpSpan>,
         live_tables: &mut BTreeSet<String>,
         partition_state: &mut PartitionLowerState,
         live: &LiveSchema,
@@ -3323,6 +3674,7 @@ impl IrAuthor {
                         plan_index,
                         steps,
                         fragments,
+                        op_spans,
                         live_tables,
                         partition_state,
                         live,
@@ -3339,6 +3691,7 @@ impl IrAuthor {
 
         let op_index = *plan_index;
         *plan_index += 1;
+        let step_start = steps.len();
         let op_kind = op_kind_tag(op);
         enforce_vendor_capability_at_lower(op, guard_scope)?;
         // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
@@ -3359,6 +3712,10 @@ impl IrAuthor {
                 // fragment-guarded (the producer is trusted; `apply_plan`
                 // re-guards at execution). It produces no `GuardedFragment` row.
                 steps.push(PlanStep::OnlineRename(*step));
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                });
                 return Ok(());
             }
             LoweredOp::Dml(step) => {
@@ -3372,6 +3729,10 @@ impl IrAuthor {
                 // the structural validator in `lower_dml_op`. So it produces no
                 // `GuardedFragment` row, exactly like an online rename.
                 steps.push(step);
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                });
                 return Ok(());
             }
         };
@@ -3447,6 +3808,10 @@ impl IrAuthor {
             }
             steps.push(PlanStep::Ddl(mig));
         }
+        op_spans.push(LoweredOpSpan {
+            op: op.clone(),
+            step_range: step_start..steps.len(),
+        });
         Ok(())
     }
 
@@ -3832,9 +4197,13 @@ impl IrAuthor {
         match &source.ty {
             ColType::Enum { name, .. } => match self.dialect {
                 SqlDialect::Postgres => {
-                    let schema = named_types.enum_schema_or(name, default_schema);
-                    col.data_type = pg_type_data_type(schema, name);
-                    col.ddl_type_override = Some(pg_type_qname(schema, name)?);
+                    let registry_schema = named_types.enum_schema_or(name, default_schema);
+                    let (data_type, ddl_type) =
+                        postgres_named_type_metadata(&source.ty, registry_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp("named enum metadata was not resolved"),
+                        )?;
+                    col.data_type = data_type;
+                    col.ddl_type_override = Some(ddl_type);
                 }
                 SqlDialect::Sqlite => {
                     let def = named_types.enum_def(name)?;
@@ -3854,9 +4223,13 @@ impl IrAuthor {
             },
             ColType::Domain { name, .. } => {
                 if matches!(self.dialect, SqlDialect::Postgres) {
-                    let schema = named_types.domain_schema_or(name, default_schema);
-                    col.data_type = pg_type_data_type(schema, name);
-                    col.ddl_type_override = Some(pg_type_qname(schema, name)?);
+                    let registry_schema = named_types.domain_schema_or(name, default_schema);
+                    let (data_type, ddl_type) =
+                        postgres_named_type_metadata(&source.ty, registry_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp("named domain metadata was not resolved"),
+                        )?;
+                    col.data_type = data_type;
+                    col.ddl_type_override = Some(ddl_type);
                     return Ok(());
                 }
                 let def = named_types.domain_def(name)?;
@@ -3994,8 +4367,17 @@ impl IrAuthor {
         // `data_type` via the SHARED builder (the SAME spelling the differ's
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
-        let col =
+        let mut col =
             self.add_column_snapshot(table, to, ty, None, None, None, None, None, None, None)?;
+        if self.dialect == SqlDialect::Postgres {
+            if let Some((data_type, ddl_type)) =
+                postgres_named_type_metadata(ty, &self.project_schema)?
+            {
+                col.data_type = data_type;
+                col.ddl_type_override = Some(ddl_type);
+            }
+        }
+        let ir_ddl_type = col.ddl_type_override.clone();
         let ir_data_type = col.data_type;
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (both legs).**
@@ -4019,21 +4401,39 @@ impl IrAuthor {
         let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
             IrLowerError::RenameNeedsLiveColumn(table.to_string(), from.to_string())
         })?;
-        let live_from_type = live_snapshot
+        let live_from_column = live_snapshot
             .columns
             .iter()
             .find(|c| c.name == from)
-            .map(|c| c.data_type.clone())
             .ok_or_else(|| {
                 IrLowerError::RenameNeedsLiveColumn(table.to_string(), from.to_string())
             })?;
-        if live_from_type != ir_data_type {
+        let live_from_type = live_from_column.data_type.clone();
+        let live_ddl_type = live_from_column
+            .ddl_type_override
+            .as_deref()
+            .unwrap_or(&live_from_type);
+        let modifier_mismatch = self.dialect == SqlDialect::Postgres
+            && !matches!(ty, ColType::Enum { .. } | ColType::Domain { .. })
+            && ir_ddl_type.as_deref().is_some_and(|authored| {
+                canonical_postgres_type_spelling(authored)
+                    != canonical_postgres_type_spelling(live_ddl_type)
+            });
+        if live_from_type != ir_data_type || modifier_mismatch {
             return Err(IrLowerError::RenameTypeMismatch {
                 table: table.to_string(),
                 from: from.to_string(),
                 to: to.to_string(),
-                ir_type: ir_data_type,
-                live_type: live_from_type,
+                ir_type: if modifier_mismatch {
+                    ir_ddl_type.unwrap_or(ir_data_type)
+                } else {
+                    ir_data_type
+                },
+                live_type: if modifier_mismatch {
+                    live_ddl_type.to_string()
+                } else {
+                    live_from_type.clone()
+                },
             });
         }
 
@@ -4065,7 +4465,18 @@ impl IrAuthor {
                 // `ddl_type`-spelled — byte-equal to the declarative path's
                 // `ddl_type(&r.ty)`. Computed ONLY on the PG leg (the SQLite
                 // leg takes affinity from the live SDK Value, never a PG string).
-                let pg_ty = crate::render::declarative::ddl_type(&ir_data_type).to_string();
+                let pg_ty = if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    ir_ddl_type.ok_or(IrLowerError::UnsupportedOp(
+                        "PostgreSQL named type metadata carried no DDL spelling",
+                    ))?
+                } else {
+                    live_from_column
+                        .ddl_type_override
+                        .clone()
+                        .unwrap_or_else(|| {
+                            crate::render::declarative::ddl_type(&ir_data_type).to_string()
+                        })
+                };
                 // The PG expand-contract author derives the dual-write from
                 // `{table, from, to, ty}` and needs no live table SHAPE; the type was
                 // already reconciled above, so pass empties for the unused snapshot/
@@ -5041,11 +5452,16 @@ fn render_sqlite_trigger_stmt(
             let pred = crate::render::dml::render_expr_inline(r#where, SqlDialect::Sqlite)?;
             Ok(match limit {
                 None => format!("DELETE FROM {qtable} WHERE {pred}"),
-                Some(n) => format!(
-                    "DELETE FROM {qtable} WHERE rowid IN \
-                     (SELECT rowid FROM {qtable} WHERE {pred} LIMIT {})",
-                    n.get()
-                ),
+                // Trigger rendering has no live-catalog snapshot for the body
+                // target. Refuse a limited delete instead of guessing at hidden
+                // rowid; the one-shot DML path can use a proven PK/UNIQUE key.
+                Some(_) => {
+                    return Err(IrLowerError::DmlAssemble(
+                        crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                            table: table.clone(),
+                        },
+                    ));
+                }
             })
         }
         TriggerStmt::Select { expr } => Ok(format!(
@@ -5065,88 +5481,325 @@ fn render_sqlite_trigger_stmt(
     }
 }
 
-/// The journal version of a plan step — the deterministic marker the plan's
-/// outer `version` borrows from its FIRST step. A `Ddl` uses its
-/// migration version; an `OnlineRename` uses its first sub-migration's version
-/// (PG: E1; SQLite: the rebuild journal migration); a `Dml` uses its own version;
-/// a `Backfill` derives a deterministic marker from its stable backfill id.
-fn plan_step_version(step: &PlanStep) -> crate::model::migration::MigrationId {
-    match step {
-        PlanStep::Ddl(m) => m.version.clone(),
-        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
-            // The plan-group identity of a PG online rename anchors on E1's version.
-            // `ExpandContractAuthor::author` ALWAYS emits E1..E3, so an EMPTY expand
-            // is an internal invariant violation (the author was bypassed or built a
-            // malformed plan), NOT a routine empty case. Fail closed: in dev/test it
-            // panics loudly (the bug surfaces), and in release it falls back to a
-            // DETERMINISTIC sentinel id derived from the plan's stable content — NOT
-            // `MigrationId::generate()`, whose RANDOM output would silently give the
-            // same broken plan a different version on every call, defeating idempotent
-            // re-deploy and masking the bug.
-            match ec.expand.first() {
-                Some(m) => m.version.clone(),
-                None => {
-                    debug_assert!(
-                        false,
-                        "internal invariant violation: PgExpandContract plan has an \
-                         empty `expand` chain (ExpandContractAuthor::author always \
-                         emits E1..E3) — refusing to mint a non-deterministic plan \
-                         version"
+/// Derive the stable identity of an IR artifact from server-stamped ownership and
+/// its migration name. Content is deliberately excluded: editing an already
+/// applied artifact must retain its identity and surface checksum drift.
+fn ir_plan_version(ir: &MigrationIr) -> MigrationId {
+    let mut seed = Vec::new();
+    push_identity_field(&mut seed, ir.owner_app.as_bytes());
+    push_identity_field(&mut seed, ir.name.as_bytes());
+    MigrationId::derive("ir_plan", &seed)
+}
+
+/// Derive one ordered plan-step identity. Only the plan identity and stable ordinal
+/// participate. Step kind, SQL, binds, and transforms live exclusively in the
+/// authoritative checksum, so changing a step's kind cannot evade drift detection
+/// by moving the journal key.
+fn ir_step_version(plan_version: &MigrationId, ordinal: usize) -> MigrationId {
+    let mut seed = Vec::new();
+    push_identity_field(&mut seed, plan_version.as_str().as_bytes());
+    seed.extend_from_slice(&(ordinal as u64).to_be_bytes());
+    MigrationId::derive("ir_step", &seed)
+}
+
+fn online_substep_version(step_version: &MigrationId, phase: &str, ordinal: usize) -> MigrationId {
+    let mut seed = Vec::new();
+    push_identity_field(&mut seed, step_version.as_str().as_bytes());
+    push_identity_field(&mut seed, phase.as_bytes());
+    seed.extend_from_slice(&(ordinal as u64).to_be_bytes());
+    MigrationId::derive("ir_online_substep", &seed)
+}
+
+fn push_identity_field(seed: &mut Vec<u8>, field: &[u8]) {
+    seed.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    seed.extend_from_slice(field);
+}
+
+/// Build the journaled ordinal-zero anchor for an IR that lowers to no work on
+/// the selected dialect. Both directions are portable no-ops so the anchor can be
+/// applied, retried, and rolled back through the ordinary migration path.
+fn empty_ir_plan_anchor(ir: &MigrationIr) -> PlanStep {
+    const NOOP_SQL: &str = "SELECT 1";
+    PlanStep::Ddl(Migration {
+        version: provisional_step_version(0, &ir.owner_app, "empty_plan_anchor"),
+        name: ir.name.clone(),
+        up: NOOP_SQL.to_string(),
+        down: Some(NOOP_SQL.to_string()),
+        checksum: provisional_step_checksum(NOOP_SQL, &ir.owner_app),
+        flags: MigrationFlags::default(),
+        owner_app: ir.owner_app.clone(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        existence_guard: None,
+    })
+}
+
+/// Apply the IR's all-optional flag carrier to flags already derived by the
+/// structural author. Safety classifications are monotonic: authored metadata may
+/// make a step stricter, but it cannot turn off structurally derived data-loss or
+/// approval requirements.
+fn merge_ir_flags(
+    mut derived: MigrationFlags,
+    overrides: &crate::model::ir::IrFlagsOverride,
+) -> MigrationFlags {
+    if let Some(value) = overrides.transactional {
+        derived.transactional = value;
+    }
+    if let Some(value) = overrides.destructive {
+        derived.destructive |= value;
+    }
+    if let Some(value) = overrides.online {
+        derived.online = value;
+    }
+    if let Some(value) = overrides.requires_approval {
+        derived.requires_approval |= value;
+    }
+    if let Some(value) = overrides.repeatable {
+        derived.repeatable = value;
+    }
+    // `engine_goodie_ddl` is an engine-authored trust bit. IR metadata is never
+    // allowed to grant it; `validate_ir_plan_execution_metadata` rejects an
+    // authored value before this helper is reached.
+    if let Some(value) = overrides.timeout_ms {
+        derived.timeout_ms = Some(value.get());
+    }
+    if let Some(value) = overrides.lock_timeout_ms {
+        derived.lock_timeout_ms = Some(value.get());
+    }
+    if let Some(value) = overrides.phase {
+        derived.phase = Some(value);
+    }
+    derived
+}
+
+/// Reject metadata that the selected plan state machine cannot execute. The
+/// canonical checksum covers every field in this domain, so accepting a field and
+/// then ignoring it at apply would create a false integrity guarantee.
+fn validate_ir_plan_execution_metadata(
+    ir: &MigrationIr,
+    steps: &[PlanStep],
+) -> Result<(), IrLowerError> {
+    // IR dependencies and supersession name logical plan ids, while the current
+    // journal records executable step ids. Until a durable outer-plan completion
+    // record exists, treating either as a step dependency/squash can falsely
+    // consider a partially applied plan complete. Refuse instead of guessing.
+    if !ir.depends_on.is_empty() {
+        return Err(IrLowerError::PlanMetadataUnsupported("depends_on"));
+    }
+    if !ir.supersedes.is_empty() {
+        return Err(IrLowerError::PlanMetadataUnsupported("supersedes"));
+    }
+    if ir.flags.engine_goodie_ddl.is_some() {
+        return Err(IrLowerError::PlanMetadataUnsupported(
+            "flags.engine_goodie_ddl",
+        ));
+    }
+
+    let has_rich_step = steps.iter().any(|step| !matches!(step, PlanStep::Ddl(_)));
+    if !has_rich_step {
+        return Ok(());
+    }
+
+    if !ir.preconditions.is_empty() {
+        return Err(IrLowerError::PlanMetadataUnsupported("preconditions"));
+    }
+    for (field, present) in [
+        ("flags.transactional", ir.flags.transactional.is_some()),
+        ("flags.online", ir.flags.online.is_some()),
+        ("flags.timeout_ms", ir.flags.timeout_ms.is_some()),
+        ("flags.lock_timeout_ms", ir.flags.lock_timeout_ms.is_some()),
+        ("flags.phase", ir.flags.phase.is_some()),
+    ] {
+        if present {
+            return Err(IrLowerError::PlanMetadataUnsupported(field));
+        }
+    }
+    Ok(())
+}
+
+/// Repeatable execution is defined by the generic `Migration` executor. Rich
+/// plan steps have independent once-only/progress state machines, so accepting a
+/// repeatable override for them would acknowledge the flag in the checksum while
+/// silently ignoring it at apply. Refuse that mismatch before a plan is returned.
+fn validate_repeatable_ir_steps(ir: &MigrationIr, steps: &[PlanStep]) -> Result<(), IrLowerError> {
+    if ir.flags.repeatable != Some(true) {
+        return Ok(());
+    }
+    for step in steps {
+        let kind = match step {
+            PlanStep::Ddl(_) => continue,
+            PlanStep::Dml { .. } => "a DML step",
+            PlanStep::Backfill { .. } => "a backfill step",
+            PlanStep::OnlineRename(_) => "an online rename step",
+        };
+        return Err(IrLowerError::RepeatableStepUnsupported(kind));
+    }
+    Ok(())
+}
+
+/// Stamp stable identities and the authoritative full-IR checksum onto every
+/// executable step. This runs after lowering because one IR op can expand to more
+/// than one ordered DDL step, so the final ordinal is known only here.
+fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId, Checksum) {
+    let plan_version = ir_plan_version(ir);
+    let anchor = crate::model::load::authoritative_ir_checksum(ir);
+    let mut replacements: BTreeMap<String, MigrationId> = BTreeMap::new();
+
+    // Build the complete old-to-new map first so sibling dependencies can be
+    // rewritten regardless of whether they point forward or backward.
+    for (ordinal, step) in steps.iter().enumerate() {
+        match step {
+            PlanStep::Ddl(m) => {
+                replacements.insert(
+                    m.version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::Dml { version, .. } => {
+                replacements.insert(
+                    version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::Backfill { version, .. } => {
+                replacements.insert(
+                    version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+                replacements.insert(
+                    rb.migration.version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                let step_version = ir_step_version(&plan_version, ordinal);
+                for (sub_ordinal, migration) in ec.expand.iter().enumerate() {
+                    let next = if sub_ordinal == 0 {
+                        step_version.clone()
+                    } else {
+                        online_substep_version(&step_version, "expand", sub_ordinal)
+                    };
+                    replacements.insert(migration.version.as_str().to_string(), next);
+                }
+                for (sub_ordinal, migration) in ec.contract.iter().enumerate() {
+                    replacements.insert(
+                        migration.version.as_str().to_string(),
+                        online_substep_version(&step_version, "contract", sub_ordinal),
                     );
-                    empty_expand_sentinel_id(ec)
                 }
             }
         }
-        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.version.clone(),
-        PlanStep::Dml { version, .. } => version.clone(),
-        PlanStep::Backfill(spec) => {
-            // A backfill's plan-step identity is derived deterministically from its
-            // stable backfill id (table + cursor + transform + name) so a re-deploy
-            // of the same backfill is idempotent and a re-authored one gets a fresh
-            // id (matching the executor's `BackfillSpec::backfill_id` resume key).
-            dml_id_from_seed("backfill", spec.backfill_id().as_bytes())
+    }
+
+    for (ordinal, step) in steps.iter_mut().enumerate() {
+        match step {
+            PlanStep::Ddl(migration) => {
+                let next = ir_step_version(&plan_version, ordinal);
+                restamp_ir_migration(migration, next, &anchor, &replacements, &ir.flags);
+            }
+            PlanStep::Dml {
+                version,
+                checksum,
+                transactional,
+                destructive,
+                requires_approval,
+                ..
+            } => {
+                *version = ir_step_version(&plan_version, ordinal);
+                *checksum = anchor.clone();
+                if let Some(value) = ir.flags.transactional {
+                    *transactional = value;
+                }
+                if let Some(value) = ir.flags.destructive {
+                    *destructive |= value;
+                }
+                if let Some(value) = ir.flags.requires_approval {
+                    *requires_approval |= value;
+                }
+            }
+            PlanStep::Backfill {
+                version, checksum, ..
+            } => {
+                *version = ir_step_version(&plan_version, ordinal);
+                *checksum = anchor.clone();
+            }
+            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+                let next = ir_step_version(&plan_version, ordinal);
+                restamp_ir_migration(&mut rb.migration, next, &anchor, &replacements, &ir.flags);
+            }
+            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                ec.plan_version = Some(plan_version.clone());
+                let step_version = ir_step_version(&plan_version, ordinal);
+                for (sub_ordinal, migration) in ec.expand.iter_mut().enumerate() {
+                    let next = if sub_ordinal == 0 {
+                        step_version.clone()
+                    } else {
+                        online_substep_version(&step_version, "expand", sub_ordinal)
+                    };
+                    restamp_ir_migration(migration, next, &anchor, &replacements, &ir.flags);
+                }
+                for (sub_ordinal, migration) in ec.contract.iter_mut().enumerate() {
+                    let next = online_substep_version(&step_version, "contract", sub_ordinal);
+                    restamp_ir_migration(migration, next, &anchor, &replacements, &ir.flags);
+                }
+                ec.trigger_version = ec
+                    .expand
+                    .get(1)
+                    .map_or_else(|| step_version.clone(), |m| m.version.clone());
+            }
         }
     }
-}
 
-/// The release-build fallback id for the (invariant-violating) empty-expand
-/// `PgExpandContract` step. Derived DETERMINISTICALLY from the plan's stable
-/// content (the rename intent + backfill id) so two computations agree — NEVER
-/// `MigrationId::generate()`, whose randomness would mask the bug and break
-/// idempotent re-deploy. Reached only when the `debug_assert` in
-/// [`plan_step_version`] is compiled out (release) AND the invariant is somehow
-/// violated; the deterministic id keeps the system honest rather than silently
-/// non-deterministic.
-fn empty_expand_sentinel_id(
-    ec: &crate::render::expand_contract::ExpandContractPlan,
-) -> crate::model::migration::MigrationId {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    let crate::render::expand_contract::OnlineIntent::RenameColumn {
-        table,
-        from,
-        to,
-        ty,
-    } = &ec.intent;
-    for field in [table.as_str(), from.as_str(), to.as_str(), ty.as_str()] {
-        h.update((field.len() as u64).to_be_bytes());
-        h.update(field.as_bytes());
+    // Each maximal run of DDL steps is handed to the generic migration executor as
+    // a set. That executor topologically sorts the set and uses the stable version
+    // only as a tie-breaker, so derived ids alone cannot preserve the order authored
+    // in the IR. Chain each DDL migration to the preceding DDL migration in its run.
+    // Other step kinds are already executed serially by the plan engine, so they
+    // reset the chain. Existing structural dependencies remain intact and are not
+    // duplicated.
+    let mut preceding_ddl: Option<MigrationId> = None;
+    for step in steps {
+        match step {
+            PlanStep::Ddl(migration) => {
+                if let Some(preceding) = &preceding_ddl {
+                    if !migration.depends_on.contains(preceding) {
+                        migration.depends_on.push(preceding.clone());
+                    }
+                }
+                preceding_ddl = Some(migration.version.clone());
+            }
+            PlanStep::Dml { .. } | PlanStep::Backfill { .. } | PlanStep::OnlineRename(_) => {
+                preceding_ddl = None;
+            }
+        }
     }
-    h.update(ec.backfill.backfill_id().as_bytes());
-    dml_id_from_seed("empty_expand_invariant", &h.finalize())
+
+    (plan_version, anchor)
 }
 
-/// **Test-only** wrapper that computes the empty-expand sentinel WITHOUT tripping
-/// the `debug_assert` in [`plan_step_version`] — so the DETERMINISM half of the
-/// fix (the release-safe property: the same broken plan yields the SAME id) can be
-/// asserted in a `cfg(test)` (= debug) build. Production code never calls this.
-#[cfg(test)]
-fn plan_step_version_empty_expand_sentinel(
-    step: &PlanStep,
-) -> crate::model::migration::MigrationId {
-    match step {
-        PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => empty_expand_sentinel_id(ec),
-        other => plan_step_version(other),
+fn restamp_ir_migration(
+    migration: &mut Migration,
+    version: MigrationId,
+    checksum: &Checksum,
+    replacements: &BTreeMap<String, MigrationId>,
+    overrides: &crate::model::ir::IrFlagsOverride,
+) {
+    migration.version = version;
+    migration.checksum = checksum.clone();
+    migration.flags = merge_ir_flags(migration.flags, overrides);
+    if migration.flags.repeatable {
+        // Repeatables are replace-style definitions, not reversible once-only
+        // migrations. The generic executor enforces this invariant and rejects a
+        // repeatable carrying a `down`; normalize it at the IR-to-Migration seam.
+        migration.down = None;
+    }
+    for dependency in &mut migration.depends_on {
+        if let Some(replacement) = replacements.get(dependency.as_str()) {
+            *dependency = replacement.clone();
+        }
     }
 }
 
@@ -5170,81 +5823,28 @@ fn enforce_vendor_capability_at_lower(
     Ok(())
 }
 
-/// Mint a DETERMINISTIC, STABLE [`MigrationId`] for a DML/backfill plan step
-/// (the shared assembler). A DML step has no `Migration` of its own, but it still needs
-/// a journal identity for the net-applied-skip (idempotent re-deploy) and the
-/// per-step journal row. Deriving it from the step's content (owner + kind +
-/// template + binds) PLUS its `op_index` (the op's position in the migration's op
-/// list) makes a re-deploy of the SAME migration file map each op to the SAME id
-/// (skipped when net-applied) and a re-authored op (a changed template/binds) get
-/// a FRESH id (no false resume) — the same property `BackfillSpec::backfill_id`
-/// gives its respective steps. The `op_index` fold is
-/// what keeps two BYTE-IDENTICAL DML ops in the SAME migration (e.g. two intentional
-/// identical increment updates) DISTINCT: without it they would collide to one
-/// version and the second would be silently net-applied-skipped (data-intent
-/// loss). The index is the plan position, so it is deterministic across re-deploys
-/// of the same file and stable per-op.
-fn dml_step_version(
-    op_index: usize,
-    owner: &str,
-    kind: &str,
-    template: &str,
-    binds: &[crate::render::step::BindValue],
-) -> crate::model::migration::MigrationId {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    // Fold the op's plan position FIRST so two byte-identical ops at different
-    // positions seed distinct digests (deterministic per file, fresh on re-author).
-    h.update((op_index as u64).to_be_bytes());
-    for field in [owner, kind, template] {
-        h.update((field.len() as u64).to_be_bytes());
-        h.update(field.as_bytes());
-    }
-    h.update((binds.len() as u64).to_be_bytes());
-    for b in binds {
-        // A stable, injective-enough byte image of each bind so two distinct bind
-        // lists hash differently (the same content folding the same id is the
-        // idempotency property).
-        let (tag, body): (u8, Vec<u8>) = match b {
-            crate::render::step::BindValue::Null => (0, Vec::new()),
-            crate::render::step::BindValue::Bool(v) => (1, vec![u8::from(*v)]),
-            crate::render::step::BindValue::Int(v) => (2, v.to_be_bytes().to_vec()),
-            crate::render::step::BindValue::Decimal(s) => (3, s.as_bytes().to_vec()),
-            crate::render::step::BindValue::Text(s) => (4, s.as_bytes().to_vec()),
-        };
-        h.update([tag]);
-        h.update((body.len() as u64).to_be_bytes());
-        h.update(&body);
-    }
-    dml_id_from_seed("dml", &h.finalize())
+/// Temporary identity used only while one op is being lowered. Every public
+/// lowering path replaces it through [`stamp_ir_plan_steps`] before returning.
+fn provisional_step_version(op_index: usize, owner: &str, kind: &str) -> MigrationId {
+    let mut seed = Vec::new();
+    push_identity_field(&mut seed, owner.as_bytes());
+    seed.extend_from_slice(&(op_index as u64).to_be_bytes());
+    push_identity_field(&mut seed, kind.as_bytes());
+    MigrationId::derive("unstamped_ir_step", &seed)
 }
 
-/// a DETERMINISTIC version id for an IR-lowered DESTRUCTIVE DDL step
-/// (`dropColumn`, a unique-index `dropIndex`, …), derived from the op's plan
-/// position + kind + rendered `up` SQL.
-///
-/// The declarative `make()` builder mints DDL migration versions with
-/// `MigrationId::generate()` (random) — fine for an additive op (the scope never
-/// gates it, and the journal drift anchor is the op-list `Checksum::of_ir`, not this
-/// version). But a per-version [`ApprovalScope`](crate::ApprovalScope) keys on the
-/// version-id, so a SCOPE-GATED destructive DDL op MUST carry a STABLE, reviewable id
-/// — otherwise the reviewer's plan and the apply would mint DIFFERENT random ids and
-/// the scope could never match (and the operator could never name the op to approve).
-/// So [`IrAuthor::lower_one_op`] re-stamps each destructive DDL step's version with
-/// this deterministic id. Re-deploying the SAME op file reproduces the SAME id (a
-/// correctness improvement: idempotent net-applied-skip for destructive IR DDL too),
-/// and a re-authored op (changed `up`) gets a fresh id (no false resume). Uses the
-/// same `0xFF…` high-48-bit derived-marker layout as [`dml_id_from_seed`], so it can
-/// never collide with a numbered file migration.
-fn ddl_step_version(op_index: usize, kind: &str, up: &str) -> crate::model::migration::MigrationId {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update((op_index as u64).to_be_bytes());
-    for field in [kind, up] {
-        h.update((field.len() as u64).to_be_bytes());
-        h.update(field.as_bytes());
-    }
-    dml_id_from_seed("ddl", &h.finalize())
+/// Temporary checksum paired with [`provisional_step_version`]. The final stamp
+/// always replaces it with the authoritative full-IR checksum.
+fn provisional_step_checksum(up: &str, owner_app: &str) -> Checksum {
+    Checksum::of(&ChecksumInput {
+        up,
+        down: None,
+        flags: &MigrationFlags::default(),
+        owner_app,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    })
 }
 
 fn partition_collapse_render_error(reason: impl Into<String>) -> IrLowerError {
@@ -5277,10 +5877,14 @@ fn normalize_partition_string_bound_literal(value: &str) -> String {
     out
 }
 
-fn render_partition_bound_literal(value: &PartitionBoundValue) -> Result<String, IrLowerError> {
+fn render_partition_bound_literal(
+    value: &PartitionBoundValue,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
     match value {
-        PartitionBoundValue::String { value } => Ok(crate::render::dml::sql_string_literal(
+        PartitionBoundValue::String { value } => Ok(crate::render::dml::inline_string_literal(
             &normalize_partition_string_bound_literal(value),
+            dialect,
         )),
         PartitionBoundValue::Int { value } => Ok(value.get().to_string()),
         PartitionBoundValue::MinValue | PartitionBoundValue::MaxValue => {
@@ -5289,31 +5893,6 @@ fn render_partition_bound_literal(value: &PartitionBoundValue) -> Result<String,
             ))
         }
     }
-}
-
-/// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using
-/// the SAME high-48-bit `0xFF…` marker layout (distinct from versioned-migration ids) — so a
-/// derived DML/backfill id can NEVER collide with a versioned migration id (whose
-/// high 48 bits hold a small numeric version) and is stable per seed. The `tag`
-/// folds into the low bits so a `"dml"` and a `"backfill"` seed never collide.
-fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::model::migration::MigrationId {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(tag.as_bytes());
-    h.update([0u8]);
-    h.update(seed);
-    let digest = h.finalize();
-    let mut bytes = [0u8; 16];
-    // High 48 bits = the repeatable/derived marker (never a real file version) ⇒
-    // never collides with a versioned id.
-    bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
-    bytes[6..16].copy_from_slice(&digest[0..10]);
-    let uuid = uuid::Uuid::from_bytes(bytes);
-    crate::model::migration::MigrationId::parse(&format!(
-        "mig_{}",
-        crate::id::uuid_to_base62(&uuid)
-    ))
-    .expect("derived DML id is a valid mig_ typed id")
 }
 
 /// The op kind tag for attribution — the human-facing name the guard
@@ -5649,7 +6228,7 @@ fn apply_author_type_overrides_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        if author_data_type_override(&source.ty, dialect).is_none() {
+        if author_type_override(&source.ty, dialect).is_none() {
             continue;
         }
         let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
@@ -5669,7 +6248,7 @@ fn apply_author_type_override_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(data_type) = author_data_type_override(ty, dialect) else {
+    let Some(type_override) = author_type_override(ty, dialect) else {
         return Ok(());
     };
     if col.name != column {
@@ -5677,13 +6256,57 @@ fn apply_author_type_override_to_column(
             "author type column folded away",
         ));
     }
-    col.data_type = data_type.to_string();
+    col.data_type = type_override.data_type;
+    col.ddl_type_override = type_override.ddl_type;
+    if type_override.quote_literal_default_as_text {
+        col.default = col
+            .default
+            .take()
+            .map(|default| crate::render::dml::sql_string_literal(&default));
+    }
     Ok(())
 }
 
-fn author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&'static str> {
+/// Type metadata that cannot survive the descriptor bridge's deliberately small
+/// token vocabulary. In particular, the shared `number` token means a floating
+/// point column, while the migration IR's `Decimal` variant is fixed-precision.
+/// Keep a catalog-comparable base type in `data_type` and a precision-carrying
+/// spelling in `ddl_type` for emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorTypeOverride {
+    pub(crate) data_type: String,
+    pub(crate) ddl_type: Option<String>,
+    pub(crate) quote_literal_default_as_text: bool,
+}
+
+pub(crate) fn author_type_override(
+    ty: &ColType,
+    dialect: SqlDialect,
+) -> Option<AuthorTypeOverride> {
     match (dialect, ty) {
-        (SqlDialect::Postgres, ColType::Uuid) => Some("uuid"),
+        (SqlDialect::Postgres, ColType::Uuid) => Some(AuthorTypeOverride {
+            data_type: "uuid".to_string(),
+            ddl_type: None,
+            quote_literal_default_as_text: false,
+        }),
+        (SqlDialect::Postgres, ColType::Decimal { precision, scale }) => Some(AuthorTypeOverride {
+            data_type: "numeric".to_string(),
+            ddl_type: Some(format!("numeric({precision}, {scale})")),
+            quote_literal_default_as_text: false,
+        }),
+        (SqlDialect::Mysql, ColType::Decimal { precision, scale }) => Some(AuthorTypeOverride {
+            data_type: "numeric".to_string(),
+            ddl_type: Some(format!("DECIMAL({precision}, {scale})")),
+            quote_literal_default_as_text: false,
+        }),
+        (SqlDialect::Sqlite, ColType::Decimal { .. }) => Some(AuthorTypeOverride {
+            // SQLite has no fixed-precision decimal storage class. NUMERIC/REAL
+            // affinity converts a sufficiently wide decimal string through a
+            // binary float, so retain authored decimal text byte-for-byte.
+            data_type: "text".to_string(),
+            ddl_type: Some("TEXT".to_string()),
+            quote_literal_default_as_text: true,
+        }),
         _ => None,
     }
 }
@@ -5695,15 +6318,22 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(
-            default @ (IrDefault::Expr { .. }
-            | IrDefault::Container { .. }
-            | IrDefault::Json { .. }
-            | IrDefault::Nextval { .. }),
-        ) = source.default.as_ref()
-        else {
+        let Some(default) = source.default.as_ref() else {
             continue;
         };
+        let needs_overlay = matches!(
+            default,
+            IrDefault::Expr { .. }
+                | IrDefault::Container { .. }
+                | IrDefault::Json { .. }
+                | IrDefault::Nextval { .. }
+        ) || matches!(
+            (&source.ty, default),
+            (ColType::Bytes, IrDefault::Literal { .. })
+        );
+        if !needs_overlay {
+            continue;
+        }
         let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
             return Err(IrLowerError::UnsupportedOp(
                 "createTable structured default column folded away",
@@ -5729,15 +6359,19 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(
-        default @ (IrDefault::Expr { .. }
-        | IrDefault::Container { .. }
-        | IrDefault::Json { .. }
-        | IrDefault::Nextval { .. }),
-    ) = default
-    else {
+    let Some(default) = default else {
         return Ok(());
     };
+    let needs_overlay = matches!(
+        default,
+        IrDefault::Expr { .. }
+            | IrDefault::Container { .. }
+            | IrDefault::Json { .. }
+            | IrDefault::Nextval { .. }
+    ) || matches!((ty, default), (ColType::Bytes, IrDefault::Literal { .. }));
+    if !needs_overlay {
+        return Ok(());
+    }
     if col.name != column {
         return Err(IrLowerError::UnsupportedOp(
             "structured default column folded away",
@@ -6104,7 +6738,23 @@ mod tests {
             .collect()
     }
 
-    use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride, IrJsonValue};
+    use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride, IrJsonValue, SafeU64};
+
+    #[test]
+    fn mysql_partition_bound_string_uses_mode_independent_literal() {
+        let value = PartitionBoundValue::String {
+            value: "a\\b'; DROP TABLE users; --".to_string(),
+        };
+        assert_eq!(
+            render_partition_bound_literal(&value, SqlDialect::Mysql).unwrap(),
+            "_utf8mb4 X'615c62273b2044524f50205441424c452075736572733b202d2d'"
+        );
+        assert_eq!(
+            render_partition_bound_literal(&value, SqlDialect::Postgres).unwrap(),
+            "'a\\b''; DROP TABLE users; --'",
+            "the PostgreSQL golden remains standard quote doubling"
+        );
+    }
 
     fn synth_default(r#fn: crate::model::expr::SynthFn) -> IrDefault {
         IrDefault::Expr {
@@ -6207,6 +6857,118 @@ mod tests {
             assert!(
                 create.up.contains(expected),
                 "{dialect:?} date column should render {expected:?}; got:\n{}",
+                create.up
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_column_defaults_render_as_native_binary_on_every_dialect() {
+        let ir = create_table_ir(
+            "files",
+            vec![TIrColumn {
+                name: "payload".into(),
+                ty: ColType::Bytes,
+                nullable: Some(false),
+                default: Some(IrDefault::Literal {
+                    value: crate::model::ir::IrScalar::Bytes(vec![0x00, 0x01, 0x7f, 0x80, 0xff]),
+                }),
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+
+        for (dialect, expected) in [
+            (
+                SqlDialect::Postgres,
+                "\"payload\" bytea NOT NULL DEFAULT decode('AAF/gP8=', 'base64')",
+            ),
+            (
+                SqlDialect::Mysql,
+                "`payload` LONGBLOB NOT NULL DEFAULT (X'00017f80ff')",
+            ),
+            (
+                SqlDialect::Sqlite,
+                "\"payload\" BLOB NOT NULL DEFAULT X'00017f80ff'",
+            ),
+        ] {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|err| panic!("{dialect:?} bytes default should lower: {err}"));
+            let create = migrations
+                .iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .expect("create migration");
+            assert!(
+                create.up.contains(expected),
+                "{dialect:?} should preserve the bytes default as a binary value; got:\n{}",
+                create.up
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_precision_decimal_columns_do_not_lower_as_floats() {
+        let ir = create_table_ir(
+            "ledger",
+            vec![TIrColumn {
+                name: "amount".into(),
+                ty: ColType::Decimal {
+                    precision: 30,
+                    scale: 10,
+                },
+                nullable: Some(false),
+                default: Some(IrDefault::Literal {
+                    value: crate::model::ir::IrScalar::Decimal(
+                        "12345678901234567890.1234567890".into(),
+                    ),
+                }),
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+
+        for (dialect, expected) in [
+            (SqlDialect::Postgres, "\"amount\" numeric(30, 10) NOT NULL"),
+            (SqlDialect::Mysql, "`amount` DECIMAL(30, 10) NOT NULL"),
+            (SqlDialect::Sqlite, "\"amount\" TEXT NOT NULL"),
+        ] {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|err| panic!("{dialect:?} decimal column should lower: {err}"));
+            let create = migrations
+                .iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .unwrap_or_else(|| panic!("{dialect:?} should emit CREATE TABLE: {migrations:#?}"));
+            assert!(
+                create.up.contains(expected),
+                "{dialect:?} fixed decimal should render {expected:?}; got:\n{}",
+                create.up
+            );
+            assert!(
+                !create.up.to_ascii_uppercase().contains("AMOUNT` DOUBLE")
+                    && !create.up.contains("\"amount\" double precision"),
+                "a fixed decimal must never degrade to a floating-point column: {}",
+                create.up
+            );
+            let expected_default = if matches!(dialect, SqlDialect::Sqlite) {
+                "DEFAULT '12345678901234567890.1234567890'"
+            } else {
+                "DEFAULT 12345678901234567890.1234567890"
+            };
+            assert!(
+                create.up.contains(expected_default),
+                "{dialect:?} should retain the exact decimal default; got:\n{}",
                 create.up
             );
         }
@@ -6455,20 +7217,10 @@ mod tests {
         let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let confined_sql = author
-            .load_and_lower(
-                &bytes,
-                "app_a",
-                &registry(&[]),
-                &LiveSchema::default()
-            )
+            .load_and_lower(&bytes, "app_a", &registry(&[]), &LiveSchema::default())
             .expect("resolved confined IR validates and lowers under confined profile");
         let platform_sql = author
-            .load_and_lower(
-                &bytes,
-                "app_a",
-                &registry(&[]),
-                &LiveSchema::default()
-            )
+            .load_and_lower(&bytes, "app_a", &registry(&[]), &LiveSchema::default())
             .expect("same resolved IR validates and lowers under platform profile");
         assert_eq!(
             migration_sql_pairs(&confined_sql),
@@ -7026,7 +7778,7 @@ mod tests {
         let spec = steps
             .iter()
             .find_map(|s| match s {
-                PlanStep::Backfill(spec) => Some(spec),
+                PlanStep::Backfill { spec, .. } => Some(spec),
                 _ => None,
             })
             .expect("the backfill produced a PlanStep::Backfill");
@@ -7059,7 +7811,7 @@ mod tests {
         let spec = steps
             .iter()
             .find_map(|s| match s {
-                PlanStep::Backfill(spec) => Some(spec),
+                PlanStep::Backfill { spec, .. } => Some(spec),
                 _ => None,
             })
             .expect("the backfill produced a PlanStep::Backfill");
@@ -7104,7 +7856,7 @@ mod tests {
             .lower_steps(&ir, &LiveSchema::default())
             .expect("an unqualified backfill lowers");
         assert!(
-            steps.iter().any(|s| matches!(s, PlanStep::Backfill(_))),
+            steps.iter().any(|s| matches!(s, PlanStep::Backfill { .. })),
             "the unqualified backfill produced a Backfill plan step; got {steps:?}"
         );
     }
@@ -7775,7 +8527,10 @@ mod tests {
             ),
             (
                 SqlDialect::Mysql,
-                format!("DEFAULT (CAST('{expected_json}' AS JSON))"),
+                format!(
+                    "DEFAULT (CAST(_utf8mb4 X'{}' AS JSON))",
+                    hex::encode(expected_json.as_bytes())
+                ),
             ),
             (SqlDialect::Sqlite, format!("DEFAULT '{expected_json}'")),
         ];
@@ -7791,13 +8546,11 @@ mod tests {
         }
     }
 
-    // Regression: a JSON string value containing a double-quote is serde-escaped as
-    // `\"`, so the rendered json text carries a backslash. MySQL's default sql_mode
-    // treats a backslash as a string-literal escape, so the MySQL `CAST(... AS JSON)`
-    // literal MUST double the backslash (or MySQL decodes `\"`→`"` and CAST sees
-    // corrupt JSON). PG (standard_conforming_strings) + SQLite must NOT double it.
+    // Regression: a JSON string containing a quote carries a JSON backslash. The
+    // MySQL CAST input is UTF-8 hex, so neither inherited sql_mode nor the pinned
+    // NO_BACKSLASH_ESCAPES setting can reinterpret that byte. PG stays unchanged.
     #[test]
-    fn json_value_string_with_backslash_escapes_only_for_mysql() {
+    fn json_value_string_with_backslash_is_mysql_mode_independent() {
         let value = IrJsonValue::Object(
             [("note".to_string(), IrJsonValue::Str("a\"b".to_string()))]
                 .into_iter()
@@ -7850,9 +8603,13 @@ mod tests {
             .expect("mysql lower")[0]
             .up
             .clone();
+        let expected_json = r#"{"note": "a\"b"}"#;
         assert!(
-            my.contains(r##"(CAST('{"note": "a\\"b"}' AS JSON))"##),
-            "MySQL must double the backslash:\n{my}"
+            my.contains(&format!(
+                "(CAST(_utf8mb4 X'{}' AS JSON))",
+                hex::encode(expected_json.as_bytes())
+            )),
+            "MySQL must preserve the JSON bytes through a hex expression:\n{my}"
         );
     }
 
@@ -8305,12 +9062,7 @@ mod tests {
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let migs = author
-            .load_and_lower(
-                bytes,
-                "app_a",
-                &registry(&[]),
-                &LiveSchema::default()
-            )
+            .load_and_lower(bytes, "app_a", &registry(&[]), &LiveSchema::default())
             .expect("a fresh createTable by its declarer loads + lowers");
         assert!(
             migs.iter()
@@ -8333,7 +9085,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("victim", "app_victim")]),
-                &LiveSchema::default()
+                &LiveSchema::default(),
             )
             .unwrap_err();
         match err {
@@ -8366,7 +9118,7 @@ mod tests {
                 "app_a",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard_cfg
+                &guard_cfg,
             )
             .expect_err(
                 "a fragment outside the confined schema must be denied via the wired entry",
@@ -8398,7 +9150,7 @@ mod tests {
                 "app_a",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard_cfg
+                &guard_cfg,
             )
             .expect("a clean createTable loads + guarded-lowers");
         assert_eq!(
@@ -8452,7 +9204,7 @@ mod tests {
                 "platform",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard
+                &guard,
             )
             .expect("platform exact createTable attachments validate + guarded-lower");
         assert_eq!(
@@ -8503,7 +9255,7 @@ mod tests {
                 "platform",
                 &registry(&[]),
                 &LiveSchema::default(),
-                &guard
+                &guard,
             )
             .expect("platform exact createTable lowers");
         let migrations = out.migrations();
@@ -8541,13 +9293,7 @@ mod tests {
         let guard = platform_guard();
         let mut owners = registry(&[]);
         let first = platform_author("platform", &guard)
-            .load_and_lower_guarded(
-                create,
-                "platform",
-                &owners,
-                &LiveSchema::default(),
-                &guard
-            )
+            .load_and_lower_guarded(create, "platform", &owners, &LiveSchema::default(), &guard)
             .expect("first file creates the platform table");
         assert_eq!(first.created_tables, vec!["platform_registry".to_string()]);
         for table in first.created_tables {
@@ -8557,13 +9303,7 @@ mod tests {
         }
 
         platform_author("platform", &guard)
-            .load_and_lower_guarded(
-                attach,
-                "platform",
-                &owners,
-                &LiveSchema::default(),
-                &guard
-            )
+            .load_and_lower_guarded(attach, "platform", &owners, &LiveSchema::default(), &guard)
             .expect("later-file structural attach passes after registry update");
     }
 
@@ -8757,7 +9497,7 @@ mod tests {
                 bytes,
                 "app_intruder",
                 &registry(&[("users", "app_owner")]),
-                &LiveSchema::default()
+                &LiveSchema::default(),
             )
             .unwrap_err();
         assert!(
@@ -8769,83 +9509,921 @@ mod tests {
         );
     }
 
-    // Note — the DML-step version folds the op's plan position so two BYTE-IDENTICAL
-    // DML ops in one migration mint DISTINCT ids (no silent net-applied-skip of the
-    // second), WHILE staying deterministic per (op_index, content) so re-lowering the
-    // SAME file yields the SAME ids (idempotent re-deploy).
     #[test]
-    fn dml_step_version_folds_op_index_yet_stays_deterministic() {
-        use crate::render::step::BindValue;
-        let binds = [BindValue::Int(7), BindValue::Text("dup".into())];
-        let v0 = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
-        let v0_again = dml_step_version(0, "app_a", "update", "UPDATE t SET …", &binds);
-        let v1 = dml_step_version(1, "app_a", "update", "UPDATE t SET …", &binds);
+    fn dml_content_edit_keeps_identity_and_moves_authoritative_checksum() {
+        let parse = |value: i64| {
+            serde_json::from_value::<MigrationIr>(serde_json::json!({
+                "ir_version": 1,
+                "name": "seed_accounts",
+                "owner_app": "app_a",
+                "ops": [{
+                    "op": "update",
+                    "table": "accounts",
+                    "set": { "score": value }
+                }]
+            }))
+            .expect("DML IR parses")
+        };
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let before = author
+            .lower_plan(&parse(7), &LiveSchema::default())
+            .expect("lower original DML");
+        let after = author
+            .lower_plan(&parse(8), &LiveSchema::default())
+            .expect("lower edited DML");
 
-        // Deterministic: re-lowering the identical (op_index, content) is the SAME id.
         assert_eq!(
-            v0, v0_again,
-            "same op_index + content must be deterministic (idempotent re-deploy)"
+            before.version, after.version,
+            "plan identity is content-free"
         );
-        // Distinct: two byte-identical ops at positions 0 and 1 must NOT collide.
-        assert_ne!(
-            v0, v1,
-            "distinct plan positions must mint distinct versions"
+        let (before_version, before_checksum) = match &before.steps[0] {
+            PlanStep::Dml {
+                version, checksum, ..
+            } => (version, checksum),
+            other => panic!("expected DML, got {other:?}"),
+        };
+        let (after_version, after_checksum) = match &after.steps[0] {
+            PlanStep::Dml {
+                version, checksum, ..
+            } => (version, checksum),
+            other => panic!("expected DML, got {other:?}"),
+        };
+        assert_eq!(
+            before_version, after_version,
+            "editing binds at the same ordinal must retain the journal version"
         );
-        // A re-authored op (changed binds) at the same position is still a fresh id.
-        let v0_diff =
-            dml_step_version(0, "app_a", "update", "UPDATE t SET …", &[BindValue::Int(8)]);
         assert_ne!(
-            v0, v0_diff,
-            "changed binds must mint a fresh id (no false resume)"
+            before_checksum, after_checksum,
+            "typed bind edits must move the authoritative checksum"
+        );
+        assert_eq!(before_checksum, &before.checksum);
+        assert_eq!(after_checksum, &after.checksum);
+    }
+
+    #[test]
+    fn mysql_on_conflict_target_is_carried_structurally_to_execution() {
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "upsert_status".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::Insert {
+                table: "status_codes".into(),
+                columns: vec!["code".into(), "label".into()],
+                rows: vec![vec![
+                    crate::model::ir::IrScalar::Int(200).into(),
+                    crate::model::ir::IrScalar::Str("ok".into()).into(),
+                ]],
+                on_conflict: Some(crate::model::ir::IrOnConflict {
+                    columns: vec!["code".into()],
+                    do_update: Some(BTreeMap::from([(
+                        "label".into(),
+                        crate::model::ir::IrScalar::Str("duplicate".into()).into(),
+                    )])),
+                }),
+                schema: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("MySQL upsert lowers");
+        assert!(matches!(
+            &plan.steps[0],
+            PlanStep::Dml {
+                conflict_target: Some(columns),
+                ..
+            } if columns == &["code".to_string()]
+        ));
+    }
+
+    fn limited_delete_ir() -> MigrationIr {
+        serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "trim_events",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "delete",
+                "table": "events",
+                "where": {
+                    "node": "binOp",
+                    "op": "lt",
+                    "lhs": { "node": "colRef", "name": "code" },
+                    "rhs": { "node": "literal", "value": 0 }
+                },
+                "limit": 1
+            }]
+        }))
+        .expect("limited delete IR parses")
+    }
+
+    fn sqlite_delete_table(
+        columns: &[(&str, bool)],
+        constraints: Vec<ConstraintSnapshot>,
+        indexes: Vec<IndexSnapshot>,
+        stored_create_sql: &str,
+    ) -> TableSnapshot {
+        TableSnapshot {
+            columns: columns
+                .iter()
+                .map(|(name, nullable)| ColumnSnapshot {
+                    name: (*name).to_string(),
+                    data_type: "text".to_string(),
+                    nullable: *nullable,
+                    ..Default::default()
+                })
+                .collect(),
+            indexes,
+            constraints,
+            runtime_options: Default::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: Some(stored_create_sql.to_string()),
+        }
+    }
+
+    fn sqlite_delete_live(table: TableSnapshot) -> LiveSchema {
+        LiveSchema::from_catalog_snapshot(
+            crate::model::snapshot::SchemaSnapshot {
+                tables: BTreeMap::from([("events".to_string(), table)]),
+                ..Default::default()
+            },
+            "app_a",
+        )
+    }
+
+    #[test]
+    fn sqlite_limited_delete_uses_primary_key_when_rowid_is_shadowed() {
+        let live = sqlite_delete_live(sqlite_delete_table(
+            &[("id", false), ("rowid", false), ("code", false)],
+            vec![ConstraintSnapshot {
+                name: "pk_events".to_string(),
+                kind: "PRIMARY KEY".to_string(),
+                definition: "PRIMARY KEY (id)".to_string(),
+                comment: None,
+            }],
+            Vec::new(),
+            "CREATE TABLE events (id TEXT PRIMARY KEY, rowid INTEGER NOT NULL, code INTEGER NOT NULL)",
+        ));
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower_plan(&limited_delete_ir(), &live)
+            .expect("catalog primary key makes the limited delete exact");
+        let [PlanStep::Dml { template, .. }] = plan.steps.as_slice() else {
+            panic!("expected one DML step")
+        };
+        assert_eq!(
+            template,
+            "DELETE FROM \"events\" WHERE \"id\" IN \
+             (SELECT \"id\" FROM \"events\" WHERE (\"code\" < ?1) LIMIT ?2)"
+        );
+        assert!(!template.contains("rowid"));
+    }
+
+    #[test]
+    fn sqlite_limited_delete_uses_composite_primary_key_on_without_rowid_table() {
+        let live = sqlite_delete_live(sqlite_delete_table(
+            &[("tenant", false), ("id", false), ("code", false)],
+            vec![ConstraintSnapshot {
+                name: "pk_events".to_string(),
+                kind: "PRIMARY KEY".to_string(),
+                definition: "PRIMARY KEY (tenant, id)".to_string(),
+                comment: None,
+            }],
+            Vec::new(),
+            "CREATE TABLE events (tenant TEXT NOT NULL, id TEXT NOT NULL, code INTEGER NOT NULL, PRIMARY KEY (tenant, id)) WITHOUT ROWID",
+        ));
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower_plan(&limited_delete_ir(), &live)
+            .expect("WITHOUT ROWID table lowers through its composite key");
+        let [PlanStep::Dml { template, .. }] = plan.steps.as_slice() else {
+            panic!("expected one DML step")
+        };
+        assert_eq!(
+            template,
+            "DELETE FROM \"events\" WHERE (\"tenant\", \"id\") IN \
+             (SELECT \"tenant\", \"id\" FROM \"events\" WHERE (\"code\" < ?1) LIMIT ?2)"
+        );
+        assert!(!template.contains("rowid"));
+    }
+
+    #[test]
+    fn sqlite_limited_delete_without_proven_identity_fails_before_plan_execution() {
+        let live = sqlite_delete_live(sqlite_delete_table(
+            &[("rowid", false), ("code", false)],
+            Vec::new(),
+            Vec::new(),
+            "CREATE TABLE events (rowid INTEGER NOT NULL, code INTEGER NOT NULL)",
+        ));
+        let err = IrAuthor::new("app", "app_a", SqlDialect::Sqlite)
+            .lower_plan(&limited_delete_ir(), &live)
+            .expect_err("a shadowed rowid is not a proven unique identity");
+        assert!(matches!(
+            err,
+            IrLowerError::DmlAssemble(
+                crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                    ref table
+                }
+            ) if table == "events"
+        ));
+    }
+
+    #[test]
+    fn sqlite_limited_delete_rejects_nullable_and_partial_unique_keys() {
+        let nullable = sqlite_delete_table(
+            &[("token", true), ("code", false)],
+            Vec::new(),
+            vec![IndexSnapshot::btree(
+                "events_token_key",
+                true,
+                vec!["token".to_string()],
+            )],
+            "CREATE TABLE events (token TEXT UNIQUE, code INTEGER NOT NULL)",
+        );
+        assert_eq!(sqlite_limited_delete_identity(&nullable), None);
+
+        let mut partial_index =
+            IndexSnapshot::btree("events_token_key", true, vec!["token".to_string()]);
+        partial_index.predicate = Some("code < 0".to_string());
+        let partial = sqlite_delete_table(
+            &[("token", false), ("code", false)],
+            Vec::new(),
+            vec![partial_index],
+            "CREATE TABLE events (token TEXT NOT NULL, code INTEGER NOT NULL)",
+        );
+        assert_eq!(sqlite_limited_delete_identity(&partial), None);
+
+        let full = sqlite_delete_table(
+            &[("token", false), ("code", false)],
+            Vec::new(),
+            vec![IndexSnapshot::btree(
+                "events_token_key",
+                true,
+                vec!["token".to_string()],
+            )],
+            "CREATE TABLE events (token TEXT NOT NULL, code INTEGER NOT NULL)",
+        );
+        assert_eq!(
+            sqlite_limited_delete_identity(&full),
+            Some(vec!["token".to_string()])
         );
     }
 
-    // Edge case: `plan_step_version` of a `PgExpandContract` whose `expand` chain is
-    // EMPTY is an internal invariant violation — `ExpandContractAuthor::author`
-    // ALWAYS produces E1..E3, so an empty expand means the author was bypassed or
-    // produced a malformed plan. The prior code fell back to
-    // `MigrationId::generate()` (a RANDOM, non-deterministic plan version) on this
-    // path, so a buggy/internal-broken plan would silently get a DIFFERENT version
-    // every call — defeating idempotent re-deploy and masking the bug. The fix
-    // fails closed: a deterministic sentinel id (NOT random) so two calls on the
-    // same broken plan agree, AND a `debug_assert` so the bug surfaces loudly in
-    // dev/test. This test pins the DETERMINISM (release-safe) half — it must hold in
-    // `cfg(test)` too, so it is written to avoid tripping the debug_assert by
-    // constructing the step through a helper that suppresses the assert. We assert
-    // the two computed ids are EQUAL (deterministic) rather than random.
     #[test]
-    fn plan_step_version_empty_pg_expand_is_deterministic_not_random() {
-        use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
-        // A degenerate (internally-invalid) ExpandContractPlan with NO expand steps.
-        let degenerate = ExpandContractPlan {
-            intent: OnlineIntent::RenameColumn {
-                table: "t".into(),
-                from: "a".into(),
-                to: "b".into(),
-                ty: "text".into(),
+    fn sqlite_trigger_limited_delete_is_rejected_without_live_identity_facts() {
+        let stmt = TriggerStmt::Delete {
+            table: "events".to_string(),
+            r#where: Expr::UnaryOp {
+                op: crate::model::expr::UnaryOp::IsNull,
+                operand: Box::new(Expr::col("code")),
             },
-            expand: Vec::new(),
-            contract: Vec::new(),
-            backfill: crate::model::backfill::BackfillSpec {
-                schema: "app".into(),
-                table: "t".into(),
-                cursor_column: "id".into(),
-                batch_size: 1000,
-                set_clause: "b = a".into(),
-                filter: None,
-                name: "rename_a_b".into(),
-            },
-            trigger_version: crate::model::migration::MigrationId::generate(),
+            limit: Some(SafeU64::new(1).unwrap()),
+            schema: None,
         };
-        let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(degenerate));
-        // Determinism: two computations of the version on the SAME (broken) step
-        // must agree. The pre-fix `MigrationId::generate()` fallback would FAIL this
-        // (a fresh random id each call).
-        let a = plan_step_version_empty_expand_sentinel(&step);
-        let b = plan_step_version_empty_expand_sentinel(&step);
+        let err = render_sqlite_trigger_stmt(&stmt, "app")
+            .expect_err("trigger body rendering cannot guess at hidden rowid");
+        assert!(matches!(
+            err,
+            IrLowerError::DmlAssemble(
+                crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                    ref table
+                }
+            ) if table == "events"
+        ));
+    }
+
+    #[test]
+    fn supported_dml_flag_edits_keep_ids_and_move_authoritative_checksum() {
+        let base: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "update_accounts",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "update",
+                "table": "accounts",
+                "set": { "score": 7 }
+            }]
+        }))
+        .expect("base IR parses");
+        let mut with_flags = base.clone();
+        with_flags.flags.destructive = Some(true);
+        let mut with_approval = base.clone();
+        with_approval.flags.requires_approval = Some(true);
+
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let lower = |ir: &MigrationIr| {
+            author
+                .lower_plan(ir, &LiveSchema::default())
+                .expect("valid metadata lowers without a panic")
+        };
+        let baseline = lower(&base);
+        let baseline_step = match &baseline.steps[0] {
+            PlanStep::Dml { version, .. } => version,
+            other => panic!("expected DML, got {other:?}"),
+        };
+
+        for (field, edited) in [
+            ("flags.destructive", with_flags),
+            ("flags.requires_approval", with_approval),
+        ] {
+            let plan = lower(&edited);
+            let step = match &plan.steps[0] {
+                PlanStep::Dml {
+                    version, checksum, ..
+                } => {
+                    assert_eq!(checksum, &plan.checksum);
+                    version
+                }
+                other => panic!("expected DML, got {other:?}"),
+            };
+            assert_eq!(
+                plan.version, baseline.version,
+                "editing {field} must retain the content-free plan id"
+            );
+            assert_eq!(
+                step, baseline_step,
+                "editing {field} must retain the ordinal step id"
+            );
+            assert_ne!(
+                plan.checksum, baseline.checksum,
+                "editing {field} must move the full IR checksum"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_flags_cannot_downgrade_delete_approval() {
+        let mut ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "remove_retired_accounts",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "delete",
+                "table": "accounts",
+                "where": {
+                    "node": "binOp",
+                    "op": "eq",
+                    "lhs": { "node": "colRef", "name": "retired" },
+                    "rhs": { "node": "literal", "value": true }
+                }
+            }]
+        }))
+        .expect("delete IR parses");
+        ir.flags.destructive = Some(false);
+        ir.flags.requires_approval = Some(false);
+
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("safety flags are derived from the operation");
+        let [PlanStep::Dml {
+            destructive,
+            requires_approval,
+            ..
+        }] = plan.steps.as_slice()
+        else {
+            panic!("expected one DML step, got {:?}", plan.steps);
+        };
+        assert!(*destructive);
+        assert!(*requires_approval);
+        assert!(plan.flags.destructive);
+        assert!(plan.flags.requires_approval);
         assert_eq!(
-            a, b,
-            "an empty PG expand must NOT mint a non-deterministic (random) plan version"
+            plan.steps[0].approval_scope_version(),
+            Some(match &plan.steps[0] {
+                PlanStep::Dml { version, .. } => version.as_str(),
+                _ => unreachable!(),
+            })
+        );
+    }
+
+    #[test]
+    fn rich_steps_reject_metadata_their_state_machine_cannot_honor() {
+        let base: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "update_accounts",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "update",
+                "table": "accounts",
+                "set": { "score": 7 }
+            }]
+        }))
+        .expect("DML IR parses");
+        let dependency = MigrationId::derive("metadata_test", b"dependency");
+
+        let mut cases = Vec::new();
+        let mut dependency_case = base.clone();
+        dependency_case
+            .depends_on
+            .push(dependency.as_str().to_string());
+        cases.push(("depends_on", dependency_case));
+        let mut supersedes_case = base.clone();
+        supersedes_case
+            .supersedes
+            .push(dependency.as_str().to_string());
+        cases.push(("supersedes", supersedes_case));
+        let mut precondition_case = base.clone();
+        precondition_case
+            .preconditions
+            .push(crate::model::precondition::PreconditionCheck::halt(
+                crate::model::precondition::Precondition::TableExists {
+                    table: "accounts".to_string(),
+                },
+            ));
+        cases.push(("preconditions", precondition_case));
+        let mut timeout_case = base;
+        timeout_case.flags.timeout_ms =
+            Some(crate::model::ir::SafeU64::new(1_000).expect("safe timeout"));
+        cases.push(("flags.timeout_ms", timeout_case));
+
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        for (field, ir) in cases {
+            let Err(error) = author.lower_plan(&ir, &LiveSchema::default()) else {
+                panic!("{field} must fail closed for a DML plan");
+            };
+            assert!(
+                error.to_string().contains(field),
+                "{field} error must name the ignored metadata: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ddl_plan_preconditions_run_on_the_first_journaled_step() {
+        let mut ir = create_table_ir(
+            "accounts_archive",
+            vec![TIrColumn {
+                name: "id".into(),
+                ty: ColType::BigInt,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+        let precondition = crate::model::precondition::PreconditionCheck::halt(
+            crate::model::precondition::Precondition::TableExists {
+                table: "accounts".to_string(),
+            },
+        );
+        ir.preconditions.push(precondition.clone());
+
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("DDL preconditions are executable by the generic migration runner");
+        let [PlanStep::Ddl(migration)] = plan.steps.as_slice() else {
+            panic!("expected one DDL step, got {:?}", plan.steps);
+        };
+        assert_eq!(
+            migration.preconditions,
+            std::slice::from_ref(&precondition)
+        );
+        assert_eq!(plan.preconditions, [precondition]);
+    }
+
+    #[test]
+    fn repeatable_ir_override_reaches_each_dialect_migration() {
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "active_users".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateView {
+                name: "active_users".into(),
+                schema: None,
+                columns: None,
+                query: ViewQuery::Structured {
+                    select: Box::new(SelectAst {
+                        from: TableRef {
+                            name: "users".into(),
+                            schema: None,
+                            alias: None,
+                        },
+                        projection: vec![SelectItem::ColRef {
+                            table: None,
+                            name: "id".into(),
+                            alias: None,
+                        }],
+                        joins: Vec::new(),
+                        r#where: None,
+                        group_by: Vec::new(),
+                        having: None,
+                        order_by: None,
+                        limit: None,
+                    }),
+                },
+                replace: Some(true),
+                materialized: None,
+            }],
+            flags: IrFlagsOverride {
+                repeatable: Some(true),
+                timeout_ms: Some(crate::model::ir::SafeU64::new(12_345).unwrap()),
+                lock_timeout_ms: Some(crate::model::ir::SafeU64::new(2_345).unwrap()),
+                ..IrFlagsOverride::default()
+            },
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let plan = IrAuthor::new("app", "app_a", dialect)
+                .lower_plan(&ir, &LiveSchema::default())
+                .unwrap_or_else(|error| panic!("{dialect:?} repeatable view lowers: {error}"));
+
+            assert!(
+                plan.flags.repeatable,
+                "{dialect:?} plan must expose the authored flag"
+            );
+            assert_eq!(plan.flags.timeout_ms, Some(12_345));
+            assert_eq!(plan.flags.lock_timeout_ms, Some(2_345));
+            let [PlanStep::Ddl(migration)] = plan.steps.as_slice() else {
+                panic!(
+                    "expected one {dialect:?} DDL migration, got {:?}",
+                    plan.steps
+                );
+            };
+            assert!(
+                migration.flags.repeatable,
+                "the generic executor partitions on the {dialect:?} Migration flag"
+            );
+            assert_eq!(migration.flags.timeout_ms, Some(12_345));
+            assert_eq!(migration.flags.lock_timeout_ms, Some(2_345));
+            assert_eq!(
+                migration.down, None,
+                "a {dialect:?} replace-style repeatable has no once-only rollback"
+            );
+            assert_eq!(
+                migration.checksum,
+                crate::model::load::authoritative_ir_checksum(&ir),
+                "{dialect:?} execution flags and authoritative IR identity stay anchored together"
+            );
+        }
+    }
+
+    #[test]
+    fn repeatable_ir_refuses_once_only_data_steps() {
+        let mut ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "refresh_accounts",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "update",
+                "table": "accounts",
+                "set": { "score": 7 }
+            }]
+        }))
+        .expect("DML IR parses");
+        ir.flags.repeatable = Some(true);
+
+        let error = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect_err("a repeatable DML step cannot be silently run once");
+        assert!(matches!(
+            error,
+            IrLowerError::RepeatableStepUnsupported("a DML step")
+        ));
+    }
+
+    #[test]
+    fn cross_kind_edit_keeps_ordinal_id_and_moves_checksum() {
+        let parse = |op: serde_json::Value| {
+            serde_json::from_value::<MigrationIr>(serde_json::json!({
+                "ir_version": 1,
+                "name": "accounts_step",
+                "owner_app": "app_a",
+                "ops": [op]
+            }))
+            .expect("IR parses")
+        };
+        let dml = parse(serde_json::json!({
+            "op": "update",
+            "table": "accounts",
+            "set": { "score": 7 }
+        }));
+        let ddl = parse(serde_json::json!({
+            "op": "addColumn",
+            "table": "accounts",
+            "column": "score",
+            "type": "int"
+        }));
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let dml_plan = author
+            .lower_plan(&dml, &LiveSchema::default())
+            .expect("DML lowers");
+        let ddl_plan = author
+            .lower_plan(&ddl, &LiveSchema::default())
+            .expect("DDL lowers");
+        let dml_version = match &dml_plan.steps[0] {
+            PlanStep::Dml { version, .. } => version,
+            other => panic!("expected DML, got {other:?}"),
+        };
+        let ddl_version = match &ddl_plan.steps[0] {
+            PlanStep::Ddl(migration) => &migration.version,
+            other => panic!("expected DDL, got {other:?}"),
+        };
+
+        assert_eq!(dml_plan.version, ddl_plan.version);
+        assert_eq!(
+            dml_version, ddl_version,
+            "changing a step kind at the same ordinal must keep its journal id"
+        );
+        assert_ne!(
+            dml_plan.checksum, ddl_plan.checksum,
+            "the cross-kind edit must be detected as checksum drift"
+        );
+    }
+
+    #[test]
+    fn one_step_to_empty_plan_keeps_anchor_key_and_reports_drift() {
+        let parse = |ops: serde_json::Value| {
+            serde_json::from_value::<MigrationIr>(serde_json::json!({
+                "ir_version": 1,
+                "name": "accounts_step",
+                "owner_app": "app_a",
+                "ops": ops
+            }))
+            .expect("IR parses")
+        };
+        let one_step = parse(serde_json::json!([{
+            "op": "update",
+            "table": "accounts",
+            "set": { "score": 7 }
+        }]));
+        let empty = parse(serde_json::json!([]));
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let applied = author
+            .lower_plan(&one_step, &LiveSchema::default())
+            .expect("one-step plan lowers");
+        let edited = author
+            .lower_plan(&empty, &LiveSchema::default())
+            .expect("empty plan lowers with an anchor");
+        let applied_version = match &applied.steps[0] {
+            PlanStep::Dml { version, .. } => version,
+            other => panic!("expected DML, got {other:?}"),
+        };
+        let anchor = match &edited.steps[0] {
+            PlanStep::Ddl(migration) => migration,
+            other => panic!("expected journal anchor DDL, got {other:?}"),
+        };
+
+        assert_eq!(edited.steps.len(), 1);
+        assert_eq!(anchor.up, "SELECT 1");
+        assert_eq!(anchor.down.as_deref(), Some("SELECT 1"));
+        assert_eq!(applied.version, edited.version);
+        assert_eq!(applied_version, &anchor.version);
+        assert_ne!(applied.checksum, edited.checksum);
+
+        let manifest = crate::ops::status::PlanStatusManifest::from_applied_plan(&edited, &[])
+            .expect("empty-plan anchor projects to status");
+        let journal = [crate::apply::journal::AppliedEntry {
+            version: applied_version.as_str().to_string(),
+            checksum: applied.checksum.as_str().to_string(),
+            phase: crate::apply::journal::Phase::Completed,
+            kind: None,
+        }];
+        let status = crate::ops::status::reconcile_applied_plans(&[manifest], &journal, &[])
+            .expect("edited empty plan reconciles");
+        assert_eq!(
+            status.plans[0].state,
+            crate::ops::status::ReconciledPlanState::Drifted
+        );
+        assert_eq!(
+            status.plans[0].steps[0].state,
+            crate::ops::status::PlanStatusStepState::Drifted
+        );
+    }
+
+    #[test]
+    fn empty_and_unselected_dialectal_plans_have_idempotent_anchors() {
+        let parse = |ops: serde_json::Value| {
+            serde_json::from_value::<MigrationIr>(serde_json::json!({
+                "ir_version": 1,
+                "name": "target_specific_accounts",
+                "owner_app": "app_a",
+                "ops": ops
+            }))
+            .expect("IR parses")
+        };
+        let empty = parse(serde_json::json!([]));
+        let dialectal = parse(serde_json::json!([{
+            "op": "dialectal",
+            "pg": [{
+                "op": "update",
+                "table": "accounts",
+                "set": { "score": 7 }
+            }]
+        }]));
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
+        let lower_twice = |ir: &MigrationIr| {
+            (
+                author
+                    .lower_plan(ir, &LiveSchema::default())
+                    .expect("first empty plan lowers"),
+                author
+                    .lower_plan(ir, &LiveSchema::default())
+                    .expect("repeated empty plan lowers"),
+            )
+        };
+
+        for (label, ir) in [("empty", &empty), ("unselected dialect leg", &dialectal)] {
+            let (first, repeated) = lower_twice(ir);
+            assert_eq!(first.version, repeated.version, "{label} plan id");
+            assert_eq!(first.checksum, repeated.checksum, "{label} checksum");
+            assert_eq!(first.steps.len(), 1, "{label} anchor count");
+            let first_anchor = match &first.steps[0] {
+                PlanStep::Ddl(migration) => migration,
+                other => panic!("expected {label} journal anchor, got {other:?}"),
+            };
+            let repeated_anchor = match &repeated.steps[0] {
+                PlanStep::Ddl(migration) => migration,
+                other => panic!("expected repeated {label} journal anchor, got {other:?}"),
+            };
+            assert_eq!(first_anchor.version, repeated_anchor.version);
+            assert_eq!(first_anchor.checksum, repeated_anchor.checksum);
+
+            let manifest =
+                crate::ops::status::PlanStatusManifest::from_applied_plan(&repeated, &[])
+                    .expect("repeated anchor projects to status");
+            let journal = [crate::apply::journal::AppliedEntry {
+                version: first_anchor.version.as_str().to_string(),
+                checksum: first_anchor.checksum.as_str().to_string(),
+                phase: crate::apply::journal::Phase::Completed,
+                kind: None,
+            }];
+            let status = crate::ops::status::reconcile_applied_plans(&[manifest], &journal, &[])
+                .expect("repeated anchor reconciles");
+            assert_eq!(
+                status.plans[0].state,
+                crate::ops::status::ReconciledPlanState::Applied,
+                "{label} rerun must be an idempotent applied plan"
+            );
+        }
+    }
+
+    #[test]
+    fn identical_dml_steps_get_distinct_stable_ordinals() {
+        let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "double_increment",
+            "owner_app": "app_a",
+            "ops": [
+                { "op": "update", "table": "accounts", "set": { "score": 1 } },
+                { "op": "update", "table": "accounts", "set": { "score": 1 } }
+            ]
+        }))
+        .expect("DML IR parses");
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let first = author
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("lower first copy");
+        let second = author
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("lower second copy");
+        let versions = |plan: &AppliedPlan| {
+            plan.steps
+                .iter()
+                .map(|step| match step {
+                    PlanStep::Dml { version, .. } => version.clone(),
+                    other => panic!("expected DML, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let first_versions = versions(&first);
+        assert_ne!(first_versions[0], first_versions[1]);
+        assert_eq!(first_versions, versions(&second));
+    }
+
+    #[test]
+    fn online_rename_carries_its_logical_plan_identity() {
+        let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "rename_accounts_label",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "renameColumn",
+                "table": "accounts",
+                "from": "label",
+                "to": "display_name",
+                "type": "text"
+            }]
+        }))
+        .expect("rename IR parses");
+        let live = LiveSchema::from_catalog_snapshot(
+            crate::model::snapshot::SchemaSnapshot {
+                tables: BTreeMap::from([(
+                    "accounts".to_string(),
+                    crate::model::snapshot::TableSnapshot {
+                        columns: vec![crate::model::snapshot::ColumnSnapshot {
+                            name: "label".to_string(),
+                            data_type: "text".to_string(),
+                            nullable: true,
+                            ..Default::default()
+                        }],
+                        indexes: Vec::new(),
+                        constraints: Vec::new(),
+                        runtime_options: Default::default(),
+                        partition_by: None,
+                        comment: None,
+                        stored_create_sql: None,
+                    },
+                )]),
+                ..Default::default()
+            },
+            "app_a",
+        );
+        let plan = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower_plan(&ir, &live)
+            .expect("rename lowers");
+
+        let [PlanStep::OnlineRename(RenameStep::PgExpandContract(rename))] = plan.steps.as_slice()
+        else {
+            panic!("expected one PostgreSQL online rename step")
+        };
+        assert_eq!(rename.plan_version.as_ref(), Some(&plan.version));
+        assert_ne!(
+            rename.expand[0].version, plan.version,
+            "logical plan identity must not be confused with the first journal substep"
+        );
+    }
+
+    #[test]
+    fn ddl_steps_keep_authored_order_when_stable_ids_sort_in_reverse() {
+        let mut ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "ddl_authored_order",
+            "owner_app": "app_a",
+            "ops": [
+                {
+                    "op": "createTable",
+                    "name": "widgets",
+                    "columns": [{ "name": "label", "type": "text" }]
+                },
+                {
+                    "op": "addColumn",
+                    "table": "widgets",
+                    "column": "qty",
+                    "type": "int"
+                }
+            ]
+        }))
+        .expect("DDL IR parses");
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Mysql);
+
+        // Derived ids are deliberately content-free and hash-distributed. Find a
+        // deterministic plan name where the CREATE id sorts after the ALTER id so
+        // this test cannot accidentally pass through the executor's id tie-breaker.
+        let migrations = (0..256)
+            .find_map(|suffix| {
+                ir.name = format!("ddl_authored_order_{suffix}");
+                let plan = author
+                    .lower_plan(&ir, &LiveSchema::default())
+                    .expect("lower DDL plan");
+                let migrations = ddl_migs(&plan.steps);
+                let create = migrations
+                    .iter()
+                    .find(|migration| migration.up.contains("CREATE TABLE"))?;
+                let alter = migrations
+                    .iter()
+                    .find(|migration| migration.up.contains("ADD COLUMN"))?;
+                (create.version > alter.version).then_some(migrations)
+            })
+            .expect("a reverse-sorting stable-id fixture exists");
+
+        for pair in migrations.windows(2) {
+            assert_eq!(
+                pair[1]
+                    .depends_on
+                    .iter()
+                    .filter(|dependency| **dependency == pair[0].version)
+                    .count(),
+                1,
+                "each DDL step depends exactly once on the preceding authored step"
+            );
+        }
+
+        let completed = std::collections::HashMap::new();
+        let satisfied = std::collections::HashSet::new();
+        let ordered = crate::apply::executor::order_pending(&migrations, &completed, &satisfied)
+            .expect("authored DDL dependency chain is sortable");
+        let create_position = ordered
+            .iter()
+            .position(|migration| migration.up.contains("CREATE TABLE"))
+            .expect("ordered plan has CREATE TABLE");
+        let alter_position = ordered
+            .iter()
+            .position(|migration| migration.up.contains("ADD COLUMN"))
+            .expect("ordered plan has ADD COLUMN");
+        assert!(
+            create_position < alter_position,
+            "CREATE TABLE must execute before the authored ADD COLUMN"
         );
     }
 

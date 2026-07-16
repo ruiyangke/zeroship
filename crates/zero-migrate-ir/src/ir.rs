@@ -1754,10 +1754,13 @@ impl CommentTarget {
 /// the optional `insert { onConflict }` upsert clause. A
 /// CLOSED carrier: the conflict-target columns + an optional `doUpdate` map of
 /// `column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
-/// raw SQL string (property A). **PostgreSQL-only** — the lowering renders it on
-/// PG and HARD-REJECTS it on `SQLite` (`dialect_scope = PgOnly`). Modelled as a
-/// distinct IR type so the wire shape is closed + schemars-expressible and a
-/// hand-crafted IR envelope cannot smuggle an arbitrary clause.
+/// raw SQL string. PostgreSQL and SQLite render an exact conflict target. MySQL
+/// uses its native duplicate-key clause for non-empty `doUpdate`, guards updates
+/// with the authored target columns, and errors on a different unique-key
+/// collision. Targeted `DO NOTHING` is refused on MySQL because the dialect has
+/// no exact form. Modelled as a distinct IR type so the wire shape is closed +
+/// schemars-expressible and a hand-crafted IR envelope cannot smuggle an arbitrary
+/// clause.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IrOnConflict {
@@ -2913,11 +2916,10 @@ pub enum Op {
         columns: Vec<String>,
         /// Rows, each a positional list of typed scalar/closed-expression values.
         rows: Vec<Vec<IrValue>>,
-        /// the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:
-        /// PG renders it natively; on a `SQLite` target it is a hard authoring error
-        /// (`dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is
-        /// no portable `SQLite` upsert and no raw route (property A). Absent ⇒ a plain
-        /// insert (portable on both backends).
+        /// the optional structured upsert clause. PostgreSQL and SQLite render an
+        /// exact conflict target. MySQL supports non-empty `doUpdate` when its
+        /// target can be guarded exactly; targeted do-nothing is refused there.
+        /// Absent means a plain portable insert.
         #[serde(skip_serializing_if = "Option::is_none")]
         on_conflict: Option<IrOnConflict>,
         /// the schema qualifier. DML carries `schema` but NO

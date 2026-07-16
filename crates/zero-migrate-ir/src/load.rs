@@ -366,11 +366,11 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// The **authoritative, dialect-neutral plan checksum** over a loaded
 /// [`MigrationIr`] — the drift anchor the deploy path journals.
 ///
-/// This is `Checksum::of_ir` over the canonical op list + the
-/// derived-then-overridden flags + the SERVER-STAMPED `owner_app`. It differs
-/// from [`recompute_hint_domain_checksum`] in exactly one way: it INCLUDES
-/// `owner_app` (the hint domain excludes it because the builder can't predict the
-/// server stamp; the authoritative journal anchor includes it — see `migration.rs`).
+/// This is `Checksum::of_ir` over every apply-relevant typed field: the canonical
+/// op list, the effective flag overrides, the server-stamped `owner_app`, exact
+/// `depends_on` and `supersedes` lists, and preconditions. It differs from
+/// [`recompute_hint_domain_checksum`] because the advisory hint helper is limited
+/// to its historical default-metadata domain and excludes `owner_app`.
 ///
 /// **Why this is the drift anchor and the rendered SQL is NOT.** The anchor is
 /// the checksum over the canonical op list — one plan checksum over the canonical
@@ -382,27 +382,40 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
 /// which the IR Lower stamps with THIS value — see [`crate::render::lower::IrAuthor::lower_plan`]).
 ///
-/// **Flags scope.** The [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→
-/// [`MigrationFlags`] and `String`→`MigrationId` merges are a later wave, so this
-/// folds the DEFAULT flags + EMPTY deps/supersedes — IDENTICAL to the hint domain
-/// (so the hint compare and the journaled anchor never disagree on a default-flags
-/// IR). The caller MUST gate on [`hint_domain_uncomputable_field`] returning `None`
-/// (the load gate already refuses an IR whose flags/deps/supersedes are non-default
-/// AND carry a hint; a non-default IR with NO hint is out of scope and the
-/// deploy path does not reach this helper for one).
+/// `name` remains part of the stable plan identity rather than its content, and
+/// `ir_version` only selects the already-validated wire interpretation. The
+/// advisory `checksum` field is excluded to avoid self-reference.
 #[must_use]
 pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
-    debug_assert!(
-        hint_domain_uncomputable_field(ir).is_none(),
-        "authoritative_ir_checksum called on an IR with a not-yet-foldable \
-         flags/deps/supersedes domain — this folds default flags + empty deps only"
-    );
-    Checksum::of_ir(
+    let mut flags = MigrationFlags::default();
+    if let Some(value) = ir.flags.transactional {
+        flags.transactional = value;
+    }
+    if let Some(value) = ir.flags.destructive {
+        flags.destructive = value;
+    }
+    if let Some(value) = ir.flags.online {
+        flags.online = value;
+    }
+    if let Some(value) = ir.flags.requires_approval {
+        flags.requires_approval = value;
+    }
+    if let Some(value) = ir.flags.repeatable {
+        flags.repeatable = value;
+    }
+    if let Some(value) = ir.flags.engine_goodie_ddl {
+        flags.engine_goodie_ddl = value;
+    }
+    flags.timeout_ms = ir.flags.timeout_ms.map(crate::ir::SafeU64::get);
+    flags.lock_timeout_ms = ir.flags.lock_timeout_ms.map(crate::ir::SafeU64::get);
+    flags.phase = ir.flags.phase;
+
+    Checksum::of_ir_strings(
         &crate::ir::CanonicalOpList(&ir.ops),
-        &MigrationFlags::default(),
-        &ir.owner_app, // server-stamped by load_ir_document; the AUTHORITATIVE anchor includes it
-        &[],
-        &[],
+        &flags,
+        &ir.owner_app,
+        &ir.depends_on,
+        &ir.supersedes,
         &ir.preconditions,
     )
 }

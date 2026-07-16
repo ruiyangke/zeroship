@@ -39,6 +39,8 @@ use crate::apply::journal::{
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 
+use super::{MysqlInflightDdlMarker, MysqlInflightResolution};
+
 /// The fixed, short, table-local immutability trigger names. ASCII-safe literals —
 /// never embed the (hyphenated-UUID) app id (the meta database name carries it).
 /// A MySQL trigger name is unique per SCHEMA (unlike Postgres' per-table), so the
@@ -81,7 +83,6 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
     let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
-    let meta_lit = cfg.pg.meta_schema.replace('\'', "''");
 
     // 1. Meta database (MySQL's "schema").
     conn.batch(&format!("CREATE DATABASE IF NOT EXISTS {meta}"))
@@ -99,9 +100,9 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
             event_kind  VARCHAR(16)  NOT NULL,
-            version     VARCHAR(255) NOT NULL,
+            version     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
             name        VARCHAR(255) NOT NULL,
-            checksum    VARCHAR(255) NOT NULL,
+            checksum    VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
             `at`        TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
             `by`        VARCHAR(255) NOT NULL,
             exec_ms     BIGINT,
@@ -130,28 +131,88 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
             id                 BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-            squash_version     VARCHAR(255) NOT NULL,
-            superseded_version VARCHAR(255) NOT NULL,
-            recorded_at        TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+            squash_version     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            superseded_version VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            recorded_at        TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            UNIQUE KEY schema_migrations_supersedes_edge_uq
+                (squash_version, superseded_version)
         ) ENGINE=InnoDB"
     ))
     .await?;
 
     // 2b. The MUTABLE inflight side-table for two-phase non-txn markers. NOT
-    // guarded by the immutability triggers — the marker is deleted on
-    // completion / recovery. (MySQL DDL is auto-committing, so the non-txn
-    // two-phase path is the norm for every MySQL migration; see the backend's
-    // `ddl_is_transactional`.)
+    // guarded by the immutability triggers; the marker is deleted on successful
+    // completion or by an audited repair. (MySQL DDL is auto-committing, so the
+    // non-txn two-phase path is the norm for every MySQL migration; see the
+    // backend's `ddl_is_transactional`.)
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_inflight (
-            version     VARCHAR(255) NOT NULL PRIMARY KEY,
+            version     VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
             name        VARCHAR(255) NOT NULL,
-            checksum    VARCHAR(255) NOT NULL,
+            checksum    VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
             started_at  TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
             applied_by  VARCHAR(255) NOT NULL
         ) ENGINE=InnoDB"
     ))
     .await?;
+
+    // Immutable operator recovery audit. Clearing an ambiguous marker for a
+    // verified retry and reconciling a fully-landed migration are both durable,
+    // append-only decisions rather than undocumented direct table edits.
+    conn.batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_recovery (
+            id            BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            version       VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            checksum      VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            action        VARCHAR(32) NOT NULL,
+            reason        TEXT NOT NULL,
+            recovered_at  TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            recovered_by  VARCHAR(255) NOT NULL,
+            CONSTRAINT schema_migrations_recovery_action_chk
+                CHECK (action IN ('mark_applied','clear_for_retry'))
+        ) ENGINE=InnoDB"
+    ))
+    .await?;
+
+    // Journals created by older releases inherited the server/database default
+    // collation. A case-insensitive version or checksum changes journal identity
+    // (`mig_A` and `mig_a` collapse), so bootstrap verifies every identity column
+    // and upgrades only the known fixed VARCHAR definitions. Converting to
+    // utf8mb4 with a binary collation preserves all text while widening equality
+    // to the byte-sensitive semantics used by the in-memory model.
+    ensure_binary_identity_columns(conn, cfg, &meta).await?;
+
+    // Upgrade journals created before the edge uniqueness invariant was added.
+    // Absence is repaired; a same-named but malformed index fails closed. Merely
+    // finding the name is not enough because a non-unique, prefixed, reordered,
+    // or partial key does not enforce one exact squash edge.
+    let edge_index = conn
+        .query(
+            "SELECT NON_UNIQUE AS non_unique,
+                    SEQ_IN_INDEX AS seq_in_index,
+                    COLUMN_NAME AS column_name,
+                    SUB_PART AS sub_part
+               FROM information_schema.STATISTICS
+              WHERE TABLE_SCHEMA = ?
+                AND TABLE_NAME = 'schema_migrations_supersedes'
+                AND INDEX_NAME = 'schema_migrations_supersedes_edge_uq'
+              ORDER BY SEQ_IN_INDEX",
+            &[cfg.pg.meta_schema.as_str().into()],
+        )
+        .await?;
+    if edge_index.is_empty() {
+        conn.batch(&format!(
+            "ALTER TABLE {meta}.schema_migrations_supersedes
+                 ADD UNIQUE KEY schema_migrations_supersedes_edge_uq
+                     (squash_version, superseded_version)"
+        ))
+        .await?;
+    } else if !is_exact_supersession_edge_index(&edge_index)? {
+        return Err(JournalError::Backend(
+            "mysql journal: index schema_migrations_supersedes_edge_uq exists but is not the exact full-column UNIQUE (squash_version, superseded_version) key; repair the index before continuing"
+                .to_string(),
+        ));
+    }
 
     // 3. Immutability triggers on BOTH append-only tables (the events table +
     // _supersedes). MySQL has no `CREATE TRIGGER IF NOT EXISTS` before 8.0.29
@@ -162,12 +223,15 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     // the least-privilege migrator role lacks, and the meta database is
     // admin-owned — the append-only guarantee rests on triggers + privilege
     // model, matching the PG side's defense-in-depth posture.)
-    for (ord, tbl) in ["schema_migrations", "schema_migrations_supersedes"]
-        .into_iter()
-        .enumerate()
+    for (ord, tbl) in [
+        "schema_migrations",
+        "schema_migrations_supersedes",
+        "schema_migrations_recovery",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let tbl_q = quote_ident_mysql(tbl)?;
-        let tbl_lit = tbl.replace('\'', "''");
         for (op, verb) in [("UPDATE", "update"), ("DELETE", "delete")] {
             // Trigger names are unique per SCHEMA in MySQL (not per table), so the
             // name embeds a per-table ordinal + the op — short, fixed, ASCII (never
@@ -175,7 +239,6 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
             // 64-char identifier limit).
             let trg = format!("{IMMUTABLE_TRG_PREFIX}_{ord}_{verb}");
             let trg_q = quote_ident_mysql(&trg)?;
-            let trg_lit = trg.replace('\'', "''");
             // Guard on information_schema so re-bootstrap is a no-op. The whole
             // block is a single simple-query batch (no client-side statement
             // splitting of the trigger body needed — the guard + CREATE TRIGGER are
@@ -184,7 +247,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
                 .query(
                     "SELECT trigger_name FROM information_schema.triggers \
                      WHERE trigger_schema = ? AND trigger_name = ?",
-                    &[meta_lit.as_str().into(), trg_lit.as_str().into()],
+                    &[cfg.pg.meta_schema.as_str().into(), trg.as_str().into()],
                 )
                 .await?;
             if exists.is_empty() {
@@ -196,11 +259,101 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
                 ))
                 .await?;
             }
-            let _ = &tbl_lit; // documented match key; the guard uses trigger name.
         }
     }
 
     Ok(())
+}
+
+async fn ensure_binary_identity_columns<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    meta: &str,
+) -> Result<(), JournalError> {
+    const EXPECTED: [(&str, &str); 8] = [
+        ("schema_migrations", "version"),
+        ("schema_migrations", "checksum"),
+        ("schema_migrations_supersedes", "squash_version"),
+        ("schema_migrations_supersedes", "superseded_version"),
+        ("schema_migrations_inflight", "version"),
+        ("schema_migrations_inflight", "checksum"),
+        ("schema_migrations_recovery", "version"),
+        ("schema_migrations_recovery", "checksum"),
+    ];
+    let rows = conn
+        .query(
+            "SELECT TABLE_NAME AS table_name,
+                    COLUMN_NAME AS column_name,
+                    CHARACTER_SET_NAME AS character_set_name,
+                    COLLATION_NAME AS collation_name
+               FROM information_schema.COLUMNS
+              WHERE TABLE_SCHEMA = ?
+                AND ((TABLE_NAME = 'schema_migrations'
+                      AND COLUMN_NAME IN ('version', 'checksum'))
+                  OR (TABLE_NAME = 'schema_migrations_supersedes'
+                      AND COLUMN_NAME IN ('squash_version', 'superseded_version'))
+                  OR (TABLE_NAME = 'schema_migrations_inflight'
+                      AND COLUMN_NAME IN ('version', 'checksum'))
+                  OR (TABLE_NAME = 'schema_migrations_recovery'
+                      AND COLUMN_NAME IN ('version', 'checksum')))
+              ORDER BY TABLE_NAME, ORDINAL_POSITION",
+            &[cfg.pg.meta_schema.as_str().into()],
+        )
+        .await?;
+
+    let mut found = std::collections::BTreeMap::new();
+    for row in rows {
+        let table: String = row.try_get("table_name")?;
+        let column: String = row.try_get("column_name")?;
+        let charset: Option<String> = row.try_get("character_set_name")?;
+        let collation: Option<String> = row.try_get("collation_name")?;
+        found.insert((table, column), (charset, collation));
+    }
+
+    for (table, column) in EXPECTED {
+        let key = (table.to_string(), column.to_string());
+        let Some((charset, collation)) = found.get(&key) else {
+            return Err(JournalError::Backend(format!(
+                "mysql journal: required identity column {table}.{column} is missing after bootstrap"
+            )));
+        };
+        if charset.as_deref() == Some("utf8mb4") && collation.as_deref() == Some("utf8mb4_bin") {
+            continue;
+        }
+        conn.batch(&format!(
+            "ALTER TABLE {meta}.{} MODIFY COLUMN {} VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL",
+            quote_ident_mysql(table)?,
+            quote_ident_mysql(column)?,
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+fn is_exact_supersession_edge_index(rows: &[crate::driver::Row]) -> Result<bool, JournalError> {
+    if rows.len() != 2 {
+        return Ok(false);
+    }
+    for (offset, (row, expected_column)) in rows
+        .iter()
+        .zip(["squash_version", "superseded_version"])
+        .enumerate()
+    {
+        let non_unique: i64 = row.try_get("non_unique")?;
+        let seq: i64 = row.try_get("seq_in_index")?;
+        let column: Option<String> = row.try_get("column_name")?;
+        let prefix: Option<i64> = row.try_get("sub_part")?;
+        if non_unique != 0
+            || seq != i64::try_from(offset + 1).unwrap_or(i64::MAX)
+            || column
+                .as_deref()
+                .is_none_or(|actual| !actual.eq_ignore_ascii_case(expected_column))
+            || prefix.is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Read the **net applied state** of the journal (the MySQL analogue of
@@ -270,6 +423,34 @@ pub(crate) async fn applied<D: SqlSession>(
         });
     }
     Ok(out)
+}
+
+/// Return versions whose latest immutable event is `rolled_back`.
+pub(crate) async fn net_rolled_back_versions<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<String>, JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let rows = conn
+        .query(
+            &format!(
+                "WITH ranked AS (
+                     SELECT version, event_kind,
+                            ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn
+                       FROM {meta}.schema_migrations
+                 )
+                 SELECT version
+                   FROM ranked
+                  WHERE rn = 1 AND event_kind = '{rolled_back}'
+                  ORDER BY version COLLATE utf8mb4_bin",
+                rolled_back = EventKind::RolledBack.as_str()
+            ),
+            &[],
+        )
+        .await?;
+    rows.into_iter()
+        .map(|row| row.try_get("version").map_err(JournalError::from))
+        .collect()
 }
 
 /// The versions covered by a net-applied squash (the MySQL analogue of
@@ -345,10 +526,10 @@ pub(crate) async fn latest_completed_checksums<D: SqlSession>(
         .collect::<Result<std::collections::HashMap<String, String>, JournalError>>()
 }
 
-/// Write (or no-op) the `started` inflight marker before a non-txn `up` runs — the
-/// MySQL analogue of [`crate::apply::journal::record_started`]. `INSERT IGNORE`
-/// stands in for Postgres' `ON CONFLICT (version) DO NOTHING`, so a re-arm on the
-/// recovery path is idempotent. `?` placeholders throughout.
+/// Write the `started` inflight marker before a non-txn `up` runs. The caller
+/// holds the project lock and has already proved that no marker exists, so this
+/// is a plain, exact one-row INSERT. Duplicate keys and unexpected affected-row
+/// counts fail closed instead of being hidden by `INSERT IGNORE`.
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
@@ -360,31 +541,45 @@ pub(crate) async fn record_started<D: SqlSession>(
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
+    for (field, value) in [("name", name), ("applied_by", applied_by)] {
+        let length = value.chars().count();
+        if length > 255 {
+            return Err(JournalError::Backend(format!(
+                "mysql inflight marker {field} is {length} characters; the maximum is 255"
+            )));
+        }
+    }
     let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
-    conn.exec(
-        &format!(
-            "INSERT IGNORE INTO {meta}.schema_migrations_inflight
+    let affected = conn
+        .exec(
+            &format!(
+                "INSERT INTO {meta}.schema_migrations_inflight
                  (version, name, checksum, applied_by)
              VALUES (?, ?, ?, ?)"
-        ),
-        &[
-            version.into(),
-            name.into(),
-            checksum.into(),
-            applied_by.into(),
-        ],
-    )
-    .await?;
+            ),
+            &[
+                version.into(),
+                name.into(),
+                checksum.into(),
+                applied_by.into(),
+            ],
+        )
+        .await?;
+    if affected != 1 {
+        return Err(JournalError::Backend(format!(
+            "mysql inflight marker insert affected {affected} rows; expected exactly 1"
+        )));
+    }
     Ok(())
 }
 
-/// Finalize a non-txn migration (phase 2): append the immutable `completed`
-/// journal row, then clear the inflight marker — the MySQL analogue of
-/// [`crate::apply::journal::record_completed`]. `?` placeholders.
+/// Append the immutable `completed` journal row. The caller must hold the InnoDB
+/// transaction that also records any squash edges and clears the inflight marker.
+/// `?` placeholders.
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.
-pub(crate) async fn record_completed<D: SqlSession>(
+pub(crate) async fn append_completed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
@@ -407,11 +602,23 @@ pub(crate) async fn record_completed<D: SqlSession>(
         ],
     )
     .await?;
-    conn.exec(
-        &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = ?"),
-        &[rec.version.into()],
-    )
-    .await?;
+    Ok(())
+}
+
+/// Append a completed row and clear its inflight marker inside the caller's open
+/// transaction. Backfill finalization uses this because its progress update,
+/// journal event, and marker cleanup must commit as one unit.
+///
+/// # Errors
+/// [`JournalError::Db`] on failure.
+pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    rec: CompletedRecord<'_>,
+) -> Result<(), JournalError> {
+    let version = rec.version;
+    append_completed(conn, cfg, rec).await?;
+    clear_inflight(conn, cfg, version).await?;
     Ok(())
 }
 
@@ -465,6 +672,69 @@ pub(crate) async fn clear_inflight<D: SqlSession>(
     conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = ?"),
         &[version.into()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Lock and read one recovery marker inside the caller's transaction. The row is
+/// decoded into a public, driver-neutral value so operator tooling never needs
+/// to query the journal tables directly.
+pub(crate) async fn inflight_for_update<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+) -> Result<Option<MysqlInflightDdlMarker>, JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT version, name, checksum, applied_by,
+                        CAST(started_at AS CHAR) AS started_at
+                   FROM {meta}.schema_migrations_inflight
+                  WHERE version = ?
+                  FOR UPDATE"
+            ),
+            &[version.into()],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    Ok(Some(MysqlInflightDdlMarker {
+        version: row.try_get("version")?,
+        name: row.try_get("name")?,
+        checksum: row.try_get("checksum")?,
+        applied_by: row.try_get("applied_by")?,
+        started_at: row.try_get("started_at")?,
+    }))
+}
+
+/// Append the immutable operator decision that resolves one ambiguous DDL
+/// marker. The caller commits this row atomically with either completion or
+/// marker clearance.
+pub(crate) async fn append_recovery_audit<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    marker: &MysqlInflightDdlMarker,
+    resolution: MysqlInflightResolution,
+    recovered_by: &str,
+    reason: &str,
+) -> Result<(), JournalError> {
+    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    conn.exec(
+        &format!(
+            "INSERT INTO {meta}.schema_migrations_recovery
+                 (version, checksum, action, reason, recovered_by)
+             VALUES (?, ?, ?, ?, ?)"
+        ),
+        &[
+            marker.version.as_str().into(),
+            marker.checksum.as_str().into(),
+            resolution.as_str().into(),
+            reason.into(),
+            recovered_by.into(),
+        ],
     )
     .await?;
     Ok(())

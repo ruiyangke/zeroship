@@ -85,7 +85,7 @@ impl DialectSupports for SqlDialect {
                 Capability::AlterTableAddConstraint => false,
                 Capability::AlterTableDropConstraint => false,
                 Capability::AlterTableValidateConstraint => false,
-                Capability::InsertOnConflictClause => false,
+                Capability::InsertOnConflictClause => true,
                 Capability::PostgresVendorPrimitives => false,
                 Capability::MaterializedView => false,
                 Capability::CreateOrReplaceView => false,
@@ -111,7 +111,7 @@ impl DialectSupports for SqlDialect {
                 Capability::AlterTableAddConstraint => true,
                 Capability::AlterTableDropConstraint => true,
                 Capability::AlterTableValidateConstraint => false,
-                Capability::InsertOnConflictClause => false,
+                Capability::InsertOnConflictClause => true,
                 Capability::PostgresVendorPrimitives => false,
                 Capability::MaterializedView => false,
                 Capability::CreateOrReplaceView => true,
@@ -501,7 +501,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     }
 
     fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError> {
-        let d = format!("'{}'", delim.replace('\'', "''"));
+        let d = dml::inline_string_literal(delim, SqlDialect::Mysql);
         Ok(format!(
             "substring_index(substring_index({col_sql}, {d}, {n}), {d}, -1)"
         ))
@@ -870,8 +870,8 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             let errcode = errcode.as_deref().unwrap_or("45000");
             Ok(format!(
                 "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
-                crate::render::dml::sql_string_literal(errcode),
-                crate::render::dml::sql_string_literal(message)
+                crate::render::dml::mysql_grammar_string_literal(errcode),
+                crate::render::dml::inline_string_literal(message, SqlDialect::Mysql)
             ))
         }
     }
@@ -966,7 +966,7 @@ mod tests {
                     (Capability::AlterTableAddConstraint, false),
                     (Capability::AlterTableDropConstraint, false),
                     (Capability::AlterTableValidateConstraint, false),
-                    (Capability::InsertOnConflictClause, false),
+                    (Capability::InsertOnConflictClause, true),
                     (Capability::PostgresVendorPrimitives, false),
                     (Capability::MaterializedView, false),
                     (Capability::CreateOrReplaceView, false),
@@ -993,7 +993,7 @@ mod tests {
                     (Capability::AlterTableAddConstraint, true),
                     (Capability::AlterTableDropConstraint, true),
                     (Capability::AlterTableValidateConstraint, false),
-                    (Capability::InsertOnConflictClause, false),
+                    (Capability::InsertOnConflictClause, true),
                     (Capability::PostgresVendorPrimitives, false),
                     (Capability::MaterializedView, false),
                     (Capability::CreateOrReplaceView, true),

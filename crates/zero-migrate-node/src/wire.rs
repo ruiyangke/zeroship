@@ -13,7 +13,7 @@
 //!    integration test constructs them directly.
 //!
 //! 2. **Typed verb request/response envelopes** ([`ApplyRequest`]/[`StatusRequest`]/
-//!    [`HistoryRequest`]/[`ApplyReply`]/[`StatusReply`]/[`HistoryReply`]/
+//!    [`StatusIrRequest`]/[`HistoryRequest`]/[`ApplyReply`]/[`StatusReply`]/[`HistoryReply`]/
 //!    [`LoadVerifyReply`]) — the strongly-typed shape each `#[napi]` verb TAKES and
 //!    RETURNS. The IR `ops` AST and a lowered `Migration` cross as REAL JS
 //!    values (`serde-json` feature, [`JsonValue`]); the exact-integer audit fields
@@ -175,9 +175,57 @@ pub struct StatusRequest {
     pub project_id: String,
     /// The confined project schema.
     pub project_schema: String,
+    /// `"postgres" | "mysql"` selects the matching journal backend.
+    pub dialect: String,
     /// The pre-lowered migrations to reconcile against the journal, each a
     /// `Migration` as a JS value (empty array for the read/empty-journal flow).
     pub migrations: Vec<JsonValue>,
+}
+
+/// The typed request for the plan-aware `statusIr` verb.
+///
+/// Each envelope is lowered through the same guarded Rust path as `applyIr`; the
+/// resulting full plan retains DML and backfill identities instead of projecting
+/// them to a lossy `Vec<Migration>`.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct StatusIrRequest {
+    /// The deploying app id stamped during guarded lowering.
+    pub owner_app: String,
+    /// The confined project schema.
+    pub project_schema: String,
+    /// `"postgres" | "mysql"` selects the journal backend.
+    pub dialect: String,
+    /// The project's table-ownership registry.
+    pub registry: std::collections::HashMap<String, String>,
+    /// Ordered authored migration envelopes to reconcile.
+    pub envelopes: Vec<JsonValue>,
+    /// Optional policy ceiling, identical to the `applyIr` lowering input.
+    pub policy_ceiling: Option<String>,
+}
+
+/// The typed request for completing or aborting one outstanding PostgreSQL
+/// online-rename contract.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ResolvePendingRequest {
+    /// The app id that authored the original rename. It is required to reproduce
+    /// the engine-stamped contract identities exactly.
+    pub owner_app: String,
+    /// The confined project schema containing the renamed table.
+    pub project_schema: String,
+    /// The migrator role used for the approval-gated cleanup DDL. Optional.
+    pub migrator_role: Option<String>,
+    /// The pending-contract key returned by apply or status.
+    pub pending_version: String,
+    /// `"apply"` keeps the new column; `"abort"` keeps the old column.
+    pub action: String,
+    /// Explicit approval for the destructive column drop.
+    pub approved: bool,
+    /// Audit label recorded with the cleanup and resolution.
+    pub applied_by: String,
 }
 
 /// The typed request for the `history` verb.
@@ -204,6 +252,23 @@ pub struct ApplyReply {
     pub skipped: Vec<String>,
     /// Versions recovered via the non-txn recovery path this run.
     pub recovered: Vec<String>,
+    /// Outstanding PostgreSQL online-rename contracts after this operation.
+    pub pending_contracts: Vec<ApplyPendingContractDto>,
+}
+
+/// One outstanding online-rename contract returned after apply.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ApplyPendingContractDto {
+    /// Table whose old and new columns currently coexist.
+    pub table: String,
+    /// Original column retained until the contract is completed.
+    pub from_column: String,
+    /// Destination column populated by the online expansion.
+    pub to_column: String,
+    /// Stable key accepted by `resolvePending` and `resolve-pending`.
+    pub pending_version: String,
 }
 
 /// The typed reply for `status` (the projected `MigrationStatus`).
@@ -217,8 +282,92 @@ pub struct StatusReply {
     pub applied: Vec<String>,
     /// Supplied versions that are NOT net-applied, in apply order.
     pub pending: Vec<String>,
+    /// Supplied logical plans whose online rename was explicitly aborted.
+    pub aborted: Vec<String>,
     /// Versions whose latest event is a rollback, in version order.
     pub rolled_back: Vec<String>,
+    /// Outstanding online-contract obligations, including orphan diagnosis.
+    pub pending_contracts: Vec<PendingContractStatusDto>,
+    /// Plans blocked by an outstanding dependency contract.
+    pub blocked: Vec<BlockedPlanDto>,
+    /// Completed or inflight journal identities absent from supplied plans.
+    pub unexpected_journal: Vec<UnexpectedJournalEntryDto>,
+    /// Plan-aware detail. Absent on the legacy migration-only `status` verb;
+    /// present (including as an empty array) on `statusIr`.
+    pub plans: Option<Vec<PlanStatusDto>>,
+}
+
+/// One outstanding online-contract obligation in a status reply.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PendingContractStatusDto {
+    /// Table whose deferred contract remains outstanding.
+    pub table: String,
+    /// Stable obligation key used by operator resolution.
+    pub pending_version: String,
+    /// Whether the supplying plan is absent from the current manifest set.
+    pub orphaned: bool,
+}
+
+/// One plan blocked by an outstanding dependency contract.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct BlockedPlanDto {
+    /// Logical id of the blocked plan.
+    pub blocked: String,
+    /// Logical id of the dependency plan.
+    pub dependency: String,
+    /// Outstanding obligation key on the dependency.
+    pub pending_version: String,
+}
+
+/// One journal identity absent from every supplied plan manifest.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct UnexpectedJournalEntryDto {
+    /// Unexpected step identity.
+    pub version: String,
+    /// `applied` or `inflight`.
+    pub state: String,
+    /// Journal checksum retained for diagnosis.
+    pub journal_checksum: String,
+    /// Journaled kind when the entry is completed; absent for inflight markers.
+    pub journal_kind: Option<String>,
+}
+
+/// One plan in a plan-aware status reply.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PlanStatusDto {
+    /// Stable logical plan id.
+    pub version: String,
+    /// Authored migration name.
+    pub name: String,
+    /// `applied | pending | partial | drifted | blocked | unknownDependency`.
+    pub state: String,
+    /// Ordered journal-visible steps.
+    pub steps: Vec<PlanStatusStepDto>,
+    /// Dependencies omitted from the supplied plan set.
+    pub missing_dependencies: Vec<String>,
+}
+
+/// One executable step in a plan-aware status reply.
+#[cfg(feature = "napi")]
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PlanStatusStepDto {
+    /// Stable step journal id.
+    pub version: String,
+    /// Human-readable operation label.
+    pub name: String,
+    /// `ddl | dml | backfill | onlineExpand | onlineContract | sqliteRebuild`.
+    pub kind: String,
+    /// `pending | inflight | applied | drifted`.
+    pub state: String,
 }
 
 /// One event in the typed `history` audit trail.

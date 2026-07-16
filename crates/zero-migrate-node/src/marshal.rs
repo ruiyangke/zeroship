@@ -194,8 +194,10 @@ mod tests {
         assert_eq!(bind_to_cell(&Bind::Bool(true)).kind, "bool");
         assert_eq!(bind_to_cell(&Bind::Int(42)).int_str.as_deref(), Some("42"));
         assert_eq!(
-            bind_to_cell(&Bind::Decimal("1.5".into())).text.as_deref(),
-            Some("1.5")
+            bind_to_cell(&Bind::Decimal("12345678901234567890.1234567890".into()))
+                .text
+                .as_deref(),
+            Some("12345678901234567890.1234567890")
         );
         assert_eq!(
             bind_to_cell(&Bind::Text("x".into())).text.as_deref(),

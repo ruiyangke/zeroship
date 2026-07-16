@@ -551,10 +551,7 @@ pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[FeatureSuppo
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,
-    DialectSupport::postgres_only(
-        RenderMode::Offline,
-        "insert onConflict is PostgreSQL-only in the current engine",
-    ),
+    DialectSupport::all_supported(RenderMode::Offline),
 )];
 
 pub(crate) const CREATE_VIEW_FEATURES: &[FeatureSupport] = &[

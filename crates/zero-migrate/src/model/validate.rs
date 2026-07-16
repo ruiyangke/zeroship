@@ -135,7 +135,126 @@ pub fn validate_ir_scoped(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
     }
+    validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TableOperationTarget<'a> {
+    schema: Option<&'a str>,
+    table: &'a str,
+    op_index: usize,
+    is_online_rename: bool,
+}
+
+fn schemas_may_name_same_table(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        // Validation does not always know which project schema an unqualified op
+        // will use. Treat it as potentially matching an explicit qualifier so the
+        // online-rename safety gate fails closed.
+        _ => true,
+    }
+}
+
+fn validate_online_rename_isolation_op<'a>(
+    op: &'a crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    seen: &mut Vec<TableOperationTarget<'a>>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    match op {
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let own = match target_dialect {
+                Dialect::Postgres => pg.as_deref(),
+                Dialect::Sqlite => sqlite.as_deref(),
+                Dialect::Mysql => mysql.as_deref(),
+            };
+            if let Some(ops) = own.or(default.as_deref()) {
+                for inner in ops {
+                    validate_online_rename_isolation_op(
+                        inner,
+                        target_dialect,
+                        op_index,
+                        ts_locations,
+                        seen,
+                    )?;
+                }
+            }
+        }
+        table_op => {
+            let Some(table) = table_op.touched_table() else {
+                return Ok(());
+            };
+            let schema = table_op.schema();
+            let is_online_rename = matches!(table_op, Op::RenameColumn { .. });
+            if let Some(previous) = seen.iter().find(|previous| {
+                previous.table == table
+                    && schemas_may_name_same_table(previous.schema, schema)
+                    && (previous.is_online_rename || is_online_rename)
+            }) {
+                let rename_schema = if is_online_rename {
+                    schema
+                } else {
+                    previous.schema
+                };
+                let qualified_table = rename_schema
+                    .map_or_else(|| table.to_string(), |schema| format!("{schema}.{table}"));
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "renameColumn must be the only operation targeting table \
+                         {qualified_table:?} in a migration; it conflicts with another operation \
+                         at op index {}",
+                        previous.op_index
+                    ),
+                    suggested_fix: Some(format!(
+                        "keep the renameColumn for {qualified_table:?} in its own migration; move \
+                         every other operation on that table into a later migration and apply it \
+                         only after the rename is resolved"
+                    )),
+                });
+            }
+            seen.push(TableOperationTarget {
+                schema,
+                table,
+                op_index,
+                is_online_rename,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_online_rename_sequence(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    // PostgreSQL keeps an online rename open across deploys, so every other
+    // operation on that table must wait for resolution. SQLite performs the
+    // rename as one rebuild and has no pending obligation; MySQL refuses the
+    // rename through its dialect-support gate.
+    if target_dialect != Dialect::Postgres {
+        return Ok(());
+    }
+    let mut seen = Vec::new();
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_online_rename_isolation_op(op, target_dialect, op_index, ts_locations, &mut seen)?;
+    }
     Ok(())
 }
 
@@ -897,47 +1016,23 @@ fn validate_dialectal_op(
     if let Some(ops) = default {
         for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             for op in ops {
-                validate_op_scoped(
-                    op,
-                    dialect,
-                    op_index,
-                    ts_location,
-                    schema_scope,
-                )?;
+                validate_op_scoped(op, dialect, op_index, ts_location, schema_scope)?;
             }
         }
     }
     if let Some(ops) = pg {
         for op in ops {
-            validate_op_scoped(
-                op,
-                Dialect::Postgres,
-                op_index,
-                ts_location,
-                schema_scope,
-            )?;
+            validate_op_scoped(op, Dialect::Postgres, op_index, ts_location, schema_scope)?;
         }
     }
     if let Some(ops) = sqlite {
         for op in ops {
-            validate_op_scoped(
-                op,
-                Dialect::Sqlite,
-                op_index,
-                ts_location,
-                schema_scope,
-            )?;
+            validate_op_scoped(op, Dialect::Sqlite, op_index, ts_location, schema_scope)?;
         }
     }
     if let Some(ops) = mysql {
         for op in ops {
-            validate_op_scoped(
-                op,
-                Dialect::Mysql,
-                op_index,
-                ts_location,
-                schema_scope,
-            )?;
+            validate_op_scoped(op, Dialect::Mysql, op_index, ts_location, schema_scope)?;
         }
     }
     Ok(())
@@ -1219,6 +1314,13 @@ pub fn validate_op_scoped(
             }
             if let Some(pred) = filter {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                validate_immutable_expr_context(
+                    pred,
+                    "backfill filter",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -3437,6 +3539,7 @@ pub fn validate_ir_resolved(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_resolved(op, target_dialect, live_columns, op_index, ts)?;
     }
+    validate_online_rename_sequence(ir, target_dialect, ts_locations)?;
     validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
 }
@@ -5403,13 +5506,7 @@ mod tests {
             existence_guard: None,
         }]);
         let scope = SchemaScope::Single("app_a".into());
-        let err = validate_ir_scoped(
-            &cross,
-            Dialect::Postgres,
-            &[],
-            Some(&scope)
-        )
-        .unwrap_err();
+        let err = validate_ir_scoped(&cross, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA, "got: {err}");
 
         // schema == project schema (case-insensitive) passes.
@@ -5419,13 +5516,7 @@ mod tests {
             schema: Some("APP_A".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(
-            &same,
-            Dialect::Postgres,
-            &[],
-            Some(&scope)
-        )
-        .is_ok());
+        assert!(validate_ir_scoped(&same, Dialect::Postgres, &[], Some(&scope)).is_ok());
 
         // Absent schema passes.
         let none = ir_with(vec![Op::DropTable {
@@ -5434,13 +5525,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(
-            &none,
-            Dialect::Postgres,
-            &[],
-            Some(&scope)
-        )
-        .is_ok());
+        assert!(validate_ir_scoped(&none, Dialect::Postgres, &[], Some(&scope)).is_ok());
     }
 
     /// Defaulted public validation (`None` scope) has no project schema available,
@@ -5456,22 +5541,10 @@ mod tests {
             existence_guard: None,
         }]);
         // Defaulted public validation: permitted for non-vendor schema qualifiers.
-        assert!(validate_ir_scoped(
-            &foreign,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .is_ok());
+        assert!(validate_ir_scoped(&foreign, Dialect::Postgres, &[], None).is_ok());
         // Platform allow-list excluding "anything": refused.
         let scope = SchemaScope::Allowlist(vec!["zero_migrate".into(), "public".into()]);
-        let err = validate_ir_scoped(
-            &foreign,
-            Dialect::Postgres,
-            &[],
-            Some(&scope)
-        )
-        .unwrap_err();
+        let err = validate_ir_scoped(&foreign, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA);
         // A schema IN the allow-list passes.
         let ok = ir_with(vec![Op::DropTable {
@@ -5480,13 +5553,7 @@ mod tests {
             schema: Some("zero_migrate".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(
-            &ok,
-            Dialect::Postgres,
-            &[],
-            Some(&scope)
-        )
-        .is_ok());
+        assert!(validate_ir_scoped(&ok, Dialect::Postgres, &[], Some(&scope)).is_ok());
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
@@ -5502,13 +5569,7 @@ mod tests {
                 existence_guard: None,
             }]);
             // Even defaulted public validation (None scope) rejects an injection-shaped ident.
-            let err = validate_ir_scoped(
-                &ir,
-                Dialect::Postgres,
-                &[],
-                None
-            )
-            .unwrap_err();
+            let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None).unwrap_err();
             assert_eq!(
                 err.code, CODE_INVALID_SCHEMA_IDENT,
                 "schema {bad:?} got: {err}"
@@ -5535,13 +5596,7 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
-        let err = validate_ir_scoped(
-            &bad_create,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .unwrap_err();
+        let err = validate_ir_scoped(&bad_create, Dialect::Postgres, &[], None).unwrap_err();
         assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
 
         // ifNotExists on dropTable — illegal.
@@ -5551,13 +5606,7 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        let err2 = validate_ir_scoped(
-            &bad_drop,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .unwrap_err();
+        let err2 = validate_ir_scoped(&bad_drop, Dialect::Postgres, &[], None).unwrap_err();
         assert_eq!(err2.code, CODE_GUARD_DIRECTION);
 
         // The LEGAL directions pass.
@@ -5574,13 +5623,7 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        assert!(validate_ir_scoped(
-            &ok_create,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .is_ok());
+        assert!(validate_ir_scoped(&ok_create, Dialect::Postgres, &[], None).is_ok());
     }
 
     #[test]
@@ -5599,13 +5642,8 @@ mod tests {
             }"#,
         )]);
 
-        validate_ir_scoped(
-            &ir,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .expect("platform profile accepts author-owned composite createTable primaryKey");
+        validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
+            .expect("platform profile accepts author-owned composite createTable primaryKey");
     }
 
     #[test]
@@ -5624,13 +5662,8 @@ mod tests {
             }"#,
         )]);
 
-        validate_ir_scoped(
-            &ir,
-            Dialect::Postgres,
-            &[],
-            None
-        )
-        .expect("platform profile accepts no primary key");
+        validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
+            .expect("platform profile accepts no primary key");
     }
 
     // Cut 3 — the author-PK CONFORMANCE refusal is now owned by the injection
@@ -5866,6 +5899,158 @@ mod tests {
         ]);
         assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
         assert!(validate_ir_platform(&ir, Dialect::Sqlite).is_ok());
+    }
+
+    fn rename_column(table: &str, from: &str, to: &str) -> Op {
+        Op::RenameColumn {
+            table: table.into(),
+            from: from.into(),
+            to: to.into(),
+            ty: ColType::Text,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn validate_ir_rejects_chained_online_renames_on_one_table() {
+        let ir = ir_with(vec![
+            rename_column("users", "display_name", "name"),
+            rename_column("users", "name", "full_name"),
+        ]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a migration cannot safely open two rename contracts on one table");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert_eq!(err.op_index, 1);
+        assert!(err.reason.contains("only operation"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ir_rejects_independent_online_renames_on_one_table() {
+        let ir = ir_with(vec![
+            rename_column("users", "first", "first_name"),
+            rename_column("users", "last", "last_name"),
+        ]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("independent renames on one table have the same contract conflict");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.op_index, 1);
+    }
+
+    #[test]
+    fn validate_ir_rejects_ddl_before_online_rename_on_same_table() {
+        let ir = ir_with(vec![
+            Op::DropColumn {
+                table: "users".into(),
+                column: "legacy_flag".into(),
+                schema: None,
+                existence_guard: None,
+            },
+            rename_column("users", "name", "display_name"),
+        ]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a same-table DDL step before a rename must be rejected");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.op_index, 1);
+        assert!(err.reason.contains("only operation"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ir_rejects_dml_after_online_rename_on_same_table() {
+        let ir = ir_with(vec![
+            rename_column("users", "name", "display_name"),
+            Op::Delete {
+                table: "users".into(),
+                r#where: Expr::lit(IrScalar::Bool(false)),
+                limit: None,
+                schema: None,
+            },
+        ]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("a same-table DML step after a rename must be rejected");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.op_index, 1);
+        assert!(err.reason.contains("only operation"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ir_allows_same_table_companion_after_sqlite_rename() {
+        let ir = ir_with(vec![
+            rename_column("users", "name", "display_name"),
+            Op::Delete {
+                table: "users".into(),
+                r#where: Expr::lit(IrScalar::Bool(false)),
+                limit: None,
+                schema: None,
+            },
+        ]);
+
+        validate_ir(&ir, Dialect::Sqlite, &[])
+            .expect("SQLite applies renameColumn as one rebuild without a pending contract");
+        validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("PostgreSQL must still isolate its online rename contract");
+    }
+
+    #[test]
+    fn validate_ir_allows_online_renames_on_different_tables() {
+        let ir = ir_with(vec![
+            rename_column("users", "name", "display_name"),
+            rename_column("accounts", "label", "display_label"),
+        ]);
+
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            validate_ir(&ir, dialect, &[]).unwrap_or_else(|err| {
+                panic!("renames on different tables should remain valid on {dialect:?}: {err}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_ir_allows_companion_operations_on_different_table() {
+        let ir = ir_with(vec![
+            Op::DropColumn {
+                table: "accounts".into(),
+                column: "legacy_flag".into(),
+                schema: None,
+                existence_guard: None,
+            },
+            rename_column("users", "name", "display_name"),
+            Op::Delete {
+                table: "accounts".into(),
+                r#where: Expr::lit(IrScalar::Bool(false)),
+                limit: None,
+                schema: None,
+            },
+        ]);
+
+        validate_ir(&ir, Dialect::Postgres, &[])
+            .expect("DDL and DML on a different table remain valid companions");
+    }
+
+    #[test]
+    fn validate_ir_checks_only_the_selected_dialectal_rename_sequence() {
+        let ir = ir_with(vec![Op::Dialectal {
+            default: None,
+            pg: Some(vec![
+                rename_column("users", "first", "first_name"),
+                rename_column("users", "last", "last_name"),
+            ]),
+            sqlite: Some(vec![rename_column("users", "name", "display_name")]),
+            mysql: None,
+        }]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("the two renames in the selected PostgreSQL leg must be rejected");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.op_index, 0);
+
+        validate_ir(&ir, Dialect::Sqlite, &[])
+            .expect("mutually exclusive dialect legs do not run in one migration");
     }
 
     #[test]
@@ -6287,6 +6472,54 @@ mod tests {
         }]);
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+    }
+
+    #[test]
+    fn validate_ir_rejects_volatile_backfill_filter() {
+        let ir = ir_with(vec![Op::Backfill {
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: serde_json::from_str("100").unwrap(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("first")))]
+                .into_iter()
+                .collect(),
+            filter: Some(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            }),
+            name: "bf".into(),
+            schema: None,
+        }]);
+
+        let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
+        assert!(err.reason.contains("backfill filter"), "{err}");
+        assert!(err.reason.contains("now()"), "{err}");
+    }
+
+    #[test]
+    fn validate_ir_rejects_aggregate_backfill_filter() {
+        let ir = ir_with(vec![Op::Backfill {
+            table: "users".into(),
+            cursor_column: "id".into(),
+            batch_size: serde_json::from_str("100").unwrap(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("first")))]
+                .into_iter()
+                .collect(),
+            filter: Some(Expr::Agg {
+                func: AggFunc::Count,
+                arg: None,
+                delimiter: None,
+                distinct: false,
+            }),
+            name: "bf".into(),
+            schema: None,
+        }]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
+        assert!(err.reason.contains("backfill filter"), "{err}");
+        assert!(err.reason.contains("count()"), "{err}");
     }
 
     // ── the names-stay-strings BINDING corollary ───────────────────────────

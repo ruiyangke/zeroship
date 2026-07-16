@@ -137,8 +137,10 @@ async fn run_rollback_txn(
 
     match result {
         Ok(()) => {
-            actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
-            actor.exec("COMMIT").await.map_err(rb_err)?;
+            actor
+                .commit_or_cleanup("migration rollback")
+                .await
+                .map_err(rb_err)?;
             Ok(())
         }
         Err(e) => {

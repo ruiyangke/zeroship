@@ -29,7 +29,8 @@ use zero_migrate::PlanStep;
 use zero_migrate::{resolve_create_table_policy, zeroship_confined_ceiling, MigrationIr};
 
 /// The representative IR exercising every renderable op + the honest-boundary
-/// witnesses (a guarded addColumn, a one-shot insert/update, an online rename).
+/// witnesses (a guarded addColumn, a one-shot insert/update, and an online rename
+/// on a separate existing table).
 const REPRESENTATIVE_IR: &str = r#"{
   "ir_version": 1,
   "name": "representative",
@@ -49,7 +50,7 @@ const REPRESENTATIVE_IR: &str = r#"{
       "where":{"node":"binOp","op":"gt",
         "lhs":{"node":"colRef","name":"code"},
         "rhs":{"node":"literal","value":300}}},
-    {"op":"renameColumn","table":"codes","from":"label","to":"display_name","type":"text"}
+    {"op":"renameColumn","table":"legacy_codes","from":"label","to":"display_name","type":"text"}
   ]
 }"#;
 

@@ -38,21 +38,25 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Env;
 use napi_derive::napi;
 
-use zero_migrate::apply::executor::ApplyOutcome;
+use zero_migrate::apply::backend::MigrationBackend;
+use zero_migrate::apply::executor::{ApplyOutcome, LockMode};
 use zero_migrate::apply::journal::{HistoryEvent, HistoryKind};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::ops::status::MigrationStatus;
+use zero_migrate::model::migration::{Migration, MigrationId};
+use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
+use zero_migrate::{LiveSchema, MigrationEngine};
 
 use crate::api;
 use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
 use crate::wire::{
-    ApplyReply, ApplyRequest, CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply,
-    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
-    RuntimeOptionsDto, StatusReply, StatusRequest,
+    ApplyPendingContractDto, ApplyReply, ApplyRequest, BlockedPlanDto, CollectionDescriptorDto,
+    FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
+    HistoryRequest, LoadVerifyReply, PendingContractStatusDto, PlanStatusDto, PlanStatusStepDto,
+    ResolvePendingRequest, RuntimeOptionsDto, StatusIrRequest, StatusReply, StatusRequest,
+    UnexpectedJournalEntryDto,
 };
 
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
@@ -103,8 +107,15 @@ pub fn load_verify(
     deploying_app: String,
     dialect: String,
     registry: std::collections::HashMap<String, String>,
+    project_schema: String,
 ) -> LoadVerifyReply {
-    api::load_verify(&envelope_json, &deploying_app, &dialect, &registry)
+    api::load_verify(
+        &envelope_json,
+        &deploying_app,
+        &dialect,
+        &registry,
+        &project_schema,
+    )
 }
 
 /// `genArtifacts` — the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
@@ -134,9 +145,7 @@ pub fn gen_artifacts(source: GenArtifactsSource) -> GenArtifactsReply {
             "genArtifacts: a source is required — set `envelopes` (generated source) or \
              `descriptors` (manual source)",
         ),
-        (Some(envelopes), None) => {
-            api::gen_artifacts_from_envelopes(&envelopes, schema, ceiling)
-        }
+        (Some(envelopes), None) => api::gen_artifacts_from_envelopes(&envelopes, schema, ceiling),
         (None, Some(dtos)) => {
             let descriptors = match dtos
                 .into_iter()
@@ -466,12 +475,25 @@ where
 // Engine-result → typed-reply projections (named — no closure-local mapping).
 // ---------------------------------------------------------------------------
 
-/// Project an [`ApplyOutcome`] into the typed [`ApplyReply`].
-fn apply_reply(outcome: ApplyOutcome) -> ApplyReply {
+/// Project an [`ApplyOutcome`] and the lock-coherent outstanding rename set into
+/// the typed [`ApplyReply`].
+fn apply_reply(
+    outcome: ApplyOutcome,
+    pending_contracts: &[zero_migrate::PendingContract],
+) -> ApplyReply {
     ApplyReply {
         applied: outcome.applied,
         skipped: outcome.skipped,
         recovered: outcome.recovered,
+        pending_contracts: pending_contracts
+            .iter()
+            .map(|contract| ApplyPendingContractDto {
+                table: contract.table.clone(),
+                from_column: contract.from_col.clone(),
+                to_column: contract.to_col.clone(),
+                pending_version: contract.pending_version.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -482,7 +504,109 @@ fn status_reply(s: &MigrationStatus) -> StatusReply {
         current_version: s.current_version.as_ref().map(|v| v.as_str().to_string()),
         applied: s.applied.iter().map(|e| e.version.clone()).collect(),
         pending: s.pending.iter().map(|v| v.as_str().to_string()).collect(),
+        aborted: Vec::new(),
         rolled_back: s.rolled_back.iter().map(|e| e.version.clone()).collect(),
+        pending_contracts: s
+            .pending_contracts
+            .iter()
+            .map(|contract| PendingContractStatusDto {
+                table: contract.table.clone(),
+                pending_version: contract.pending_version.clone(),
+                orphaned: contract.orphaned,
+            })
+            .collect(),
+        blocked: s
+            .blocked
+            .iter()
+            .map(|blocked| BlockedPlanDto {
+                blocked: blocked.blocked.as_str().to_string(),
+                dependency: blocked.dependency.as_str().to_string(),
+                pending_version: blocked.pending_version.clone(),
+            })
+            .collect(),
+        unexpected_journal: Vec::new(),
+        plans: None,
+    }
+}
+
+/// Project a complete-plan reconciliation into the shared status reply shape.
+/// Top-level ids are LOGICAL PLAN ids; `plans[].steps` carries the actual journal
+/// identities and their individual states.
+fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
+    let plans = status
+        .plans
+        .iter()
+        .map(|plan| PlanStatusDto {
+            version: plan.version.as_str().to_string(),
+            name: plan.name.clone(),
+            state: plan.state.as_str().to_string(),
+            steps: plan
+                .steps
+                .iter()
+                .map(|step| PlanStatusStepDto {
+                    version: step.version.as_str().to_string(),
+                    name: step.name.clone(),
+                    kind: step.kind.as_str().to_string(),
+                    state: step.state.as_str().to_string(),
+                })
+                .collect(),
+            missing_dependencies: plan
+                .missing_dependencies
+                .iter()
+                .map(|dependency| dependency.as_str().to_string())
+                .collect(),
+        })
+        .collect();
+    StatusReply {
+        current_version: status
+            .current_version
+            .as_ref()
+            .map(|version| version.as_str().to_string()),
+        applied: status
+            .applied
+            .iter()
+            .map(|version| version.as_str().to_string())
+            .collect(),
+        pending: status
+            .pending
+            .iter()
+            .map(|version| version.as_str().to_string())
+            .collect(),
+        aborted: status
+            .aborted
+            .iter()
+            .map(|version| version.as_str().to_string())
+            .collect(),
+        rolled_back: status.rolled_back.clone(),
+        pending_contracts: status
+            .pending_contracts
+            .iter()
+            .map(|contract| PendingContractStatusDto {
+                table: contract.table.clone(),
+                pending_version: contract.pending_version.clone(),
+                orphaned: contract.orphaned,
+            })
+            .collect(),
+        blocked: status
+            .blocked
+            .iter()
+            .map(|blocked| BlockedPlanDto {
+                blocked: blocked.blocked.as_str().to_string(),
+                dependency: blocked.dependency.as_str().to_string(),
+                pending_version: blocked.pending_version.clone(),
+            })
+            .collect(),
+        unexpected_journal: status
+            .unexpected_journal
+            .iter()
+            .map(|entry| UnexpectedJournalEntryDto {
+                version: entry.version.clone(),
+                state: entry.state.as_str().to_string(),
+                journal_checksum: entry.journal_checksum.clone(),
+                journal_kind: entry.journal_kind.map(|kind| kind.as_str().to_string()),
+            })
+            .collect(),
+        plans: Some(plans),
     }
 }
 
@@ -520,11 +644,303 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 // The typed verbs — each is a thin `run_verb` closure over the engine.
 // ---------------------------------------------------------------------------
 
+/// Snapshot, lower, and apply one authored envelope inside one project-lock
+/// bracket. The catalog facts used by lowering must describe the same serialized
+/// database state that the executor mutates; taking the snapshot before the lock
+/// would leave a check-then-use window for a concurrent deploy.
+#[allow(clippy::too_many_arguments)]
+async fn apply_ir_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    envelope_json: &str,
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    policy_ceiling: Option<&str>,
+    approval: Approval,
+    applied_by: &str,
+) -> std::result::Result<ApplyReply, String> {
+    backend
+        .ensure_journal(cfg)
+        .await
+        .map_err(|error| error.to_string())?;
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        let snapshot = backend
+            .snapshot_schema(cfg)
+            .await
+            .map_err(|error| format!("live schema introspection failed: {error}"))?;
+        let journal_entries = backend
+            .applied(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        let resolved_contracts = match backend.pending_contracts() {
+            Some(capability) => capability
+                .resolved_pending_contracts(cfg)
+                .await
+                .map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        };
+        let live = LiveSchema::from_catalog_snapshot(snapshot.clone(), owner_app);
+        let artifact = match crate::lower::lower_envelope_to_plan_with_live(
+            envelope_json,
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            policy_ceiling,
+            &live,
+        ) {
+            Ok(artifact) => artifact,
+            Err(original_error) => {
+                let mut artifacts = crate::lower::lower_ordered_envelopes_to_plans(
+                    &[envelope_json.to_string()],
+                    owner_app,
+                    project_schema,
+                    dialect,
+                    registry_json,
+                    policy_ceiling,
+                    snapshot,
+                    &journal_entries,
+                    &resolved_contracts,
+                )?;
+                let artifact = artifacts.pop().ok_or_else(|| {
+                    "lowering returned no plan for the migration envelope".to_string()
+                })?;
+                crate::lower::validate_historical_apply_evidence(
+                    &artifact,
+                    &live,
+                    &journal_entries,
+                    &resolved_contracts,
+                )
+                .map_err(|evidence_error| {
+                    format!("{original_error}; historical replay refused: {evidence_error}")
+                })?;
+                artifact
+            }
+        };
+        let outcome = MigrationEngine::new()
+            .apply_plan_with_touched_and_depends(
+                &artifact.plan.steps,
+                &artifact.touched_tables,
+                &artifact.depends_on,
+                approval,
+                backend,
+                cfg,
+                applied_by,
+                LockMode::AlreadyHeld,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending_contracts = match backend.pending_contracts() {
+            Some(capability) => capability
+                .outstanding_pending_contracts(cfg)
+                .await
+                .map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        };
+        Ok::<ApplyReply, String>(apply_reply(outcome.applied, &pending_contracts))
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
+/// Lower and reconcile authored plans while holding the same project lock across
+/// the live-catalog and journal reads.
+#[allow(clippy::too_many_arguments)]
+async fn status_ir_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    envelope_json: &[String],
+    owner_app: &str,
+    project_schema: &str,
+    dialect: &str,
+    registry_json: &str,
+    policy_ceiling: Option<&str>,
+) -> std::result::Result<StatusReply, String> {
+    backend
+        .ensure_journal(cfg)
+        .await
+        .map_err(|error| error.to_string())?;
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        let snapshot = backend
+            .snapshot_schema(cfg)
+            .await
+            .map_err(|error| format!("live schema introspection failed: {error}"))?;
+        let journal_entries = backend
+            .applied(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        let resolved_contracts = match backend.pending_contracts() {
+            Some(capability) => capability
+                .resolved_pending_contracts(cfg)
+                .await
+                .map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        };
+        let artifacts = crate::lower::lower_ordered_envelopes_to_plans(
+            envelope_json,
+            owner_app,
+            project_schema,
+            dialect,
+            registry_json,
+            policy_ceiling,
+            snapshot,
+            &journal_entries,
+            &resolved_contracts,
+        )?;
+        let manifests = artifacts
+            .iter()
+            .map(|artifact| {
+                PlanStatusManifest::from_applied_plan(&artifact.plan, &artifact.depends_on)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let status =
+            zero_migrate::ops::status::status_plans_via_backend_locked(backend, cfg, &manifests)
+                .await
+                .map_err(|error| error.to_string())?;
+        Ok::<StatusReply, String>(plan_status_reply(&status))
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
+/// Read migration-only status through the selected dialect backend while holding
+/// one project lock across the journal buckets. The core legacy status carrier
+/// retains detailed PostgreSQL rollback rows, while the neutral backend trait
+/// exposes rollback version ids; the Node reply needs only those ids, so project
+/// them directly without sending PostgreSQL-only SQL to MySQL.
+async fn legacy_status_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> std::result::Result<StatusReply, String> {
+    backend
+        .ensure_journal(cfg)
+        .await
+        .map_err(|error| error.to_string())?;
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        let status = zero_migrate::ops::status::status_via_backend_locked(backend, cfg, migrations)
+            .await
+            .map_err(|error| error.to_string())?;
+        let rolled_back = backend
+            .net_rolled_back_versions(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut reply = status_reply(&status);
+        reply.rolled_back = rolled_back;
+        Ok::<StatusReply, String>(reply)
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
+/// Resolve one durable PostgreSQL online-rename obligation and return the
+/// remaining obligations from the same project-lock bracket.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    pending_version: &str,
+    resolution: zero_migrate::Resolution,
+    owner_app: &str,
+    approval: Approval,
+    applied_by: &str,
+) -> std::result::Result<ApplyReply, String> {
+    // Keep the approval failure DB-free. The engine enforces this again as a
+    // defense in depth, but this adapter owns the outer lock bracket.
+    if approval != Approval::Approved {
+        return Err("explicit approval is required to resolve a pending contract".to_string());
+    }
+
+    backend
+        .acquire_project_lock(cfg)
+        .await
+        .map_err(|error| format!("failed to acquire project lock: {error}"))?;
+
+    let result = async {
+        let outcome = MigrationEngine::new()
+            .resolve_pending_contract_with_lock(
+                pending_version,
+                resolution,
+                owner_app,
+                approval,
+                backend,
+                cfg,
+                applied_by,
+                LockMode::AlreadyHeld,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let pending = backend
+            .pending_contracts()
+            .ok_or_else(|| "this backend does not support pending contracts".to_string())?
+            .outstanding_pending_contracts(cfg)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<ApplyReply, String>(apply_reply(outcome.applied, &pending))
+    }
+    .await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (result, release) {
+        (Ok(reply), Ok(())) => Ok(reply),
+        (Ok(_), Err(error)) => Err(format!("failed to release project lock: {error}")),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => Err(format!(
+            "{error}; additionally failed to release project lock: {release_error}"
+        )),
+    }
+}
+
 /// `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS IR envelope
 /// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
 /// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
 /// authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then
-/// drive `executor::apply` over the host driver. The envelope must NOT carry
+/// drive the complete ordered plan over the host driver. The envelope must NOT carry
 /// `owner_app`; it is stamped from `req.owner_app` (provenance).
 ///
 /// This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
@@ -539,26 +955,12 @@ pub fn apply_ir(
     host_driver: HostDriverFn,
     req: ApplyRequest,
 ) -> Result<Object<'static>> {
-    // Lower the envelope → Vec<Migration> IN RUST (checksum folded here). The
+    // Lower the envelope to an ordered plan in Rust (checksum folded here). The
     // `ops` AST crossed as a real JS value; re-serialize it for the lower gate.
     let envelope_json = serde_json::to_string(&req.envelope)
         .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))?;
     let registry_json = serde_json::to_string(&req.registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
-    let migrations: Vec<Migration> = {
-        let json = crate::lower::lower_envelope_to_migrations_json(
-            &envelope_json,
-            &req.owner_app,
-            &req.project_schema,
-            &req.dialect,
-            &registry_json,
-            req.policy_ceiling.as_deref(),
-        )
-        .map_err(Error::from_reason)?;
-        serde_json::from_str(&json)
-            .map_err(|e| Error::from_reason(format!("lowered migrations re-parse failed: {e}")))?
-    };
-
     // Dialect selects the backend: Postgres and MySQL ride the
     // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
     // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
@@ -568,11 +970,13 @@ pub fn apply_ir(
     let target = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
 
     let ApplyRequest {
-        owner_app: _,
+        owner_app,
         project_schema,
+        dialect,
         migrator_role,
         approved,
         applied_by,
+        policy_ceiling,
         ..
     } = req;
     let approval = if approved {
@@ -582,34 +986,102 @@ pub fn apply_ir(
     };
 
     run_verb(env, host_driver, move |session| async move {
-        let mut cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema);
+        let mut cfg =
+            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
-        let out = match target {
+        match target {
             ApplyDialect::Postgres => {
-                zero_migrate::apply::executor::apply(
-                    &session,
+                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                apply_ir_with_locked_backend(
+                    &backend,
                     &cfg,
-                    &migrations,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    policy_ceiling.as_deref(),
                     approval,
                     &applied_by,
                 )
                 .await
             }
             ApplyDialect::Mysql => {
-                zero_migrate::apply::executor::apply_with_lock_mysql(
-                    &session,
+                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                apply_ir_with_locked_backend(
+                    &backend,
                     &cfg,
-                    &migrations,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    policy_ceiling.as_deref(),
                     approval,
                     &applied_by,
-                    zero_migrate::apply::executor::LockMode::Acquire,
                 )
                 .await
             }
-        };
-        out.map(apply_reply).map_err(|e| e.to_string())
+        }
+    })
+}
+
+/// Complete or abort one outstanding PostgreSQL online column rename.
+#[napi(ts_return_type = "Promise<ApplyReply>")]
+pub fn resolve_pending(
+    env: Env,
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
+    host_driver: HostDriverFn,
+    req: ResolvePendingRequest,
+) -> Result<Object<'static>> {
+    let ResolvePendingRequest {
+        owner_app,
+        project_schema,
+        migrator_role,
+        pending_version,
+        action,
+        approved,
+        applied_by,
+    } = req;
+
+    MigrationId::parse(&pending_version)
+        .map_err(|error| Error::from_reason(format!("invalid pending version: {error}")))?;
+    let resolution = match action.as_str() {
+        "apply" => zero_migrate::Resolution::Applied,
+        "abort" => zero_migrate::Resolution::Aborted,
+        other => {
+            return Err(Error::from_reason(format!(
+                "unknown pending-contract action {other:?} (expected apply|abort)"
+            )))
+        }
+    };
+    let approval = if approved {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
+
+    run_verb(env, host_driver, move |session| async move {
+        let mut cfg =
+            ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
+        if let Some(role) = migrator_role {
+            cfg = cfg.with_migrator_role(role);
+        }
+        let backend = zero_migrate::PostgresBackend::new_generic(&session);
+        resolve_pending_with_locked_backend(
+            &backend,
+            &cfg,
+            &pending_version,
+            resolution,
+            &owner_app,
+            approval,
+            &applied_by,
+        )
+        .await
     })
 }
 
@@ -619,6 +1091,77 @@ pub fn apply_ir(
 /// schema)`. A distinct project id can be threaded through a future facade arg.
 fn owner_app_project(project_schema: &str) -> String {
     project_schema.to_string()
+}
+
+/// `statusIr`: lower the supplied pure-JS envelopes through the same guarded
+/// Rust path as [`apply_ir`], retain every executable plan step, and reconcile
+/// their stable journal identities through the selected dialect backend.
+///
+/// This is the status entrypoint for mixed and data-only plans. The legacy
+/// [`status`] verb remains available for callers that already hold a flat set of
+/// pre-lowered `Migration` values.
+#[napi(ts_return_type = "Promise<StatusReply>")]
+pub fn status_ir(
+    env: Env,
+    #[napi(
+        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+    )]
+    host_driver: HostDriverFn,
+    req: StatusIrRequest,
+) -> Result<Object<'static>> {
+    let StatusIrRequest {
+        owner_app,
+        project_schema,
+        dialect,
+        registry,
+        envelopes,
+        policy_ceiling,
+    } = req;
+    let registry_json = serde_json::to_string(&registry)
+        .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
+
+    let envelope_json = envelopes
+        .into_iter()
+        .map(|envelope| {
+            serde_json::to_string(&envelope)
+                .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
+
+    run_verb(env, host_driver, move |session| async move {
+        let cfg = ExecutorConfig::new(owner_app_project(&project_schema), project_schema.clone());
+        match target {
+            ApplyDialect::Postgres => {
+                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                status_ir_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    policy_ceiling.as_deref(),
+                )
+                .await
+            }
+            ApplyDialect::Mysql => {
+                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                status_ir_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    policy_ceiling.as_deref(),
+                )
+                .await
+            }
+        }
+    })
 }
 
 /// `status` — the generic `ops::status::status` over the host driver.
@@ -642,15 +1185,23 @@ pub fn status(
     let StatusRequest {
         project_id,
         project_schema,
+        dialect,
         ..
     } = req;
+    let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
 
     run_verb(env, host_driver, move |session| async move {
         let cfg = ExecutorConfig::new(project_id, project_schema);
-        zero_migrate::ops::status::status(&session, &cfg, &migrations)
-            .await
-            .map(|s| status_reply(&s))
-            .map_err(|e| e.to_string())
+        match target {
+            ApplyDialect::Postgres => {
+                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
+            }
+            ApplyDialect::Mysql => {
+                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
+            }
+        }
     })
 }
 
@@ -677,4 +1228,57 @@ pub fn history(
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())
     })
+}
+
+#[cfg(test)]
+mod status_projection_tests {
+    use super::*;
+    use zero_migrate::apply::journal::JournaledKind;
+    use zero_migrate::model::migration::MigrationId;
+    use zero_migrate::ops::status::{BlockedPlan, PendingContractStatus, UnexpectedJournalEntry};
+
+    #[test]
+    fn plan_status_reply_preserves_operator_details() {
+        let blocked_version = MigrationId::derive("node_status", b"blocked");
+        let dependency = MigrationId::derive("node_status", b"dependency");
+        let aborted_version = MigrationId::derive("node_status", b"aborted");
+        let status = AppliedPlanStatus {
+            current_version: None,
+            applied: Vec::new(),
+            pending: vec![blocked_version.clone()],
+            aborted: vec![aborted_version.clone()],
+            rolled_back: vec!["mig_rolled_back".to_string()],
+            plans: Vec::new(),
+            unexpected_journal: vec![UnexpectedJournalEntry {
+                version: "mig_unexpected".to_string(),
+                state: zero_migrate::ops::status::PlanStatusStepState::Applied,
+                journal_checksum: "checksum".to_string(),
+                journal_kind: Some(JournaledKind::Apply),
+            }],
+            pending_contracts: vec![PendingContractStatus {
+                table: "widgets".to_string(),
+                pending_version: "mig_pending_contract".to_string(),
+                orphaned: false,
+            }],
+            blocked: vec![BlockedPlan {
+                blocked: blocked_version.clone(),
+                dependency: dependency.clone(),
+                pending_version: "mig_pending_contract".to_string(),
+            }],
+        };
+
+        let reply = plan_status_reply(&status);
+
+        assert_eq!(reply.aborted, vec![aborted_version.as_str()]);
+
+        assert_eq!(reply.rolled_back, ["mig_rolled_back"]);
+        assert_eq!(reply.pending_contracts[0].table, "widgets");
+        assert_eq!(reply.blocked[0].blocked, blocked_version.as_str());
+        assert_eq!(reply.blocked[0].dependency, dependency.as_str());
+        assert_eq!(reply.unexpected_journal[0].state, "applied");
+        assert_eq!(
+            reply.unexpected_journal[0].journal_kind.as_deref(),
+            Some("apply")
+        );
+    }
 }

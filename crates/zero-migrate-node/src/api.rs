@@ -21,7 +21,7 @@ use zero_migrate::model::validate::Dialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
     confined_no_inject_policy, effective_policy_from_ceiling_toml, render_artifacts,
-    render_artifacts_from_descriptors, resolve_create_table_policy, EffectivePolicy,
+    render_artifacts_from_descriptors, resolve_create_table_policy, EffectivePolicy, SchemaScope,
     DEFAULT_PROJECT_SCHEMA,
 };
 
@@ -55,6 +55,7 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
 /// - `registry` — the already-parsed `{ "owner_app": "project_id", ... }` map (it
 ///   crosses the napi boundary typed as a `Record<string,string>`, not a JSON
 ///   string): the project registry ownership is enforced against.
+/// - `project_schema` - the single schema this creator migration may target.
 ///
 /// Returns a [`LoadVerifyReply`]; a malformed document / failed validation / failed
 /// ownership yields `ok: false` with the message, never a panic. The confinement
@@ -66,6 +67,7 @@ pub fn load_verify(
     deploying_app: &str,
     dialect: &str,
     registry: &HashMap<String, String>,
+    project_schema: &str,
 ) -> LoadVerifyReply {
     let dialect = match parse_dialect(dialect) {
         Ok(d) => d,
@@ -77,7 +79,14 @@ pub fn load_verify(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    match load_ir_document(envelope_json, deploying_app, dialect, &registry, None) {
+    let schema_scope = SchemaScope::Single(project_schema.to_string());
+    match load_ir_document(
+        envelope_json,
+        deploying_app,
+        dialect,
+        &registry,
+        Some(&schema_scope),
+    ) {
         Ok(ir) => LoadVerifyReply {
             ok: true,
             ir_version: Some(ir.ir_version),
@@ -244,16 +253,54 @@ mod tests {
 
     #[test]
     fn unknown_dialect_is_rejected_not_panicked() {
-        let r = load_verify("{}", "app_x", "oracle", &empty_registry());
+        let r = load_verify("{}", "app_x", "oracle", &empty_registry(), "public");
         assert!(!r.ok);
         assert!(r.error.unwrap().contains("unknown dialect"));
     }
 
     #[test]
     fn malformed_envelope_json_yields_ok_false_with_message() {
-        let r = load_verify("{not json", "app_x", "postgres", &empty_registry());
+        let r = load_verify(
+            "{not json",
+            "app_x",
+            "postgres",
+            &empty_registry(),
+            "public",
+        );
         assert!(!r.ok);
         assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn load_verify_rejects_an_operation_outside_the_project_schema() {
+        let envelope = serde_json::json!({
+            "ir_version": current_ir_version(),
+            "name": "foreign_schema",
+            "ops": [{
+                "op": "createTable",
+                "name": "widgets",
+                "schema": "outside_project",
+                "columns": [{ "name": "id", "type": "int" }],
+                "primaryKey": null
+            }]
+        });
+
+        let r = load_verify(
+            &envelope.to_string(),
+            "app_x",
+            "postgres",
+            &empty_registry(),
+            "app_data",
+        );
+
+        assert!(!r.ok, "foreign-schema operation must fail validation");
+        assert!(
+            r.error
+                .as_deref()
+                .is_some_and(|message| message.contains("outside_project")),
+            "error should identify the rejected schema: {:?}",
+            r.error
+        );
     }
 
     #[test]
@@ -398,7 +445,7 @@ mod tests {
         // malformed IR envelope still fails closed with a message (never a panic).
         let mut reg = HashMap::new();
         reg.insert("widgets".to_string(), "app_x".to_string());
-        let r = load_verify("{not json", "app_x", "postgres", &reg);
+        let r = load_verify("{not json", "app_x", "postgres", &reg, "public");
         assert!(!r.ok);
         assert!(r.error.is_some());
     }

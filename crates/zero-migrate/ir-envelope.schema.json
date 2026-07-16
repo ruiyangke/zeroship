@@ -1251,7 +1251,7 @@
               }
             },
             "onConflict": {
-              "description": "the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:\nPG renders it natively; on a `SQLite` target it is a hard authoring error\n(`dialect_scope = PgOnly` / `UNSUPPORTED { kind: \"op\" }`) — there is\nno portable `SQLite` upsert and no raw route (property A). Absent ⇒ a plain\ninsert (portable on both backends).",
+              "description": "the optional structured upsert clause. PostgreSQL and SQLite render an\nexact conflict target. MySQL supports non-empty `doUpdate` when its\ntarget can be guarded exactly; targeted do-nothing is refused there.\nAbsent means a plain portable insert.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/IrOnConflict"
@@ -5647,7 +5647,7 @@
       ]
     },
     "IrOnConflict": {
-      "description": "the optional `insert { onConflict }` upsert clause. A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on `SQLite` (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted IR envelope cannot smuggle an arbitrary clause.",
+      "description": "the optional `insert { onConflict }` upsert clause. A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string. PostgreSQL and SQLite render an exact conflict target. MySQL\nuses its native duplicate-key clause for non-empty `doUpdate`, guards updates\nwith the authored target columns, and errors on a different unique-key\ncollision. Targeted `DO NOTHING` is refused on MySQL because the dialect has\nno exact form. Modelled as a distinct IR type so the wire shape is closed +\nschemars-expressible and a hand-crafted IR envelope cannot smuggle an arbitrary\nclause.",
       "type": "object",
       "properties": {
         "columns": {

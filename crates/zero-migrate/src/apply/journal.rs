@@ -236,6 +236,9 @@ impl Resolution {
 /// apply-time interlock and the `status` orphan/blocked surfacing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingContract {
+    /// App that authored the rename. `None` is reserved for legacy rows created
+    /// before pending obligations recorded their author explicitly.
+    pub owner_app: Option<String>,
     /// The table the rename targets (bare name; from the rename intent).
     pub table: String,
     /// The existing column being renamed away from.
@@ -263,10 +266,33 @@ pub struct PendingContract {
     pub contract_versions: Vec<String>,
 }
 
+/// A terminal pending-contract event and the obligation facts it closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPendingContract {
+    /// Immutable obligation descriptor copied onto the resolved row.
+    pub contract: PendingContract,
+    /// Whether the destination or source column was retained.
+    pub resolution: Resolution,
+}
+
+/// Live invariants required before either pending-contract resolution action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingContractShape {
+    /// Both recorded columns exist with the authored base type. When the
+    /// authored type includes an explicit modifier, the live modifier matches.
+    pub columns_compatible: bool,
+    /// Every current row has identical source and destination values.
+    pub values_synchronized: bool,
+    /// The expected dual-write trigger and function are present and enabled.
+    pub trigger_ready: bool,
+}
+
 /// The fields of a `pending` pending-contract obligation row, bundled so the
 /// writer takes one descriptor (keeping the arg count down).
 #[derive(Debug, Clone, Copy)]
 pub struct PendingContractRecord<'a> {
+    /// App that authored the rename.
+    pub owner_app: &'a str,
     /// The table the rename targets (bare name).
     pub table: &'a str,
     /// The existing column name (`from`).
@@ -533,6 +559,7 @@ pub async fn ensure_journal<D: SqlSession>(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_pending_contracts (
             event_seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             state             TEXT NOT NULL CHECK (state IN ('pending','resolved')),
+            owner_app         TEXT,
             \"table\"           TEXT NOT NULL,
             from_col          TEXT NOT NULL,
             to_col            TEXT NOT NULL,
@@ -549,6 +576,14 @@ pub async fn ensure_journal<D: SqlSession>(
                 (state = 'resolved' AND resolution IS NOT NULL)
             )
         )"
+    ))
+    .await?;
+    // Upgrade journals created before pending obligations recorded their author.
+    // Existing rows remain NULL and therefore cannot be resolved through an
+    // owner-asserting public call; every new row written below carries the value.
+    conn.batch(&format!(
+        "ALTER TABLE {meta}.schema_pending_contracts
+             ADD COLUMN IF NOT EXISTS owner_app TEXT"
     ))
     .await?;
 
@@ -1100,11 +1135,10 @@ pub async fn record_completed<D: SqlSession>(
 
 /// Read the OUTSTANDING cross-deploy pending-contract obligations.
 ///
-/// The net state per `pending_version` is its **latest event** on the
-/// `event_seq` IDENTITY scale (the same DISTINCT-ON-latest pattern [`applied`]
-/// uses). An obligation is OUTSTANDING iff its latest row is `state='pending'`
-/// (no later `resolved` row discharges it). This is the source of truth for the
-/// apply-time interlock read-back and the `status` orphan/blocked surfacing.
+/// A resolved row is a terminal tombstone for its `pending_version`. An
+/// obligation is outstanding only when it has a pending row and has never been
+/// resolved. This prevents replaying the same authored migration from reopening
+/// an aborted or completed rename.
 ///
 /// Admin-run (the whole helper family is — the migrator has no meta-schema
 /// grant), so a creator migration's `up` can neither read nor forge this set.
@@ -1120,19 +1154,26 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
     let rows = conn
         .query(
             &format!(
-                "WITH latest AS (
+                "WITH latest_pending AS (
                      SELECT DISTINCT ON (pending_version)
-                            pending_version, plan_version, state, \"table\", from_col,
+                            pending_version, plan_version, owner_app, \"table\", from_col,
                             to_col, ty, contract_versions
                        FROM {meta}.schema_pending_contracts
+                      WHERE state = '{pending}'
                       ORDER BY pending_version, event_seq DESC
                  )
-                 SELECT pending_version, plan_version, \"table\", from_col, to_col, ty,
+                 SELECT pending_version, plan_version, owner_app, \"table\", from_col, to_col, ty,
                         contract_versions
-                   FROM latest
-                  WHERE state = '{pending}'
+                   FROM latest_pending p
+                  WHERE NOT EXISTS (
+                            SELECT 1
+                              FROM {meta}.schema_pending_contracts r
+                             WHERE r.pending_version = p.pending_version
+                               AND r.state = '{resolved}'
+                        )
                   ORDER BY pending_version",
-                pending = PendingState::Pending.as_str()
+                pending = PendingState::Pending.as_str(),
+                resolved = PendingState::Resolved.as_str()
             ),
             &[],
         )
@@ -1151,6 +1192,7 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
             ))
         })?;
         out.push(PendingContract {
+            owner_app: row.try_get("owner_app")?,
             table: row.try_get("table")?,
             from_col: row.try_get("from_col")?,
             to_col: row.try_get("to_col")?,
@@ -1163,16 +1205,208 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
     Ok(out)
 }
 
+/// Read terminal pending-contract tombstones, one per durable pending version.
+///
+/// Resolution is absorbing, so any resolved row closes the version forever.
+/// When corrupt history contains more than one resolved row, the newest row is
+/// returned for diagnostics while the version remains terminal.
+#[cfg(pg_seam)]
+pub async fn resolved_pending_contracts<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<ResolvedPendingContract>, JournalError> {
+    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT DISTINCT ON (pending_version)
+                        pending_version, plan_version, owner_app, \"table\", from_col, to_col,
+                        ty, contract_versions, resolution
+                   FROM {meta}.schema_pending_contracts
+                  WHERE state = '{resolved}'
+                  ORDER BY pending_version, event_seq DESC",
+                resolved = PendingState::Resolved.as_str()
+            ),
+            &[],
+        )
+        .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let cv_json: String = row.try_get("contract_versions")?;
+        let contract_versions: Vec<String> = serde_json::from_str(&cv_json).map_err(|e| {
+            JournalError::Backend(format!(
+                "resolved pending-contract row has invalid contract_versions JSON: {e}"
+            ))
+        })?;
+        let resolution_raw: String = row.try_get("resolution")?;
+        let resolution = Resolution::parse(&resolution_raw).ok_or_else(|| {
+            JournalError::Backend(format!(
+                "resolved pending-contract row has invalid resolution {resolution_raw:?}"
+            ))
+        })?;
+        out.push(ResolvedPendingContract {
+            contract: PendingContract {
+                owner_app: row.try_get("owner_app")?,
+                table: row.try_get("table")?,
+                from_col: row.try_get("from_col")?,
+                to_col: row.try_get("to_col")?,
+                ty: row.try_get("ty")?,
+                pending_version: row.try_get("pending_version")?,
+                plan_version: row.try_get("plan_version")?,
+                contract_versions,
+            },
+            resolution,
+        });
+    }
+    Ok(out)
+}
+
+/// Inspect the live invariants required before destructive online-rename
+/// cleanup. The resolver performs a second, transaction-local value assertion
+/// in its atomic migration; this read provides an early, structured refusal and
+/// verifies the managed trigger before cleanup begins.
+#[cfg(pg_seam)]
+pub async fn pending_contract_shape<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    contract: &PendingContract,
+) -> Result<PendingContractShape, JournalError> {
+    let catalog = conn
+        .query(
+            "SELECT a.atttypid::bigint AS type_oid,
+                    a.atttypmod::bigint AS type_modifier,
+                    format_type(a.atttypid, a.atttypmod) AS formatted_type,
+                    to_regtype($5)::oid::bigint AS expected_type_oid
+               FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = $1
+                AND c.relname = $2
+                AND a.attname IN ($3, $4)
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+              ORDER BY a.attname",
+            &[
+                (&cfg.project_schema).into(),
+                (&contract.table).into(),
+                (&contract.from_col).into(),
+                (&contract.to_col).into(),
+                (&contract.ty).into(),
+            ],
+        )
+        .await?;
+    let columns_compatible = if catalog.len() == 2 {
+        let first_oid: i64 = catalog[0].try_get("type_oid")?;
+        let second_oid: i64 = catalog[1].try_get("type_oid")?;
+        let first_modifier: i64 = catalog[0].try_get("type_modifier")?;
+        let second_modifier: i64 = catalog[1].try_get("type_modifier")?;
+        let first_type: String = catalog[0].try_get("formatted_type")?;
+        let second_type: String = catalog[1].try_get("formatted_type")?;
+        let expected_type_oid: Option<i64> = catalog[0].try_get("expected_type_oid")?;
+        let expected_type = canonical_pending_contract_type(&contract.ty);
+        let formatted_type_matches = canonical_pending_contract_type(&first_type) == expected_type
+            && canonical_pending_contract_type(&second_type) == expected_type;
+        let authored_type_matches = match expected_type_oid {
+            // PostgreSQL named enum/domain types have no modifier. Resolve the
+            // authored, safely quoted type name to its catalog OID so equivalent
+            // qualified spellings do not fail merely because `format_type`
+            // chooses different identifier quoting or search-path qualification.
+            // Modifier-bearing built-ins still require their exact formatted
+            // spelling below, preserving numeric/varchar/etc. precision.
+            Some(oid) if oid == first_oid => first_modifier == -1 || formatted_type_matches,
+            // Keep the legacy alias fallback for pseudo type spellings such as
+            // `serial`, which PostgreSQL accepts in DDL but `to_regtype` does not
+            // resolve as a real catalog type.
+            None => formatted_type_matches,
+            Some(_) => false,
+        };
+        first_oid == second_oid
+            && first_modifier == second_modifier
+            && authored_type_matches
+    } else {
+        false
+    };
+
+    let values_synchronized = if columns_compatible {
+        let schema = quote_ident(&cfg.project_schema)?;
+        let table = quote_ident(&contract.table)?;
+        let from = quote_ident(&contract.from_col)?;
+        let to = quote_ident(&contract.to_col)?;
+        conn.query_one(
+            &format!(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM {schema}.{table}
+                      WHERE ({from})::text IS DISTINCT FROM ({to})::text
+                 ) AS values_synchronized"
+            ),
+            &[],
+        )
+        .await?
+        .try_get("values_synchronized")?
+    } else {
+        false
+    };
+
+    let trigger_name = crate::render::expand_contract::dual_write_trg_name(
+        &contract.table,
+        &contract.from_col,
+        &contract.to_col,
+    );
+    let function_name = crate::render::expand_contract::dual_write_fn_name(
+        &contract.table,
+        &contract.from_col,
+        &contract.to_col,
+    );
+    let trigger_ready: bool = conn
+        .query_one(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                   JOIN pg_proc p ON p.oid = t.tgfoid
+                   JOIN pg_namespace pn ON pn.oid = p.pronamespace
+                  WHERE n.nspname = $1
+                    AND c.relname = $2
+                    AND t.tgname = $3
+                    AND pn.nspname = $1
+                    AND p.proname = $4
+                    AND p.pronargs = 0
+                    AND NOT t.tgisinternal
+                    AND t.tgenabled IN ('O', 'A')
+             ) AS trigger_ready",
+            &[
+                (&cfg.project_schema).into(),
+                (&contract.table).into(),
+                (&trigger_name).into(),
+                (&function_name).into(),
+            ],
+        )
+        .await?
+        .try_get("trigger_ready")?;
+
+    Ok(PendingContractShape {
+        columns_compatible,
+        values_synchronized,
+        trigger_ready,
+    })
+}
+
+/// Normalize PostgreSQL's built-in type aliases without discarding modifiers.
+/// This keeps `numeric(20,4)` distinct from `numeric(20,2)` while accepting the
+/// equivalent spellings authors and `format_type` commonly use.
+fn canonical_pending_contract_type(ty: &str) -> String {
+    crate::render::lower::canonical_postgres_type_spelling(ty)
+}
+
 /// Open a cross-deploy pending-contract obligation: INSERT a `state='pending'`
 /// row. Called once per `PgExpandContract` whose EXPAND completed.
 ///
-/// **Idempotent by membership-guard (Deliverable 5).** The caller checks the
-/// outstanding set under the held project lock and only records if this
-/// `pending_version` is NOT already outstanding, so an idempotent re-run of deploy
-/// N (EXPAND net-applied-skipped) does NOT append a duplicate `pending` row — yet
-/// the obligation stays outstanding. The append-only history is preserved (a
-/// re-open after a resolve would legitimately append a new `pending` row, but the
-/// rename id is deterministic so that never happens in practice).
+/// The caller avoids duplicate pending rows under the project lock. The insert
+/// also refuses to reopen a version that has any resolved row. Resolution is
+/// terminal for one authored migration; retrying the intent requires a fresh
+/// migration identity.
 ///
 /// Open a cross-deploy pending-contract obligation AND, when a
 /// [`DeployRecoveryScope`] is supplied, its deploy-scoped recovery marker — in ONE
@@ -1201,19 +1435,27 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     cfg: &ExecutorConfig,
     rec: PendingContractRecord<'_>,
     scope: Option<DeployRecoveryScope<'_>>,
-) -> Result<(), JournalError> {
+) -> Result<bool, JournalError> {
     let meta = quote_ident(&cfg.pg.meta_schema)?;
     let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
     let obligation_sql = format!(
         "INSERT INTO {meta}.schema_pending_contracts
-             (state, \"table\", from_col, to_col, ty, pending_version,
+             (state, owner_app, \"table\", from_col, to_col, ty, pending_version,
               plan_version, contract_versions, \"by\")
-         VALUES ('{pending}', $1, $2, $3, $4, $5, $6, $7, $8)",
-        pending = PendingState::Pending.as_str()
+         SELECT '{pending}', $1, $2, $3, $4, $5, $6, $7, $8, $9
+          WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM {meta}.schema_pending_contracts
+                     WHERE pending_version = $6
+                       AND state = '{resolved}'
+                )",
+        pending = PendingState::Pending.as_str(),
+        resolved = PendingState::Resolved.as_str()
     );
-    let obligation_params: [crate::driver::Bind; 8] = [
+    let obligation_params: [crate::driver::Bind; 9] = [
+        rec.owner_app.into(),
         rec.table.into(),
         rec.from_col.into(),
         rec.to_col.into(),
@@ -1228,8 +1470,8 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     // obligation INSERT, byte-identical to the earlier behavior.
     let Some(scope) = scope else {
         let n = conn.exec(&obligation_sql, &obligation_params).await?;
-        debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
-        return Ok(());
+        debug_assert!(n <= 1, "record_pending_contract inserts at most one row");
+        return Ok(n == 1);
     };
 
     // Deploy path — bracket the obligation row AND its `in_progress` recovery marker
@@ -1238,7 +1480,10 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     conn.batch("BEGIN").await?;
     let result = async {
         let n = conn.exec(&obligation_sql, &obligation_params).await?;
-        debug_assert_eq!(n, 1, "record_pending_contract must insert exactly one row");
+        debug_assert!(n <= 1, "record_pending_contract inserts at most one row");
+        if n == 0 {
+            return Ok(false);
+        }
         let m = conn
             .exec(
                 &format!(
@@ -1257,21 +1502,24 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
             m, 1,
             "the in_progress recovery marker must insert exactly one row"
         );
-        Ok::<(), JournalError>(())
+        Ok::<bool, JournalError>(true)
     }
     .await;
-    if let Err(e) = result {
-        if let Err(rb) = conn.batch("ROLLBACK").await {
-            tracing::warn!(
-                error = %rb,
-                "zero-migrate: ROLLBACK failed after a \
-                 record_pending_contract_with_recovery error"
-            );
+    let opened = match result {
+        Ok(opened) => opened,
+        Err(e) => {
+            if let Err(rb) = conn.batch("ROLLBACK").await {
+                tracing::warn!(
+                    error = %rb,
+                    "zero-migrate: ROLLBACK failed after a \
+                     record_pending_contract_with_recovery error"
+                );
+            }
+            return Err(e);
         }
-        return Err(e);
-    }
+    };
     conn.batch("COMMIT").await?;
-    Ok(())
+    Ok(opened)
 }
 
 /// Discharge a cross-deploy pending-contract obligation: APPEND a
@@ -1303,12 +1551,13 @@ pub async fn resolve_pending_contract<D: SqlSession>(
         .exec(
             &format!(
                 "INSERT INTO {meta}.schema_pending_contracts
-                     (state, \"table\", from_col, to_col, ty, pending_version,
+                     (state, owner_app, \"table\", from_col, to_col, ty, pending_version,
                       plan_version, contract_versions, resolution, \"by\")
-                 VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 VALUES ('{resolved}', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 resolved = PendingState::Resolved.as_str()
             ),
             &[
+                (&pc.owner_app).into(),
                 (&pc.table).into(),
                 (&pc.from_col).into(),
                 (&pc.to_col).into(),
@@ -1516,17 +1765,25 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
                        FROM {meta}.schema_deploy_recovery
                       ORDER BY deploy_id, pending_version, event_seq DESC
                  ),
-                 latest_obligation AS (
-                     SELECT DISTINCT ON (pending_version) pending_version, state
-                       FROM {meta}.schema_pending_contracts
-                      ORDER BY pending_version, event_seq DESC
+                 unresolved_obligation AS (
+                     SELECT DISTINCT ON (pending_version) pending_version
+                       FROM {meta}.schema_pending_contracts p
+                      WHERE p.state = '{pending}'
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM {meta}.schema_pending_contracts resolved
+                             WHERE resolved.pending_version = p.pending_version
+                               AND resolved.state = '{resolved}'
+                        )
+                      ORDER BY p.pending_version, p.event_seq DESC
                  )
                  SELECT r.deploy_id, r.pending_version
                    FROM latest_recovery r
-                   JOIN latest_obligation o ON o.pending_version = r.pending_version
-                  WHERE r.state = 'in_progress' AND o.state = '{pending}'
+                   JOIN unresolved_obligation o ON o.pending_version = r.pending_version
+                  WHERE r.state = 'in_progress'
                   ORDER BY r.deploy_id, r.pending_version",
-                pending = PendingState::Pending.as_str()
+                pending = PendingState::Pending.as_str(),
+                resolved = PendingState::Resolved.as_str()
             ),
             &[],
         )
@@ -1818,7 +2075,29 @@ pub async fn clear_inflight<D: SqlSession>(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventKind, JournalError, PendingState, Resolution};
+    use super::{
+        canonical_pending_contract_type, EventKind, JournalError, PendingState, Resolution,
+    };
+
+    #[test]
+    fn pending_contract_type_aliases_preserve_modifiers() {
+        assert_eq!(
+            canonical_pending_contract_type("timestamp with time zone"),
+            canonical_pending_contract_type("timestamptz")
+        );
+        assert_eq!(
+            canonical_pending_contract_type("decimal(20, 4)"),
+            canonical_pending_contract_type("NUMERIC(20,4)")
+        );
+        assert_ne!(
+            canonical_pending_contract_type("numeric(20,4)"),
+            canonical_pending_contract_type("numeric(20,2)")
+        );
+        assert_eq!(
+            canonical_pending_contract_type("character varying(128)[]"),
+            canonical_pending_contract_type("varchar(128)[]")
+        );
+    }
 
     /// The `event_kind` wire contract is byte-exact: every INSERT/SELECT in the
     /// journal (PG + SQLite) now interpolates these literals from this single

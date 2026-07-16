@@ -13,7 +13,8 @@
 //! ```text
 //! 0. open the APP FILE as the connection's MAIN db (the creator `up` lands here)
 //! 0. ATTACH 'file:<journal>' AS "_mig" -- engine, BEFORE the authorizer
-//! 1. PRAGMA foreign_keys = ON -- engine-set, the only PRAGMA
+//! 1. pin both databases to DELETE rollback journals + FULL synchronous;
+//!    PRAGMA foreign_keys = ON
 //! 2. conn.load_extension_disable -- real rusqlite API (not a DbConfig)
 //! 3. set_db_config(DEFENSIVE, true)
 //! 4. set_db_config(TRUSTED_SCHEMA, false)
@@ -140,6 +141,13 @@ enum Command {
         params: Vec<SqliteBind>,
         reply: flume::Sender<Result<Vec<Vec<Option<String>>>, SqliteActorError>>,
     },
+    /// Stream one text column and verify that every value has a lossless UTF-8
+    /// representation. Backfill checkpoints are Rust strings, so this preflight
+    /// must finish before any batch is allowed to commit.
+    ValidateTextUtf8 {
+        sql: String,
+        reply: flume::Sender<Result<(), SqliteActorError>>,
+    },
     /// Flip the authorizer mode. A plain atomic store on the worker side,
     /// between (never inside) statement prepares.
     SetMode {
@@ -169,6 +177,8 @@ pub enum SqliteBind {
     Int(i64),
     /// A decimal/text value bound as TEXT (affinity coerces).
     Text(String),
+    /// Exact binary value bound as a SQLite BLOB.
+    Blob(Vec<u8>),
 }
 
 impl SqliteBind {
@@ -181,6 +191,7 @@ impl SqliteBind {
             crate::render::step::BindValue::Int(v) => SqliteBind::Int(*v),
             crate::render::step::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
             crate::render::step::BindValue::Text(s) => SqliteBind::Text(s.clone()),
+            crate::render::step::BindValue::Bytes(bytes) => SqliteBind::Blob(bytes.clone()),
         }
     }
 
@@ -191,6 +202,7 @@ impl SqliteBind {
             SqliteBind::Bool(b) => Value::Integer(i64::from(*b)),
             SqliteBind::Int(i) => Value::Integer(*i),
             SqliteBind::Text(s) => Value::Text(s.clone()),
+            SqliteBind::Blob(bytes) => Value::Blob(bytes.clone()),
         }
     }
 }
@@ -250,6 +262,9 @@ impl MigrationActor {
                         }
                         Command::QueryParams { sql, params, reply } => {
                             let _ = reply.send(run_query_params(&conn, &sql, &params));
+                        }
+                        Command::ValidateTextUtf8 { sql, reply } => {
+                            let _ = reply.send(run_validate_text_utf8(&conn, &sql));
                         }
                         Command::SetMode { mode, reply } => {
                             // The authorizer mode flag is owned by the closure; we
@@ -344,6 +359,18 @@ impl MigrationActor {
         recv(rx).await?
     }
 
+    /// Stream a single TEXT expression and reject the first value that cannot be
+    /// represented losslessly as UTF-8. No result rows are materialized.
+    pub async fn validate_text_utf8(&self, sql: &str) -> Result<(), SqliteActorError> {
+        let (reply, rx) = flume::bounded(1);
+        self.send(Command::ValidateTextUtf8 {
+            sql: sql.to_string(),
+            reply,
+        })
+        .await?;
+        recv(rx).await?
+    }
+
     /// Run one query, returning stringified rows.
     pub async fn query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, SqliteActorError> {
         let (reply, rx) = flume::bounded(1);
@@ -370,6 +397,57 @@ impl MigrationActor {
         let (reply, rx) = flume::bounded(1);
         self.send(Command::IsAutocommit { reply }).await?;
         recv(rx).await
+    }
+
+    /// Commit the current engine-owned transaction, cleaning it up before
+    /// returning if `COMMIT` fails. SQLite can leave a transaction open after a
+    /// deferred-constraint or I/O failure at commit time; returning that raw
+    /// error would poison this long-lived connection for every later migration.
+    ///
+    /// A failed commit is followed by `ROLLBACK` and an autocommit probe. The
+    /// original commit error is returned only when the connection is confirmed
+    /// clean. Otherwise the stronger [`SqliteActorError::Poisoned`] error wins.
+    pub(crate) async fn commit_or_cleanup(&self, context: &str) -> Result<(), SqliteActorError> {
+        self.set_mode(Mode::EngineJournal).await?;
+        match self.exec("COMMIT").await {
+            Ok(()) => match self.is_autocommit().await {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    let unexpected = SqliteActorError::Poisoned(format!(
+                        "{context} COMMIT returned success but the connection is still in a transaction"
+                    ));
+                    Err(self.cleanup_after_error(context, unexpected).await)
+                }
+                Err(probe) => Err(SqliteActorError::Poisoned(format!(
+                    "could not confirm autocommit after {context} COMMIT: {probe}"
+                ))),
+            },
+            Err(commit_error) => Err(self.cleanup_after_error(context, commit_error).await),
+        }
+    }
+
+    /// Roll back a failed engine-owned transaction and return the original error
+    /// only after proving that the connection is back in autocommit mode.
+    pub(crate) async fn cleanup_after_error(
+        &self,
+        context: &str,
+        original: SqliteActorError,
+    ) -> SqliteActorError {
+        if let Err(mode_error) = self.set_mode(Mode::EngineJournal).await {
+            return SqliteActorError::Poisoned(format!(
+                "could not enter engine mode to clean up {context}: {mode_error}; original error: {original}"
+            ));
+        }
+        let rollback = self.exec("ROLLBACK").await;
+        match self.is_autocommit().await {
+            Ok(true) => original,
+            Ok(false) => SqliteActorError::Poisoned(format!(
+                "transaction still open after {context} ROLLBACK (rollback result: {rollback:?}); original error: {original}"
+            )),
+            Err(probe) => SqliteActorError::Poisoned(format!(
+                "could not confirm autocommit after {context} ROLLBACK: {probe}; original error: {original}"
+            )),
+        }
     }
 }
 
@@ -452,13 +530,18 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
     // transient internal lock (e.g. between the RETURNING read and the next write
     // on the same connection across `main` + `_mig`) does not surface as an
     // immediate `SQLITE_BUSY`. `foreign_keys=ON` enables FK enforcement (a
-    // per-connection setting SQLite ships OFF). WAL is NOT set here: the
-    // migration connection is the single writer (in-process serialization),
-    // and the default rollback journal is simplest for the atomic apply; the
-    // busy_timeout covers the only contention (the connection with itself across
-    // `main` + `_mig` during BEGIN IMMEDIATE).
+    // per-connection setting SQLite ships OFF).
     conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
         .map_err(|e| SqliteActorError::Open(format!("pragma bootstrap: {e}")))?;
+
+    // A transaction that touches `main` and the attached `_mig` journal is
+    // crash-atomic only when SQLite can use its super-journal protocol. WAL,
+    // MEMORY, and OFF journal modes do not provide that guarantee across attached
+    // databases. Pin both files to the conservative DELETE rollback-journal mode
+    // and FULL synchronous, then read the effective values back. Never trust the
+    // assignment alone: SQLite returns the mode it actually achieved and can
+    // silently retain an old mode when a change is unavailable.
+    enforce_atomic_attached_profile(&conn)?;
 
     // 2. Disable extension loading (real rusqlite API; not a DbConfig variant).
     conn.load_extension_disable()
@@ -482,6 +565,40 @@ fn open_hardened(app_path: &Path, journal_path: &Path) -> Result<HardenedConn, S
         .map_err(|e| SqliteActorError::Open(format!("install authorizer: {e}")))?;
 
     Ok(HardenedConn { conn, mode })
+}
+
+/// Pin and verify the settings required for crash-atomic commits spanning
+/// `main` and the attached `_mig` journal.
+fn enforce_atomic_attached_profile(conn: &Connection) -> Result<(), SqliteActorError> {
+    for schema in ["main", MIG_ALIAS] {
+        let sql = format!("PRAGMA \"{schema}\".journal_mode = DELETE");
+        let actual: String = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+            SqliteActorError::Open(format!(
+                "set {schema}.journal_mode=DELETE for attached-DB atomicity: {e}"
+            ))
+        })?;
+        if !actual.eq_ignore_ascii_case("delete") {
+            return Err(SqliteActorError::Open(format!(
+                "{schema}.journal_mode remained {actual:?}; DELETE rollback journaling is required for atomic app+journal commits"
+            )));
+        }
+
+        conn.execute_batch(&format!("PRAGMA \"{schema}\".synchronous = FULL"))
+            .map_err(|e| SqliteActorError::Open(format!("set {schema}.synchronous=FULL: {e}")))?;
+        let synchronous: i64 = conn
+            .query_row(&format!("PRAGMA \"{schema}\".synchronous"), [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| SqliteActorError::Open(format!("verify {schema}.synchronous: {e}")))?;
+        // SQLite's stable numeric value for FULL is 2. EXTRA (3) is stronger but
+        // not the pinned profile, so reject configuration drift in either direction.
+        if synchronous != 2 {
+            return Err(SqliteActorError::Open(format!(
+                "{schema}.synchronous remained {synchronous}; FULL (2) is required for atomic app+journal commits"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn path_str(p: &Path) -> Result<String, SqliteActorError> {
@@ -541,9 +658,17 @@ fn run_query_params(
                     rusqlite::types::ValueRef::Null => None,
                     rusqlite::types::ValueRef::Integer(n) => Some(n.to_string()),
                     rusqlite::types::ValueRef::Real(f) => Some(f.to_string()),
-                    rusqlite::types::ValueRef::Text(t) => {
-                        Some(String::from_utf8_lossy(t).into_owned())
-                    }
+                    rusqlite::types::ValueRef::Text(t) => Some(
+                        std::str::from_utf8(t)
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    i,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?
+                            .to_owned(),
+                    ),
                     rusqlite::types::ValueRef::Blob(b) => Some(hex::encode(b)),
                 };
                 out.push(cell);
@@ -556,6 +681,51 @@ fn run_query_params(
         materialized.push(r.map_err(|e| SqliteActorError::Exec(e.to_string()))?);
     }
     Ok(materialized)
+}
+
+fn run_validate_text_utf8(conn: &Connection, sql: &str) -> Result<(), SqliteActorError> {
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    if stmt.column_count() != 1 {
+        return Err(SqliteActorError::Exec(
+            "UTF-8 cursor preflight must select exactly one column".to_string(),
+        ));
+    }
+    let mut rows = stmt
+        .query([])
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?;
+    let mut row_number = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| SqliteActorError::Exec(error.to_string()))?
+    {
+        row_number += 1;
+        match row
+            .get_ref(0)
+            .map_err(|error| SqliteActorError::Exec(error.to_string()))?
+        {
+            rusqlite::types::ValueRef::Text(value) => {
+                if let Err(error) = std::str::from_utf8(value) {
+                    return Err(SqliteActorError::Exec(format!(
+                        "SQLite TEXT backfill cursor contains invalid UTF-8 at row {row_number}: {error}"
+                    )));
+                }
+            }
+            rusqlite::types::ValueRef::Null => {
+                return Err(SqliteActorError::Exec(format!(
+                    "SQLite TEXT backfill cursor contains NULL at row {row_number}"
+                )));
+            }
+            other => {
+                return Err(SqliteActorError::Exec(format!(
+                    "SQLite TEXT backfill cursor has non-text storage class {:?} at row {row_number}",
+                    other.data_type()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Run one query, stringifying every cell so the reply crosses the actor boundary.
@@ -573,9 +743,17 @@ fn run_query(conn: &Connection, sql: &str) -> Result<Vec<Vec<Option<String>>>, S
                     rusqlite::types::ValueRef::Null => None,
                     rusqlite::types::ValueRef::Integer(n) => Some(n.to_string()),
                     rusqlite::types::ValueRef::Real(f) => Some(f.to_string()),
-                    rusqlite::types::ValueRef::Text(t) => {
-                        Some(String::from_utf8_lossy(t).into_owned())
-                    }
+                    rusqlite::types::ValueRef::Text(t) => Some(
+                        std::str::from_utf8(t)
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    i,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?
+                            .to_owned(),
+                    ),
                     rusqlite::types::ValueRef::Blob(b) => Some(hex::encode(b)),
                 };
                 out.push(cell);
@@ -588,4 +766,113 @@ fn run_query(conn: &Connection, sql: &str) -> Result<Vec<Vec<Option<String>>>, S
         materialized.push(r.map_err(|e| SqliteActorError::Exec(e.to_string()))?);
     }
     Ok(materialized)
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_transaction_paths_use_commit_cleanup_helper() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/apply/backend/sqlite");
+        for file in [
+            "backfill_sql.rs",
+            "journal_sql.rs",
+            "rebuild_sql.rs",
+            "rollback_sql.rs",
+        ] {
+            let source = std::fs::read_to_string(root.join(file)).expect("read SQLite source");
+            assert!(
+                !source.contains(".exec(\"COMMIT\")"),
+                "{file} must route COMMIT failures through commit_or_cleanup"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_plan_bind_becomes_a_blob_value() {
+        let bytes = vec![0, 1, 0x80, 0xff];
+        let bind = SqliteBind::from_bind(&crate::render::step::BindValue::Bytes(bytes.clone()));
+        assert!(matches!(
+            bind.to_sql_value(),
+            rusqlite::types::Value::Blob(value) if value == bytes
+        ));
+    }
+
+    #[test]
+    fn hardened_open_pins_both_files_to_crash_atomic_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = Connection::open(dir.path().join("app.sqlite")).expect("open main");
+        conn.execute(
+            &format!("ATTACH DATABASE ?1 AS \"{MIG_ALIAS}\""),
+            [dir.path().join("journal.sqlite").to_string_lossy()],
+        )
+        .expect("attach journal");
+        enforce_atomic_attached_profile(&conn).expect("pin atomic settings");
+
+        for schema in ["main", MIG_ALIAS] {
+            let mode: String = conn
+                .query_row(&format!("PRAGMA \"{schema}\".journal_mode"), [], |row| {
+                    row.get(0)
+                })
+                .expect("read journal mode");
+            let synchronous: i64 = conn
+                .query_row(&format!("PRAGMA \"{schema}\".synchronous"), [], |row| {
+                    row.get(0)
+                })
+                .expect("read synchronous");
+            assert_eq!(mode, "delete", "{schema} uses a rollback journal");
+            assert_eq!(synchronous, 2, "{schema} uses FULL synchronous");
+        }
+    }
+
+    #[compio::test]
+    async fn failed_commit_rolls_back_and_leaves_actor_reusable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let actor = MigrationActor::open(
+            &dir.path().join("app.sqlite"),
+            &dir.path().join("journal.sqlite"),
+        )
+        .expect("open actor");
+
+        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+        actor
+            .exec(
+                "CREATE TABLE parent (id INTEGER PRIMARY KEY); \
+                 CREATE TABLE child (\
+                    id INTEGER PRIMARY KEY, \
+                    parent_id INTEGER NOT NULL, \
+                    FOREIGN KEY (parent_id) REFERENCES parent(id) \
+                        DEFERRABLE INITIALLY DEFERRED\
+                 )",
+            )
+            .await
+            .expect("create deferred foreign key");
+
+        actor
+            .set_mode(Mode::EngineJournal)
+            .await
+            .expect("engine mode");
+        actor.exec("BEGIN IMMEDIATE").await.expect("begin");
+        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+        actor
+            .exec("INSERT INTO child (id, parent_id) VALUES (1, 99)")
+            .await
+            .expect("deferred violation is accepted before commit");
+
+        let error = actor
+            .commit_or_cleanup("test transaction")
+            .await
+            .expect_err("deferred foreign key makes COMMIT fail");
+        assert!(matches!(error, SqliteActorError::Exec(_)), "{error:?}");
+        assert!(actor.is_autocommit().await.expect("autocommit probe"));
+
+        actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+        let rows = actor
+            .query("SELECT count(*) FROM child")
+            .await
+            .expect("actor remains reusable");
+        assert_eq!(rows[0][0].as_deref(), Some("0"));
+    }
 }

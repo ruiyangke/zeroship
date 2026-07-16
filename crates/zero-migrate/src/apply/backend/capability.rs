@@ -40,6 +40,16 @@ pub enum BackfillError {
     /// A backfill mutates table data and requires explicit approval.
     #[error("backfill requires Approval::Approved (it mutates table data) but it was not given")]
     ApprovalRequired,
+    /// A stable backfill step was resumed with different authored content.
+    #[error("checksum drift on backfill {version}: progress has {recorded}, plan has {expected}")]
+    ChecksumDrift {
+        /// The stable plan-step version.
+        version: String,
+        /// The checksum stored with the progress row.
+        recorded: String,
+        /// The checksum supplied by the current plan.
+        expected: String,
+    },
     /// A bare SQL identifier in the spec is invalid.
     #[error("invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)")]
     InvalidIdentifier {

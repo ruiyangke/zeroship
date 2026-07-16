@@ -66,7 +66,8 @@ impl SqliteRebuildSpec {
 /// the dry-run [`MigrationPlan`](crate::engine::MigrationPlan).
 #[derive(Debug, Clone)]
 pub struct AppliedPlan {
-    /// The outer plan version (the filename's `<NNNN>` → deterministic UUIDv7).
+    /// The outer plan version. SQL files derive it from their numeric version;
+    /// host IR derives it from server-stamped owner plus migration name.
     pub version: MigrationId,
     /// Human-readable name.
     pub name: String,

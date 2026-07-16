@@ -151,6 +151,92 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
 }
 
 #[test]
+fn pg_named_type_column_operations_honor_explicit_reference_schema() {
+    let ops = vec![
+        Op::AddColumn {
+            table: "subscriptions".to_string(),
+            column: "tier".to_string(),
+            ty: ColType::Enum {
+                name: "plan_tier".to_string(),
+                schema: Some("shared_types".to_string()),
+            },
+            nullable: Some(true),
+            default: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::SetColumnType {
+            table: "subscriptions".to_string(),
+            column: "period".to_string(),
+            to_type: ColType::Domain {
+                name: "billing_period".to_string(),
+                schema: Some("shared_types".to_string()),
+            },
+            using: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+    let sql = lower_all(SqlDialect::Postgres, ops.clone());
+
+    assert_eq!(
+        sql[0],
+        r#"ALTER TABLE "app"."subscriptions" ADD COLUMN "tier" "shared_types"."plan_tier""#
+    );
+    assert_eq!(
+        sql[1],
+        r#"ALTER TABLE "app"."subscriptions" ALTER COLUMN "period" TYPE "shared_types"."billing_period" USING "period"::"shared_types"."billing_period""#
+    );
+
+    let base = zero_migrate::SchemaSnapshot {
+        tables: std::collections::BTreeMap::from([(
+            "subscriptions".to_string(),
+            zero_migrate::TableSnapshot {
+                columns: vec![zero_migrate::ColumnSnapshot {
+                    name: "period".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: true,
+                    ..Default::default()
+                }],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+                runtime_options: Default::default(),
+                partition_by: None,
+                comment: None,
+                stored_create_sql: None,
+            },
+        )]),
+        ..Default::default()
+    };
+    let folded = zero_migrate::fold_ops_onto(&base, &ops, SqlDialect::Postgres, SCHEMA)
+        .expect("explicit named type references fold");
+    let columns = &folded.tables["subscriptions"].columns;
+    let tier = columns
+        .iter()
+        .find(|column| column.name == "tier")
+        .expect("folded enum column");
+    assert_eq!(tier.data_type, "shared_types.plan_tier");
+    assert_eq!(
+        tier.ddl_type_override.as_deref(),
+        Some(r#""shared_types"."plan_tier""#)
+    );
+    let period = columns
+        .iter()
+        .find(|column| column.name == "period")
+        .expect("folded domain column");
+    assert_eq!(period.data_type, "shared_types.billing_period");
+    assert_eq!(
+        period.ddl_type_override.as_deref(),
+        Some(r#""shared_types"."billing_period""#)
+    );
+}
+
+#[test]
 fn sqlite_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
         SqlDialect::Sqlite,

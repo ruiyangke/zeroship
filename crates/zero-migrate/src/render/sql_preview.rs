@@ -5,8 +5,10 @@
 //! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
 //! [`IrAuthor::lower_plan`](crate::render::lower::IrAuthor::lower_plan) for an
 //! IR envelope), it walks the steps and prints the SQL strings already held in each
-//! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It NEVER renders SQL
-//! itself.
+//! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It does not re-render
+//! migration SQL. Executable MySQL previews add a fixed session envelope so copied
+//! SQL has the same string-literal grammar as apply, without changing the caller's
+//! inherited `sql_mode` after the preview finishes.
 //!
 //! # The honest boundary (the load-bearing design point)
 //!
@@ -51,6 +53,17 @@ use crate::schema::query::SqlDialect;
 /// no-fabrication tests assert on. If you change this, change the tests.
 pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 
+/// MySQL string literals are authored for standard quote-doubling. A copied
+/// preview must therefore execute under `NO_BACKSLASH_ESCAPES`, just like apply.
+/// Save and restore the exact inherited mode so preview execution does not leak a
+/// session-policy change into the caller's connection.
+const MYSQL_PREVIEW_SAVE_SQL_MODE: &str =
+    "SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;";
+const MYSQL_PREVIEW_PIN_SQL_MODE: &str =
+    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES');";
+const MYSQL_PREVIEW_RESTORE_SQL_MODE: &str =
+    "SET SESSION sql_mode = @__zero_migrate_preview_saved_sql_mode;";
+
 /// Options for the offline preview render.
 #[derive(Debug, Clone)]
 pub struct PreviewOpts {
@@ -94,8 +107,8 @@ enum DialectCaption {
     /// The body was lowered for this dialect — claim it.
     Lowered(SqlDialect),
     /// The body is operator-authored raw `.sql`, shown verbatim — NOT transformed.
-    /// `requested` is the `--dialect` the operator asked for (named only to be
-    /// explicit that we did NOT honour it for raw SQL).
+    /// `requested` is the `--dialect` the operator asked for. It does not transform
+    /// the body; MySQL uses it only to select the safe session envelope.
     VerbatimRawSql { requested: SqlDialect },
 }
 
@@ -107,7 +120,7 @@ impl DialectCaption {
         match self {
             DialectCaption::Lowered(d) => format!("(dialect: {})", dialect_label(d)),
             DialectCaption::VerbatimRawSql { requested } => format!(
-                "(verbatim raw .sql — NOT dialect-transformed; --dialect {} ignored for raw SQL)",
+                "(verbatim raw .sql; body NOT dialect-transformed for --dialect {})",
                 dialect_label(requested)
             ),
         }
@@ -151,14 +164,21 @@ impl Rendered {
 
 /// Render ONE already-lowered [`AppliedPlan`] to its offline SQL preview string.
 /// Pure + DB-free: it reads back the SQL the lowering already
-/// produced. `dialect` is used only for the header label (the plan's steps were
-/// already lowered for a dialect by the caller).
+/// produced. The plan's steps were already lowered for a dialect by the caller;
+/// `dialect` selects the header label and the MySQL session envelope.
 #[must_use]
 pub fn render_plan_sql(plan: &AppliedPlan, dialect: SqlDialect, _opts: &PreviewOpts) -> String {
     let rendered = render_plan_steps(plan);
+    let wrap_mysql = needs_mysql_session_envelope(dialect, &rendered);
     let mut out = String::new();
     write_plan_header(&mut out, plan, DialectCaption::Lowered(dialect));
+    if wrap_mysql {
+        write_mysql_session_prologue(&mut out);
+    }
     write_rendered(&mut out, &rendered);
+    if wrap_mysql {
+        write_mysql_session_epilogue(&mut out);
+    }
     out
 }
 
@@ -169,22 +189,39 @@ pub fn render_plan_sql(plan: &AppliedPlan, dialect: SqlDialect, _opts: &PreviewO
 /// verbatim operator SQL, which is NOT dialect-transformed. The headers
 /// therefore carry a `(verbatim raw .sql — NOT dialect-transformed)` caption rather
 /// than a `(dialect: …)` claim, so an operator reviewing a SQLite go-live is never
-/// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` here
-/// is only the operator's REQUESTED target (surfaced as "ignored for raw SQL").
+/// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` does
+/// not transform the raw body; MySQL uses it to add the safe session envelope.
 #[must_use]
 pub fn render_set_sql(plans: &[AppliedPlan], dialect: SqlDialect, _opts: &PreviewOpts) -> String {
     let caption = DialectCaption::VerbatimRawSql { requested: dialect };
+    let rendered_plans = plans
+        .iter()
+        .map(render_plan_steps)
+        .collect::<Vec<Vec<Rendered>>>();
+    let total_statements = rendered_plans
+        .iter()
+        .flatten()
+        .filter(|r| r.statement)
+        .count();
+    let total_runtime = rendered_plans
+        .iter()
+        .flatten()
+        .filter(|r| r.runtime_resolved)
+        .count();
+    let wrap_mysql = dialect == SqlDialect::Mysql && total_statements > 0;
+
     let mut out = String::new();
     write_doc_header(&mut out, caption);
-    let mut total_statements = 0usize;
-    let mut total_runtime = 0usize;
-    for plan in plans {
-        let rendered = render_plan_steps(plan);
-        total_statements += rendered.iter().filter(|r| r.statement).count();
-        total_runtime += rendered.iter().filter(|r| r.runtime_resolved).count();
+    if wrap_mysql {
+        write_mysql_session_prologue(&mut out);
+    }
+    for (plan, rendered) in plans.iter().zip(&rendered_plans) {
         out.push('\n');
         write_plan_header(&mut out, plan, caption);
-        write_rendered(&mut out, &rendered);
+        write_rendered(&mut out, rendered);
+    }
+    if wrap_mysql {
+        write_mysql_session_epilogue(&mut out);
     }
     let _ = writeln!(
         out,
@@ -211,6 +248,7 @@ pub fn render_ir_envelope_sql(
     opts: &PreviewOpts,
 ) -> Result<String, String> {
     let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts)?;
+    let wrap_mysql = needs_mysql_session_envelope(dialect, &rendered);
     let mut out = String::new();
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
     // a single un-lowerable op would otherwise make `lower_plan` abort).
@@ -228,7 +266,13 @@ pub fn render_ir_envelope_sql(
         out,
         "-- ============================================================"
     );
+    if wrap_mysql {
+        write_mysql_session_prologue(&mut out);
+    }
     write_rendered(&mut out, &rendered);
+    if wrap_mysql {
+        write_mysql_session_epilogue(&mut out);
+    }
     let statements = rendered.iter().filter(|r| r.statement).count();
     let runtime = rendered.iter().filter(|r| r.runtime_resolved).count();
     let _ = writeln!(
@@ -244,6 +288,8 @@ pub fn render_ir_envelope_sql(
 /// This is the DB-free lint seam: callers can feed these statements to the
 /// advisory analyzers without scraping SQL back out of the human preview, while
 /// runtime-resolved labels and comments stay out of the analyzer input.
+/// For MySQL, a non-empty statement stream includes the same save/pin/restore
+/// `sql_mode` envelope as the human preview, so it is also safe to execute as-is.
 ///
 /// # Errors
 ///
@@ -259,7 +305,8 @@ pub fn render_ir_envelope_sql_statements(
         .into_iter()
         .filter(|r| r.statement)
         .map(|r| r.text)
-        .collect();
+        .collect::<Vec<_>>();
+    let statements = wrap_mysql_statements(dialect, statements);
     Ok((name, statements))
 }
 
@@ -372,7 +419,7 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
             out.push(Rendered::comment(dml_comment(op, binds)));
             push_statement(template, out);
         }
-        PlanStep::Backfill(spec) => {
+        PlanStep::Backfill { spec, .. } => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} backfill {:?}.{:?}: windowed runtime loop over batches \
                  (cursor {:?}, batch {}); exact statement stream depends on live row count",
@@ -405,7 +452,7 @@ fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
             )));
             push_statement(template, out);
         }
-        PlanStep::Backfill(spec) => {
+        PlanStep::Backfill { spec, .. } => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} backfill {:?}.{:?}: windowed runtime loop (cursor {:?}, \
                  batch {}); exact statement stream depends on live row count",
@@ -482,9 +529,9 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
         // runtime-resolved: backfill windowed by PK + (PG) cross-deploy contract
         // cutover. NEVER fabricate the stream.
         IrLowerError::RenameLower(_) | IrLowerError::RenameNeedsLiveColumn(..) => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject}: online rename — needs the live column \
+            "{RUNTIME_RESOLVED} {kind} {subject}: online rename needs the live column \
              structure to lower (expand-contract dual-write / SQLite rebuild); the backfill is \
-             windowed by PK and the cutover is partitioned across deploys — exact statement \
+             windowed by PK and the cutover is partitioned across deploys; exact statement \
              stream depends on live state"
         ),
         other => format!("{RUNTIME_RESOLVED} {kind} {subject}: not offline-renderable ({other})"),
@@ -736,10 +783,159 @@ fn write_doc_header(out: &mut String, caption: DialectCaption) {
     );
 }
 
+/// Whether this preview needs the MySQL session envelope. A label-only preview
+/// stays comment-only: it must not gain executable SQL solely from formatting.
+fn needs_mysql_session_envelope(dialect: SqlDialect, rendered: &[Rendered]) -> bool {
+    dialect == SqlDialect::Mysql && rendered.iter().any(|r| r.statement)
+}
+
+/// Write the MySQL session setup before any author SQL. The mode append preserves
+/// every inherited mode while pinning the literal grammar required by lowering.
+fn write_mysql_session_prologue(out: &mut String) {
+    write_preview_statement(out, MYSQL_PREVIEW_SAVE_SQL_MODE);
+    write_preview_statement(out, MYSQL_PREVIEW_PIN_SQL_MODE);
+}
+
+/// Restore the exact `sql_mode` value captured before the preview ran.
+fn write_mysql_session_epilogue(out: &mut String) {
+    write_preview_statement(out, MYSQL_PREVIEW_RESTORE_SQL_MODE);
+}
+
+fn write_preview_statement(out: &mut String, statement: &str) {
+    out.push('\n');
+    let _ = writeln!(out, "{statement}");
+}
+
+/// Apply the same save/pin/restore contract to the programmatic executable-
+/// statement preview. An empty author stream remains empty.
+fn wrap_mysql_statements(dialect: SqlDialect, statements: Vec<String>) -> Vec<String> {
+    if dialect != SqlDialect::Mysql || statements.is_empty() {
+        return statements;
+    }
+
+    let mut wrapped = Vec::with_capacity(statements.len() + 3);
+    wrapped.push(MYSQL_PREVIEW_SAVE_SQL_MODE.to_string());
+    wrapped.push(MYSQL_PREVIEW_PIN_SQL_MODE.to_string());
+    wrapped.extend(statements);
+    wrapped.push(MYSQL_PREVIEW_RESTORE_SQL_MODE.to_string());
+    wrapped
+}
+
 /// Flush rendered lines into the output, one blank line between statements.
 fn write_rendered(out: &mut String, rendered: &[Rendered]) {
     for r in rendered {
         out.push('\n');
         let _ = writeln!(out, "{}", r.text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIMPLE_IR: &str = r#"{
+      "ir_version": 1,
+      "name": "preview_mode",
+      "ops": [
+        {"op":"dropTable","table":"widgets"}
+      ]
+    }"#;
+
+    fn opts() -> PreviewOpts {
+        PreviewOpts {
+            default_schema: "public".to_string(),
+            owner_app: "app_preview".to_string(),
+        }
+    }
+
+    fn assert_appears_in_order(text: &str, needles: &[&str]) {
+        let mut remainder = text;
+        for needle in needles {
+            let offset = remainder
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} in preview:\n{text}"));
+            remainder = &remainder[offset + needle.len()..];
+        }
+    }
+
+    #[test]
+    fn mysql_human_preview_saves_pins_and_restores_sql_mode() {
+        let out = render_ir_envelope_sql(SIMPLE_IR, SqlDialect::Mysql, &opts())
+            .expect("MySQL IR renders offline");
+
+        assert_appears_in_order(
+            &out,
+            &[
+                MYSQL_PREVIEW_SAVE_SQL_MODE,
+                MYSQL_PREVIEW_PIN_SQL_MODE,
+                "DROP TABLE",
+                MYSQL_PREVIEW_RESTORE_SQL_MODE,
+            ],
+        );
+        assert_eq!(out.matches(MYSQL_PREVIEW_SAVE_SQL_MODE).count(), 1, "{out}");
+        assert_eq!(
+            out.matches(MYSQL_PREVIEW_RESTORE_SQL_MODE).count(),
+            1,
+            "{out}"
+        );
+        assert!(
+            out.contains("-- preview: 1 statement(s) rendered"),
+            "the safety envelope must not inflate the migration-statement tally:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mysql_executable_statement_preview_includes_session_envelope() {
+        let (name, statements) =
+            render_ir_envelope_sql_statements(SIMPLE_IR, SqlDialect::Mysql, &opts())
+                .expect("MySQL executable preview renders offline");
+
+        assert_eq!(name, "preview_mode");
+        assert_eq!(statements.len(), 4, "{statements:#?}");
+        assert_eq!(statements[0], MYSQL_PREVIEW_SAVE_SQL_MODE);
+        assert_eq!(statements[1], MYSQL_PREVIEW_PIN_SQL_MODE);
+        assert!(statements[2].starts_with("DROP TABLE"), "{statements:#?}");
+        assert_eq!(statements[3], MYSQL_PREVIEW_RESTORE_SQL_MODE);
+    }
+
+    #[test]
+    fn mysql_plan_and_set_previews_wrap_the_whole_author_stream() {
+        let ir: MigrationIr = serde_json::from_str(SIMPLE_IR).expect("fixture parses");
+        let author = IrAuthor::new("public", "app_preview", SqlDialect::Mysql);
+        let plan = author
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("fixture lowers offline");
+
+        for out in [
+            render_plan_sql(&plan, SqlDialect::Mysql, &opts()),
+            render_set_sql(&[plan], SqlDialect::Mysql, &opts()),
+        ] {
+            assert_appears_in_order(
+                &out,
+                &[
+                    MYSQL_PREVIEW_SAVE_SQL_MODE,
+                    MYSQL_PREVIEW_PIN_SQL_MODE,
+                    "DROP TABLE",
+                    MYSQL_PREVIEW_RESTORE_SQL_MODE,
+                ],
+            );
+            assert_eq!(out.matches(MYSQL_PREVIEW_SAVE_SQL_MODE).count(), 1, "{out}");
+            assert_eq!(
+                out.matches(MYSQL_PREVIEW_RESTORE_SQL_MODE).count(),
+                1,
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_mysql_and_empty_statement_previews_do_not_gain_an_envelope() {
+        let (_, postgres) =
+            render_ir_envelope_sql_statements(SIMPLE_IR, SqlDialect::Postgres, &opts())
+                .expect("Postgres executable preview renders offline");
+        assert_eq!(postgres.len(), 1, "{postgres:#?}");
+        assert!(!postgres.iter().any(|s| s.contains("sql_mode")));
+
+        assert!(wrap_mysql_statements(SqlDialect::Mysql, Vec::new()).is_empty());
     }
 }

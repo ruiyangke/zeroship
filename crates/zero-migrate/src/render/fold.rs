@@ -64,11 +64,12 @@ use crate::render::declarative::{
     CollectionDescriptor, DeclarativeError,
 };
 use crate::render::lower::{
-    create_index_snapshot, derived_check_constraint_name, derived_constraint_name,
-    derived_exclusion_constraint_name, enum_inline_check, index_method_access, ir_column_to_field,
-    ir_column_to_field_resolved_create, mysql_enum_type, render_container_default_for_data_type,
-    render_domain_check, render_exclusion_constraint_body, render_ir_default,
-    render_ir_default_for_type, render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
+    author_type_override, create_index_snapshot, derived_check_constraint_name,
+    derived_constraint_name, derived_exclusion_constraint_name, enum_inline_check,
+    index_method_access, ir_column_to_field, ir_column_to_field_resolved_create, mysql_enum_type,
+    postgres_named_type_metadata, render_container_default_for_data_type, render_domain_check,
+    render_exclusion_constraint_body, render_ir_default, render_ir_default_for_type,
+    render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::SqlDialect;
@@ -448,15 +449,32 @@ pub fn fold_ops(
     dialect: SqlDialect,
     project_schema: &str,
 ) -> Result<SchemaSnapshot, FoldError> {
-    let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
-    let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
-    let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
-    let mut sequences: BTreeMap<String, SequenceSnapshot> = BTreeMap::new();
+    fold_ops_onto(&SchemaSnapshot::default(), ops, dialect, project_schema)
+}
+
+/// Replay an ordered [`Op`] list on top of an existing logical snapshot.
+///
+/// This is the catalog-seeded form of [`fold_ops`]. It uses the same exhaustive
+/// structural replay, including dialectal selection and DML no-ops, while
+/// preserving objects that predate the supplied migration set.
+///
+/// # Errors
+/// See [`FoldError`] for incoherent transitions relative to `base`.
+pub fn fold_ops_onto(
+    base: &SchemaSnapshot,
+    ops: &[Op],
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Result<SchemaSnapshot, FoldError> {
+    let mut tables: BTreeMap<String, TableSnapshot> = base.tables.clone();
+    let mut partitions: BTreeMap<String, PartitionSnapshot> = base.partitions.clone();
+    let mut views: BTreeMap<String, ViewSnapshot> = base.views.clone();
+    let mut sequences: BTreeMap<String, SequenceSnapshot> = base.sequences.clone();
     let mut named_types = NamedTypeRegistry::default();
-    let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
-    let mut roles: BTreeMap<String, RoleSnapshot> = BTreeMap::new();
-    let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = BTreeMap::new();
-    let mut extensions: BTreeMap<String, ExtensionSnapshot> = BTreeMap::new();
+    let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = base.named_types.clone();
+    let mut roles: BTreeMap<String, RoleSnapshot> = base.roles.clone();
+    let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = base.schemas.clone();
+    let mut extensions: BTreeMap<String, ExtensionSnapshot> = base.extensions.clone();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
     for op in replay_ops {
@@ -1015,6 +1033,7 @@ pub fn fold_ops(
                     ));
                 }
                 col.data_type = new_col.data_type;
+                col.ddl_type_override = new_col.ddl_type_override;
             }
             Op::SetColumnNotNull { table, column, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -1515,7 +1534,7 @@ fn apply_fold_author_type_overrides_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        if fold_author_data_type_override(&source.ty, dialect).is_none() {
+        if author_type_override(&source.ty, dialect).is_none() {
             continue;
         }
         let col = snap
@@ -1538,7 +1557,7 @@ fn apply_fold_author_type_override_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(data_type) = fold_author_data_type_override(ty, dialect) else {
+    let Some(type_override) = author_type_override(ty, dialect) else {
         return Ok(());
     };
     if col.name != column {
@@ -1547,15 +1566,15 @@ fn apply_fold_author_type_override_to_column(
             column: column.to_string(),
         });
     }
-    col.data_type = data_type.to_string();
-    Ok(())
-}
-
-fn fold_author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&'static str> {
-    match (dialect, ty) {
-        (SqlDialect::Postgres, ColType::Uuid) => Some("uuid"),
-        _ => None,
+    col.data_type = type_override.data_type;
+    col.ddl_type_override = type_override.ddl_type;
+    if type_override.quote_literal_default_as_text {
+        col.default = col
+            .default
+            .take()
+            .map(|default| crate::render::dml::sql_string_literal(&default));
     }
+    Ok(())
 }
 
 fn apply_fold_structured_defaults_to_snapshot(
@@ -1666,8 +1685,13 @@ fn apply_fold_named_type_column_metadata(
     match &source.ty {
         ColType::Enum { name, .. } => match dialect {
             SqlDialect::Postgres => {
-                let schema = named_types.enum_schema_or(name, project_schema);
-                col.data_type = pg_type_data_type(schema, name);
+                let registry_schema = named_types.enum_schema_or(name, project_schema);
+                let (data_type, ddl_type) =
+                    postgres_named_type_metadata(&source.ty, registry_schema)
+                        .map_err(fold_named_type_error)?
+                        .ok_or(FoldError::Unsupported("named enum metadata was not resolved"))?;
+                col.data_type = data_type;
+                col.ddl_type_override = Some(ddl_type);
             }
             SqlDialect::Sqlite => {
                 let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
@@ -1686,8 +1710,13 @@ fn apply_fold_named_type_column_metadata(
         },
         ColType::Domain { name, .. } => {
             if matches!(dialect, SqlDialect::Postgres) {
-                let schema = named_types.domain_schema_or(name, project_schema);
-                col.data_type = pg_type_data_type(schema, name);
+                let registry_schema = named_types.domain_schema_or(name, project_schema);
+                let (data_type, ddl_type) =
+                    postgres_named_type_metadata(&source.ty, registry_schema)
+                        .map_err(fold_named_type_error)?
+                        .ok_or(FoldError::Unsupported("named domain metadata was not resolved"))?;
+                col.data_type = data_type;
+                col.ddl_type_override = Some(ddl_type);
                 return Ok(());
             }
             let def = named_types
@@ -3405,6 +3434,101 @@ mod tests {
                 .any(|c| c.name == "users_pkey" && c.kind == "PRIMARY KEY"),
             "system PK constraint injected"
         );
+    }
+
+    #[test]
+    fn fold_ops_onto_preserves_base_and_advances_complete_table_shape() {
+        let create_op = create("events", vec![col("payload", ColType::Json, true)]);
+        let base = fold(std::slice::from_ref(&create_op)).expect("base schema folds");
+        let tail = vec![
+            Op::RenameColumn {
+                table: "events".to_string(),
+                from: "payload".to_string(),
+                to: "body".to_string(),
+                ty: ColType::Json,
+                schema: None,
+                existence_guard: None,
+            },
+            Op::SetColumnDefault {
+                table: "events".to_string(),
+                column: "body".to_string(),
+                value: IrDefault::Container {
+                    kind: crate::model::ir::EmptyContainerKind::Object,
+                },
+                schema: None,
+                existence_guard: None,
+            },
+        ];
+
+        let projected = fold_ops_onto(&base, &tail, SqlDialect::Postgres, SCHEMA)
+            .expect("tail projects onto catalog base");
+        let expected = fold(
+            &std::iter::once(create_op)
+                .chain(tail)
+                .collect::<Vec<_>>(),
+        )
+        .expect("combined replay folds");
+
+        assert_eq!(projected, expected);
+        let events = projected.tables.get("events").expect("events survives");
+        assert!(events.columns.iter().all(|column| column.name != "payload"));
+        let body = events
+            .columns
+            .iter()
+            .find(|column| column.name == "body")
+            .expect("renamed column is projected");
+        assert_eq!(body.default.as_deref(), Some("'{}'::jsonb"));
+    }
+
+    #[test]
+    fn fold_retains_fixed_decimal_storage_for_mysql_and_sqlite_replay() {
+        let snap = fold_ops(
+            &[create(
+                "ledger",
+                vec![col(
+                    "amount",
+                    ColType::Decimal {
+                        precision: 30,
+                        scale: 10,
+                    },
+                    false,
+                )],
+            )],
+            SqlDialect::Mysql,
+            SCHEMA,
+        )
+        .expect("MySQL decimal create should fold");
+        let amount = snap.tables["ledger"]
+            .columns
+            .iter()
+            .find(|column| column.name == "amount")
+            .expect("amount column");
+        assert_eq!(amount.data_type, "numeric");
+        assert_eq!(amount.ddl_type_override.as_deref(), Some("DECIMAL(30, 10)"));
+
+        let sqlite = fold_ops(
+            &[create(
+                "ledger",
+                vec![col(
+                    "amount",
+                    ColType::Decimal {
+                        precision: 30,
+                        scale: 10,
+                    },
+                    false,
+                )],
+            )],
+            SqlDialect::Sqlite,
+            SCHEMA,
+        )
+        .expect("SQLite decimal create should fold");
+        let amount = sqlite.tables["ledger"]
+            .columns
+            .iter()
+            .find(|column| column.name == "amount")
+            .expect("amount column");
+        assert_eq!(amount.data_type, "text");
+        assert_eq!(amount.ddl_type_override.as_deref(), Some("TEXT"));
     }
 
     #[test]

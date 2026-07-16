@@ -102,6 +102,11 @@ pub enum ExpandContractError {
 /// flat [`all`](Self::all) view is the input to [`plan`](crate::engine::MigrationEngine::plan).
 #[derive(Debug, Clone)]
 pub struct ExpandContractPlan {
+    /// The stable logical identity of the owning authored plan. IR lowering
+    /// stamps this after the ordered plan is assembled; declarative callers that
+    /// do not have an outer plan identity leave it `None` and retain the legacy
+    /// first-expand-step fallback.
+    pub plan_version: Option<MigrationId>,
     /// E1, E2, E3 in order (add column, dual-write trigger, backfill marker).
     pub expand: Vec<Migration>,
     /// C1, C2 in order (drop trigger/function, drop old column).
@@ -207,6 +212,32 @@ const EC_STEP_E2: u8 = 2;
 const EC_STEP_E3: u8 = 3;
 const EC_STEP_C1: u8 = 4;
 const EC_STEP_C2: u8 = 5;
+const EC_STEP_ABORT_C1: u8 = 6;
+const EC_STEP_ABORT_C2: u8 = 7;
+
+/// Derive the journal identity of one resolver-authored abort step.
+///
+/// The pending version is the durable identity of an online rename, while the
+/// ordinal distinguishes the ordered cleanup statements. Keeping this in one
+/// helper lets execution and status recognize the same resolver-owned entries.
+pub(crate) fn resolve_pending_abort_version(
+    pending_version: &str,
+    ordinal: usize,
+) -> MigrationId {
+    let mut seed = pending_version.as_bytes().to_vec();
+    seed.extend_from_slice(&(ordinal as u64).to_be_bytes());
+    MigrationId::derive("resolve_pending_abort", &seed)
+}
+
+/// Derive the journal identity for the atomic roll-forward resolver step.
+pub(crate) fn resolve_pending_apply_atomic_version(pending_version: &str) -> MigrationId {
+    MigrationId::derive("resolve_pending_apply_atomic", pending_version.as_bytes())
+}
+
+/// Derive the journal identity for the atomic abort resolver step.
+pub(crate) fn resolve_pending_abort_atomic_version(pending_version: &str) -> MigrationId {
+    MigrationId::derive("resolve_pending_abort_atomic", pending_version.as_bytes())
+}
 
 /// Build the rename's STABLE identity seed: a length-prefixed image of
 /// every fact that identifies the logical rename — `schema`, `owner`, `table`,
@@ -241,13 +272,13 @@ const PG_MAX_IDENT_BYTES: usize = 63;
 /// `down` and the orchestrator target the same object), with a hash suffix to
 /// disambiguate over-long natural names — mirroring [`crate::plan::author`]'s
 /// `index_name` discipline.
-fn dual_write_fn_name(table: &str, from: &str, to: &str) -> String {
+pub(crate) fn dual_write_fn_name(table: &str, from: &str, to: &str) -> String {
     capped_name(&format!("zsdw_{table}_{from}_{to}_fn"))
 }
 
 /// Deterministically derive the dual-write trigger name (see
 /// [`dual_write_fn_name`]).
-fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
+pub(crate) fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
     capped_name(&format!("zsdw_{table}_{from}_{to}_trg"))
 }
 
@@ -323,6 +354,67 @@ impl ExpandContractAuthor {
                 ty,
             } => self.author_rename(table, from, to, ty),
         }
+    }
+
+    /// Author the safe rollback of an outstanding rename expansion.
+    ///
+    /// The two approval-gated steps first remove the dual-write trigger and
+    /// function, then drop the destination column. The source column remains
+    /// untouched, returning the table to its pre-rename shape. These steps use
+    /// identities distinct from the forward contract so an aborted rename can
+    /// never make the destructive source-column drop appear completed.
+    ///
+    /// # Errors
+    /// The same intent validation errors as [`Self::author`].
+    pub fn author_abort(
+        &self,
+        intent: &OnlineIntent,
+    ) -> Result<Vec<Migration>, ExpandContractError> {
+        // Reuse the canonical author for validation and for the exact dual-write
+        // cleanup SQL. This guarantees abort targets the objects expand created.
+        let plan = self.author(intent)?;
+        let OnlineIntent::RenameColumn {
+            table,
+            from,
+            to,
+            ty,
+        } = intent;
+        let id_seed = rename_id_seed(&self.project_schema, &self.owner_app, table, from, to, ty);
+        let canonical_cleanup = &plan.contract[0];
+        let cleanup = self.make(
+            &format!("abort_drop_dual_write_{table}_{from}_{to}"),
+            canonical_cleanup.up.clone(),
+            canonical_cleanup.down.clone(),
+            MigrationFlags {
+                online: true,
+                phase: Some(OnlinePhase::Contract),
+                requires_approval: true,
+                ..MigrationFlags::default()
+            },
+            vec![plan.trigger_version.clone()],
+            &id_seed,
+            EC_STEP_ABORT_C1,
+        );
+        let drop_destination = self.make(
+            &format!("abort_drop_column_{table}_{to}"),
+            format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                qualified(&self.project_schema, table),
+                quote_ident(to)
+            ),
+            None,
+            MigrationFlags {
+                online: true,
+                phase: Some(OnlinePhase::Contract),
+                destructive: true,
+                requires_approval: true,
+                ..MigrationFlags::default()
+            },
+            vec![cleanup.version.clone()],
+            &id_seed,
+            EC_STEP_ABORT_C2,
+        );
+        Ok(vec![cleanup, drop_destination])
     }
 
     // A linear sequence builder: validate, then emit E1/E2/E3/C1/C2 in order.
@@ -531,6 +623,7 @@ impl ExpandContractAuthor {
         );
 
         Ok(ExpandContractPlan {
+            plan_version: None,
             expand: vec![e1, e2, e3],
             contract: vec![c1, c2],
             backfill,
@@ -839,6 +932,65 @@ mod tests {
         // C1 is not "destructive" in the data-loss sense (no rows lost dropping
         // a trigger), but is gated.
         assert!(!c1.flags.destructive);
+    }
+
+    #[test]
+    fn abort_plan_removes_dual_write_then_the_new_column() {
+        let expand = author().author(&rename()).expect("expand author");
+        let abort = author().author_abort(&rename()).expect("abort author");
+
+        assert_eq!(
+            abort.len(),
+            2,
+            "trigger cleanup and destination-column drop"
+        );
+        assert_eq!(
+            abort[0].up, expand.contract[0].up,
+            "abort must remove the exact dual-write objects created by expand"
+        );
+        assert_eq!(
+            abort[0].depends_on,
+            vec![expand.trigger_version],
+            "the trigger must have been created before it can be removed"
+        );
+        assert_eq!(
+            abort[1].up,
+            "ALTER TABLE \"proj_acme\".\"users\" DROP COLUMN \"email_address\""
+        );
+        assert_eq!(abort[1].depends_on, vec![abort[0].version.clone()]);
+        assert!(abort.iter().all(|step| step.flags.requires_approval));
+        assert!(abort[1].flags.destructive);
+        assert!(abort
+            .iter()
+            .all(|step| { step.flags.online && step.flags.phase == Some(OnlinePhase::Contract) }));
+    }
+
+    #[test]
+    fn abort_plan_is_deterministic_and_does_not_reuse_contract_ids() {
+        let first = author()
+            .author_abort(&rename())
+            .expect("first abort author");
+        let second = author()
+            .author_abort(&rename())
+            .expect("second abort author");
+        let contract = author()
+            .author(&rename())
+            .expect("contract author")
+            .contract;
+
+        assert_eq!(first.len(), second.len());
+        for (left, right) in first.iter().zip(&second) {
+            assert_eq!(left.version, right.version);
+            assert_eq!(left.checksum, right.checksum);
+            assert_eq!(left.up, right.up);
+        }
+        let contract_ids = contract
+            .iter()
+            .map(|step| step.version.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(first
+            .iter()
+            .all(|step| !contract_ids.contains(step.version.as_str())));
     }
 
     #[test]

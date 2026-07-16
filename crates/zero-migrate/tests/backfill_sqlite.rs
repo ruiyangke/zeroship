@@ -142,11 +142,113 @@ async fn sqlite_backfill_transforms_large_table_in_batches() {
     assert_eq!(undone, 0, "every row marked done");
 }
 
-// ── CRITICAL: crash-resume exactly-once ──────────────────────────────────────
+#[compio::test]
+async fn sqlite_backfill_rejects_target_triggers_before_mutating_rows() {
+    let _g = serial();
+    let p = paths("bf_trigger");
+    let be = backend(&p);
+    seed_nums(&be, 3).await;
+
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TRIGGER skip_second_row \
+             BEFORE UPDATE ON nums \
+             WHEN OLD.id = 2 \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .await
+        .expect("create adversarial trigger");
+
+    let s = spec(2);
+    let error = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect_err("a target trigger can suppress rows and must be rejected");
+    assert!(
+        error.to_string().contains("trigger"),
+        "the error should explain why the target is unsafe: {error}"
+    );
+    assert_eq!(
+        scalar_i64(&be, "SELECT count(*) FROM nums WHERE done <> 0").await,
+        0,
+        "trigger rejection must happen before any application row changes"
+    );
+}
+
+// A selected row must never be skipped silently by a constraint policy.
+
+#[compio::test]
+async fn sqlite_backfill_rolls_back_when_conflict_ignore_suppresses_a_selected_row() {
+    let _g = serial();
+    let p = paths("bf_conflict_ignore");
+    let be = backend(&p);
+
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE ignored_updates (\
+                id INTEGER PRIMARY KEY, \
+                unique_value INTEGER NOT NULL UNIQUE ON CONFLICT IGNORE, \
+                done INTEGER NOT NULL DEFAULT 0\
+             ); \
+             INSERT INTO ignored_updates (id, unique_value) VALUES (1, 1), (2, 2), (3, 3)",
+        )
+        .await
+        .expect("seed conflict-ignore target");
+
+    let s = BackfillSpec {
+        schema: "main".to_string(),
+        table: "ignored_updates".to_string(),
+        cursor_column: "id".to_string(),
+        batch_size: 2,
+        set_clause: "\"unique_value\" = 0, \"done\" = 1".to_string(),
+        filter: Some("\"done\" = 0".to_string()),
+        name: "conflict_ignore_must_not_skip_rows".to_string(),
+    };
+    let error = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect_err("a silently ignored update must fail the batch");
+    assert!(
+        error.to_string().contains("selected 2 rows but updated 1"),
+        "the error should report the exact window mismatch: {error}"
+    );
+    assert_eq!(
+        scalar_i64(
+            &be,
+            "SELECT count(*) FROM ignored_updates WHERE done <> 0 OR unique_value <> id"
+        )
+        .await,
+        0,
+        "the mismatched batch must roll back every application row change"
+    );
+    actor.set_mode(Mode::EngineJournal).await.unwrap();
+    let progress = actor
+        .query(
+            "SELECT last_cursor, rows_done, batches_done, complete \
+             FROM \"_mig\".schema_backfills",
+        )
+        .await
+        .expect("inspect journal progress");
+    assert_eq!(progress.len(), 1, "the initialized progress row remains");
+    assert_eq!(
+        progress[0],
+        vec![
+            None,
+            Some("0".to_string()),
+            Some("0".to_string()),
+            Some("0".to_string()),
+        ],
+        "the mismatched batch must not checkpoint or complete"
+    );
+}
+
 // Run a bounded number of batches (faithful crash: process stops, NOT marked
 // complete), then re-run unbounded and assert it resumes from the committed
 // cursor and reaches the same final state with NO double-apply.
-
 #[compio::test]
 async fn sqlite_backfill_resumes_exactly_once_after_crash() {
     let _g = serial();
@@ -296,19 +398,14 @@ async fn sqlite_backfill_complete_rerun_is_noop() {
     assert_eq!(mismatches, 0, "no double-apply on re-run");
 }
 
-// ── REAL (numeric-affinity, non-integral) unique cursor, exactly-once ────────
-// `max_returned_cursor` parsed each RETURNING'd cell with
-// `parse::<i64>()` and SILENTLY DROPPED any non-i64 value — so a UNIQUE NOT NULL
-// REAL cursor (legal, just unusual) yielded max_cursor=None even with n>0 rows
-// touched, writing last_cursor=NULL, re-scanning from the start (WHERE 1=1), and
-// re-applying the non-idempotent transform. The bind side already had a text
-// fallback; the max side did not. This faithful e2e proves exactly-once over a REAL
-// cursor with actual non-integral data, which a re-apply loop would fail (val=id+2
-// somewhere) and a premature-stop would fail (a row left at val=id).
+// ── fail-closed cursor domains ───────────────────────────────────────────────
+// SQLite values are dynamically typed. Durable checkpoints therefore accept only
+// the table's single-column INTEGER/TEXT primary key with matching live storage
+// classes. A UNIQUE-only key is not the table's paging contract, and REAL cannot be
+// round-tripped through a text progress checkpoint without ordering ambiguity.
 
-/// Seed `rnums(rk REAL UNIQUE NOT NULL, id INTEGER PRIMARY KEY, val INTEGER, done
-/// INTEGER)` with `n` rows whose REAL cursor `rk = i + 0.5` is NON-integral (so the
-/// `parse::<i64>()` path would drop EVERY cell). `val = id`, `done = 0`.
+/// Seed a table whose requested cursor is REAL and UNIQUE but is not its primary
+/// key. This isolates the single-primary-key gate.
 async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
     let actor = be.actor();
     actor.set_mode(Mode::CreatorUp).await.unwrap();
@@ -324,7 +421,7 @@ async fn seed_real_cursor(be: &SqliteBackend, n: i64) {
         .expect("create rnums");
     let mut vals = Vec::with_capacity(n as usize);
     for i in 1..=n {
-        // rk = i + 0.5 — distinct, NON-integral, numeric-order = id-order.
+        // rk = i + 0.5: distinct but not a supported durable cursor domain.
         vals.push(format!("({i}.5, {i}, {i}, 0)"));
     }
     actor
@@ -349,74 +446,135 @@ fn real_spec(batch: u32) -> BackfillSpec {
 }
 
 #[compio::test]
-async fn sqlite_backfill_real_cursor_advances_exactly_once() {
+async fn sqlite_backfill_rejects_unique_only_cursor() {
     let _g = serial();
     let p = paths("bf_real");
     let be = backend(&p);
     seed_real_cursor(&be, 50).await;
-    let s = real_spec(10); // 5 batches; each must advance the REAL cursor, not reset
+    let s = real_spec(10);
 
-    let out = be
+    let error = be
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
-        .expect("REAL-cursor backfill runs to completion");
-    assert!(out.complete, "backfill completed");
-    assert_eq!(
-        out.batches, 5,
-        "50 rows / 10 per batch = 5 batches (cursor advanced, not reset)"
+        .expect_err("a UNIQUE-only cursor is not the table primary key");
+    assert!(
+        matches!(error, BackfillError::CursorNotUniqueNotNull { .. }),
+        "{error:?}"
     );
     assert_eq!(
-        out.rows_updated, 50,
-        "every row touched ONCE (a reset loop would touch more)"
+        scalar_i64(&be, "SELECT count(*) FROM rnums WHERE done <> 0").await,
+        0,
+        "rejection happens before data mutation"
     );
-
-    // Exactly-once: every row val == id + 1. A dropped-cursor re-scan would push some
-    // row to id+2 (double-apply) before the `done=0` filter caught up, or leave a row
-    // at id (premature complete) — both surface here.
-    let mismatches = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE val <> id + 1").await;
-    assert_eq!(mismatches, 0, "REAL-cursor backfill is exactly-once");
-    let undone = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE done <> 1").await;
-    assert_eq!(undone, 0, "every row marked done");
 }
 
 #[compio::test]
-async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
+async fn sqlite_backfill_rejects_real_primary_key_cursor() {
     let _g = serial();
     let p = paths("bf_real_crash");
     let be = backend(&p);
-    seed_real_cursor(&be, 50).await;
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE rnums (\
+               rk REAL PRIMARY KEY NOT NULL, \
+               val INTEGER NOT NULL, \
+               done INTEGER NOT NULL DEFAULT 0); \
+             INSERT INTO rnums (rk, val, done) VALUES (1.5, 1, 0), (2.5, 2, 0)",
+        )
+        .await
+        .expect("seed REAL primary key");
     let s = real_spec(10);
 
-    // Phase 1 — exactly 2 committed batches (rows 1..20), then "crash". With the bug,
-    // last_cursor was written NULL, so the resume below would re-scan from rk>nothing.
-    let out1 = be
-        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", Some(2))
-        .await
-        .expect("bounded REAL run");
-    assert_eq!(out1.batches, 2, "exactly 2 batches before the crash");
-    assert_eq!(out1.rows_updated, 20);
-    assert!(!out1.complete);
-
-    // Phase 2 — resume. MUST resume from the committed REAL cursor (rk≈20.5), NOT
-    // restart from the beginning (the dropped-cursor bug would re-touch rows 1..20).
-    let out2 = be
+    let error = be
         .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
         .await
-        .expect("resumed REAL run");
+        .expect_err("REAL primary-key cursors are unsupported");
     assert!(
-        out2.resumed,
-        "the re-run resumed from a committed REAL cursor"
+        matches!(error, BackfillError::CursorNotUniqueNotNull { .. }),
+        "{error:?}"
     );
     assert_eq!(
-        out2.rows_updated, 30,
-        "only the remaining 30 rows touched (no re-touch)"
+        scalar_i64(&be, "SELECT count(*) FROM rnums WHERE done <> 0").await,
+        0,
+        "REAL rejection happens before data mutation"
     );
-    assert!(out2.complete);
+}
 
-    let mismatches = scalar_i64(&be, "SELECT count(*) FROM rnums WHERE val <> id + 1").await;
+#[compio::test]
+async fn sqlite_backfill_rejects_non_utf8_text_keys_before_mutation() {
+    let _g = serial();
+    let p = paths("bf_non_utf8_text");
+    let be = backend(&p);
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE text_keys (k TEXT PRIMARY KEY NOT NULL, done INTEGER NOT NULL); \
+             INSERT INTO text_keys (k, done) VALUES \
+               (CAST(X'61' AS TEXT), 0), \
+               (CAST(X'C0' AS TEXT), 0), \
+               (CAST(X'F48FBFBF' AS TEXT), 0)",
+        )
+        .await
+        .expect("seed one invalid UTF-8 key between valid keys");
+    let s = BackfillSpec {
+        schema: "main".into(),
+        table: "text_keys".into(),
+        cursor_column: "k".into(),
+        batch_size: 1,
+        set_clause: "\"done\" = 1".into(),
+        filter: Some("\"done\" = 0".into()),
+        name: "invalid_utf8".into(),
+    };
+
+    let error = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect_err("a durable text cursor must have a lossless UTF-8 checkpoint");
+    assert!(error.to_string().contains("UTF-8"), "{error}");
     assert_eq!(
-        mismatches, 0,
-        "every row incremented EXACTLY once across the crash (REAL cursor)"
+        scalar_i64(&be, "SELECT count(*) FROM text_keys WHERE done <> 0").await,
+        0,
+        "the full cursor domain is checked before the first batch"
+    );
+}
+
+#[compio::test]
+async fn sqlite_backfill_text_key_with_nul_is_checkpointed_with_binds() {
+    let _g = serial();
+    let p = paths("bf_nul_text");
+    let be = backend(&p);
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.unwrap();
+    actor
+        .exec(
+            "CREATE TABLE text_keys (k TEXT PRIMARY KEY NOT NULL, done INTEGER NOT NULL); \
+             INSERT INTO text_keys (k, done) VALUES \
+               ('a', 0), (CAST(X'6100' AS TEXT), 0), ('b', 0)",
+        )
+        .await
+        .expect("seed a text key containing NUL");
+    let s = BackfillSpec {
+        schema: "main".into(),
+        table: "text_keys".into(),
+        cursor_column: "k".into(),
+        batch_size: 1,
+        set_clause: "\"done\" = 1".into(),
+        filter: Some("\"done\" = 0".into()),
+        name: "nul_text".into(),
+    };
+
+    let outcome = be
+        .run_backfill_bounded_sqlite(&s, &s.set_clause, s.filter.as_deref(), "tester", None)
+        .await
+        .expect("NUL is data, not SQL syntax, when checkpoints use native binds");
+    assert!(outcome.complete);
+    assert_eq!(outcome.rows_updated, 3);
+    assert_eq!(
+        scalar_i64(&be, "SELECT count(*) FROM text_keys WHERE done = 1").await,
+        3
     );
 }
 
@@ -439,7 +597,7 @@ async fn sqlite_backfill_real_cursor_resumes_exactly_once_after_crash() {
 // a SECOND increment of row 'B'. The transform is `val = val + 1` with NO filter
 // so a double-apply is directly visible (val lands at the base + 2).
 
-/// Seed `ci(k TEXT COLLATE NOCASE NOT NULL UNIQUE, val INTEGER NOT NULL)` with the
+/// Seed `ci(k TEXT COLLATE NOCASE PRIMARY KEY NOT NULL, val INTEGER NOT NULL)` with the
 /// two adversarial keys 'a','B' (val=0). The NOCASE collation on the cursor column
 /// is the crux: paging honors it but Rust `cells.max()` does not.
 async fn seed_nocase_cursor(be: &SqliteBackend) {
@@ -448,7 +606,7 @@ async fn seed_nocase_cursor(be: &SqliteBackend) {
     actor
         .exec(
             "CREATE TABLE ci (\
-               k   TEXT COLLATE NOCASE NOT NULL UNIQUE, \
+               k   TEXT COLLATE NOCASE PRIMARY KEY NOT NULL, \
                val INTEGER NOT NULL)",
         )
         .await

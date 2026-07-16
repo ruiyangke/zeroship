@@ -9,7 +9,8 @@
 //! 3. computes `pending = set − applied`, in `UUIDv7` version order;
 //! 4. re-verifies the checksums of already-applied migrations — a mismatch is a
 //!    hard abort (drift / tamper);
-//! 5. **first pass (static, all-up-front):** runs the **[`SqlGuard`]** over the
+//! 5. **first pass (static, all-up-front):** runs the dialect-selected
+//!    **[`MigrationGuard`](crate::guard::MigrationGuard)** over the
 //!    `up` SQL of EVERY pending migration, and validates that every
 //!    non-transactional `up` is **idempotent** (each non-txn statement uses the
 //!    `IF NOT EXISTS` form). A denial / non-idempotent op aborts the whole apply
@@ -50,7 +51,7 @@ use crate::apply::journal::{AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 #[cfg(pg_seam)]
 use crate::driver::SqlSession;
-use crate::guard::{GuardError, SqlGuard};
+use crate::guard::GuardError;
 use crate::model::migration::{Migration, MigrationId};
 
 /// Whether an apply sub-batch must acquire/release the project advisory lock
@@ -593,7 +594,11 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // direct caller cannot bypass it. It is dialect-agnostic (reads only
     // `flags.destructive`), so it sits in the generic core — running identically for
     // PG and the engine path.
-    if approval != Approval::Approved && migrations.iter().any(|m| m.flags.destructive) {
+    if approval != Approval::Approved
+        && migrations
+            .iter()
+            .any(|m| m.flags.destructive || m.flags.requires_approval)
+    {
         return Err(ApplyError::ApprovalRequired);
     }
     // **Per-version approval scope (anti-bypass), defense in depth.** Even
@@ -607,10 +612,9 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // versions). Fail-closed: the FIRST un-scoped destructive migration aborts the
     // whole batch before the lock or any DDL.
     if approval == Approval::Approved {
-        if let Some(m) = migrations
-            .iter()
-            .find(|m| m.flags.destructive && !scope.admits(m.version.as_str()))
-        {
+        if let Some(m) = migrations.iter().find(|m| {
+            (m.flags.destructive || m.flags.requires_approval) && !scope.admits(m.version.as_str())
+        }) {
             return Err(ApplyError::ApprovalNotScoped {
                 version: m.version.as_str().to_string(),
             });
@@ -629,7 +633,25 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // leak onto the (pooled / long-lived) connection after apply. This runs
     // regardless of lock mode: every sub-batch is responsible for its own session
     // hygiene even when the lock is owned outside it.
-    let snapshot = backend.snapshot_session().await;
+    let snapshot = match backend.snapshot_session().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // A snapshot is the prerequisite for every session mutation below.
+            // Continuing without it can leak settings, and on MySQL pinning
+            // autocommit could commit caller-owned work. Nothing author-controlled
+            // may run after this failure.
+            backend.reset_role_best_effort().await;
+            if lock_mode == LockMode::Acquire {
+                if let Err(unlock) = backend.release_project_lock(cfg).await {
+                    tracing::warn!(
+                        error = %unlock,
+                        "zero-migrate: failed to release project lock after session snapshot error"
+                    );
+                }
+            }
+            return Err(error);
+        }
+    };
     let result = apply_locked(backend, cfg, migrations, applied_by).await;
     // RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
     // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
@@ -638,15 +660,23 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // role back to admin on EVERY exit path first, then restore the GUCs if we
     // have a snapshot. (Harmless no-op when no `SET ROLE` ran.)
     backend.reset_role_best_effort().await;
-    // Restore the original session settings (best-effort; logged on failure)
-    // before releasing the lock. The txn path uses SET LOCAL so only the non-txn
-    // path actually mutates the session, but restoring unconditionally is cheap
-    // and keeps the guarantee total.
-    if let Ok(snap) = &snapshot {
-        if let Err(e) = backend.restore_session(snap).await {
-            tracing::warn!(error = %e, "zero-migrate: failed to restore session GUCs after apply");
+    // Restore before releasing the lock. Preserve an apply failure when cleanup
+    // also fails, but never report a successful apply if its session restoration
+    // failed: returning that connection to a pool with altered settings is an
+    // observable failure of the operation's contract.
+    let restored = backend.restore_session(&snapshot).await;
+    let result = match (result, restored) {
+        (Err(error), Err(restore)) => {
+            tracing::warn!(
+                error = %restore,
+                "zero-migrate: failed to restore session settings after apply error"
+            );
+            Err(error)
         }
-    }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+    };
     // Release the lock only when WE acquired it. Under `AlreadyHeld` the outer
     // `apply_declarative` releases it once, after every sub-batch. Always release
     // on the `Acquire` path, even on error. Surface the original error first.
@@ -927,13 +957,13 @@ async fn apply_locked<B: MigrationBackend>(
 
     let mut outcome = ApplyOutcome {
         applied: Vec::new(),
-        // Skipped = already-completed versions PLUS versions skipped because a
-        // squash supersedes them (they will never run — `S` covers their effect).
-        skipped: completed
-            .keys()
-            .map(|v| (*v).to_string())
-            .chain(superseded_owned.iter().cloned())
-            .collect(),
+        // Report only versions from this supplied batch. The journal can contain
+        // completed steps outside `migrations` (for example DML siblings when the
+        // plan executor submits a consecutive DDL sub-batch); including the whole
+        // journal here duplicates those sibling ids when their own plan arms report
+        // them. Iterate the supplied set once so a version that is both completed
+        // and superseded is still reported exactly once and in caller order.
+        skipped: supplied_skipped_versions(migrations, &completed, &superseded),
         recovered: Vec::new(),
     };
 
@@ -949,6 +979,21 @@ async fn apply_locked<B: MigrationBackend>(
     apply_repeatables(backend, cfg, &repeatables, applied_by, &mut outcome).await?;
 
     Ok(outcome)
+}
+
+fn supplied_skipped_versions(
+    migrations: &[Migration],
+    completed: &HashMap<&str, &AppliedEntry>,
+    superseded: &std::collections::HashSet<&str>,
+) -> Vec<String> {
+    migrations
+        .iter()
+        .filter(|migration| {
+            let version = migration.version.as_str();
+            completed.contains_key(version) || superseded.contains(version)
+        })
+        .map(|migration| migration.version.as_str().to_string())
+        .collect()
 }
 
 /// The execute pass: for each pending migration, evaluate
@@ -1084,20 +1129,28 @@ async fn apply_repeatables<B: MigrationBackend>(
     // The latest journaled `completed` checksum per identity — the re-run oracle.
     let latest = backend.latest_completed_checksums(cfg).await?;
 
-    // Order repeatables among themselves by `depends_on` topo (version-tiebroken),
-    // honoring deps on versioned migrations as pre-satisfied (they already ran).
-    let ordered = order_repeatables(repeatables)?;
+    // Re-read satisfied state after the versioned phase. A supplied versioned
+    // migration may have just applied, been covered by a squash, or remained
+    // pending because an `OnUnmet::Skip` precondition did not pass. Only durable
+    // journal completion or a durable supersession edge satisfies an external
+    // repeatable dependency.
+    let mut satisfied = backend
+        .applied(cfg)
+        .await?
+        .into_iter()
+        .filter(|entry| matches!(entry.phase, Phase::Completed))
+        .map(|entry| entry.version)
+        .collect::<std::collections::HashSet<_>>();
+    satisfied.extend(backend.superseded_versions(cfg).await?);
 
-    let guard = SqlGuard::new(cfg.guard_config());
+    // Order repeatables among themselves by `depends_on` topo
+    // (version-tiebroken), and reject every external dependency that is not
+    // durably satisfied.
+    let ordered = order_repeatables(repeatables, &satisfied)?;
 
     // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
     // the versioned all-up-front static gate: a denial applies NOTHING.
-    for m in &ordered {
-        guard.check(&m.up).map_err(|source| ApplyError::Guard {
-            version: m.version.as_str().to_string(),
-            source,
-        })?;
-    }
+    guard_repeatable_batch(cfg, backend.dialect(), &ordered)?;
 
     // SECOND PASS — re-apply each changed repeatable; skip the unchanged ones.
     for &m in &ordered {
@@ -1138,19 +1191,44 @@ async fn apply_repeatables<B: MigrationBackend>(
     Ok(())
 }
 
+/// Run repeatable DDL through the same dialect-selected line-1 guard as the
+/// versioned phase. In particular, MySQL descriptor-generated SQL must not be
+/// handed to the PostgreSQL parser merely because it entered the later
+/// repeatable phase.
+fn guard_repeatable_batch(
+    cfg: &ExecutorConfig,
+    dialect: crate::schema::query::SqlDialect,
+    migrations: &[&Migration],
+) -> Result<(), ApplyError> {
+    let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(dialect));
+    for migration in migrations {
+        guard
+            .check(&migration.up)
+            .map_err(|source| ApplyError::Guard {
+                version: migration.version.as_str().to_string(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
 /// Topologically order the repeatables among THEMSELVES, honoring
 /// `depends_on` edges between repeatables, version-tiebroken for determinism.
 ///
-/// A repeatable's `depends_on` may name a VERSIONED migration (e.g. a view depends
-/// on a table); that dependency is pre-satisfied — the versioned phase already ran
-/// — so it imposes no ordering here and is simply NOT treated as an edge among the
-/// repeatables (it is also not required to be in the repeatable set). Only an edge
-/// to ANOTHER REPEATABLE in this set constrains order. With no inter-repeatable
-/// edges this degrades to pure version order.
+/// A repeatable's `depends_on` may name a version outside the current repeatable
+/// set only when that version is durably satisfied by a completed journal event or
+/// a recorded supersession edge. An edge to another supplied repeatable constrains
+/// the topological order. With no inter-repeatable edges this degrades to pure
+/// version order.
 ///
 /// # Errors
+/// - [`ApplyError::MissingDependency`]: an external dependency is not durably
+///   satisfied.
 /// - [`ApplyError::DependencyCycle`] — the inter-repeatable edges form a cycle.
-fn order_repeatables<'a>(repeatables: &[&'a Migration]) -> Result<Vec<&'a Migration>, ApplyError> {
+fn order_repeatables<'a>(
+    repeatables: &[&'a Migration],
+    satisfied: &std::collections::HashSet<String>,
+) -> Result<Vec<&'a Migration>, ApplyError> {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     let rep_versions: BTreeSet<&str> = repeatables.iter().map(|m| m.version.as_str()).collect();
@@ -1168,12 +1246,14 @@ fn order_repeatables<'a>(repeatables: &[&'a Migration]) -> Result<Vec<&'a Migrat
     for m in repeatables {
         for dep in &m.depends_on {
             let dep_v = dep.as_str();
-            // Only edges to ANOTHER repeatable in this set constrain order; a dep
-            // on a versioned migration is pre-satisfied (it already ran) and a dep
-            // outside the set entirely imposes no repeatable ordering.
             if rep_versions.contains(dep_v) {
                 adj.entry(dep_v).or_default().push(m.version.as_str());
                 *indeg.get_mut(m.version.as_str()).expect("repeatable node") += 1;
+            } else if !satisfied.contains(dep_v) {
+                return Err(ApplyError::MissingDependency {
+                    version: m.version.as_str().to_string(),
+                    missing: dep_v.to_string(),
+                });
             }
         }
     }
@@ -1944,6 +2024,38 @@ mod order_tests {
     }
 
     #[test]
+    fn skipped_versions_are_limited_to_the_supplied_batch() {
+        let a = MigrationId::generate();
+        let b = MigrationId::generate();
+        let unrelated = MigrationId::generate();
+        let supplied = vec![m(a.clone(), vec![]), m(b.clone(), vec![])];
+        let entries = [
+            AppliedEntry {
+                version: a.as_str().to_string(),
+                checksum: "checksum-a".into(),
+                phase: Phase::Completed,
+                kind: None,
+            },
+            AppliedEntry {
+                version: unrelated.as_str().to_string(),
+                checksum: "checksum-unrelated".into(),
+                phase: Phase::Completed,
+                kind: None,
+            },
+        ];
+        let completed = HashMap::from([
+            (entries[0].version.as_str(), &entries[0]),
+            (entries[1].version.as_str(), &entries[1]),
+        ]);
+        let superseded = std::collections::HashSet::from([a.as_str(), b.as_str()]);
+
+        assert_eq!(
+            supplied_skipped_versions(&supplied, &completed, &superseded),
+            vec![a.as_str().to_string(), b.as_str().to_string()]
+        );
+    }
+
+    #[test]
     fn no_depends_on_is_pure_version_order() {
         // Three migrations, no edges: result is strict ascending version order.
         let a = MigrationId::generate();
@@ -2040,6 +2152,55 @@ mod order_tests {
             order_pending(&set, &completed, &std::collections::HashSet::new()).expect("order");
         let vs: Vec<&str> = ordered.iter().map(|x| x.version.as_str()).collect();
         assert_eq!(vs, vec![pend.as_str()], "only the pending one is ordered");
+    }
+
+    #[test]
+    fn mysql_repeatable_uses_the_mysql_descriptor_guard() {
+        let mut repeatable = m(MigrationId::generate(), Vec::new());
+        repeatable.up =
+            "CREATE OR REPLACE VIEW `project_acme`.`active_users` AS SELECT `id` FROM `project_acme`.`users`"
+                .to_string();
+        repeatable.flags.repeatable = true;
+        repeatable.down = None;
+        let cfg = ExecutorConfig::new("project_acme", "project_acme");
+
+        guard_repeatable_batch(
+            &cfg,
+            crate::schema::query::SqlDialect::Mysql,
+            &[&repeatable],
+        )
+        .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
+    }
+
+    #[test]
+    fn repeatable_with_unknown_dependency_is_rejected() {
+        let ghost = MigrationId::generate();
+        let mut repeatable = m(MigrationId::generate(), vec![ghost.clone()]);
+        repeatable.flags.repeatable = true;
+        repeatable.down = None;
+
+        let error =
+            order_repeatables(&[&repeatable], &std::collections::HashSet::new()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ApplyError::MissingDependency { ref missing, .. }
+                    if missing == ghost.as_str()
+            ),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn repeatable_accepts_a_durably_satisfied_external_dependency() {
+        let dependency = MigrationId::generate();
+        let mut repeatable = m(MigrationId::generate(), vec![dependency.clone()]);
+        repeatable.flags.repeatable = true;
+        repeatable.down = None;
+        let satisfied = std::collections::HashSet::from([dependency.as_str().to_string()]);
+
+        let ordered = order_repeatables(&[&repeatable], &satisfied).expect("dependency is met");
+        assert_eq!(ordered[0].version, repeatable.version);
     }
 }
 

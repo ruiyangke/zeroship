@@ -45,12 +45,18 @@
 //! own; on **SQLite** the table lives in the connection's `main` database (the app
 //! file) and is referenced UNqualified, matching the engine's SQLite DDL.
 //!
-//! # Portability boundary
+//! # Conflict handling and backfills
 //!
-//! - `insert { onConflict }` renders natively on **Postgres**; on **SQLite** it is
-//!   a hard authoring error ([`DmlError::OnConflictNotPortable`], surfaced as
-//!   `dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is NO raw
-//!   route (property A) and we never silently drop the conflict clause.
+//! - `insert { onConflict }` renders exact `ON CONFLICT (columns)` semantics on
+//!   PostgreSQL and SQLite. MySQL uses `ON DUPLICATE KEY UPDATE`, which cannot name
+//!   one unique constraint. For `doUpdate`, the generated statement compares the
+//!   incoming target values with the conflicting row before applying assignments,
+//!   so a collision on another unique key cannot update the wrong row. A MySQL
+//!   `doUpdate` therefore requires every target column in the inserted column list
+//!   and does not permit assigning those target columns. A collision on another
+//!   unique key raises an error. MySQL `doNothing` is refused because its native
+//!   no-op update fires update triggers, while `INSERT IGNORE` suppresses unrelated
+//!   errors; neither is equivalent to a targeted `DO NOTHING`.
 //! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
 //!   BOTH backends: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
@@ -82,15 +88,17 @@ use crate::render::step::BindValue;
 /// A failure assembling a DML op into a statement (template + binds, or a backfill
 /// spec). Distinct from the structural [`crate::model::validate::AuthoringError`]
 /// (which gates the expression AST *before* assembly): this carries the
-/// assembler-level rejections — a malformed identifier, an empty insert, an
-/// expression node the renderer cannot lower, and the two SQLite portability
-/// boundaries (`onConflict`, batched backfill).
+/// assembler-level rejections: a malformed identifier, an empty insert, an
+/// expression node the renderer cannot lower, or a MySQL conflict shape whose
+/// target intent cannot be retained safely.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DmlError {
     /// An identifier (table / column) is not a bare `[A-Za-z_][A-Za-z0-9_]*`
     /// identifier — empty, schema-qualified, or containing characters outside the
     /// safe set. Rejected before any SQL is assembled.
-    #[error("invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)")]
+    #[error(
+        "invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)"
+    )]
     InvalidIdentifier {
         /// Which slot was invalid (`"table"` / `"column"`).
         what: &'static str,
@@ -116,25 +124,77 @@ pub enum DmlError {
         /// The target table.
         table: String,
     },
+    /// SQLite has no portable native `DELETE ... LIMIT` form. The subquery
+    /// lowering therefore needs a live-catalog key that identifies one row
+    /// exactly. Hidden `rowid` is not sufficient: a declared `rowid` column can
+    /// shadow it, and `WITHOUT ROWID` tables do not have it at all.
+    #[error(
+        "SQLite limited delete from {table:?} requires a catalog-proven non-null PRIMARY KEY or full UNIQUE key"
+    )]
+    SqliteLimitedDeleteNeedsUniqueIdentity {
+        /// The target table whose catalog snapshot had no safe identity.
+        table: String,
+    },
     /// The closed-AST expression renderer cannot lower a node (an unsupported /
     /// out-of-policy shape that the structural validator should have rejected
     /// first — this is the assembler's fail-closed backstop, never a silent
     /// emission). Carries a description of the offending node.
-    #[error("cannot render expression node ({0}) — the structural validator must reject it before assembly")]
-    UnrenderableExpr(String),
-    /// `insert { onConflict }` on a **SQLite** target. PG `ON CONFLICT … DO UPDATE`
-    /// and SQLite upsert clauses are incompatible and there is no raw route
-    /// (property A), so `onConflict` is PG-only — a hard authoring error on SQLite
-    /// (`dialect_scope = PgOnly`), not a silently-dropped conflict clause.
     #[error(
-        "insert into {table:?} carries `onConflict`, which is PostgreSQL-only — SQLite \
-         has no portable upsert and there is no raw route; restructure as separate \
-         insert + update, or mark the migration dialect_scope=PgOnly (PG-only)"
+        "cannot render expression node ({0}); the structural validator must reject it before assembly"
     )]
-    OnConflictNotPortable {
+    UnrenderableExpr(String),
+    /// A MySQL `doUpdate` target column is absent from the inserted column list.
+    /// MySQL cannot name a conflict target, so the renderer needs the incoming
+    /// value of each target column to guard the update.
+    #[error(
+        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+         target column {column:?} is not present in the inserted columns"
+    )]
+    MySqlConflictTargetNotInserted {
         /// The target table.
         table: String,
+        /// The target column without an incoming value.
+        column: String,
     },
+    /// A MySQL `doUpdate` attempts to assign one of its target columns. MySQL
+    /// evaluates duplicate-key assignments from left to right, so changing a
+    /// target value would invalidate the target-match guard for later assignments.
+    #[error(
+        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+         assignment to target column {column:?} is not supported; update a \
+         non-target column or split the migration into explicit steps"
+    )]
+    MySqlConflictTargetUpdated {
+        /// The target table.
+        table: String,
+        /// The conflict target column also present in `doUpdate`.
+        column: String,
+    },
+    /// A MySQL multi-column assignment reads another column that the same SET
+    /// list also writes. PostgreSQL and SQLite evaluate every RHS from the
+    /// original row, while MySQL exposes earlier assignments to later ones.
+    #[error(
+        "MySQL {op} on {table:?} cannot preserve simultaneous SET semantics: \
+         assignment to {column:?} reads assigned column {referenced_column:?}; \
+         split the operation or compute the value without another assigned column"
+    )]
+    MySqlCrossAssignmentDependency {
+        /// The authored operation (`update`, `backfill`, or `onConflict.doUpdate`).
+        op: &'static str,
+        /// The target table.
+        table: String,
+        /// The assignment whose RHS has the dependency.
+        column: String,
+        /// The other assigned column read by that RHS.
+        referenced_column: String,
+    },
+    /// MySQL has no exact native equivalent for targeted `DO NOTHING`.
+    #[error(
+        "MySQL cannot safely apply `onConflict` without a non-empty `doUpdate`: \
+         `ON DUPLICATE KEY UPDATE` fires update triggers and `INSERT IGNORE` \
+         suppresses unrelated data errors"
+    )]
+    MySqlConflictDoNothingNotExact,
     /// A single `insert` assembled more bind parameters than the wire protocol
     /// admits (PostgreSQL caps a statement at 65535 positional parameters; the
     /// `Bind` message length is a `u16`). Reject at assemble time with a bounded
@@ -307,9 +367,9 @@ fn qualify_table(
 
 /// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
 /// one-shot DML path. The IR numeric domain (`Int` `|v| < 2^53` / decimal-string)
-/// carries through verbatim; `Bytes` is carried as its canonical base64 text (the
-/// PG/SQLite executors bind it as text and the column type coerces it). NEVER
-/// inlined.
+/// carries through verbatim. Binary values stay binary on SQLite; PostgreSQL and
+/// MySQL wrap a base64 text bind in a dialect decoder at the placeholder site.
+/// Values are never inlined.
 fn scalar_to_bind(s: &IrScalar) -> BindValue {
     match s {
         IrScalar::Null => BindValue::Null,
@@ -317,12 +377,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
         IrScalar::Int(i) => BindValue::Int(*i),
         IrScalar::Decimal(d) => BindValue::Decimal(d.clone()),
         IrScalar::Str(s) => BindValue::Text(s.clone()),
-        // Carry bytes as canonical base64 text; the column type coerces. (The IR
-        // already round-trips Bytes through canonical base64.)
-        IrScalar::Bytes(b) => {
-            use base64::Engine as _;
-            BindValue::Text(base64::engine::general_purpose::STANDARD.encode(b))
-        }
+        IrScalar::Bytes(bytes) => BindValue::Bytes(bytes.clone()),
     }
 }
 
@@ -350,20 +405,42 @@ pub fn sqlite_placeholder(n: usize) -> String {
 }
 
 /// Render a single inline SQL literal for the **backfill** string path
-/// ([`render_expr_inline`]). Numeric/bool literals print verbatim; a string is
-/// single-quoted with `''` doubling (the canonical SQL escape) — the assembled
+/// ([`render_expr_inline`]). Numeric/bool literals print verbatim, except that an
+/// exact decimal is quoted on SQLite to match its lossless TEXT storage. A string
+/// is single-quoted with `''` doubling (the canonical SQL escape). The assembled
 /// statement is then guard-checked by the real Postgres parser before any batch
 /// runs, so a hostile literal cannot alter the statement shape past the parser.
-/// NULL renders as the keyword. Bytes are not inline-renderable in the backfill
-/// path (they have no portable inline literal form across both dialects) → a
-/// fail-closed error.
+/// NULL renders as the keyword. Bytes use native binary expressions on every
+/// dialect so a backfill or column default never coerces them through text.
 /// Render a SQL string literal using the canonical single-quote escape.
 #[must_use]
 pub(crate) fn sql_string_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
+/// Render a MySQL string in a grammar position that accepts only a quoted
+/// string token (not a hex expression), such as an `ENUM(...)` member or the
+/// five-character `SIGNAL SQLSTATE` code. Every MySQL author-SQL execution path
+/// pins `NO_BACKSLASH_ESCAPES` before executing these literals, so standard
+/// quote doubling has one stable interpretation regardless of the connection's
+/// inherited `sql_mode`.
+#[must_use]
+pub(crate) fn mysql_grammar_string_literal(s: &str) -> String {
+    sql_string_literal(s)
+}
+
+/// Render an inline string without depending on a server's string-escape mode.
+/// PostgreSQL and SQLite use standard quote doubling. MySQL uses a UTF-8 hex
+/// literal so `NO_BACKSLASH_ESCAPES` (present or absent) cannot change either the
+/// value or the statement shape.
+pub(crate) fn inline_string_literal(s: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Mysql => format!("_utf8mb4 X'{}'", hex::encode(s.as_bytes())),
+        SqlDialect::Postgres | SqlDialect::Sqlite => sql_string_literal(s),
+    }
+}
+
+pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
     Ok(match s {
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bool(b) => {
@@ -374,15 +451,20 @@ pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
             }
         }
         IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
         IrScalar::Decimal(d) => d.clone(),
-        IrScalar::Str(s) => sql_string_literal(s),
-        IrScalar::Bytes(_) => {
-            return Err(DmlError::UnrenderableExpr(
-                "a bytes literal is not inline-renderable in a backfill transform \
-                 (use a one-shot update with a native bind for byte values)"
-                    .to_string(),
-            ));
-        }
+        IrScalar::Str(s) => inline_string_literal(s, dialect),
+        IrScalar::Bytes(bytes) => match dialect {
+            SqlDialect::Postgres => {
+                use base64::Engine as _;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                format!("decode({}, 'base64')", sql_string_literal(&encoded))
+            }
+            // MySQL requires expression defaults for BLOB columns. Parentheses
+            // keep the same literal valid in defaults and ordinary expressions.
+            SqlDialect::Mysql => format!("(X'{}')", hex::encode(bytes)),
+            SqlDialect::Sqlite => format!("X'{}'", hex::encode(bytes)),
+        },
     })
 }
 
@@ -400,7 +482,11 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
-fn in_list_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+fn in_list_text_literal(
+    s: &str,
+    what: &'static str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     if s.is_empty() {
         return Err(DmlError::UnrenderableExpr(format!(
             "{what} must be non-empty"
@@ -411,7 +497,7 @@ fn in_list_text_literal(s: &str, what: &'static str) -> Result<String, DmlError>
             "{what} contains a NUL byte"
         )));
     }
-    Ok(sql_string_literal(s))
+    Ok(inline_string_literal(s, dialect))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -476,10 +562,11 @@ fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
     })
 }
 
-fn render_in_list_elem_portable(elem: &IrScalar) -> Result<String, DmlError> {
+fn render_in_list_elem_portable(elem: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
     Ok(match elem {
-        IrScalar::Str(s) => in_list_text_literal(s, "inList element")?,
+        IrScalar::Str(s) => in_list_text_literal(s, "inList element", dialect)?,
         IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Bool(b) => {
             if *b {
@@ -525,7 +612,7 @@ fn render_in_list(
         SqlDialect::Sqlite | SqlDialect::Mysql => {
             let rendered = elems
                 .iter()
-                .map(render_in_list_elem_portable)
+                .map(|elem| render_in_list_elem_portable(elem, dialect))
                 .collect::<Result<Vec<_>, _>>()?;
             let op = if negated { "NOT IN" } else { "IN" };
             Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
@@ -545,7 +632,7 @@ fn render_pg_regex_match(
         )),
         SqlDialect::Mysql => Ok(format!(
             "({expr} REGEXP {})",
-            in_list_text_literal(pattern, "regex pattern")?
+            in_list_text_literal(pattern, "regex pattern", SqlDialect::Mysql)?
         )),
         SqlDialect::Sqlite => Err(DmlError::UnrenderableExpr(
             "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
@@ -758,6 +845,23 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
         ScalarFn::Length if matches!(dialect, SqlDialect::Mysql) => {
             format!("char_length({})", args.join(", "))
         }
+        // SQLite exposes floor()/ceil() only when it was built with the optional
+        // math extension. Lower both operations to core SQL so the portable DSL
+        // behaves the same on every supported SQLite build. The builder enforces
+        // one argument; indexing defensively falls back to the generic spelling
+        // for malformed hand-authored IR, which validation rejects before render.
+        ScalarFn::Floor if matches!(dialect, SqlDialect::Sqlite) && args.len() == 1 => {
+            let arg = &args[0];
+            format!(
+                "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) - (CAST({arg} AS INTEGER) > {arg}) END)"
+            )
+        }
+        ScalarFn::Ceil if matches!(dialect, SqlDialect::Sqlite) && args.len() == 1 => {
+            let arg = &args[0];
+            format!(
+                "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) + (CAST({arg} AS INTEGER) < {arg}) END)"
+            )
+        }
         _ => format!("{}({})", scalar_fn_sql(f), args.join(", ")),
     }
 }
@@ -939,6 +1043,115 @@ fn select_dialect_leg<'a>(
     })
 }
 
+/// Return whether the MySQL-selected leg of an expression reads `column`.
+/// This mirrors the renderer's recursive closed-AST walk so an unsafe dependency
+/// cannot hide inside CASE, a helper, or a dialect branch.
+fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
+    Ok(match expr {
+        Expr::ColRef { name, .. } => name == column,
+        Expr::Literal { .. } | Expr::PgInterval { .. } => false,
+        Expr::BinOp { lhs, rhs, .. } => {
+            mysql_expr_references_column(lhs, column)? || mysql_expr_references_column(rhs, column)?
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::InList { expr: operand, .. } => mysql_expr_references_column(operand, column)?,
+        Expr::Case { branches, r#else } => {
+            let mut found = false;
+            for branch in branches {
+                if mysql_expr_references_column(&branch.when, column)?
+                    || mysql_expr_references_column(&branch.then, column)?
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                if let Some(r#else) = r#else {
+                    found = mysql_expr_references_column(r#else, column)?;
+                }
+            }
+            found
+        }
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            let mut found = false;
+            for arg in args {
+                if mysql_expr_references_column(arg, column)? {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }
+        Expr::Between { operand, low, high } => {
+            mysql_expr_references_column(operand, column)?
+                || mysql_expr_references_column(low, column)?
+                || mysql_expr_references_column(high, column)?
+        }
+        Expr::Like { operand, pattern } => {
+            mysql_expr_references_column(operand, column)?
+                || mysql_expr_references_column(pattern, column)?
+        }
+        Expr::DistinctFrom { left, right } => {
+            mysql_expr_references_column(left, column)?
+                || mysql_expr_references_column(right, column)?
+        }
+        Expr::Agg { arg, delimiter, .. } => {
+            if let Some(arg) = arg {
+                if mysql_expr_references_column(arg, column)? {
+                    return Ok(true);
+                }
+            }
+            if let Some(delimiter) = delimiter {
+                mysql_expr_references_column(delimiter, column)?
+            } else {
+                false
+            }
+        }
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => mysql_expr_references_column(
+            select_dialect_leg(SqlDialect::Mysql, default, pg, sqlite, mysql)?,
+            column,
+        )?,
+    })
+}
+
+/// MySQL evaluates a SET list from left to right. Refuse cross-assignment reads
+/// rather than silently changing the simultaneous RHS semantics authors get on
+/// PostgreSQL and SQLite. A self-reference remains safe because its RHS is read
+/// before that column's sole assignment.
+fn validate_mysql_assignment_semantics(
+    op: &'static str,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+) -> Result<(), DmlError> {
+    for (column, value) in set {
+        let IrValue::Expr(expr) = value else {
+            continue;
+        };
+        for referenced_column in set.keys() {
+            if referenced_column != column && mysql_expr_references_column(expr, referenced_column)?
+            {
+                return Err(DmlError::MySqlCrossAssignmentDependency {
+                    op,
+                    table: table.to_string(),
+                    column: column.clone(),
+                    referenced_column: referenced_column.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A bind accumulator carried through the parameterized render walk: it owns the
 /// running placeholder counter (1-based, dialect-specific) and the ordered
 /// [`BindValue`] list.
@@ -960,6 +1173,26 @@ impl BindCtx {
         self.binds.push(b);
         placeholder(self.dialect, self.binds.len())
     }
+
+    /// Bind one typed IR scalar without losing binary values. PostgreSQL's
+    /// schema-blind DML seam and mysql2 both accept the canonical base64 as text;
+    /// the SQL wrapper decodes it inside the statement. SQLite can bind the byte
+    /// vector directly through rusqlite.
+    fn push_scalar(&mut self, value: &IrScalar) -> String {
+        if let IrScalar::Bytes(bytes) = value {
+            if !matches!(self.dialect, SqlDialect::Sqlite) {
+                use base64::Engine as _;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let placeholder = self.push_bind(BindValue::Text(encoded));
+                return match self.dialect {
+                    SqlDialect::Postgres => format!("decode({placeholder}, 'base64')"),
+                    SqlDialect::Mysql => format!("FROM_BASE64({placeholder})"),
+                    SqlDialect::Sqlite => unreachable!("handled above"),
+                };
+            }
+        }
+        self.push_bind(scalar_to_bind(value))
+    }
 }
 
 /// Render a closed-AST [`Expr`] to a parameterized SQL fragment, appending a
@@ -979,7 +1212,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             ),
             None => quote_ident_for_dialect("column", name, ctx.dialect)?,
         },
-        Expr::Literal { value } => ctx.push_bind(scalar_to_bind(value)),
+        Expr::Literal { value } => ctx.push_scalar(value),
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
             let r = render_expr_bound(rhs, ctx)?;
@@ -1122,7 +1355,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
 
 fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlError> {
     match value {
-        IrValue::Scalar(s) => Ok(ctx.push_bind(scalar_to_bind(s))),
+        IrValue::Scalar(s) => Ok(ctx.push_scalar(s)),
         IrValue::Expr(e) => render_expr_bound(e, ctx),
     }
 }
@@ -1159,7 +1392,7 @@ pub(crate) fn render_value_inline(
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
     match value {
-        IrValue::Scalar(s) => inline_literal(s),
+        IrValue::Scalar(s) => inline_literal(s, dialect),
         IrValue::Expr(e) => render_expr_inline(e, dialect),
     }
 }
@@ -1183,7 +1416,7 @@ where
             ),
             None => col_ref(name)?,
         },
-        Expr::Literal { value } => inline_literal(value)?,
+        Expr::Literal { value } => inline_literal(value, dialect)?,
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
             let r = render_expr_inline_with_col(rhs, dialect, col_ref)?;
@@ -1348,7 +1581,7 @@ pub(crate) fn render_predicate_sqlite(expr: &Expr) -> Result<String, DmlError> {
     render_expr_inline(expr, SqlDialect::Sqlite)
 }
 
-/// The `onConflict` facet of an `insert`. PG-only.
+/// The structured `onConflict` facet of an `insert`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
@@ -1368,12 +1601,12 @@ pub struct AssembledDml {
 }
 
 /// Assemble an `insert` op into a parameterized one-shot statement. Every
-/// value is a native bind; `onConflict` renders on PG and is a hard error on
-/// SQLite ([`DmlError::OnConflictNotPortable`]).
+/// value is a native bind. PostgreSQL and SQLite render an exact conflict target;
+/// MySQL renders its safe native duplicate-key form.
 ///
 /// # Errors
-/// [`DmlError`] on a malformed identifier / empty-or-ragged insert / a SQLite
-/// `onConflict`.
+/// [`DmlError`] on a malformed identifier, an empty-or-ragged insert, or a MySQL
+/// conflict shape that cannot retain target intent safely.
 pub fn assemble_insert(
     project_schema: &str,
     dialect: SqlDialect,
@@ -1430,11 +1663,11 @@ pub fn assemble_insert(
 
     if let Some(oc) = on_conflict {
         if !dialect.supports(Capability::InsertOnConflictClause) {
-            return Err(DmlError::OnConflictNotPortable {
-                table: table.to_string(),
-            });
+            return Err(DmlError::UnrenderableExpr(format!(
+                "structured onConflict is unavailable for the {dialect:?} target"
+            )));
         }
-        template.push_str(&render_on_conflict(oc, &mut ctx)?);
+        template.push_str(&render_on_conflict(table, &qtable, columns, oc, &mut ctx)?);
     }
 
     if ctx.binds.len() > MAX_BIND_PARAMS {
@@ -1451,9 +1684,16 @@ pub fn assemble_insert(
     })
 }
 
-/// Render the PG `ON CONFLICT (cols) DO {NOTHING|UPDATE SET …}` tail. The
-/// `do_update` SET values are native binds (appended to the running counter).
-fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlError> {
+/// Render a dialect-native conflict tail. PostgreSQL and SQLite share the exact
+/// `ON CONFLICT (cols)` grammar. MySQL uses its duplicate-key grammar and guards
+/// every requested update with an incoming-target comparison.
+fn render_on_conflict(
+    table: &str,
+    qtable: &str,
+    insert_columns: &[String],
+    oc: &OnConflict,
+    ctx: &mut BindCtx,
+) -> Result<String, DmlError> {
     if oc.columns.is_empty() {
         return Err(DmlError::MalformedInsert {
             table: "<onConflict>".to_string(),
@@ -1465,7 +1705,12 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
         .iter()
         .map(|c| quote_ident_for_dialect("column", c, ctx.dialect))
         .collect();
-    let target = format!("ON CONFLICT ({})", qcols?.join(", "));
+    let qcols = qcols?;
+    if matches!(ctx.dialect, SqlDialect::Mysql) {
+        return render_on_conflict_mysql(table, qtable, insert_columns, oc, &qcols, ctx);
+    }
+
+    let target = format!("ON CONFLICT ({})", qcols.join(", "));
     match &oc.do_update {
         None => Ok(format!(" {target} DO NOTHING")),
         Some(set) => {
@@ -1482,6 +1727,90 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
             Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
         }
     }
+}
+
+/// Render MySQL 8's closest safe native equivalent to a named conflict target.
+/// MySQL has no syntax for choosing one unique key. `DO NOTHING` is refused
+/// because neither a no-op update nor `INSERT IGNORE` has the same behavior. For
+/// `doUpdate`, generated row aliases expose the incoming target values and each
+/// assignment is conditional on all authored target columns matching the existing
+/// row. A non-target collision evaluates a guarded invalid-JSON expression, which
+/// is a hard MySQL error even when the caller uses a permissive `sql_mode`. The
+/// generated alias names contain hyphens, which cannot collide with the DSL's bare
+/// authored identifiers.
+fn render_on_conflict_mysql(
+    table: &str,
+    qtable: &str,
+    insert_columns: &[String],
+    oc: &OnConflict,
+    qtarget_columns: &[String],
+    ctx: &mut BindCtx,
+) -> Result<String, DmlError> {
+    let Some(set) = oc.do_update.as_ref().filter(|set| !set.is_empty()) else {
+        return Err(DmlError::MySqlConflictDoNothingNotExact);
+    };
+
+    for target in &oc.columns {
+        if set.contains_key(target) {
+            return Err(DmlError::MySqlConflictTargetUpdated {
+                table: table.to_string(),
+                column: target.clone(),
+            });
+        }
+    }
+    validate_mysql_assignment_semantics("onConflict.doUpdate", table, set)?;
+
+    let row_alias = escape_quote_ident_for_dialect("zero-migrate-incoming", SqlDialect::Mysql);
+    let value_aliases = insert_columns
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            escape_quote_ident_for_dialect(
+                &format!("zero-migrate-value-{index}"),
+                SqlDialect::Mysql,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut target_match = Vec::with_capacity(oc.columns.len());
+    for (target, qtarget) in oc.columns.iter().zip(qtarget_columns) {
+        let Some(index) = insert_columns.iter().position(|column| column == target) else {
+            return Err(DmlError::MySqlConflictTargetNotInserted {
+                table: table.to_string(),
+                column: target.clone(),
+            });
+        };
+        target_match.push(format!(
+            "({qtable}.{qtarget} = {row_alias}.{})",
+            value_aliases[index]
+        ));
+    }
+    let target_match = target_match.join(" AND ");
+    // Ordinary equality is intentional: MySQL UNIQUE indexes do not conflict on
+    // NULL, so NULL/NULL must never establish an authored-target match. The false
+    // branch is selected for both FALSE and NULL. Invalid JSON text is specified
+    // by MySQL as a statement error independently of `sql_mode`; division by zero
+    // is not, and under a permissive mode silently yields NULL. CONCAT keeps IF's
+    // false branch string-compatible with legitimate text, decimal, or binary
+    // assignment values. IF evaluates only the selected branch, so a genuine
+    // authored-target collision never touches the invalid document.
+    let non_target_conflict_error =
+        "CONCAT('', JSON_EXTRACT('zero-migrate conflict target mismatch', '$'))";
+
+    let mut assigns = Vec::with_capacity(set.len());
+    for (column, value) in set {
+        let qcolumn = quote_ident_for_dialect("column", column, SqlDialect::Mysql)?;
+        let desired = render_value_bound(value, ctx)?;
+        assigns.push(format!(
+            "{qcolumn} = IF({target_match}, {desired}, {non_target_conflict_error})"
+        ));
+    }
+
+    Ok(format!(
+        " AS {row_alias}({}) ON DUPLICATE KEY UPDATE {}",
+        value_aliases.join(", "),
+        assigns.join(", ")
+    ))
 }
 
 /// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
@@ -1505,6 +1834,9 @@ pub fn assemble_update(
         });
     }
     let qtable = qualify_table(project_schema, dialect, table)?;
+    if matches!(dialect, SqlDialect::Mysql) {
+        validate_mysql_assignment_semantics("update", table, set)?;
+    }
     let mut ctx = BindCtx::new(dialect);
     // BTreeMap ⇒ deterministic, canonical assignment order.
     let mut assigns = Vec::with_capacity(set.len());
@@ -1524,16 +1856,16 @@ pub fn assemble_update(
     })
 }
 
-/// Assemble a `del` op into a parameterized `DELETE`. The mandatory `where`
-/// renders through [`render_expr_bound`]. An optional `limit` is enforced via a
-/// primary-rowid subquery on BOTH backends (`ctid` on PG, `rowid` on SQLite):
-/// PG never supported `DELETE … LIMIT n`, and the bundled rusqlite is built
-/// WITHOUT `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so a bare `DELETE … LIMIT ?n`
-/// is a hard syntax error there too. The limit-free form is a plain `DELETE …
-/// WHERE …`.
+/// Assemble a `del` op into a parameterized `DELETE`. PostgreSQL limited deletes
+/// identify a physical row with `(tableoid, ctid)`, including when the target is
+/// a partitioned parent. MySQL uses its native limit clause. A SQLite limited
+/// delete is rejected here because this schema-blind entry cannot prove a safe
+/// row identity; the catalog-aware IR lower uses the internal identity-bearing
+/// entry after introspection. The limit-free form is a plain delete everywhere.
 ///
 /// # Errors
-/// [`DmlError`] on a malformed identifier / an unrenderable predicate.
+/// [`DmlError`] on a malformed identifier, an unrenderable predicate, or a
+/// SQLite limit without catalog identity facts.
 pub fn assemble_delete(
     project_schema: &str,
     dialect: SqlDialect,
@@ -1541,29 +1873,62 @@ pub fn assemble_delete(
     r#where: &Expr,
     limit: Option<u64>,
 ) -> Result<AssembledDml, DmlError> {
+    assemble_delete_with_sqlite_identity(project_schema, dialect, table, r#where, limit, None)
+}
+
+/// Catalog-aware delete assembly used by the guarded IR lower. The SQLite
+/// identity columns must be a non-null PRIMARY KEY or complete non-partial UNIQUE
+/// key recovered from the live table snapshot.
+pub(crate) fn assemble_delete_with_sqlite_identity(
+    project_schema: &str,
+    dialect: SqlDialect,
+    table: &str,
+    r#where: &Expr,
+    limit: Option<u64>,
+    sqlite_identity_columns: Option<&[String]>,
+) -> Result<AssembledDml, DmlError> {
     let qtable = qualify_table(project_schema, dialect, table)?;
     let mut ctx = BindCtx::new(dialect);
     let w = render_expr_bound(r#where, &mut ctx)?;
     let template = match (dialect, limit) {
         (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
-        // Neither backend can take a bare `DELETE … WHERE … LIMIT n` portably:
-        // the bundled rusqlite (features=["bundled"]) does NOT compile
-        // `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so `DELETE … LIMIT ?n` is a hard
-        // syntax error at apply; PG never supported the form. Both therefore lower
-        // to a primary-rowid subquery (`rowid` on SQLite, `ctid` on PG) that picks
-        // exactly `limit` matching rows. The limit binds natively.
+        // PostgreSQL and SQLite cannot take a bare limited DELETE portably. The
+        // limit binds natively while a subquery selects exact row identities.
         (SqlDialect::Sqlite, Some(n)) => {
+            let identity_columns = sqlite_identity_columns
+                .filter(|columns| !columns.is_empty())
+                .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                    table: table.to_string(),
+                })?;
+            let quoted_identity: Result<Vec<_>, _> = identity_columns
+                .iter()
+                .map(|column| {
+                    quote_ident_checked_for_dialect(column, SqlDialect::Sqlite).map_err(|_| {
+                        DmlError::InvalidIdentifier {
+                            what: "catalog identity column",
+                            value: column.clone(),
+                        }
+                    })
+                })
+                .collect();
+            let quoted_identity = quoted_identity?;
+            let selected_identity = quoted_identity.join(", ");
+            let compared_identity = if quoted_identity.len() == 1 {
+                selected_identity.clone()
+            } else {
+                format!("({selected_identity})")
+            };
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
             format!(
-                "DELETE FROM {qtable} WHERE rowid IN \
-                 (SELECT rowid FROM {qtable} WHERE {w} LIMIT {ph})"
+                "DELETE FROM {qtable} WHERE {compared_identity} IN \
+                 (SELECT {selected_identity} FROM {qtable} WHERE {w} LIMIT {ph})"
             )
         }
         (SqlDialect::Postgres, Some(n)) => {
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
             format!(
-                "DELETE FROM {qtable} WHERE ctid IN \
-                 (SELECT ctid FROM {qtable} WHERE {w} LIMIT {ph})"
+                "DELETE FROM {qtable} WHERE (tableoid, ctid) IN \
+                 (SELECT tableoid, ctid FROM {qtable} WHERE {w} LIMIT {ph})"
             )
         }
         (SqlDialect::Mysql, Some(n)) => {
@@ -1606,6 +1971,9 @@ pub fn assemble_backfill_clauses(
             op: "backfill",
             table: table.to_string(),
         });
+    }
+    if matches!(dialect, SqlDialect::Mysql) {
+        validate_mysql_assignment_semantics("backfill", table, set)?;
     }
     // BTreeMap ⇒ canonical order.
     let mut assigns = Vec::with_capacity(set.len());
@@ -1851,6 +2219,23 @@ mod tests {
         IrValue::Expr(e)
     }
 
+    #[test]
+    fn bytes_inline_literals_are_native_binary_values_on_every_dialect() {
+        let value = IrScalar::Bytes(vec![0x00, 0x01, 0x7f, 0x80, 0xff]);
+        assert_eq!(
+            inline_literal(&value, SqlDialect::Postgres).unwrap(),
+            "decode('AAF/gP8=', 'base64')"
+        );
+        assert_eq!(
+            inline_literal(&value, SqlDialect::Mysql).unwrap(),
+            "(X'00017f80ff')"
+        );
+        assert_eq!(
+            inline_literal(&value, SqlDialect::Sqlite).unwrap(),
+            "X'00017f80ff'"
+        );
+    }
+
     // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
 
     #[test]
@@ -1999,18 +2384,19 @@ mod tests {
         );
     }
 
-    /// Portable scalar fns: `round`/`floor`/`ceil`/`substr`/`replace` all
-    /// spell IDENTICALLY on PG, SQLite, and MySQL, so they render byte-identically
-    /// on every dialect via the neutral `<name>(<args>)` path.
+    /// Portable scalar functions keep equivalent semantics on every dialect.
+    /// SQLite floor/ceil use core SQL because those named functions belong to an
+    /// optional SQLite math extension.
     #[test]
-    fn portable_scalar_fns_render_identically_on_all_three() {
-        let cases: &[(Expr, &str)] = &[
+    fn portable_scalar_fns_render_on_all_three() {
+        let cases: &[(Expr, &str, Option<&str>)] = &[
             (
                 Expr::FnCall {
                     r#fn: ScalarFn::Round,
                     args: vec![Expr::col("x")],
                 },
                 "round(\"x\")",
+                None,
             ),
             (
                 Expr::FnCall {
@@ -2018,6 +2404,7 @@ mod tests {
                     args: vec![Expr::col("x"), Expr::lit(IrScalar::Int(2))],
                 },
                 "round(\"x\", 2)",
+                None,
             ),
             (
                 Expr::FnCall {
@@ -2025,6 +2412,7 @@ mod tests {
                     args: vec![Expr::col("x")],
                 },
                 "floor(\"x\")",
+                Some("(CASE WHEN \"x\" >= 9223372036854775808.0 OR \"x\" <= -9223372036854775808.0 THEN \"x\" ELSE CAST(\"x\" AS INTEGER) - (CAST(\"x\" AS INTEGER) > \"x\") END)"),
             ),
             (
                 Expr::FnCall {
@@ -2032,6 +2420,7 @@ mod tests {
                     args: vec![Expr::col("x")],
                 },
                 "ceil(\"x\")",
+                Some("(CASE WHEN \"x\" >= 9223372036854775808.0 OR \"x\" <= -9223372036854775808.0 THEN \"x\" ELSE CAST(\"x\" AS INTEGER) + (CAST(\"x\" AS INTEGER) < \"x\") END)"),
             ),
             (
                 Expr::FnCall {
@@ -2043,6 +2432,7 @@ mod tests {
                     ],
                 },
                 "substr(\"s\", 1, 3)",
+                None,
             ),
             (
                 Expr::FnCall {
@@ -2054,23 +2444,26 @@ mod tests {
                     ],
                 },
                 "replace(\"s\", 'a', 'b')",
+                None,
             ),
         ];
-        for (expr, pg_sqlite_expect) in cases {
-            // PG and SQLite quote identifiers with `"`; the fn spelling is identical.
+        for (expr, pg_expect, sqlite_expect) in cases {
             assert_eq!(
                 &render_expr_inline(expr, SqlDialect::Postgres).unwrap(),
-                pg_sqlite_expect,
+                pg_expect,
                 "PG render mismatch"
             );
             assert_eq!(
                 &render_expr_inline(expr, SqlDialect::Sqlite).unwrap(),
-                pg_sqlite_expect,
+                sqlite_expect.unwrap_or(pg_expect),
                 "SQLite render mismatch"
             );
-            // MySQL differs ONLY in identifier quoting (backticks); the fn name +
-            // arg shape are identical (CEIL/SUBSTR are MySQL aliases).
-            let mysql_expect = pg_sqlite_expect.replace('"', "`");
+            // MySQL uses backtick identifiers and mode-independent UTF-8 hex
+            // literals; the function name and argument shape stay equivalent.
+            let mysql_expect = pg_expect
+                .replace('"', "`")
+                .replace("'a'", "_utf8mb4 X'61'")
+                .replace("'b'", "_utf8mb4 X'62'");
             assert_eq!(
                 render_expr_inline(expr, SqlDialect::Mysql).unwrap(),
                 mysql_expect,
@@ -2175,7 +2568,7 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "(`name` REGEXP '^a$')"
+            "(`name` REGEXP _utf8mb4 X'5e6124')"
         );
 
         let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
@@ -2210,6 +2603,34 @@ mod tests {
         assert_eq!(
             render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
             "(\"n\" % $1)"
+        );
+    }
+
+    #[test]
+    fn sqlite_inline_decimal_literals_preserve_authored_text() {
+        let decimal = "12345678901234567890.1234567890";
+        let literal = Expr::lit(IrScalar::Decimal(decimal.into()));
+        assert_eq!(
+            render_expr_inline(&literal, SqlDialect::Sqlite).unwrap(),
+            format!("'{decimal}'")
+        );
+        assert_eq!(
+            render_expr_inline(&literal, SqlDialect::Postgres).unwrap(),
+            decimal
+        );
+        assert_eq!(
+            render_expr_inline(&literal, SqlDialect::Mysql).unwrap(),
+            decimal
+        );
+
+        let list = Expr::InList {
+            expr: Box::new(Expr::col("amount")),
+            elems: vec![IrScalar::Decimal(decimal.into())],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&list, SqlDialect::Sqlite).unwrap(),
+            format!("(\"amount\" IN ('{decimal}'))")
         );
     }
 
@@ -2303,7 +2724,7 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "(`name` LIKE 'A%')"
+            "(`name` LIKE _utf8mb4 X'4125')"
         );
     }
 
@@ -2324,7 +2745,7 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&includes, SqlDialect::Mysql).unwrap(),
-            "(`status` IN ('a', 'b'))"
+            "(`status` IN (_utf8mb4 X'61', _utf8mb4 X'62'))"
         );
 
         let excludes = Expr::InList {
@@ -2342,7 +2763,7 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
-            "(`status` NOT IN ('x', 'y'))"
+            "(`status` NOT IN (_utf8mb4 X'78', _utf8mb4 X'79'))"
         );
 
         let status_codes = Expr::InList {
@@ -2431,8 +2852,42 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "(`status` IN ('a''b'))"
+            "(`status` IN (_utf8mb4 X'612762'))"
         );
+    }
+
+    #[test]
+    fn mysql_structural_string_literals_are_hex_in_inline_and_bound_paths() {
+        let hostile = "a\\b'; DROP TABLE users; --";
+        let hostile_hex = "615c62273b2044524f50205441424c452075736572733b202d2d";
+        let expressions = [
+            Expr::InList {
+                expr: Box::new(Expr::col("status")),
+                elems: vec![IrScalar::Str(hostile.into())],
+                negated: false,
+            },
+            Expr::PgRegexMatch {
+                expr: Box::new(Expr::col("status")),
+                pattern: hostile.into(),
+            },
+        ];
+
+        for expr in expressions {
+            let inline = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+            let mut ctx = BindCtx::new(SqlDialect::Mysql);
+            let bound = render_expr_bound(&expr, &mut ctx).unwrap();
+            for sql in [&inline, &bound] {
+                assert!(
+                    sql.contains(&format!("_utf8mb4 X'{hostile_hex}'")),
+                    "the author string must use the mode-independent hex renderer: {sql}"
+                );
+                assert!(
+                    !sql.contains("DROP TABLE") && !sql.contains('\\'),
+                    "no hostile source text may reach the SQL statement: {sql}"
+                );
+            }
+            assert!(ctx.binds.is_empty(), "structural constants are not binds");
+        }
     }
 
     #[test]
@@ -2517,7 +2972,10 @@ mod tests {
             render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
             "'B'"
         );
-        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'C'");
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "_utf8mb4 X'43'"
+        );
 
         // Bound path: each leg's literal becomes exactly ONE placeholder — the
         // shape is fixed by the chosen leg, not by the other legs.
@@ -2559,7 +3017,7 @@ mod tests {
         );
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "'D'",
+            "_utf8mb4 X'44'",
             "MySQL falls back to default"
         );
     }
@@ -2986,6 +3444,34 @@ mod tests {
     }
 
     #[test]
+    fn binary_insert_values_round_trip_without_text_coercion() {
+        let bytes = vec![0, 1, 0x7f, 0x80, 0xff];
+        let assemble = |dialect| {
+            assemble_insert(
+                SCHEMA,
+                dialect,
+                "files",
+                &["payload".into()],
+                &[vec![val(IrScalar::Bytes(bytes.clone()))]],
+                None,
+            )
+            .unwrap()
+        };
+
+        let pg = assemble(SqlDialect::Postgres);
+        assert!(pg.template.contains("VALUES (decode($1, 'base64'))"));
+        assert_eq!(pg.binds, vec![BindValue::Text("AAF/gP8=".into())]);
+
+        let mysql = assemble(SqlDialect::Mysql);
+        assert!(mysql.template.contains("VALUES (FROM_BASE64(?))"));
+        assert_eq!(mysql.binds, vec![BindValue::Text("AAF/gP8=".into())]);
+
+        let sqlite = assemble(SqlDialect::Sqlite);
+        assert!(sqlite.template.contains("VALUES (?1)"));
+        assert_eq!(sqlite.binds, vec![BindValue::Bytes(bytes)]);
+    }
+
+    #[test]
     fn insert_multi_row_continues_placeholder_counter() {
         let a = assemble_insert(
             SCHEMA,
@@ -3078,7 +3564,7 @@ mod tests {
         assert!(matches!(err, DmlError::MalformedInsert { .. }), "{err:?}");
     }
 
-    // ── onConflict: PG renders, SQLite hard error ────────────────────────────
+    // Structured onConflict rendering across all three dialects.
 
     #[test]
     fn insert_on_conflict_renders_on_pg() {
@@ -3169,23 +3655,206 @@ mod tests {
     }
 
     #[test]
-    fn insert_on_conflict_rejected_on_sqlite() {
+    fn insert_on_conflict_renders_exact_target_on_sqlite() {
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "label".to_string(),
+                val(IrScalar::Str("dup".into())),
+            )])),
+        };
+        let assembled = assemble_insert(
+            SCHEMA,
+            SqlDialect::Sqlite,
+            "status_codes",
+            &["code".into(), "label".into()],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
+            Some(&oc),
+        )
+        .unwrap();
+        assert_eq!(
+            assembled.template,
+            "INSERT INTO \"status_codes\" (\"code\", \"label\") VALUES (?1, ?2) \
+             ON CONFLICT (\"code\") DO UPDATE SET \"label\" = ?3"
+        );
+        assert_eq!(
+            assembled.binds,
+            vec![
+                BindValue::Int(1),
+                BindValue::Text("ok".into()),
+                BindValue::Text("dup".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_on_conflict_do_nothing_is_refused_on_mysql() {
         let oc = OnConflict {
             columns: vec!["code".into()],
             do_update: None,
         };
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Sqlite,
-            "t",
+            SqlDialect::Mysql,
+            "status_codes",
+            &["code".into(), "label".into()],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
+            Some(&oc),
+        )
+        .unwrap_err();
+        assert!(matches!(err, DmlError::MySqlConflictDoNothingNotExact));
+    }
+
+    #[test]
+    fn insert_on_conflict_guards_mysql_update_with_authored_target() {
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "label".to_string(),
+                val(IrScalar::Str("dup".into())),
+            )])),
+        };
+        let assembled = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "status_codes",
+            &["code".into(), "label".into()],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
+            Some(&oc),
+        )
+        .unwrap();
+        assert_eq!(
+            assembled.template,
+            "INSERT INTO `app_proj`.`status_codes` (`code`, `label`) VALUES (?, ?) \
+             AS `zero-migrate-incoming`(`zero-migrate-value-0`, `zero-migrate-value-1`) \
+             ON DUPLICATE KEY UPDATE `label` = IF((`app_proj`.`status_codes`.`code` \
+             = `zero-migrate-incoming`.`zero-migrate-value-0`), ?, \
+             CONCAT('', JSON_EXTRACT('zero-migrate conflict target mismatch', '$')))"
+        );
+        assert_eq!(
+            assembled.binds,
+            vec![
+                BindValue::Int(1),
+                BindValue::Text("ok".into()),
+                BindValue::Text("dup".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_wrong_target_guard_does_not_depend_on_strict_sql_mode() {
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "label".to_string(),
+                val(IrScalar::Str("dup".into())),
+            )])),
+        };
+        let assembled = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "status_codes",
+            &["code".into(), "label".into()],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
+            Some(&oc),
+        )
+        .unwrap();
+
+        assert!(
+            assembled
+                .template
+                .contains("JSON_EXTRACT('zero-migrate conflict target mismatch', '$')"),
+            "the false branch must use a MySQL expression that raises under every sql_mode: {}",
+            assembled.template
+        );
+        assert!(
+            !assembled.template.contains(" / "),
+            "division by zero degrades to a warning and NULL under permissive sql_mode: {}",
+            assembled.template
+        );
+    }
+
+    #[test]
+    fn insert_on_conflict_rejects_unguardable_mysql_target() {
+        let missing_incoming = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "label".to_string(),
+                val(IrScalar::Str("dup".into())),
+            )])),
+        };
+        let err = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "status_codes",
+            &["label".into()],
+            &[vec![val(IrScalar::Str("ok".into()))]],
+            Some(&missing_incoming),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            DmlError::MySqlConflictTargetNotInserted { column, .. } if column == "code"
+        ));
+
+        let target_update = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "code".to_string(),
+                val(IrScalar::Int(2)),
+            )])),
+        };
+        let err = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "status_codes",
             &["code".into()],
             &[vec![val(IrScalar::Int(1))]],
+            Some(&target_update),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            DmlError::MySqlConflictTargetUpdated { column, .. } if column == "code"
+        ));
+    }
+
+    #[test]
+    fn mysql_conflict_update_rejects_cross_assignment_dependencies() {
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([
+                ("first".to_string(), dml_expr(Expr::col("second"))),
+                ("second".to_string(), dml_expr(Expr::col("first"))),
+            ])),
+        };
+
+        let error = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "status_codes",
+            &["code".into(), "first".into(), "second".into()],
+            &[vec![
+                val(IrScalar::Int(1)),
+                val(IrScalar::Str("a".into())),
+                val(IrScalar::Str("b".into())),
+            ]],
             Some(&oc),
         )
         .unwrap_err();
         assert!(
-            matches!(err, DmlError::OnConflictNotPortable { .. }),
-            "{err:?}"
+            matches!(
+                &error,
+                DmlError::MySqlCrossAssignmentDependency {
+                    op,
+                    column,
+                    referenced_column,
+                    ..
+                } if *op == "onConflict.doUpdate"
+                    && column == "first"
+                    && referenced_column == "second"
+            ),
+            "unexpected error: {error:?}"
         );
     }
 
@@ -3242,6 +3911,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mysql_update_rejects_cross_assignment_dependencies_but_allows_self_reference() {
+        let swap = BTreeMap::from([
+            ("first".to_string(), dml_expr(Expr::col("second"))),
+            ("second".to_string(), dml_expr(Expr::col("first"))),
+        ]);
+        let error = assemble_update(SCHEMA, SqlDialect::Mysql, "t", &swap, None).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                DmlError::MySqlCrossAssignmentDependency {
+                    op,
+                    column,
+                    referenced_column,
+                    ..
+                } if *op == "update" && column == "first" && referenced_column == "second"
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        let increment = BTreeMap::from([(
+            "counter".to_string(),
+            dml_expr(Expr::BinOp {
+                op: BinaryOp::Add,
+                lhs: Box::new(Expr::col("counter")),
+                rhs: Box::new(lit_int(1)),
+            }),
+        )]);
+        assert!(
+            assemble_update(SCHEMA, SqlDialect::Mysql, "t", &increment, None).is_ok(),
+            "a column's own RHS is evaluated before that assignment and remains portable"
+        );
+    }
+
     // ── delete: mandatory where, both dialects ───────────────────────────────
 
     #[test]
@@ -3265,22 +3968,115 @@ mod tests {
             lhs: Box::new(Expr::col("code")),
             rhs: Box::new(lit_int(0)),
         };
-        let a = assemble_delete(SCHEMA, SqlDialect::Sqlite, "t", &pred, Some(100)).unwrap();
-        // The bundled rusqlite is built WITHOUT SQLITE_ENABLE_UPDATE_DELETE_LIMIT,
-        // so `DELETE … LIMIT ?n` is a syntax error; the portable form is the
-        // rowid subquery (the SQLite analog of the PG ctid form).
+        let identity = vec!["id".to_string()];
+        let a = assemble_delete_with_sqlite_identity(
+            SCHEMA,
+            SqlDialect::Sqlite,
+            "t",
+            &pred,
+            Some(100),
+            Some(&identity),
+        )
+        .unwrap();
         assert_eq!(
             a.template,
-            "DELETE FROM \"t\" WHERE rowid IN \
-             (SELECT rowid FROM \"t\" WHERE (\"code\" < ?1) LIMIT ?2)"
+            "DELETE FROM \"t\" WHERE \"id\" IN \
+             (SELECT \"id\" FROM \"t\" WHERE (\"code\" < ?1) LIMIT ?2)"
         );
         assert_eq!(a.binds, vec![BindValue::Int(0), BindValue::Int(100)]);
     }
 
     #[test]
-    fn delete_with_limit_pg() {
-        // The PG ctid-subquery form is unchanged; pin it alongside the SQLite form
-        // so the two portable lowerings stay structurally parallel.
+    fn sqlite_limited_delete_does_not_treat_a_shadowing_rowid_column_as_identity() {
+        let pred = Expr::BinOp {
+            op: BinaryOp::Lt,
+            lhs: Box::new(Expr::col("code")),
+            rhs: Box::new(lit_int(0)),
+        };
+        let identity = vec!["id".to_string()];
+        let assembled = assemble_delete_with_sqlite_identity(
+            SCHEMA,
+            SqlDialect::Sqlite,
+            "t",
+            &pred,
+            Some(1),
+            Some(&identity),
+        )
+        .unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, rowid INTEGER NOT NULL, code INTEGER NOT NULL);\
+             INSERT INTO t (id, rowid, code) VALUES (1, 7, -1), (2, 7, -1), (3, 8, -1);",
+        )
+        .unwrap();
+        let changed = conn
+            .execute(&assembled.template, rusqlite::params![0_i64, 1_i64])
+            .unwrap();
+
+        assert_eq!(changed, 1, "a limit of one must identify exactly one row");
+    }
+
+    #[test]
+    fn sqlite_limited_delete_uses_a_composite_key_on_without_rowid_tables() {
+        let pred = Expr::BinOp {
+            op: BinaryOp::Lt,
+            lhs: Box::new(Expr::col("code")),
+            rhs: Box::new(lit_int(0)),
+        };
+        let identity = vec!["tenant".to_string(), "id".to_string()];
+        let assembled = assemble_delete_with_sqlite_identity(
+            SCHEMA,
+            SqlDialect::Sqlite,
+            "t",
+            &pred,
+            Some(1),
+            Some(&identity),
+        )
+        .unwrap();
+        assert_eq!(
+            assembled.template,
+            "DELETE FROM \"t\" WHERE (\"tenant\", \"id\") IN \
+             (SELECT \"tenant\", \"id\" FROM \"t\" WHERE (\"code\" < ?1) LIMIT ?2)"
+        );
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (\
+                 tenant TEXT NOT NULL,\
+                 id TEXT NOT NULL,\
+                 code INTEGER NOT NULL,\
+                 PRIMARY KEY (tenant, id)\
+             ) WITHOUT ROWID;\
+             INSERT INTO t (tenant, id, code) VALUES\
+                 ('a', '1', -1), ('a', '2', -1), ('b', '1', -1);",
+        )
+        .unwrap();
+        let changed = conn
+            .execute(&assembled.template, rusqlite::params![0_i64, 1_i64])
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    #[test]
+    fn sqlite_limited_delete_without_catalog_identity_is_rejected() {
+        let pred = Expr::UnaryOp {
+            op: UnaryOp::IsNull,
+            operand: Box::new(Expr::col("code")),
+        };
+        let err = assemble_delete(SCHEMA, SqlDialect::Sqlite, "t", &pred, Some(1)).unwrap_err();
+        assert_eq!(
+            err,
+            DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                table: "t".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn delete_with_limit_pg_uses_tableoid_and_ctid_for_partitioned_parents() {
+        // Child partitions can reuse the same ctid. Pair it with tableoid so the
+        // outer delete targets only the physical row selected by the subquery.
         let pred = Expr::BinOp {
             op: BinaryOp::Lt,
             lhs: Box::new(Expr::col("code")),
@@ -3289,8 +4085,8 @@ mod tests {
         let a = assemble_delete(SCHEMA, SqlDialect::Postgres, "t", &pred, Some(100)).unwrap();
         assert_eq!(
             a.template,
-            "DELETE FROM \"app_proj\".\"t\" WHERE ctid IN \
-             (SELECT ctid FROM \"app_proj\".\"t\" WHERE (\"code\" < $1) LIMIT $2)"
+            "DELETE FROM \"app_proj\".\"t\" WHERE (tableoid, ctid) IN \
+             (SELECT tableoid, ctid FROM \"app_proj\".\"t\" WHERE (\"code\" < $1) LIMIT $2)"
         );
         assert_eq!(a.binds, vec![BindValue::Int(0), BindValue::Int(100)]);
     }
@@ -3324,6 +4120,41 @@ mod tests {
         let set = BTreeMap::from([("a".to_string(), dml_expr(lit_str("O'Brien")))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = 'O''Brien'");
+    }
+
+    #[test]
+    fn mysql_backfill_string_is_independent_of_backslash_sql_mode() {
+        let set = BTreeMap::from([(
+            "a".to_string(),
+            dml_expr(lit_str("a\\b'; DROP TABLE users; --")),
+        )]);
+        let c = assemble_backfill_clauses(SqlDialect::Mysql, "t", &set, None).unwrap();
+        assert_eq!(
+            c.set_clause,
+            "`a` = _utf8mb4 X'615c62273b2044524f50205441424c452075736572733b202d2d'"
+        );
+        assert!(!c.set_clause.contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn mysql_backfill_rejects_cross_assignment_dependencies() {
+        let swap = BTreeMap::from([
+            ("first".to_string(), dml_expr(Expr::col("second"))),
+            ("second".to_string(), dml_expr(Expr::col("first"))),
+        ]);
+        let error = assemble_backfill_clauses(SqlDialect::Mysql, "t", &swap, None).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                DmlError::MySqlCrossAssignmentDependency {
+                    op,
+                    column,
+                    referenced_column,
+                    ..
+                } if *op == "backfill" && column == "first" && referenced_column == "second"
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -3397,6 +4228,27 @@ mod tests {
             a.binds.is_empty(),
             "delim/n are pinned constants, not binds"
         );
+    }
+
+    #[test]
+    fn split_part_mysql_delimiter_is_mode_independent_in_both_paths() {
+        for (delimiter, encoded) in [("\\", "5c"), ("'", "27")] {
+            let set = BTreeMap::from([("part".to_string(), dml_expr(split("name", delimiter, 1)))]);
+            let literal = format!("_utf8mb4 X'{encoded}'");
+            let expected_expr =
+                format!("substring_index(substring_index(`name`, {literal}, 1), {literal}, -1)");
+
+            let backfill = assemble_backfill_clauses(SqlDialect::Mysql, "t", &set, None).unwrap();
+            assert_eq!(backfill.set_clause, format!("`part` = {expected_expr}"));
+
+            let one_shot = assemble_update(SCHEMA, SqlDialect::Mysql, "t", &set, None).unwrap();
+            assert_eq!(
+                one_shot.template,
+                format!("UPDATE `app_proj`.`t` SET `part` = {expected_expr}")
+            );
+            assert!(one_shot.binds.is_empty());
+            assert!(!one_shot.template.contains("DROP TABLE"));
+        }
     }
 
     /// A single-quote delimiter is `''''`-escaped in the inline literal on both legs.

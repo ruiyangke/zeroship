@@ -19,17 +19,13 @@
 /// dialect-specific spelling to be wired before the crate can build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlDialect {
-    /// Postgres dialect: encrypted-column binds wrap the placeholder with
-    /// `decode($N, 'base64')::bytea` so the BYTEA column receives raw bytes
-    /// from the base64 text param.
+    /// Postgres dialect: binary DML values wrap their text placeholder with
+    /// `decode($N, 'base64')` so a `BYTEA` column receives the original bytes.
     Postgres,
-    /// `SQLite` dialect: encrypted-column binds emit `$N` and the param value is
-    /// tagged with a blob sentinel so the session actor binds raw bytes (BLOB)
-    /// instead of text.
+    /// `SQLite` dialect: binary DML values use a numbered `?N` placeholder and
+    /// are bound directly as a `BLOB` by the in-process SQLite actor.
     Sqlite,
-    /// `MySQL` dialect: encrypted-column binds wrap the placeholder with
-    /// `FROM_BASE64(?)` so the LONGBLOB column receives raw bytes from the
-    /// base64 text param. Render-only today; no live `MySQL` runtime/backend
-    /// constructs this dialect for execution.
+    /// `MySQL` dialect: binary DML values wrap their text placeholder with
+    /// `FROM_BASE64(?)` so a binary column receives the original bytes.
     Mysql,
 }

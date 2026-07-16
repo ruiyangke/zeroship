@@ -1049,7 +1049,18 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push(("insert", "base", insert(None)));
     c.push((
         "insert",
-        "onConflict",
+        "onConflictDoUpdate",
+        insert(Some(zero_migrate::model::ir::IrOnConflict {
+            columns: vec!["a".into()],
+            do_update: Some(std::collections::BTreeMap::from([(
+                "b".into(),
+                zero_migrate::model::ir::IrValue::Scalar(zero_migrate::model::ir::IrScalar::Int(1)),
+            )])),
+        })),
+    ));
+    c.push((
+        "insert",
+        "onConflictDoNothing",
         insert(Some(zero_migrate::model::ir::IrOnConflict {
             columns: vec!["a".into()],
             do_update: None,

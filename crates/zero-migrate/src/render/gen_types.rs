@@ -62,9 +62,7 @@ pub enum GenTypesError {
     Fold(crate::FoldError),
     /// `--check`: the generated artifact on disk diverges from the freshly-generated
     /// one. Names the file + a unified-ish diff preview.
-    #[error(
-        "gen-types --check: {file} is STALE — regenerate the schema artifacts\n{detail}"
-    )]
+    #[error("gen-types --check: {file} is stale; regenerate the schema artifacts\n{detail}")]
     Drift {
         /// The drifted file.
         file: String,
@@ -781,7 +779,8 @@ fn js_key(s: &str) -> String {
         && s.chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     if is_ident {
         s.to_string()
     } else {
@@ -898,7 +897,9 @@ mod tests {
         );
         assert_eq!(chain(json!({ "type": "id" })), "t.id()");
         assert_eq!(
-            chain(json!({ "type": "ref", "refTarget": "users", "onDelete": "cascade", "deferrable": true })),
+            chain(
+                json!({ "type": "ref", "refTarget": "users", "onDelete": "cascade", "deferrable": true })
+            ),
             "t.ref(\"users\", { onDelete: \"cascade\", deferrable: true })"
         );
         assert_eq!(
@@ -909,7 +910,10 @@ mod tests {
             chain(json!({ "type": "vector", "vectorDims": 1536, "vectorMetric": "innerProduct" })),
             "t.vector(1536, { metric: \"innerProduct\" })"
         );
-        assert_eq!(chain(json!({ "type": "vector", "vectorDims": 8 })), "t.vector(8)");
+        assert_eq!(
+            chain(json!({ "type": "vector", "vectorDims": 8 })),
+            "t.vector(8)"
+        );
     }
 
     #[test]
@@ -923,7 +927,9 @@ mod tests {
             "t.string().enum(\"a\", \"b\", \"c\")"
         );
         assert_eq!(
-            chain(json!({ "type": "string", "mask": { "kind": "last4", "classification": "pii" } })),
+            chain(
+                json!({ "type": "string", "mask": { "kind": "last4", "classification": "pii" } })
+            ),
             "t.string().mask({ kind: \"last4\", classification: \"pii\" })"
         );
         assert_eq!(
@@ -943,12 +949,16 @@ mod tests {
         // `t.encrypted()` (type-equivalent; the full facet lives in
         // schema.runtime.json).
         assert_eq!(
-            chain(json!({ "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } })),
+            chain(
+                json!({ "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } })
+            ),
             "t.encrypted()"
         );
         // An explicit-mode encrypted renders the opts.
         assert_eq!(
-            chain(json!({ "type": "string", "encrypted": { "mode": "deterministic", "keyId": "k1" } })),
+            chain(
+                json!({ "type": "string", "encrypted": { "mode": "deterministic", "keyId": "k1" } })
+            ),
             "t.encrypted({ mode: \"deterministic\", keyId: \"k1\" })"
         );
         // A non-default keyId alone (mode/wraps default) still renders explicit.
@@ -994,7 +1004,9 @@ mod tests {
         );
         let metadata = BTreeMap::new();
         let dts = render_env_db_ts(&defs, &metadata);
-        assert!(dts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";"));
+        assert!(
+            dts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";")
+        );
         assert!(dts.contains("const schema = {"));
         assert!(dts.contains("email: t.string().required(),"));
         assert!(dts.contains("} as const;"));
@@ -1059,6 +1071,9 @@ mod tests {
         }
         // Options default block present.
         assert_eq!(value["collections"]["hits"]["options"]["softDelete"], false);
-        assert_eq!(value["collections"]["hits"]["options"]["strictness"], "strict");
+        assert_eq!(
+            value["collections"]["hits"]["options"]["strictness"],
+            "strict"
+        );
     }
 }

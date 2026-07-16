@@ -224,7 +224,9 @@ pub(crate) async fn journal_satisfied_noop(
 
     match result {
         Ok(()) => {
-            actor.exec("COMMIT").await?;
+            actor
+                .commit_or_cleanup("satisfied no-op journal write")
+                .await?;
             Ok(true)
         }
         Err(e) => {
@@ -327,7 +329,7 @@ pub(crate) async fn baseline(
 
     match result {
         Ok(()) => {
-            actor.exec("COMMIT").await?;
+            actor.commit_or_cleanup("baseline journal write").await?;
             Ok(crate::apply::baseline::BaselineOutcome {
                 version,
                 already_present: false,
@@ -428,7 +430,7 @@ pub(crate) async fn record_loaded_versions(
 
     match result {
         Ok(()) => {
-            actor.exec("COMMIT").await?;
+            actor.commit_or_cleanup("baseline load").await?;
             Ok(versions.len())
         }
         Err(e) => {
@@ -457,10 +459,9 @@ pub(crate) async fn record_loaded_versions(
 /// boundaries / vtables), then the `completed` journal row is written under
 /// **EngineJournal** — DML + journal atomic in one `BEGIN IMMEDIATE`.
 ///
-/// The journal checksum binds the DECLARING app's identity (`owner_app`),
-/// the SAME `Checksum::of(template, owner_app)` discipline the PG path uses — so
-/// two DML steps with an identical `(template, binds)` authored by different apps
-/// hash to different checksums.
+/// The supplied checksum is the authoritative checksum of the complete authored
+/// migration. The same value is journaled for every step so edits to SQL, bound
+/// values, or neighboring steps are detected consistently on every backend.
 ///
 /// # Errors
 /// [`SqliteActorError`] on a DML / journal-write failure (rolled back, nothing
@@ -469,10 +470,10 @@ pub(crate) async fn record_loaded_versions(
 pub(crate) async fn run_dml(
     actor: &MigrationActor,
     version: &str,
+    checksum: &crate::model::migration::Checksum,
     name: &str,
     template: &str,
     binds: &[crate::apply::backend::sqlite::actor::SqliteBind],
-    owner_app: &str,
     applied_by: &str,
 ) -> Result<(), SqliteActorError> {
     ensure_journal(actor).await?;
@@ -492,16 +493,6 @@ pub(crate) async fn run_dml(
         // 3. EngineJournal — INSERT the `completed` row. SEPARATE prepares from the
         // DML, with the mode flip strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
-        let checksum =
-            crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
-                up: template,
-                down: None,
-                flags: &crate::model::migration::MigrationFlags::default(),
-                owner_app,
-                depends_on: &[],
-                supersedes: &[],
-                preconditions: &[],
-            });
         let name_lit = sql_lit(name);
         let checksum_lit = sql_lit(checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);
@@ -520,26 +511,8 @@ pub(crate) async fn run_dml(
     .await;
 
     match result {
-        Ok(()) => {
-            actor.set_mode(Mode::EngineJournal).await?;
-            actor.exec("COMMIT").await?;
-            Ok(())
-        }
-        Err(e) => {
-            actor.set_mode(Mode::EngineJournal).await?;
-            let rb = actor.exec("ROLLBACK").await;
-            match actor.is_autocommit().await {
-                Ok(true) => Err(e),
-                Ok(false) => Err(SqliteActorError::Poisoned(format!(
-                    "transaction still open after ROLLBACK (rollback result: {rb:?}); \
-                     original DML error: {e}"
-                ))),
-                Err(probe) => Err(SqliteActorError::Poisoned(format!(
-                    "could not confirm autocommit after ROLLBACK: {probe}; \
-                     original DML error: {e}"
-                ))),
-            }
-        }
+        Ok(()) => actor.commit_or_cleanup("one-shot DML").await,
+        Err(error) => Err(actor.cleanup_after_error("one-shot DML", error).await),
     }
 }
 
@@ -607,8 +580,7 @@ async fn run_apply_txn(
     match result {
         Ok(()) => {
             // 4. COMMIT — DDL + journal row commit together.
-            actor.set_mode(Mode::EngineJournal).await?;
-            actor.exec("COMMIT").await?;
+            actor.commit_or_cleanup("additive migration apply").await?;
             Ok(())
         }
         Err(e) => {
@@ -699,6 +671,31 @@ pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>,
         });
     }
     Ok(out)
+}
+
+/// Versions whose latest immutable event is `rolled_back`, ordered by version.
+pub(crate) async fn net_rolled_back_versions(
+    actor: &MigrationActor,
+) -> Result<Vec<String>, SqliteActorError> {
+    actor.set_mode(Mode::EngineJournal).await?;
+    let sql = format!(
+        "\
+        WITH ranked AS ( \
+            SELECT version, event_kind, \
+                   ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
+              FROM \"_mig\".schema_migrations \
+        ) \
+        SELECT version FROM ranked \
+         WHERE rn = 1 AND event_kind = '{rolled_back}' \
+         ORDER BY version",
+        rolled_back = EventKind::RolledBack.as_str()
+    );
+    actor
+        .query(&sql)
+        .await?
+        .iter()
+        .map(|row| cell(row, 0))
+        .collect()
 }
 
 /// The versions covered by a net-applied squash. Mirrors PG

@@ -661,22 +661,29 @@ fn selected_cells_match_current_validate_and_lower_behavior() {
         assert_current_cell_matches(first(&ops, "dropConstraint"), dialect);
     }
 
-    let insert_with_on_conflict = ops
+    let inserts_with_on_conflict = ops
         .get("insert")
-        .and_then(|items| {
-            items.iter().find(|op| {
-                matches!(
-                    op,
-                    Op::Insert {
-                        on_conflict: Some(_),
-                        ..
-                    }
-                )
-            })
+        .expect("fixture corpus must include insert operations")
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::Insert {
+                    on_conflict: Some(_),
+                    ..
+                }
+            )
         })
-        .expect("fixture corpus must include insert with onConflict");
-    for dialect in DIALECTS {
-        assert_current_cell_matches(insert_with_on_conflict, dialect);
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inserts_with_on_conflict.len(),
+        2,
+        "fixture corpus must include doUpdate and doNothing conflict forms"
+    );
+    for insert in inserts_with_on_conflict {
+        for dialect in DIALECTS {
+            assert_current_cell_matches(insert, dialect);
+        }
     }
 
     let trigger_execute_function = ops

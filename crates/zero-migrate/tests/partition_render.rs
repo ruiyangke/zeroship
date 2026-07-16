@@ -168,9 +168,18 @@ fn partition_exec_cfg() -> ExecutorConfig {
     ExecutorConfig::new("prj_partition", "app_partition")
 }
 
+#[track_caller]
 fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_migrate::PlanStep> {
+    // Applied calls in this fixture represent separate migration files. Give
+    // each call site its own durable name so stable plan identities do not turn
+    // unrelated setup and teardown plans into checksum drift.
+    let mut migration = ir_ops(ops);
+    migration.name = format!(
+        "partition_render_{}",
+        std::panic::Location::caller().line()
+    );
     IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
-        .lower_steps(&ir_ops(ops), live)
+        .lower_steps(&migration, live)
         .expect("lower partition ops to SQLite")
 }
 

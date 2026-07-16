@@ -31,6 +31,13 @@ use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::model::migration::Migration;
 
+/// PostgreSQL's author-side renderers use standard quote doubling for inline
+/// string literals. Pin their interpretation inside each transaction so an
+/// inherited `standard_conforming_strings = off` cannot reinterpret backslashes.
+/// `SET LOCAL` also guarantees that commit or rollback restores the caller's
+/// original session value without adding another session snapshot field.
+pub(super) const AUTHOR_SQL_LITERAL_MODE: &str = "SET LOCAL standard_conforming_strings = on;";
+
 /// A stable i64 advisory-lock key from the project id, mirroring the
 /// `hashtext(project_id)` design intent: we run `pg_advisory_lock(hashtext($1))`
 /// server-side so the key is computed by Postgres exactly as the design states
@@ -196,6 +203,20 @@ fn set_local_role_sql(
             ))
         })
         .transpose()
+}
+
+fn dml_set_local_session_sql(
+    cfg: &ExecutorConfig,
+) -> Result<String, crate::render::dml::IdentQuoteError> {
+    Ok(format!(
+        "{AUTHOR_SQL_LITERAL_MODE} \
+         SET LOCAL search_path TO {}; \
+         SET LOCAL statement_timeout = {}; \
+         SET LOCAL lock_timeout = {};",
+        cfg.search_path_clause()?,
+        cfg.statement_timeout_ms(),
+        cfg.lock_timeout_ms(),
+    ))
 }
 
 /// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
@@ -543,10 +564,10 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
+    checksum: &crate::model::migration::Checksum,
     name: &str,
     template: &str,
     binds: &[crate::render::step::BindValue],
-    owner_app: &str,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
@@ -564,17 +585,21 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     let params: Vec<Option<String>> = binds
         .iter()
         .map(|b| match b {
-            crate::render::step::BindValue::Null => None,
-            crate::render::step::BindValue::Bool(v) => Some(if *v {
+            crate::render::step::BindValue::Null => Ok(None),
+            crate::render::step::BindValue::Bool(v) => Ok(Some(if *v {
                 "true".to_string()
             } else {
                 "false".to_string()
-            }),
-            crate::render::step::BindValue::Int(v) => Some(v.to_string()),
-            crate::render::step::BindValue::Decimal(s) => Some(s.clone()),
-            crate::render::step::BindValue::Text(s) => Some(s.clone()),
+            })),
+            crate::render::step::BindValue::Int(v) => Ok(Some(v.to_string())),
+            crate::render::step::BindValue::Decimal(s) => Ok(Some(s.clone())),
+            crate::render::step::BindValue::Text(s) => Ok(Some(s.clone())),
+            crate::render::step::BindValue::Bytes(_) => Err(ApplyError::Backend(
+                "postgres DML: raw binary bind reached the backend without a decode wrapper"
+                    .to_string(),
+            )),
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
@@ -582,14 +607,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
     // `set_local` is built from cfg directly (a DML step has no per-migration
     // timeout override slot).
-    let set_local = format!(
-        "SET LOCAL search_path TO {}; \
-         SET LOCAL statement_timeout = {}; \
-         SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause()?,
-        cfg.statement_timeout_ms(),
-        cfg.lock_timeout_ms(),
-    );
+    let set_local = dml_set_local_session_sql(cfg)?;
     let role_sql = set_local_role_sql(cfg)?;
 
     conn.batch("BEGIN").await?;
@@ -630,22 +648,6 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         return Err(e);
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    // The journal checksum is over the PARAMETERIZED template (binds fold into the
-    // plan checksum, not the journal row). Use the migration checksum
-    // discipline over (template, None).
-    // The journal checksum binds the DECLARING app's identity: two DML
-    // steps with an identical `(template, binds)` authored by different
-    // `owner_app`s hash to DIFFERENT checksums, so the journal row's owner
-    // attribution is correct for multi-tenant DML (the creator-DML assembler).
-    let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
-        up: template,
-        down: None,
-        flags: &crate::model::migration::MigrationFlags::default(),
-        owner_app,
-        depends_on: &[],
-        supersedes: &[],
-        preconditions: &[],
-    });
     let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
     if let Err(e) = conn
         .exec(
@@ -1189,6 +1191,21 @@ mod pg_confinement_shape_tests {
             .expect("role ident quotable")
             .expect("migrator role set");
         assert_eq!(role, "SET LOCAL ROLE \"migrator_proj_x\"");
+    }
+
+    #[test]
+    fn structured_dml_pins_standard_string_literals_transaction_locally() {
+        let cfg = ExecutorConfig::new("prj_x", "proj_x");
+        let session = dml_set_local_session_sql(&cfg).expect("DML session SQL renders");
+
+        assert!(
+            session.starts_with(AUTHOR_SQL_LITERAL_MODE),
+            "the literal mode must be pinned before authored DML: {session}"
+        );
+        assert!(
+            session.contains("SET LOCAL standard_conforming_strings = on;"),
+            "the setting must be transaction-local so the inherited value is restored: {session}"
+        );
     }
 
     /// The per-migration `lock_timeout_ms` override (the maintenance-window knob,

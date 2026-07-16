@@ -12,10 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
-    apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr,
-    SqlDialect, SqliteBackend,
+    Approval, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    apply::executor::LockMode, resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -55,8 +56,15 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 fn resolved_envelope_json(raw: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
-    let resolved =
-        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
+    let resolved = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
+        .expect("test IR resolves");
+    serde_json::to_string(&resolved).expect("resolved test IR serializes")
+}
+
+fn no_inject_envelope_json(raw: &str) -> String {
+    let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
+    let resolved = resolve_create_table_policy(&ir, &zero_migrate::zeroship_no_inject_ceiling())
+        .expect("test IR resolves without platform columns");
     serde_json::to_string(&resolved).expect("resolved test IR serializes")
 }
 
@@ -108,6 +116,454 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
         rows.len(),
         1,
         "the IR-created 'notes' table must exist on SQLite"
+    );
+}
+
+#[compio::test]
+async fn insert_on_conflict_updates_and_does_nothing_on_real_sqlite() {
+    let p = paths("ir_on_conflict");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec("CREATE TABLE status_codes (code INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        .await
+        .expect("create conflict target");
+    be.actor()
+        .exec("INSERT INTO status_codes (code, label) VALUES (200, 'seed')")
+        .await
+        .expect("seed conflict target");
+
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_on_conflict","ops":[
+          {"op":"insert","table":"status_codes","columns":["code","label"],
+           "rows":[[200,"incoming"]],
+           "onConflict":{"columns":["code"],"doUpdate":{"label":"updated"}}},
+          {"op":"insert","table":"status_codes","columns":["code","label"],
+           "rows":[[200,"must-not-apply"]],
+           "onConflict":{"columns":["code"]}}
+        ]}"#,
+    );
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let artifact = author
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[("status_codes", APP)]),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("both exact SQLite conflict forms lower");
+
+    let engine = MigrationEngine::new();
+    let outcome = engine
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-on-conflict-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("both exact SQLite conflict forms apply");
+    assert_eq!(outcome.applied.applied.len(), 2);
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter read mode");
+    let rows = be
+        .actor()
+        .query("SELECT label FROM status_codes WHERE code = 200")
+        .await
+        .expect("read conflict result");
+    assert_eq!(rows[0][0].as_deref(), Some("updated"));
+}
+
+#[compio::test]
+async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
+    let p = paths("ir_portable_functions");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec(
+            "CREATE TABLE metrics (\
+                id INTEGER PRIMARY KEY, x REAL NOT NULL, source TEXT NOT NULL, \
+                happened_at TEXT NOT NULL, rounded REAL, floored REAL, ceiled REAL, \
+                replaced TEXT, event_year INTEGER); \
+             INSERT INTO metrics (id, x, source, happened_at) \
+             VALUES (1, 12.75, 'a-b-a', '2026-07-15T12:30:00Z'), \
+                    (2, -12.25, 'a-b-a', '2026-07-15T12:30:00Z'), \
+                    (3, 1e20, 'a-b-a', '2026-07-15T12:30:00Z'), \
+                    (4, -1e20, 'a-b-a', '2026-07-15T12:30:00Z')",
+        )
+        .await
+        .expect("seed function target");
+
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_portable_functions","ops":[
+          {"op":"update","table":"metrics","set":{
+            "rounded":{"node":"fnCall","fn":"round","args":[{"node":"colRef","name":"x"}]},
+            "floored":{"node":"fnCall","fn":"floor","args":[{"node":"colRef","name":"x"}]},
+            "ceiled":{"node":"fnCall","fn":"ceil","args":[{"node":"colRef","name":"x"}]},
+            "replaced":{"node":"fnCall","fn":"replace","args":[
+              {"node":"colRef","name":"source"},{"node":"literal","value":"a"},{"node":"literal","value":"z"}]},
+            "event_year":{"node":"extract","field":"year","from":{"node":"colRef","name":"happened_at"}}
+          }}
+        ]}"#,
+    );
+    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[("metrics", APP)]),
+            &LiveSchema::default(),
+            &GuardConfig::confined_sqlite(PROJECT.to_string()),
+        )
+        .expect("portable function update lowers");
+
+    MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-function-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("portable functions apply through the hardened connection");
+
+    be.actor().set_mode(Mode::CreatorUp).await.unwrap();
+    let rows = be
+        .actor()
+        .query(
+            "SELECT rounded, floored, ceiled, replaced, event_year \
+             FROM metrics WHERE id <= 2 ORDER BY id",
+        )
+        .await
+        .expect("read function results");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some("13".into()),
+            Some("12".into()),
+            Some("13".into()),
+            Some("z-b-z".into()),
+            Some("2026".into()),
+        ], vec![
+            Some("-12".into()),
+            Some("-13".into()),
+            Some("-12".into()),
+            Some("z-b-z".into()),
+            Some("2026".into()),
+        ]]
+    );
+
+    let large_rows = be
+        .actor()
+        .query(
+            "SELECT floored = x, ceiled = x \
+             FROM metrics WHERE id > 2 ORDER BY id",
+        )
+        .await
+        .expect("read large-number floor and ceil results");
+    assert_eq!(
+        large_rows,
+        vec![
+            vec![Some("1".into()), Some("1".into())],
+            vec![Some("1".into()), Some("1".into())],
+        ],
+        "floor and ceil must not clamp finite SQLite REAL values outside i64"
+    );
+}
+
+#[compio::test]
+async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sqlite() {
+    let p = paths("ir_byte_value");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec("CREATE TABLE files (payload BLOB NOT NULL)")
+        .await
+        .expect("create binary DML target");
+
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_byte_value","ops":[
+          {"op":"insert","table":"files","columns":["payload"],
+           "rows":[[{"bytes":"AAF/gP8="}]]}
+        ]}"#,
+    );
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let artifact = author
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[("files", APP)]),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("a byteValue insert lowers for SQLite");
+
+    let engine = MigrationEngine::new();
+    let outcome = engine
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-byte-value-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the byteValue insert applies on SQLite");
+    assert_eq!(outcome.applied.applied.len(), 1);
+    let version = &outcome.applied.applied[0];
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter read mode");
+    let rows = be
+        .actor()
+        .query("SELECT typeof(payload), hex(payload), length(payload) FROM files")
+        .await
+        .expect("read the stored binary value");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some("blob".to_string()),
+            Some("00017F80FF".to_string()),
+            Some("5".to_string()),
+        ]],
+        "SQLite must store the decoded bytes as a five-byte BLOB"
+    );
+
+    let journal = be.applied_sqlite().await.expect("read the SQLite journal");
+    let entry = journal
+        .iter()
+        .find(|entry| &entry.version == version)
+        .expect("the byteValue DML step is journaled");
+    assert_eq!(
+        entry.phase,
+        zero_migrate::apply::journal::Phase::Completed,
+        "the exact BLOB write and its completed journal event commit together"
+    );
+}
+
+#[compio::test]
+async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
+    let p = paths("ir_byte_backfill");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, payload BLOB); \
+             INSERT INTO files (id, payload) VALUES (1, NULL), (2, NULL)",
+        )
+        .await
+        .expect("create binary backfill target");
+
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_byte_backfill","ops":[
+          {"op":"backfill","table":"files","name":"fill_payload",
+           "cursorColumn":"id","batchSize":1,
+           "set":{"payload":{"node":"literal","value":{"bytes":"AAF/gP8="}}}}
+        ]}"#,
+    );
+    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[("files", APP)]),
+            &LiveSchema::default(),
+            &GuardConfig::confined_sqlite(PROJECT.to_string()),
+        )
+        .expect("a byteValue backfill lowers for SQLite");
+
+    MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "sqlite-byte-backfill-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the byteValue backfill applies on SQLite");
+
+    be.actor().set_mode(Mode::CreatorUp).await.unwrap();
+    let rows = be
+        .actor()
+        .query("SELECT typeof(payload), hex(payload) FROM files ORDER BY id")
+        .await
+        .expect("read binary backfill results");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("blob".into()), Some("00017F80FF".into())],
+            vec![Some("blob".into()), Some("00017F80FF".into())],
+        ]
+    );
+}
+
+#[compio::test]
+async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
+    let p = paths("ir_fixed_decimal");
+    let be = backend(&p);
+    let ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_fixed_decimal","ops":[
+          {"op":"createTable","name":"ledger","columns":[
+            {"name":"amount","type":{"decimal":{"precision":30,"scale":10}},"nullable":false}
+          ]},
+          {"op":"insert","table":"ledger","columns":["amount"],
+           "rows":[[{"decimal":"12345678901234567890.1234567890"}]]}
+        ]}"#,
+    );
+    let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
+    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[]),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("a fixed decimal create plus insert lowers on SQLite");
+
+    MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-fixed-decimal-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the fixed decimal plan applies on SQLite");
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter read mode");
+    let table_sql = be
+        .actor()
+        .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ledger'")
+        .await
+        .expect("read the created table definition");
+    assert!(
+        table_sql
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Option::as_deref)
+            .is_some_and(|sql| sql.contains("\"amount\" TEXT")),
+        "the fixed decimal column must use SQLite TEXT storage: {table_sql:?}"
+    );
+    let rows = be
+        .actor()
+        .query("SELECT typeof(amount), amount FROM ledger")
+        .await
+        .expect("read the stored decimal text");
+    assert_eq!(
+        rows,
+        vec![vec![
+            Some("text".to_string()),
+            Some("12345678901234567890.1234567890".to_string()),
+        ]],
+        "SQLite must not coerce a wide fixed decimal through REAL affinity"
+    );
+}
+
+#[compio::test]
+async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_unapproved() {
+    let p = paths("mixed_data_approval_preflight");
+    let be = backend(&p);
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter creator mode");
+    be.actor()
+        .exec(
+            "CREATE TABLE users (\
+                id INTEGER PRIMARY KEY, \
+                ready INTEGER NOT NULL\
+            )",
+        )
+        .await
+        .expect("create mixed-plan target");
+
+    let ir = resolved_envelope_json(
+        r#"{"ir_version":1,"name":"mixed_data_approval_preflight","ops":[
+          {"op":"insert","table":"users","columns":["id","ready"],"rows":[[1,false]]},
+          {"op":"delete","table":"users","where":{"node":"binOp","op":"eq",
+            "lhs":{"node":"colRef","name":"id"},"rhs":{"node":"literal","value":999}}},
+          {"op":"backfill","table":"users","name":"mark_users_ready",
+            "cursorColumn":"id","batchSize":100,
+            "set":{"ready":{"node":"literal","value":true}}}
+        ]}"#,
+    );
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let artifact = author
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[("users", APP)]),
+            &LiveSchema::default(),
+            &GuardConfig::confined_sqlite(PROJECT.to_string()),
+        )
+        .expect("the mixed data plan lowers");
+
+    let result = MigrationEngine::new()
+        .apply_plan(
+            &artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-approval-preflight-test",
+            LockMode::Acquire,
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
+    ));
+
+    be.actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("enter read mode");
+    let rows = be
+        .actor()
+        .query("SELECT COUNT(*) FROM users")
+        .await
+        .expect("read target after refusal");
+    assert_eq!(
+        rows,
+        vec![vec![Some("0".to_string())]],
+        "the leading insert must not commit before a later approval gate"
+    );
+    assert!(
+        be.applied_sqlite()
+            .await
+            .expect("read journal after refusal")
+            .is_empty(),
+        "no plan step may be journaled on approval refusal"
     );
 }
 
@@ -188,13 +644,7 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let artifact = author
-        .load_and_lower_guarded(
-            &ir,
-            APP,
-            &registry(&[]),
-            &LiveSchema::default(),
-            &guard_cfg,
-        )
+        .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
         .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
 
     // Per-statement attribution survived: the createTable's CREATE is ONE fragment
