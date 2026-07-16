@@ -284,6 +284,112 @@ test("create() with a composite primaryKey records the top-level primaryKey", ()
   assert.equal(ops[0].constraints, undefined);
 });
 
+test("create() accepts a single-column primary key in either spelling", () => {
+  const columnLevel = record(() =>
+    table("column_level").create({ columns: { id: t.int().primaryKey() } }),
+  );
+  const tableLevel = record(() =>
+    table("table_level").create({
+      columns: { id: t.int() },
+      primaryKey: ["id"],
+    }),
+  );
+  const matchingDeclarations = record(() =>
+    table("matching").create({
+      columns: { id: t.int().primaryKey() },
+      primaryKey: ["id"],
+    }),
+  );
+
+  assert.deepEqual(columnLevel[0].primaryKey, ["id"]);
+  assert.deepEqual(tableLevel[0].primaryKey, ["id"]);
+  assert.deepEqual(matchingDeclarations[0].primaryKey, ["id"]);
+});
+
+test("create() rejects invalid table-level primaryKey arrays", () => {
+  const rejectsPrimaryKey = (primaryKey: unknown, message: RegExp): void => {
+    assert.throws(
+      () =>
+        record(() =>
+          table("memberships").create({
+            columns: { account_id: t.uuid(), team: t.text() },
+            primaryKey: primaryKey as string[],
+          }),
+        ),
+      (error: any) => error.code === "PRIMARY_KEY_INVALID" && message.test(error.message),
+    );
+  };
+
+  rejectsPrimaryKey([], /cannot be empty/);
+  rejectsPrimaryKey(["account_id", "account_id"], /more than once/);
+  rejectsPrimaryKey(["account_id", "missing"], /unknown column "missing"/);
+});
+
+test("create() rejects repeated column-level .primaryKey() instead of collecting a composite key", () => {
+  const repeatedColumnPrimaryKeys = () =>
+    record(() =>
+      table("memberships").create({
+        columns: {
+          account_id: t.uuid().primaryKey(),
+          team: t.text().primaryKey(),
+        },
+      }),
+    );
+
+  assert.throws(
+    repeatedColumnPrimaryKeys,
+    (error: any) =>
+      error.code === "PRIMARY_KEY_INVALID" &&
+      /multiple columns with \.primaryKey\(\)/.test(error.message) &&
+      /ordered table-level primaryKey array/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      recordEngine(({ table, t }) =>
+        table("memberships").create({
+          columns: {
+            account_id: t.uuid().primaryKey(),
+            team: t.text().primaryKey(),
+          },
+        }),
+      ),
+    (error: any) =>
+      error.code === "PRIMARY_KEY_INVALID" && /ordered table-level primaryKey array/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("memberships").create({
+          columns: {
+            account_id: t.uuid().primaryKey(),
+            team: t.text().primaryKey(),
+          },
+          primaryKey: ["account_id", "team"],
+        }),
+      ),
+    (error: any) => error.code === "PRIMARY_KEY_INVALID" && /multiple columns/.test(error.message),
+  );
+});
+
+test("create() rejects conflicting column-level and table-level primary keys", () => {
+  for (const primaryKey of [null, ["team"], ["account_id", "team"]] as const) {
+    assert.throws(
+      () =>
+        record(() =>
+          table("memberships").create({
+            columns: {
+              account_id: t.uuid().primaryKey(),
+              team: t.text(),
+            },
+            primaryKey: primaryKey as string[] | null,
+          }),
+        ),
+      (error: any) =>
+        error.code === "PRIMARY_KEY_INVALID" && /conflicting table-level primaryKey/.test(error.message),
+    );
+  }
+});
+
 test("table runtime options record setTableOptions patches", () => {
   const publicOps = record(() => {
     table("posts").setOptions({ softDelete: true });

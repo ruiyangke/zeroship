@@ -1834,6 +1834,15 @@ fn system_index_snapshots(table: &str) -> Vec<IndexSnapshot> {
 
 /// Stamp a resolved primary-key constraint and its implicit index onto a snapshot.
 pub(crate) fn push_primary_key_snapshot(table: &str, snap: &mut TableSnapshot, columns: &[String]) {
+    // PRIMARY KEY implies NOT NULL for every component. Normalize that semantic
+    // consequence into the desired snapshot before rendering/diffing so the
+    // table-level spelling has the same column nullability as `.primaryKey()`.
+    for column in &mut snap.columns {
+        if columns.contains(&column.name) {
+            column.nullable = false;
+        }
+    }
+
     let name = format!("{table}_pkey");
     snap.constraints.push(ConstraintSnapshot {
         name: name.clone(),

@@ -251,6 +251,84 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 }
 
 #[test]
+fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
+    let ordered = Op::CreateTable {
+        name: "memberships".into(),
+        columns: vec![
+            IrColumn {
+                name: "tenant_id".into(),
+                ty: ColType::Uuid,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+            IrColumn {
+                name: "member_id".into(),
+                ty: ColType::Uuid,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+        ],
+        primary_key: Some(vec!["tenant_id".into(), "member_id".into()]),
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let mut reversed = ordered.clone();
+    if let Op::CreateTable { primary_key, .. } = &mut reversed {
+        primary_key
+            .as_mut()
+            .expect("test createTable has a primary key")
+            .reverse();
+    }
+
+    let ordered_ops = [ordered];
+    let reversed_ops = [reversed];
+    assert_ne!(
+        CanonicalOpList(&ordered_ops).canonical_bytes(),
+        CanonicalOpList(&reversed_ops).canonical_bytes(),
+        "primaryKey tuple order is part of canonical IR"
+    );
+
+    let flags = MigrationFlags::default();
+    assert_ne!(
+        Checksum::of_ir(
+            &CanonicalOpList(&ordered_ops),
+            &flags,
+            "app_ir",
+            &[],
+            &[],
+            &[],
+        ),
+        Checksum::of_ir(
+            &CanonicalOpList(&reversed_ops),
+            &flags,
+            "app_ir",
+            &[],
+            &[],
+            &[],
+        ),
+        "primaryKey tuple order must change the canonical checksum"
+    );
+}
+
+#[test]
 fn checksum_of_ir_includes_table_check_expr() {
     fn check_op(rhs: i64) -> Op {
         Op::CreateTable {

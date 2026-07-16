@@ -7725,14 +7725,14 @@ mod tests {
     }
 
     #[test]
-    fn create_table_top_level_composite_primary_key_renders_pg() {
+    fn create_table_top_level_composite_primary_key_preserves_order_on_every_dialect() {
         let mut ir = create_table_ir(
             "memberships",
             vec![
                 TIrColumn {
                     name: "account_id".into(),
                     ty: ColType::Uuid,
-                    nullable: Some(false),
+                    nullable: None,
                     default: None,
                     unique: None,
                     id_prefix: None,
@@ -7745,7 +7745,7 @@ mod tests {
                 TIrColumn {
                     name: "team".into(),
                     ty: ColType::Text,
-                    nullable: Some(false),
+                    nullable: None,
                     default: None,
                     unique: None,
                     id_prefix: None,
@@ -7758,21 +7758,117 @@ mod tests {
             ],
         );
         if let Op::CreateTable { primary_key, .. } = &mut ir.ops[0] {
-            *primary_key = Some(vec!["account_id".into(), "team".into()]);
+            // Deliberately opposite the column declaration order: the authored PK
+            // tuple, not object/column order, owns correspondence and index prefix.
+            *primary_key = Some(vec!["team".into(), "account_id".into()]);
         }
-        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
-        let migs = author
-            .lower(&ir, &LiveSchema::default())
-            .expect("lower platform composite PK createTable");
-        let create = migs
-            .iter()
-            .find(|m| m.up.contains("CREATE TABLE"))
-            .expect("create");
-        assert!(
-            create.up.contains("PRIMARY KEY (account_id, team)"),
-            "top-level composite primary_key must render as a composite PK:\n{}",
-            create.up
-        );
+
+        for (sql_dialect, validator_dialect, non_null_columns) in [
+            (
+                SqlDialect::Postgres,
+                crate::model::validate::Dialect::Postgres,
+                [r#""account_id" uuid NOT NULL"#, r#""team" text NOT NULL"#],
+            ),
+            (
+                SqlDialect::Sqlite,
+                crate::model::validate::Dialect::Sqlite,
+                [r#""account_id" TEXT NOT NULL"#, r#""team" TEXT NOT NULL"#],
+            ),
+            (
+                SqlDialect::Mysql,
+                crate::model::validate::Dialect::Mysql,
+                [
+                    r#"`account_id` VARCHAR(191) NOT NULL"#,
+                    r#"`team` VARCHAR(191) NOT NULL"#,
+                ],
+            ),
+        ] {
+            validate_ir_platform(&ir, validator_dialect)
+                .unwrap_or_else(|error| panic!("{sql_dialect:?} validation failed: {error}"));
+            let author = IrAuthor::new("app", "app_a", sql_dialect);
+            let migs = author
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|error| panic!("{sql_dialect:?} lowering failed: {error}"));
+            let create = migs
+                .iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .expect("create");
+            assert!(
+                create.up.contains("PRIMARY KEY (team, account_id)"),
+                "{sql_dialect:?} must preserve the authored composite-PK order:\n{}",
+                create.up
+            );
+            for column in non_null_columns {
+                assert!(
+                    create.up.contains(column),
+                    "{sql_dialect:?} must lower every PK component as non-null:\n{}",
+                    create.up
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_column_primary_key_spellings_lower_identically_on_every_dialect() {
+        let single_key_ir = |nullable| {
+            let mut ir = create_table_ir(
+                "widgets",
+                vec![TIrColumn {
+                    name: "id".into(),
+                    ty: ColType::Int,
+                    nullable,
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
+            );
+            if let Op::CreateTable { primary_key, .. } = &mut ir.ops[0] {
+                *primary_key = Some(vec!["id".into()]);
+            }
+            ir
+        };
+
+        // `.primaryKey()` records nullable:false; table-level primaryKey:["id"]
+        // leaves the ordinary column nullable facet absent. PK normalization must
+        // make both authoring spellings lower to one table shape.
+        let column_spelling = single_key_ir(Some(false));
+        let table_spelling = single_key_ir(None);
+
+        for (sql_dialect, validator_dialect) in [
+            (
+                SqlDialect::Postgres,
+                crate::model::validate::Dialect::Postgres,
+            ),
+            (SqlDialect::Sqlite, crate::model::validate::Dialect::Sqlite),
+            (SqlDialect::Mysql, crate::model::validate::Dialect::Mysql),
+        ] {
+            validate_ir_platform(&column_spelling, validator_dialect).unwrap();
+            validate_ir_platform(&table_spelling, validator_dialect).unwrap();
+            let author = IrAuthor::new("app", "app_a", sql_dialect);
+            let column_sql = author
+                .lower(&column_spelling, &LiveSchema::default())
+                .unwrap()
+                .into_iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .expect("column-level PK create")
+                .up;
+            let table_sql = author
+                .lower(&table_spelling, &LiveSchema::default())
+                .unwrap()
+                .into_iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .expect("table-level PK create")
+                .up;
+            assert_eq!(
+                column_sql, table_sql,
+                "{sql_dialect:?} must canonicalize both single-column PK spellings"
+            );
+        }
     }
 
     #[test]

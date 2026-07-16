@@ -295,15 +295,12 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     id.nullable = Some(false);
     id.identity = Some(IdentityCol { always: false });
     let tenant = col("tenant_id", ColType::Text);
+    let composite = ir_platform(create_table(vec![id, tenant], pk(&["id", "tenant_id"])));
+    validate_platform(&composite, ValidatorDialect::Postgres)
+        .expect("a PostgreSQL-targeted BY DEFAULT identity may be one composite-PK component");
     for dialect in [ValidatorDialect::Sqlite, ValidatorDialect::Mysql] {
-        let err = validate_platform(
-            &ir_platform(create_table(
-                vec![id.clone(), tenant.clone()],
-                pk(&["id", "tenant_id"]),
-            )),
-            dialect,
-        )
-        .expect_err("autoIncrement on a composite-PK column has no sound emulation");
+        let err = validate_platform(&composite, dialect)
+            .expect_err("autoIncrement on a composite-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Identity), "got: {err}");
     }

@@ -5640,8 +5640,56 @@ mod tests {
             }"#,
         )]);
 
-        validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
-            .expect("platform profile accepts author-owned composite createTable primaryKey");
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_ir_scoped(&ir, dialect, &[], None).unwrap_or_else(|error| {
+                panic!(
+                    "{dialect:?} must accept an ordered author-owned composite primary key: {error}"
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn create_table_primary_key_rejects_empty_duplicate_and_missing_columns_on_every_dialect() {
+        let invalid = [
+            (Vec::<&str>::new(), "empty"),
+            (vec!["account_id", "account_id"], "more than once"),
+            (
+                vec!["account_id", "missing"],
+                "absent from the resolved table",
+            ),
+        ];
+
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            for (primary_key, reason) in &invalid {
+                let ir = ir_with(vec![Op::CreateTable {
+                    name: "memberships".into(),
+                    columns: vec![
+                        part_col("account_id", ColType::Uuid, false),
+                        part_col("team", ColType::Text, false),
+                    ],
+                    primary_key: Some(
+                        primary_key
+                            .iter()
+                            .map(|column| (*column).to_string())
+                            .collect(),
+                    ),
+                    constraints: vec![],
+                    indexes: vec![],
+                    partition_by: None,
+                    runtime_options: None,
+                    schema: None,
+                    existence_guard: None,
+                }]);
+
+                let error = validate_ir_scoped(&ir, dialect, &[], None).unwrap_err();
+                assert_eq!(error.code, CODE_PRIMARY_KEY_INVALID, "got: {error}");
+                assert!(
+                    error.reason.contains(reason),
+                    "{dialect:?} rejection must identify {reason:?}: {error}"
+                );
+            }
+        }
     }
 
     #[test]

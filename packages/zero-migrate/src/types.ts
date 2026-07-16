@@ -1038,9 +1038,11 @@ export interface TableRuntimeOptions {
  *  - `checks` lower from the closed `Expr` AST through the engine renderer.
  *    Partial-index `where` renders on PostgreSQL and SQLite; MySQL refuses it
  *    fail-closed because MySQL has no partial indexes.
- *  - `primaryKey` (composite) and a column's `.primaryKey()` are represented in
- *    the recorded IR. Current confined/platform policy still decides later whether
- *    an authored PK is accepted, rejected, or replaced by the system shape.
+ *  - `primaryKey` is the ordered table-level spelling for composite keys. A
+ *    column's `.primaryKey()` is valid only as a single-column shorthand; repeated
+ *    column facets and conflicting table/column declarations are rejected.
+ *    Current confined/platform policy still decides later whether an authored PK
+ *    is accepted, rejected, or replaced by the system shape.
  *
  *  None of the above is ever a silent no-op — an unsupported spec fails closed at
  *  lower time. */
@@ -1051,7 +1053,8 @@ export interface CreateTableArgs {
    *  `table(name).setOptions(...)`. */
   options?: TableRuntimeOptions;
   /** Table primary key intent: undefined leaves the policy default unresolved,
-   *  null requests no PK, and a string array records an explicit/composite PK. */
+   *  null requests no PK, and a non-empty ordered column-name array records an
+   *  explicit single-column or composite PK. */
   primaryKey?: string[] | null;
   uniques?: Array<{ name: string; columns: string[] }>;
   checks?: CheckDef[];

@@ -2287,13 +2287,70 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
   const constraints = [];
   const indexes = [];
   const pkCols = [];
-  for (const colName of Object.keys(args.columns)) {
+  const columnNames = Object.keys(args.columns);
+  for (const colName of columnNames) {
     const def = args.columns[colName];
     if (!isColumnDef(def)) {
       throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
     }
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);
+  }
+  const tablePrimaryKey = args.primaryKey;
+  if (tablePrimaryKey !== void 0 && tablePrimaryKey !== null) {
+    if (!Array.isArray(tablePrimaryKey)) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" primaryKey must be null or an ordered column-name array`
+      );
+    }
+    if (tablePrimaryKey.length === 0) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" primaryKey cannot be empty; omit it for no primary key`
+      );
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const knownColumns = new Set(columnNames);
+    for (const column of tablePrimaryKey) {
+      if (typeof column !== "string") {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey must contain only column names`
+        );
+      }
+      if (seen.has(column)) {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey names column "${column}" more than once`
+        );
+      }
+      if (!knownColumns.has(column)) {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey names unknown column "${column}"`
+        );
+      }
+      seen.add(column);
+    }
+  }
+  if (pkCols.length > 1) {
+    throw structuredError(
+      "PRIMARY_KEY_INVALID",
+      `create table "${name}" marks multiple columns with .primaryKey(); author a composite primary key solely with the ordered table-level primaryKey array`,
+      { columns: pkCols }
+    );
+  }
+  if (pkCols.length === 1 && tablePrimaryKey !== void 0) {
+    const columnPrimaryKey = pkCols[0];
+    const declarationsMatch = Array.isArray(tablePrimaryKey) && tablePrimaryKey.length === 1 && tablePrimaryKey[0] === columnPrimaryKey;
+    if (!declarationsMatch) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" declares column "${columnPrimaryKey}" with .primaryKey() and a conflicting table-level primaryKey; use one consistent single-column declaration`,
+        { column: columnPrimaryKey, primaryKey: tablePrimaryKey }
+      );
+    }
   }
   const primaryKey = args.primaryKey !== void 0 ? args.primaryKey : pkCols.length ? pkCols : void 0;
   for (const uq of args.uniques ?? []) {
