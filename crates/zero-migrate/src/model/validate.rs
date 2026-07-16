@@ -1164,41 +1164,44 @@ pub fn validate_op_scoped(
             // seven system fields before checksum; Platform paths do not.
             let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             let scope = TargetScope::new(name, &cols);
-            let type_id_columns = columns
+            let value_format_columns = columns
                 .iter()
-                .filter(|column| {
-                    matches!(
-                        column.value_format,
-                        Some(crate::model::ir::ValueFormat::TypeId { .. })
-                    )
+                .filter_map(|column| {
+                    let format = match column.value_format.as_ref()? {
+                        crate::model::ir::ValueFormat::TypeId { .. } => "TypeID",
+                        crate::model::ir::ValueFormat::Ulid => "ULID",
+                    };
+                    Some((column.name.as_str(), format))
                 })
-                .map(|column| column.name.as_str())
-                .collect::<std::collections::BTreeSet<_>>();
+                .collect::<std::collections::BTreeMap<_, _>>();
             for ix in indexes {
                 for element in &ix.columns {
-                    match element {
+                    let weakening = match element {
                         IndexElement::Column {
                             name,
                             collation: Some(collation),
                             ..
-                        } if type_id_columns.contains(name.as_str()) && collation != "C" => {
-                            return Err(AuthoringError {
-                                code: CODE_COLUMN_FACET_CONFLICT.to_string(),
-                                kind: None,
-                                op_index,
-                                ts_location: ts_location.map(str::to_string),
-                                dialect: target_dialect,
-                                reason: format!(
-                                    "column {name:?} declares a TypeID value format but index {:?} selects collation {collation:?}; TypeID requires the bytewise C collation",
-                                    ix.name
-                                ),
-                                suggested_fix: Some(
-                                    "remove the index collation override or use collation \"C\""
-                                        .to_string(),
-                                ),
-                            });
-                        }
-                        _ => {}
+                        } if collation != "C" => value_format_columns
+                            .get(name.as_str())
+                            .map(|format| (name, collation, format)),
+                        _ => None,
+                    };
+                    if let Some((name, collation, format)) = weakening {
+                        return Err(AuthoringError {
+                            code: CODE_COLUMN_FACET_CONFLICT.to_string(),
+                            kind: None,
+                            op_index,
+                            ts_location: ts_location.map(str::to_string),
+                            dialect: target_dialect,
+                            reason: format!(
+                                "column {name:?} declares a {format} value format but index {:?} selects collation {collation:?}; {format} requires the bytewise C collation",
+                                ix.name
+                            ),
+                            suggested_fix: Some(
+                                "remove the index collation override or use collation \"C\""
+                                    .to_string(),
+                            ),
+                        });
                     }
                     check_index_element(element, &scope)?;
                 }
@@ -3271,8 +3274,9 @@ fn validate_default_expr(
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
 ///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
 /// 2. **`value_format`** — TypeID prefixes obey the distinct TypeID 0.3 grammar;
-///    a TypeID format co-occurs only with exact [`ColType::Text`](crate::model::ir::ColType::Text)
-///    storage and never with `caseSensitive:false`.
+///    TypeID and ULID formats co-occur only with exact
+///    [`ColType::Text`](crate::model::ir::ColType::Text) storage and never with
+///    `caseSensitive:false`.
 /// 3. **`vector_metric`** — structurally bounded by the closed
 ///    [`crate::model::ir::VectorMetric`] enum at deserialize; the only authoring error
 ///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
@@ -3428,28 +3432,35 @@ fn validate_column_facets(
         }
     }
 
-    if let Some(crate::model::ir::ValueFormat::TypeId { prefix }) = &col.value_format {
-        if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
-            return Err(mk(
-                CODE_INVALID_TYPE_ID_PREFIX,
-                format!(
-                    "column {:?} declares an invalid TypeID prefix {prefix:?}: {error}",
-                    col.name
-                ),
-                "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
-                    .to_string(),
-            ));
-        }
+    if let Some(value_format) = &col.value_format {
+        let format_name = match value_format {
+            crate::model::ir::ValueFormat::TypeId { prefix } => {
+                if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
+                    return Err(mk(
+                        CODE_INVALID_TYPE_ID_PREFIX,
+                        format!(
+                            "column {:?} declares an invalid TypeID prefix {prefix:?}: {error}",
+                            col.name
+                        ),
+                        "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
+                            .to_string(),
+                    ));
+                }
+                "TypeID"
+            }
+            crate::model::ir::ValueFormat::Ulid => "ULID",
+        };
 
         if !matches!(col.ty, crate::model::ir::ColType::Text) {
             return Err(mk(
                 CODE_COLUMN_FACET_CONFLICT,
                 format!(
-                    "column {:?} declares a TypeID value format on a non-text storage type; TypeID requires exact text storage",
-                    col.name
+                    "column {:?} declares a {format_name} value format on a non-text storage type; {format_name} requires exact text storage",
+                    col.name,
                 ),
-                "declare the column with text storage, or remove the TypeID value format"
-                    .to_string(),
+                format!(
+                    "declare the column with text storage, or remove the {format_name} value format"
+                ),
             ));
         }
 
@@ -3457,11 +3468,12 @@ fn validate_column_facets(
             return Err(mk(
                 CODE_COLUMN_FACET_CONFLICT,
                 format!(
-                    "column {:?} declares both a TypeID value format and caseSensitive:false; TypeID requires bytewise, case-sensitive comparison",
-                    col.name
+                    "column {:?} declares both a {format_name} value format and caseSensitive:false; {format_name} requires bytewise, case-sensitive comparison",
+                    col.name,
                 ),
-                "remove caseSensitive:false so TypeID storage keeps bytewise comparison semantics"
-                    .to_string(),
+                format!(
+                    "remove caseSensitive:false so {format_name} storage keeps bytewise comparison semantics"
+                ),
             ));
         }
     }
@@ -6786,6 +6798,33 @@ mod tests {
         }
     }
 
+    fn create_with_ulid(ty: ColType, case_sensitive: Option<bool>) -> Op {
+        Op::CreateTable {
+            name: "things".into(),
+            columns: vec![IrColumn {
+                name: "id".into(),
+                ty,
+                nullable: None,
+                default: None,
+                unique: None,
+                value_format: Some(ValueFormat::Ulid),
+                id_prefix: None,
+                case_sensitive,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
     fn create_with_default(ty: ColType, default: crate::model::ir::IrDefault) -> Op {
         Op::CreateTable {
             name: "docs".into(),
@@ -6937,6 +6976,91 @@ mod tests {
         )]);
         let error = validate_ir_platform(&wrong_storage, Dialect::Postgres)
             .expect_err("addColumn TypeID metadata on UUID storage must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+    }
+
+    #[test]
+    fn ulid_value_format_accepts_exact_text_on_every_dialect() {
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            let ir = ir_with(vec![create_with_ulid(ColType::Text, None)]);
+            assert!(
+                validate_ir_platform(&ir, dialect).is_ok(),
+                "ULID text storage must validate for {dialect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ulid_value_format_requires_exact_text_storage() {
+        for ty in [
+            ColType::Uuid,
+            ColType::String,
+            ColType::Encrypted {
+                of: Box::new(ColType::Text),
+            },
+        ] {
+            let ir = ir_with(vec![create_with_ulid(ty, None)]);
+            let error = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("ULID metadata on non-text storage must fail closed");
+            assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+            assert!(error.reason.contains("exact text storage"), "got: {error}");
+            assert!(error.reason.contains("ULID"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn ulid_value_format_rejects_case_insensitive_text() {
+        let ir = ir_with(vec![create_with_ulid(ColType::Text, Some(false))]);
+        let error = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("ULID plus caseSensitive:false must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+        assert!(error.reason.contains("ULID"), "got: {error}");
+        assert!(error.reason.contains("bytewise"), "got: {error}");
+    }
+
+    #[test]
+    fn ulid_value_format_rejects_a_weakening_index_collation() {
+        let mut op = create_with_ulid(ColType::Text, None);
+        let Op::CreateTable { indexes, .. } = &mut op else {
+            unreachable!("helper always returns createTable");
+        };
+        indexes.push(IrIndex {
+            name: Some("things_id_ci".into()),
+            columns: vec![crate::model::ir::IndexElement::Column {
+                name: "id".into(),
+                order: None,
+                opclass: None,
+                collation: Some("und-x-icu".into()),
+            }],
+            unique: Some(true),
+            using: None,
+            r#where: None,
+            include: vec![],
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        });
+
+        let error = validate_ir_platform(&ir_with(vec![op]), Dialect::Postgres)
+            .expect_err("a non-bytewise ULID index collation must fail closed");
+        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+        assert!(error.reason.contains("ULID"), "got: {error}");
+        assert!(error.reason.contains("collation"), "got: {error}");
+        assert!(error.reason.contains("bytewise"), "got: {error}");
+    }
+
+    #[test]
+    fn add_column_ulid_value_format_uses_the_same_policy_gate() {
+        let valid = ir_with(vec![op_json(
+            r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":"ulid"}"#,
+        )]);
+        assert!(validate_ir_platform(&valid, Dialect::Postgres).is_ok());
+
+        let wrong_storage = ir_with(vec![op_json(
+            r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":"ulid"}"#,
+        )]);
+        let error = validate_ir_platform(&wrong_storage, Dialect::Postgres)
+            .expect_err("addColumn ULID metadata on UUID storage must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
     }
 

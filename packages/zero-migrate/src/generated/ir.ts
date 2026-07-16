@@ -128,8 +128,8 @@ export type ColType =
   | { encrypted: { of: ColType } };
 
 /** Canonical, validated value formats carried independently from physical
- * column storage. TypeID uses externally tagged camelCase enum encoding. */
-export type ValueFormat = { typeId: { prefix: string } };
+ * column storage. The variants use Serde's externally tagged encoding. */
+export type ValueFormat = { typeId: { prefix: string } } | "ulid";
 
 /** The CLOSED pgvector distance-metric lexicon — drives the ivfflat/hnsw
  *  operator class. Camel-cased on the wire; faithful transcription of the schema
@@ -253,8 +253,8 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
-  /** Canonical value-format semantics. `ids.typeId()` stores text while this
-   *  facet carries the exact persisted TypeID prefix. Default-absent. */
+  /** Canonical value-format semantics. `ids.typeId()` and `ids.ulid()` store
+   *  text while this facet carries the exact persisted format. Default-absent. */
   valueFormat?: ValueFormat | null;
   /** The `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
    *  introspection cannot recover. Camel-cased on the wire. Default-absent. */

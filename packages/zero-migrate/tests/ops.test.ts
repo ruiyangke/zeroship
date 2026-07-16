@@ -276,9 +276,71 @@ test("ids.typeId validates TypeID 0.3 prefixes at authoring time", () => {
   );
 });
 
+test("ids.ulid records exact text + valueFormat IR and remains constraint-neutral by default", () => {
+  const ops = record(() => {
+    table("events").create({
+      columns: {
+        event_id: ids.ulid(),
+        candidate_id: ids.ulid().notNull().unique(),
+        key_id: ids.ulid().primaryKey(),
+      },
+    });
+    table("events").column("external_id").add({
+      type: ids.ulid().notNull().unique(),
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createTable",
+      name: "events",
+      columns: [
+        {
+          name: "event_id",
+          type: "text",
+          valueFormat: "ulid",
+        },
+        {
+          name: "candidate_id",
+          type: "text",
+          nullable: false,
+          unique: true,
+          valueFormat: "ulid",
+        },
+        {
+          name: "key_id",
+          type: "text",
+          nullable: false,
+          valueFormat: "ulid",
+        },
+      ],
+      primaryKey: ["key_id"],
+    },
+    {
+      op: "addColumn",
+      table: "events",
+      column: "external_id",
+      type: "text",
+      nullable: false,
+      valueFormat: "ulid",
+    },
+    {
+      op: "addConstraint",
+      table: "events",
+      constraint: { kind: { kind: "unique", columns: ["external_id"] } },
+    },
+  ]);
+});
+
 test("raw DML strings are never rewritten as TypeID values by the recorder", () => {
   const authored = "User_01ARZ3NDEKTSV4RRFFQ69G5FAV";
   const ops = record(() => table("public_examples").insert({ rows: { typed_id: authored } }));
+  assert.equal(ops[0].rows[0][0], authored);
+});
+
+test("raw DML strings are never canonicalized as ULID values by the recorder", () => {
+  const authored = "01arz3ndektsv4rrffq69g5fav";
+  const ops = record(() => table("events").insert({ rows: { event_id: authored } }));
   assert.equal(ops[0].rows[0][0], authored);
 });
 

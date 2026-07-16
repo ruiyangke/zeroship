@@ -1463,6 +1463,7 @@ export const ids: IdFormats = {
       valueFormat: { typeId: { prefix: opts.prefix } },
     });
   },
+  ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" }),
 };
 
 export const t: TypeLexicon = {

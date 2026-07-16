@@ -116,6 +116,7 @@ export interface TypeIdOptions {
  * semantics unless the ordinary {@link ColumnDef} modifiers opt in. */
 export interface IdFormats {
   typeId(options: TypeIdOptions): ColumnDef;
+  ulid(): ColumnDef;
 }
 
 /** Options for `t.text({ caseSensitive })`. `false` records the portable

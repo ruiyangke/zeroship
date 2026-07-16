@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): `t.id({ prefix })`, `ids.typeId({ prefix })`,
+// generated/identity): `t.id({ prefix })`, `ids.typeId({ prefix })`, `ids.ulid()`,
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
@@ -76,6 +76,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   // createTable carrying the column facets:
   //  - t.id({ prefix })            → IrColumn.idPrefix
   //  - ids.typeId({ prefix })      → IrColumn.valueFormat.typeId
+  //  - ids.ulid()                  → IrColumn.valueFormat "ulid"
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
   //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
@@ -85,6 +86,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
       id: t.id({ prefix: "doc" }),
       public_id: ids.typeId({ prefix: "document" }).notNull().unique(),
       opaque_id: ids.typeId({ prefix: "" }),
+      event_id: ids.ulid().notNull().unique(),
       seq: t.bigInt().identity({ always: true }),
       shard: t.smallInt(),
       qty: t.int(),
@@ -104,6 +106,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("external_id").add({ type: ids.typeId({ prefix: "external" }) });
+  table("documents").column("external_event_id").add({ type: ids.ulid() });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
     type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
@@ -112,7 +115,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   return drain();
 }
 
-test("public t.id/t.vector/.mask facets record byte-identically to the engine recorder", () => {
+test("public column facets record byte-identically to the engine recorder", () => {
   const pub = authorWith(PUBLIC);
   const eng = authorWith(ENGINE);
   assert.deepEqual(pub, eng);
@@ -134,6 +137,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(byName("source_ip").type, "inet");
   assert.deepEqual(byName("public_id").valueFormat, { typeId: { prefix: "document" } });
   assert.deepEqual(byName("opaque_id").valueFormat, { typeId: { prefix: "" } });
+  assert.equal(byName("event_id").valueFormat, "ulid");
 
   // standalone .mask({ kind, classification }) → mask:{kind,classification}
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });
@@ -162,6 +166,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(addVec.vectorMetric, "innerProduct");
   const addTypeId = ops.find((o: any) => o.op === "addColumn" && o.column === "external_id");
   assert.deepEqual(addTypeId.valueFormat, { typeId: { prefix: "external" } });
+  const addUlid = ops.find((o: any) => o.op === "addColumn" && o.column === "external_event_id");
+  assert.equal(addUlid.valueFormat, "ulid");
   const addPhone = ops.find((o: any) => o.op === "addColumn" && o.column === "phone");
   assert.deepEqual(addPhone.mask, { kind: "last4", classification: "pii" });
   const addGenerated = ops.find((o: any) => o.op === "addColumn" && o.column === "added_total");

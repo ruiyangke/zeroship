@@ -361,9 +361,10 @@ test("createTable primaryKey is present in the schema and hand-authored ir.ts", 
   assert.match(irTs, /primaryKey:\s*string\[\]\s*\|\s*null/);
 });
 
-test("TypeID ValueFormat shape and column placements match the hand-authored IR mirror", () => {
+test("TypeID and ULID ValueFormat shapes and column placements match the hand-authored IR mirror", () => {
   const valueFormat = schema.$defs.ValueFormat;
   assert.ok(valueFormat, "schema must define ValueFormat");
+  assert.equal(valueFormat.oneOf.length, 2, "ValueFormat must contain exactly TypeID and ULID");
   const typeId = valueFormat.oneOf.find((branch: any) => branch.required?.includes("typeId"));
   assert.ok(typeId, "ValueFormat must include the externally tagged typeId variant");
   assert.equal(typeId.additionalProperties, false);
@@ -371,6 +372,9 @@ test("TypeID ValueFormat shape and column placements match the hand-authored IR 
   assert.deepEqual(typeId.properties.typeId.required, ["prefix"]);
   assert.deepEqual(Object.keys(typeId.properties.typeId.properties), ["prefix"]);
   assert.equal(typeId.properties.typeId.properties.prefix.type, "string");
+  const ulid = valueFormat.oneOf.find((branch: any) => branch.const === "ulid");
+  assert.ok(ulid, "ValueFormat must include the externally tagged ULID unit variant");
+  assert.equal(ulid.type, "string");
 
   const irColumnFormat = schema.$defs.IrColumn.properties.valueFormat;
   assert.match(JSON.stringify(irColumnFormat), /#\/\$defs\/ValueFormat/);
@@ -381,7 +385,10 @@ test("TypeID ValueFormat shape and column placements match the hand-authored IR 
   assert.match(JSON.stringify(addColumn.properties.valueFormat), /#\/\$defs\/ValueFormat/);
 
   const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-  assert.match(irTs, /export type ValueFormat\s*=\s*\{\s*typeId:\s*\{\s*prefix:\s*string\s*\}\s*\}/);
+  assert.match(
+    irTs,
+    /export type ValueFormat\s*=\s*\{\s*typeId:\s*\{\s*prefix:\s*string\s*\}\s*\}\s*\|\s*"ulid"/,
+  );
   assert.equal(
     irTs.match(/valueFormat\?:\s*ValueFormat\s*\|\s*null/g)?.length,
     2,

@@ -92,6 +92,24 @@ const INVALID_OFFICIAL_TYPE_IDS = [
   "prefix_",
 ] as const;
 
+const VALID_ULIDS = [
+  "00000000000000000000000000",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+] as const;
+
+const INVALID_ULIDS = [
+  "01ARZ3NDEKTSV4RRFFQ69G5FA",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAV0",
+  "8ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+  "01arz3ndektsv4rrffq69g5fav",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAI",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAL",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAO",
+  "01ARZ3NDEKTSV4RRFFQ69G5FAU",
+  "01ARZ3NDEKTSV4RRFFQ69G5FA-",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Live-MySQL apply — the napi addon lowers for the `mysql` dialect + applies over
 // the real `mysql2` driver into a fresh throwaway database. Skips (does not fail)
@@ -268,6 +286,73 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
           [value],
         ),
         `invalid official TypeID fixture was accepted: ${JSON.stringify(value)}`,
+      );
+    }
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+test("Live MySQL ULID CHECK enforces canonical uppercase spelling and bounds", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL ULID fixtures skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueDatabase("mysql_ulid");
+  const meta = `${database}_migrations`;
+  const migration = {
+    name: "mysql_ulid_fixtures",
+    default: {
+      up() {
+        table("ulid_samples").create({
+          columns: {
+            id: ids.ulid(),
+          },
+        });
+      },
+    },
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    await apply({
+      migration,
+      ownerApp: "app_mysql_ulid",
+      projectSchema: database,
+      driver: { kind: "mysql", url: MYSQL_URL },
+      registry: {},
+      approved: false,
+      appliedBy: "ulid-test",
+    });
+
+    for (const value of VALID_ULIDS) {
+      await admin.query(
+        `INSERT INTO \`${database}\`.\`ulid_samples\` (id) VALUES (?)`,
+        [value],
+      );
+    }
+    await admin.query(
+      `INSERT INTO \`${database}\`.\`ulid_samples\` (id) VALUES (NULL)`,
+    );
+
+    for (const value of INVALID_ULIDS) {
+      await assert.rejects(
+        admin.query(
+          `INSERT INTO \`${database}\`.\`ulid_samples\` (id) VALUES (?)`,
+          [value],
+        ),
+        `invalid ULID fixture was accepted: ${JSON.stringify(value)}`,
       );
     }
   } finally {

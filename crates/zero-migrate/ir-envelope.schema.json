@@ -4376,7 +4376,7 @@
       ]
     },
     "ValueFormat": {
-      "description": "Canonical value-level format metadata, independent of physical SQL storage.\n\nThe enum uses serde's natural externally-tagged representation. For example,\na TypeID is encoded as `{ \"typeId\": { \"prefix\": \"user\" } }`.",
+      "description": "Canonical value-level format metadata, independent of physical SQL storage.\n\nThe enum uses serde's natural externally-tagged representation. For example,\na TypeID is encoded as `{ \"typeId\": { \"prefix\": \"user\" } }`, while a ULID\nis encoded as the unit-variant string `\"ulid\"`.",
       "oneOf": [
         {
           "description": "TypeID 0.3, stored canonically as `<prefix>_<suffix>` or as the bare\nsuffix when `prefix` is empty.",
@@ -4400,6 +4400,11 @@
             "typeId"
           ],
           "additionalProperties": false
+        },
+        {
+          "description": "ULID, stored as exactly 26 canonical uppercase Crockford Base32\ncharacters with the 128-bit overflow bound enforced.",
+          "type": "string",
+          "const": "ulid"
         }
       ]
     },

@@ -13,6 +13,8 @@ use crate::schema::query::SqlDialect;
 
 const TYPE_ID_SUFFIX_LEN: usize = 26;
 const TYPE_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+const ULID_LEN: usize = 26;
+const ULID_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The physical column details implied by one logical value format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +37,56 @@ pub(crate) fn column_metadata(
 ) -> Result<ValueFormatColumnMetadata, String> {
     match value_format {
         ValueFormat::TypeId { prefix } => type_id_column_metadata(column, prefix, dialect),
+        ValueFormat::Ulid => ulid_column_metadata(column, dialect),
     }
+}
+
+fn ulid_column_metadata(
+    column: &str,
+    dialect: SqlDialect,
+) -> Result<ValueFormatColumnMetadata, String> {
+    let quoted = quote_ident_for_dialect("ULID column", column, dialect)
+        .map_err(|error| error.to_string())?;
+    let regex = format!("^[0-7][{ULID_ALPHABET}]{{{}}}$", ULID_LEN - 1);
+
+    let (ddl_type, inline_check) = match dialect {
+        SqlDialect::Postgres => {
+            let regex = sql_string_literal(&regex);
+            (
+                "text COLLATE \"C\"".to_string(),
+                format!(
+                    "CHECK ({quoted} IS NULL OR (octet_length({quoted}) = {ULID_LEN} AND \
+                     ({quoted} COLLATE \"C\") ~ {regex}))"
+                ),
+            )
+        }
+        SqlDialect::Mysql => {
+            let regex = mysql_grammar_string_literal(&regex);
+            (
+                "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
+                format!(
+                    "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {ULID_LEN} AND \
+                     REGEXP_LIKE({quoted}, {regex}, 'c')))"
+                ),
+            )
+        }
+        SqlDialect::Sqlite => (
+            "TEXT COLLATE BINARY".to_string(),
+            format!(
+                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
+                 length({quoted}) = {ULID_LEN} AND \
+                 length(CAST({quoted} AS BLOB)) = {ULID_LEN} AND \
+                 substr({quoted}, 1, 1) GLOB '[0-7]' AND \
+                 substr({quoted}, 1, {ULID_LEN}) NOT GLOB \
+                 '*[^{ULID_ALPHABET}]*'))"
+            ),
+        ),
+    };
+
+    Ok(ValueFormatColumnMetadata {
+        ddl_type,
+        inline_check,
+    })
 }
 
 fn type_id_column_metadata(

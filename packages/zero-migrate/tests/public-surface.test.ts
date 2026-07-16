@@ -97,6 +97,7 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   const runtimeRoot = await import("zero-migrate");
   assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
   assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");
+  assert.equal(typeof runtimeRoot.ids.ulid, "function", "ids.ulid must be a root runtime builder");
   for (const name of rootedVendorExports) {
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }

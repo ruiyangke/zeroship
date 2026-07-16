@@ -38,7 +38,7 @@ use crate::model::ir::{
     IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join, MigrationIr, Op,
     OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
     RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
-    TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
+    TriggerAction, TriggerEvent, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
 };
 use crate::model::load::op_created_table;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -1484,8 +1484,8 @@ fn collect_op_database_requirements(
             generated,
             ..
         } => {
-            if dialect == SqlDialect::Mysql && value_format.is_some() {
-                requirements.require(DatabaseFeature::TypeIdValidation);
+            if let Some(value_format) = value_format {
+                collect_value_format_database_requirement(value_format, dialect, requirements);
             }
             if let Some(default) = default {
                 collect_default_database_requirements(default, dialect, requirements);
@@ -1650,8 +1650,8 @@ fn collect_column_database_requirements(
     dialect: SqlDialect,
     requirements: &mut DatabaseRequirements,
 ) {
-    if dialect == SqlDialect::Mysql && column.value_format.is_some() {
-        requirements.require(DatabaseFeature::TypeIdValidation);
+    if let Some(value_format) = &column.value_format {
+        collect_value_format_database_requirement(value_format, dialect, requirements);
     }
     if let Some(default) = &column.default {
         collect_default_database_requirements(default, dialect, requirements);
@@ -1659,6 +1659,20 @@ fn collect_column_database_requirements(
     if let Some(generated) = &column.generated {
         collect_expr_database_requirements(&generated.expr, dialect, requirements);
     }
+}
+
+fn collect_value_format_database_requirement(
+    value_format: &ValueFormat,
+    dialect: SqlDialect,
+    requirements: &mut DatabaseRequirements,
+) {
+    if dialect != SqlDialect::Mysql {
+        return;
+    }
+    requirements.require(match value_format {
+        ValueFormat::TypeId { .. } => DatabaseFeature::TypeIdValidation,
+        ValueFormat::Ulid => DatabaseFeature::UlidValidation,
+    });
 }
 
 fn collect_default_database_requirements(
@@ -7293,6 +7307,23 @@ mod tests {
         }
     }
 
+    fn ulid_column(name: &str) -> TIrColumn {
+        TIrColumn {
+            name: name.into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            value_format: Some(crate::model::ir::ValueFormat::Ulid),
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
     fn insert_uuid_expr(expr: Expr) -> Op {
         Op::Insert {
             table: "events".into(),
@@ -7398,6 +7429,47 @@ mod tests {
                 .expect("TypeID storage lowers without a server gate");
             assert!(plan.database_requirements.is_empty(), "got {dialect:?}");
         }
+    }
+
+    #[test]
+    fn mysql_plan_records_ulid_check_requirement_only_on_mysql() {
+        let ir = create_table_ir("events", vec![ulid_column("id")]);
+
+        let mysql_plan = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("MySQL ULID storage lowers");
+        assert_eq!(
+            mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UlidValidation]
+        );
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let plan = IrAuthor::new("app", "app_a", dialect)
+                .lower_plan(&ir, &LiveSchema::default())
+                .expect("ULID storage lowers without a server gate");
+            assert!(plan.database_requirements.is_empty(), "got {dialect:?}");
+        }
+
+        let add_ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "add_event_id",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "addColumn",
+                "table": "events",
+                "column": "public_id",
+                "type": "text",
+                "valueFormat": "ulid"
+            }]
+        }))
+        .expect("ULID add-column IR deserializes");
+        let add_plan = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower_plan(&add_ir, &LiveSchema::default())
+            .expect("MySQL ULID add column lowers");
+        assert_eq!(
+            add_plan.database_requirements.iter().collect::<Vec<_>>(),
+            vec![DatabaseFeature::UlidValidation]
+        );
     }
 
     #[test]

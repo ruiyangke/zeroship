@@ -491,7 +491,8 @@ pub fn validate_type_id_prefix(prefix: &str) -> Result<(), String> {
 /// Canonical value-level format metadata, independent of physical SQL storage.
 ///
 /// The enum uses serde's natural externally-tagged representation. For example,
-/// a TypeID is encoded as `{ "typeId": { "prefix": "user" } }`.
+/// a TypeID is encoded as `{ "typeId": { "prefix": "user" } }`, while a ULID
+/// is encoded as the unit-variant string `"ulid"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub enum ValueFormat {
@@ -501,6 +502,9 @@ pub enum ValueFormat {
         /// Stored TypeID prefix, without the separator underscore.
         prefix: String,
     },
+    /// ULID, stored as exactly 26 canonical uppercase Crockford Base32
+    /// characters with the 128-bit overflow bound enforced.
+    Ulid,
 }
 
 /// Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema
@@ -4443,6 +4447,16 @@ mod tests {
     }
 
     #[test]
+    fn ulid_value_format_uses_natural_unit_tag() {
+        let wire = serde_json::to_value(&ValueFormat::Ulid).unwrap();
+        assert_eq!(wire, serde_json::json!("ulid"));
+        assert_eq!(
+            serde_json::from_value::<ValueFormat>(wire).unwrap(),
+            ValueFormat::Ulid
+        );
+    }
+
+    #[test]
     fn type_id_value_format_round_trips_on_columns_and_add_column() {
         let column_wire = serde_json::json!({
             "name": "id",
@@ -4481,6 +4495,28 @@ mod tests {
                 .is_none(),
             "an absent value format must remain checksum-neutral"
         );
+    }
+
+    #[test]
+    fn ulid_value_format_round_trips_on_columns_and_add_column() {
+        let column_wire = serde_json::json!({
+            "name": "id",
+            "type": "text",
+            "valueFormat": "ulid"
+        });
+        let column: IrColumn = serde_json::from_value(column_wire.clone()).unwrap();
+        assert_eq!(column.value_format, Some(ValueFormat::Ulid));
+        assert_eq!(serde_json::to_value(column).unwrap(), column_wire);
+
+        let op_wire = serde_json::json!({
+            "op": "addColumn",
+            "table": "things",
+            "column": "id",
+            "type": "text",
+            "valueFormat": "ulid"
+        });
+        let op: Op = serde_json::from_value(op_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(op).unwrap(), op_wire);
     }
 
     #[test]

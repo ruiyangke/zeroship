@@ -419,9 +419,13 @@ export function badColTypes(): void {
   const typeIdOptions: TypeIdOptions = { prefix: "account" };
   const idFormats: IdFormats = ids;
   const valueFormat: ValueFormat = { typeId: typeIdOptions };
+  const ulidValueFormat: ValueFormat = "ulid";
   const typedId: ColumnDef = idFormats.typeId(typeIdOptions).notNull().unique().primaryKey();
+  const ulid: ColumnDef = idFormats.ulid().notNull().unique().primaryKey();
   table("accounts").create({ columns: { id: typedId } });
   void valueFormat;
+  void ulidValueFormat;
+  void ulid;
 
   // @ts-expect-error — TypeID options are required.
   ids.typeId();
@@ -432,8 +436,14 @@ export function badColTypes(): void {
   // @ts-expect-error — a TypeID prefix is text.
   ids.typeId({ prefix: 42 });
 
-  // @ts-expect-error — ULID is intentionally deferred to a later piece.
   ids.ulid();
+
+  // @ts-expect-error — ULID takes no options.
+  ids.ulid({});
+
+  // @ts-expect-error — the ULID ValueFormat wire tag is canonical lowercase.
+  const invalidUlidValueFormat: ValueFormat = "ULID";
+  void invalidUlidValueFormat;
 
   // @ts-expect-error — `t.numeric` now takes a named options bag.
   t.numeric(12, 2);

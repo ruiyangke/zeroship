@@ -968,7 +968,8 @@ var ids = {
     return new ColumnDefImpl("text", {
       valueFormat: { typeId: { prefix: opts.prefix } }
     });
-  }
+  },
+  ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" })
 };
 var t = {
   id: (opts) => {
