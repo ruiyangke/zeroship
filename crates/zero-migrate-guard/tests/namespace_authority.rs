@@ -58,7 +58,10 @@ fn grants_only(toml: &str) -> String {
 
 /// A confined guard over the composed policy, pinned to project schema `app`.
 fn guard_with(ceiling_toml: &str) -> SqlGuard {
-    SqlGuard::new(GuardConfig::confined_with_effective("app", policy(ceiling_toml)))
+    SqlGuard::new(GuardConfig::confined_with_effective(
+        "app",
+        policy(ceiling_toml),
+    ))
 }
 
 fn assert_namespace_denied(guard: &SqlGuard, sql: &str, want_rule: &str) {
@@ -160,7 +163,10 @@ scope = { include = ["app"] }
 "#;
     // `staging` is in cross-schema scope (so `staging.t` is not a CrossSchema
     // violation) but NOT in the create grant (`app`-only) → CreateTableNotGranted.
-    let g = SqlGuard::new(GuardConfig::confined_with_effective("staging", policy(ceiling)));
+    let g = SqlGuard::new(GuardConfig::confined_with_effective(
+        "staging",
+        policy(ceiling),
+    ));
     assert_namespace_denied(
         &g,
         "CREATE TABLE staging.t (id text)",

@@ -20,7 +20,9 @@
 //! - `on_destructive` → requires approval iff the op is [`Op::is_destructive`] (the
 //!   same destructive notion the guard's `sec.destructive_ops` classifier uses).
 
-use zero_migrate_policy::{normalize_pg_identifier, EffectivePolicy, KnobKey, KnobValue, ObjectName};
+use zero_migrate_policy::{
+    normalize_pg_identifier, EffectivePolicy, KnobKey, KnobValue, ObjectName,
+};
 
 use crate::ir::Op;
 use crate::policy_registry::{KEY_SAFETY_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
@@ -208,7 +210,11 @@ mod tests {
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n",
         );
         // Even a purely additive op requires approval under `always`.
-        assert!(migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
+        assert!(migration_requires_approval(
+            &ep,
+            &[add_column("app_main", "t")],
+            "app_main"
+        ));
     }
 
     #[test]
@@ -217,7 +223,11 @@ mod tests {
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n",
         );
         // Additive-only migration → no approval.
-        assert!(!migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
+        assert!(!migration_requires_approval(
+            &ep,
+            &[add_column("app_main", "t")],
+            "app_main"
+        ));
         // A destructive op in the mix → approval required.
         assert!(migration_requires_approval(
             &ep,
@@ -233,9 +243,17 @@ mod tests {
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
         );
         // An additive op on the unscoped schema → no approval.
-        assert!(!migration_requires_approval(&ep, &[add_column("app_main", "t")], "app_main"));
+        assert!(!migration_requires_approval(
+            &ep,
+            &[add_column("app_main", "t")],
+            "app_main"
+        ));
         // The same op on the scoped schema → approval (always).
-        assert!(migration_requires_approval(&ep, &[add_column("app_secret", "t")], "app_secret"));
+        assert!(migration_requires_approval(
+            &ep,
+            &[add_column("app_secret", "t")],
+            "app_secret"
+        ));
     }
 
     #[test]

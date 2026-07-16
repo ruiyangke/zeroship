@@ -11,8 +11,7 @@ use zero_migrate::model::op_support;
 use zero_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
 use zero_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
 use zero_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, SqlDialect,
-    CURRENT_IR_VERSION,
+    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, SqlDialect, CURRENT_IR_VERSION,
 };
 
 const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql];
@@ -166,7 +165,7 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
         &one_op_ir(op.clone()),
         dialect,
         &[],
-        Some(&SchemaScope::Unconfined)
+        Some(&SchemaScope::Unconfined),
     )
     .is_ok()
 }
@@ -593,7 +592,7 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
             &one_op_ir(op.clone()),
             dialect,
             &[],
-            Some(&SchemaScope::Unconfined)
+            Some(&SchemaScope::Unconfined),
         )
         .expect_err("partitioned createTable must fail closed off PostgreSQL");
         assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{dialect:?}: {err}");

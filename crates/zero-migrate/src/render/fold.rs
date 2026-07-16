@@ -1689,7 +1689,9 @@ fn apply_fold_named_type_column_metadata(
                 let (data_type, ddl_type) =
                     postgres_named_type_metadata(&source.ty, registry_schema)
                         .map_err(fold_named_type_error)?
-                        .ok_or(FoldError::Unsupported("named enum metadata was not resolved"))?;
+                        .ok_or(FoldError::Unsupported(
+                            "named enum metadata was not resolved",
+                        ))?;
                 col.data_type = data_type;
                 col.ddl_type_override = Some(ddl_type);
             }
@@ -1714,7 +1716,9 @@ fn apply_fold_named_type_column_metadata(
                 let (data_type, ddl_type) =
                     postgres_named_type_metadata(&source.ty, registry_schema)
                         .map_err(fold_named_type_error)?
-                        .ok_or(FoldError::Unsupported("named domain metadata was not resolved"))?;
+                        .ok_or(FoldError::Unsupported(
+                            "named domain metadata was not resolved",
+                        ))?;
                 col.data_type = data_type;
                 col.ddl_type_override = Some(ddl_type);
                 return Ok(());
@@ -2724,10 +2728,7 @@ fn confined_resolved_system_prefix_len(columns: &[IrColumn]) -> usize {
     }
 }
 
-fn resolved_system_column_matches(
-    actual: &IrColumn,
-    expected: &(&str, &str, bool),
-) -> bool {
+fn resolved_system_column_matches(actual: &IrColumn, expected: &(&str, &str, bool)) -> bool {
     let (name, data_type, nullable) = *expected;
     if actual.name != name {
         return false;
@@ -3181,9 +3182,7 @@ pub fn descriptors_to_create_ops(
 /// hand-authored plain named index. `unique == false` maps to `None` (the SQL
 /// default), not `Some(false)`, so a non-unique index serializes identically to the
 /// pre-index wire shape.
-fn index_descriptor_to_ir(
-    d: &crate::render::declarative::IndexDescriptor,
-) -> IrIndex {
+fn index_descriptor_to_ir(d: &crate::render::declarative::IndexDescriptor) -> IrIndex {
     IrIndex {
         name: Some(d.name.clone()),
         columns: d
@@ -3315,7 +3314,7 @@ mod tests {
         TableStrictness, CURRENT_IR_VERSION,
     };
     use crate::model::policy::SchemaScope;
-    
+
     use crate::model::table_shape::{resolve_create_table_policy, zeroship_confined_ceiling};
     use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
@@ -3337,13 +3336,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(
-            &ir,
-            dialect,
-            &[],
-            Some(&SchemaScope::Unconfined)
-        )
-        .unwrap_err()
+        validate_ir_scoped(&ir, dialect, &[], Some(&SchemaScope::Unconfined)).unwrap_err()
     }
 
     fn assert_validate_ops_ok(ops: Vec<Op>, dialect: Dialect) {
@@ -3358,13 +3351,8 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(
-            &ir,
-            dialect,
-            &[],
-            Some(&SchemaScope::Unconfined)
-        )
-        .expect("ops validate");
+        validate_ir_scoped(&ir, dialect, &[], Some(&SchemaScope::Unconfined))
+            .expect("ops validate");
     }
 
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
@@ -3462,12 +3450,8 @@ mod tests {
 
         let projected = fold_ops_onto(&base, &tail, SqlDialect::Postgres, SCHEMA)
             .expect("tail projects onto catalog base");
-        let expected = fold(
-            &std::iter::once(create_op)
-                .chain(tail)
-                .collect::<Vec<_>>(),
-        )
-        .expect("combined replay folds");
+        let expected = fold(&std::iter::once(create_op).chain(tail).collect::<Vec<_>>())
+            .expect("combined replay folds");
 
         assert_eq!(projected, expected);
         let events = projected.tables.get("events").expect("events survives");
@@ -5969,7 +5953,10 @@ mod tests {
             .iter()
             .find(|i| i.name.as_deref() == Some("articles_author_idx"))
             .expect("the plain author index survives production");
-        assert_eq!(author_idx.unique, None, "a non-unique index is `None`, not Some(false)");
+        assert_eq!(
+            author_idx.unique, None,
+            "a non-unique index is `None`, not Some(false)"
+        );
         assert_eq!(
             author_idx.columns,
             vec![IndexElement::Column {
@@ -5983,7 +5970,11 @@ mod tests {
             .iter()
             .find(|i| i.name.as_deref() == Some("articles_slug_key"))
             .expect("the UNIQUE author index survives production");
-        assert_eq!(unique_idx.unique, Some(true), "the unique flag is preserved");
+        assert_eq!(
+            unique_idx.unique,
+            Some(true),
+            "the unique flag is preserved"
+        );
 
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
         let artifacts =

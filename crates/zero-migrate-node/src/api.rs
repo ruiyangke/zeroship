@@ -327,8 +327,14 @@ mod tests {
         assert!(reply.ok, "render ok: {:?}", reply.error);
         let runtime = reply.runtime_json.expect("runtime json");
         let ts = reply.env_db_ts.expect("env.db.ts");
-        assert!(runtime.contains("\"version\": 1"), "v1 descriptor: {runtime}");
-        assert!(runtime.contains("\"widgets\""), "carries the table: {runtime}");
+        assert!(
+            runtime.contains("\"version\": 1"),
+            "v1 descriptor: {runtime}"
+        );
+        assert!(
+            runtime.contains("\"widgets\""),
+            "carries the table: {runtime}"
+        );
         assert!(
             ts.contains("label: t.string(),"),
             "env.db.ts renders the builder chain: {ts}"

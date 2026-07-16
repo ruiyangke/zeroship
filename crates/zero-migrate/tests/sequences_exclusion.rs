@@ -244,7 +244,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
         &ir(vec![text_nextval.clone()]),
         Dialect::Postgres,
         &[],
-        None
+        None,
     )
     .unwrap_err();
     assert_eq!(
@@ -258,13 +258,8 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
-        let err = validate_ir_scoped(
-            &ir(vec![text_nextval.clone()]),
-            dialect,
-            &[],
-            None
-        )
-        .unwrap_err();
+        let err =
+            validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, &[], None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("nextval"));

@@ -26,12 +26,18 @@ pub struct ObjectName {
 impl ObjectName {
     #[must_use]
     pub fn schema(s: impl Into<Vec<u8>>) -> Self {
-        Self { schema: s.into(), table: None }
+        Self {
+            schema: s.into(),
+            table: None,
+        }
     }
 
     #[must_use]
     pub fn table(s: impl Into<Vec<u8>>, t: impl Into<Vec<u8>>) -> Self {
-        Self { schema: s.into(), table: Some(t.into()) }
+        Self {
+            schema: s.into(),
+            table: Some(t.into()),
+        }
     }
 }
 
@@ -47,7 +53,10 @@ impl Pattern {
     /// A schema-only pattern `P`, normalized to `P.*` (cross-arity, II.3.1).
     #[must_use]
     pub fn schema(glob: SegGlob) -> Self {
-        Self { schema: glob, table: SegGlob::star() }
+        Self {
+            schema: glob,
+            table: SegGlob::star(),
+        }
     }
 
     /// A two-segment `schema.table` pattern.
@@ -96,9 +105,10 @@ impl Pattern {
         let segs = split_normalize_segments(s)?;
         match segs.as_slice() {
             [schema] => Some(Self::schema(seg_from_normalized(schema)?)),
-            [schema, table] => {
-                Some(Self::table(seg_from_normalized(schema)?, seg_from_normalized(table)?))
-            }
+            [schema, table] => Some(Self::table(
+                seg_from_normalized(schema)?,
+                seg_from_normalized(table)?,
+            )),
             _ => None,
         }
     }
@@ -108,7 +118,10 @@ impl Pattern {
     /// membership reasoning and as the include of a universe `Of{["*"]}`.
     #[must_use]
     pub fn universe() -> Self {
-        Self { schema: SegGlob::star(), table: SegGlob::star() }
+        Self {
+            schema: SegGlob::star(),
+            table: SegGlob::star(),
+        }
     }
 
     /// Ground-truth matcher: does this pattern match the concrete name `n`?
@@ -216,7 +229,10 @@ fn finish_segment(bytes: &[u8], quoted: bool, unquoted: bool) -> Option<Normaliz
     if quoted && unquoted {
         return None; // `a"b"` mixing — reject fail-closed
     }
-    Some(NormalizedSegment { bytes: bytes.to_vec(), quoted })
+    Some(NormalizedSegment {
+        bytes: bytes.to_vec(),
+        quoted,
+    })
 }
 
 /// Build a [`SegGlob`] from a normalized segment: a quoted segment is a pure
@@ -263,7 +279,10 @@ pub fn intersect_pattern(a: &Pattern, b: &Pattern) -> BTreeSet<Pattern> {
     let mut out = BTreeSet::new();
     for s in &schemas {
         for t in &tables {
-            out.insert(Pattern { schema: s.clone(), table: t.clone() });
+            out.insert(Pattern {
+                schema: s.clone(),
+                table: t.clone(),
+            });
         }
     }
     out

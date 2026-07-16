@@ -70,8 +70,8 @@ async fn apply_doc(
     approval: Approval,
 ) -> Vec<Op> {
     let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses");
-    let resolved =
-        resolve_create_table_policy(&raw, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
+    let resolved = resolve_create_table_policy(&raw, &zero_migrate::zeroship_confined_ceiling())
+        .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let document = zero_migrate::model::load::load_ir_document(

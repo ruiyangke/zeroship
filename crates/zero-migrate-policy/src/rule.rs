@@ -107,11 +107,18 @@ pub enum ValidatePredicate {
     /// The table must carry a primary key (satisfiable by an injected PK).
     HasPrimaryKey,
     /// Column names must match every `require` glob and no `forbid` glob.
-    ColumnNamePattern { require: Vec<NameGlob>, forbid: Vec<NameGlob> },
+    ColumnNamePattern {
+        require: Vec<NameGlob>,
+        forbid: Vec<NameGlob>,
+    },
     /// These (normalized) column names must NOT appear.
     ForbiddenColumns { names: Vec<String> },
     /// A named column's type / nullability constraint.
-    TypeNullability { column: String, ty: Option<String>, nullable: Option<bool> },
+    TypeNullability {
+        column: String,
+        ty: Option<String>,
+        nullable: Option<bool>,
+    },
     /// The table must carry an index over exactly these columns.
     RequireIndex { columns: Vec<String> },
     /// The created/renamed table's NORMALIZED name must NOT match any pattern

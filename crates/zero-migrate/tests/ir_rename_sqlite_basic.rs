@@ -172,8 +172,8 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             preconditions: vec![],
             checksum: None,
         };
-        let ir =
-            resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("test IR resolves");
+        let ir = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
+            .expect("test IR resolves");
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .expect("lower create");

@@ -1625,9 +1625,7 @@ impl MigrationEngine {
                 let blocked = steps
                     .iter()
                     .find_map(|step| match step {
-                        PlanStep::Ddl(migration) => {
-                            Some(migration.version.as_str().to_string())
-                        }
+                        PlanStep::Ddl(migration) => Some(migration.version.as_str().to_string()),
                         _ => None,
                     })
                     .unwrap_or_else(|| applied_by.to_string());
@@ -1762,10 +1760,7 @@ impl MigrationEngine {
                                 && atomic_direct_resolutions
                                     .insert(contract.pending_version.clone())
                             {
-                                let owner = contract
-                                    .owner_app
-                                    .as_deref()
-                                    .unwrap_or(applied_by);
+                                let owner = contract.owner_app.as_deref().unwrap_or(applied_by);
                                 let intent =
                                     crate::render::expand_contract::OnlineIntent::RenameColumn {
                                         table: contract.table.clone(),
@@ -1773,15 +1768,16 @@ impl MigrationEngine {
                                         to: contract.to_col.clone(),
                                         ty: contract.ty.clone(),
                                     };
-                                let templates = crate::render::expand_contract::ExpandContractAuthor::new(
-                                    exec_cfg.project_schema.clone(),
-                                    owner,
-                                )
-                                .author(&intent)
-                                .map_err(|error| {
-                                    EngineError::Apply(ApplyError::Backend(error.to_string()))
-                                })?
-                                .contract;
+                                let templates =
+                                    crate::render::expand_contract::ExpandContractAuthor::new(
+                                        exec_cfg.project_schema.clone(),
+                                        owner,
+                                    )
+                                    .author(&intent)
+                                    .map_err(|error| {
+                                        EngineError::Apply(ApplyError::Backend(error.to_string()))
+                                    })?
+                                    .contract;
                                 let atomic = atomic_pending_resolution_migration(
                                     &exec_cfg.project_schema,
                                     contract,
@@ -2064,18 +2060,16 @@ impl MigrationEngine {
                                 pending_contract.extend(rename.contract.iter().cloned());
                                 // Surface the full obligation descriptor so the
                                 // control loop can safely recover this deploy.
-                                opened_obligations.push(
-                                    crate::apply::journal::PendingContract {
-                                        owner_app: Some(obligation_owner),
-                                        table: (*table).clone(),
-                                        from_col: (*from).clone(),
-                                        to_col: (*to).clone(),
-                                        ty: (*ty).clone(),
-                                        pending_version: pending_version.clone(),
-                                        plan_version: plan_version.clone(),
-                                        contract_versions,
-                                    },
-                                );
+                                opened_obligations.push(crate::apply::journal::PendingContract {
+                                    owner_app: Some(obligation_owner),
+                                    table: (*table).clone(),
+                                    from_col: (*from).clone(),
+                                    to_col: (*to).clone(),
+                                    ty: (*ty).clone(),
+                                    pending_version: pending_version.clone(),
+                                    plan_version: plan_version.clone(),
+                                    contract_versions,
+                                });
                             }
                         } else {
                             // Backends without a durable obligation capability can
@@ -2749,11 +2743,13 @@ fn atomic_pending_resolution_migration(
     templates: &[Migration],
     resolution: crate::apply::journal::Resolution,
 ) -> Result<Migration, EngineError> {
-    let mut migration = templates.last().cloned().ok_or_else(|| {
-        EngineError::PendingContractMalformed {
-            version: obligation.pending_version.clone(),
-        }
-    })?;
+    let mut migration =
+        templates
+            .last()
+            .cloned()
+            .ok_or_else(|| EngineError::PendingContractMalformed {
+                version: obligation.pending_version.clone(),
+            })?;
     let version = match resolution {
         crate::apply::journal::Resolution::Applied => {
             crate::render::expand_contract::resolve_pending_apply_atomic_version(
@@ -2766,14 +2762,8 @@ fn atomic_pending_resolution_migration(
             )
         }
     };
-    let constraint_name = format!(
-        "zs_sync_{}",
-        version.as_str().trim_start_matches("mig_")
-    );
-    let table = crate::render::expand_contract::qualified(
-        project_schema,
-        &obligation.table,
-    );
+    let constraint_name = format!("zs_sync_{}", version.as_str().trim_start_matches("mig_"));
+    let table = crate::render::expand_contract::qualified(project_schema, &obligation.table);
     let from = crate::render::expand_contract::quote_ident(&obligation.from_col);
     let to = crate::render::expand_contract::quote_ident(&obligation.to_col);
     let constraint = crate::render::expand_contract::quote_ident(&constraint_name);

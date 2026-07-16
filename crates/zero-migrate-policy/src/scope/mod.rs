@@ -46,7 +46,10 @@ pub enum Scope {
     All,
     /// A proper scope: `include` non-empty, `exclude` subtracts (exclude-wins).
     /// Patterns are stored in NORMALIZED two-segment form (schema→`P.*`).
-    Of { include: Vec<Pattern>, exclude: Vec<Pattern> },
+    Of {
+        include: Vec<Pattern>,
+        exclude: Vec<Pattern>,
+    },
 }
 
 /// A scope construction / normalization error.
@@ -120,7 +123,9 @@ impl Scope {
             Scope::Nothing => false,
             Scope::Of { include, exclude } => {
                 let universe_pat = Pattern::universe();
-                include.iter().any(|p| pattern_covers(p, &universe_pat) && pattern_covers(&universe_pat, p))
+                include
+                    .iter()
+                    .any(|p| pattern_covers(p, &universe_pat) && pattern_covers(&universe_pat, p))
                     && exclude.is_empty()
             }
         }
@@ -160,7 +165,9 @@ impl Scope {
                 let exclude: Vec<Pattern> = dedup(exclude)
                     .into_iter()
                     .filter(|exc| {
-                        include.iter().any(|inc| !intersect_pattern(inc, exc).is_empty())
+                        include
+                            .iter()
+                            .any(|inc| !intersect_pattern(inc, exc).is_empty())
                     })
                     .collect();
                 Scope::Of { include, exclude }
@@ -192,7 +199,16 @@ impl Scope {
             // with an empty object set IS `Nothing` (the constructor/normalize
             // fold empty-object `Of` to `Nothing`), so only `Nothing ⊑ Nothing`.
             (_, Scope::Nothing) => matches!(self, Scope::Nothing),
-            (Scope::Of { include: di, exclude: de }, Scope::Of { include: ci, exclude: ce }) => {
+            (
+                Scope::Of {
+                    include: di,
+                    exclude: de,
+                },
+                Scope::Of {
+                    include: ci,
+                    exclude: ce,
+                },
+            ) => {
                 for d in di {
                     // The region of `d` that self actually keeps = d minus de.
                     // For each such region we need coverage by some c AND
@@ -215,7 +231,16 @@ impl Scope {
         match (self, other) {
             (Scope::Nothing, _) | (_, Scope::Nothing) => Scope::Nothing,
             (Scope::All, s) | (s, Scope::All) => s.clone(),
-            (Scope::Of { include: ai, exclude: ae }, Scope::Of { include: bi, exclude: be }) => {
+            (
+                Scope::Of {
+                    include: ai,
+                    exclude: ae,
+                },
+                Scope::Of {
+                    include: bi,
+                    exclude: be,
+                },
+            ) => {
                 // include = ⋃_{a∈ai, b∈bi} (a ∩ b)  (pairwise pattern∩, flattened)
                 let mut include: Vec<Pattern> = Vec::new();
                 for a in ai {
@@ -226,7 +251,11 @@ impl Scope {
                 // exclude = ae ∪ be  (exclude-wins: unioning excludes only shrinks)
                 let mut exclude = ae.clone();
                 exclude.extend(be.iter().cloned());
-                Scope::Of { include: dedup(include), exclude: dedup(exclude) }.normalize()
+                Scope::Of {
+                    include: dedup(include),
+                    exclude: dedup(exclude),
+                }
+                .normalize()
             }
         }
     }
@@ -246,7 +275,16 @@ impl Scope {
         match (self, other) {
             (Scope::All, _) | (_, Scope::All) => Scope::All,
             (Scope::Nothing, s) | (s, Scope::Nothing) => s.clone(),
-            (Scope::Of { include: ai, exclude: ae }, Scope::Of { include: bi, exclude: be }) => {
+            (
+                Scope::Of {
+                    include: ai,
+                    exclude: ae,
+                },
+                Scope::Of {
+                    include: bi,
+                    exclude: be,
+                },
+            ) => {
                 let include = dedup([ai.clone(), bi.clone()].concat());
                 // Start from ea ∩ eb (only objects BOTH sides exclude can stay
                 // excluded), then drop any exclude that overlaps the OTHER side's
@@ -264,7 +302,9 @@ impl Scope {
                 let exclude: Vec<Pattern> = dedup(exclude)
                     .into_iter()
                     .filter(|exc| {
-                        !include.iter().any(|inc| !intersect_pattern(inc, exc).is_empty())
+                        !include
+                            .iter()
+                            .any(|inc| !intersect_pattern(inc, exc).is_empty())
                     })
                     .collect();
                 Scope::Of { include, exclude }.normalize()
@@ -306,7 +346,16 @@ impl Scope {
             // glob is not a glob) unless B is ∅/⊤ (handled above) — reject.
             (Scope::Nothing, _) => Difference::Scope(Scope::Nothing),
             (Scope::All, _) => Difference::NotRepresentable,
-            (Scope::Of { include: ai, exclude: ae }, Scope::Of { include: bi, exclude: be }) => {
+            (
+                Scope::Of {
+                    include: ai,
+                    exclude: ae,
+                },
+                Scope::Of {
+                    include: bi,
+                    exclude: be,
+                },
+            ) => {
                 // Term 1: A with B.include folded into excludes.
                 let term1 = Scope::Of {
                     include: ai.clone(),
@@ -334,7 +383,10 @@ impl Scope {
 /// Dedup a pattern vec preserving first-seen order.
 fn dedup(patterns: Vec<Pattern>) -> Vec<Pattern> {
     let mut seen: BTreeSet<Pattern> = BTreeSet::new();
-    patterns.into_iter().filter(|p| seen.insert(p.clone())).collect()
+    patterns
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// The exclude-aware `⊑` per-include-region check (II.3.1 steps 2 & 3), SOUND.

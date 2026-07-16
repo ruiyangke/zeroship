@@ -101,8 +101,8 @@ fn ir_pairs_for(
         preconditions: vec![],
         checksum: None,
     };
-    let ir =
-        resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling()).expect("parity IR resolves");
+    let ir = resolve_create_table_policy(&ir, &zero_migrate::zeroship_confined_ceiling())
+        .expect("parity IR resolves");
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
     let migs = author
         .lower(&ir, &LiveSchema::from(live))

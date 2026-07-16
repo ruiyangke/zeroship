@@ -68,10 +68,7 @@ fn lower(op: Op) -> Vec<Migration> {
     // Each call site represents a separate migration file. Stable production
     // identities are derived from owner + migration name, so the fixture must
     // not reuse one name for unrelated setup and guarded operations.
-    let migration_name = format!(
-        "guard_test_{}",
-        std::panic::Location::caller().line()
-    );
+    let migration_name = format!("guard_test_{}", std::panic::Location::caller().line());
     let ir = MigrationIr {
         ir_version: 2,
         name: migration_name,

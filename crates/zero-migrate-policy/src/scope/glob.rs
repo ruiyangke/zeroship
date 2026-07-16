@@ -45,20 +45,32 @@ impl SegGlob {
     /// An exact literal segment (no `*`).
     #[must_use]
     pub fn literal(bytes: impl Into<Vec<u8>>) -> Self {
-        Self { prefix: bytes.into(), suffix: Vec::new(), has_star: false }
+        Self {
+            prefix: bytes.into(),
+            suffix: Vec::new(),
+            has_star: false,
+        }
     }
 
     /// The `*` glob — matches every byte string in this segment.
     #[must_use]
     pub fn star() -> Self {
-        Self { prefix: Vec::new(), suffix: Vec::new(), has_star: true }
+        Self {
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            has_star: true,
+        }
     }
 
     /// A prefix/star/suffix/infix glob from its `p` and `s` pieces (one `*`
     /// between them). Both pieces may be empty (yielding `*`).
     #[must_use]
     pub fn infix(prefix: impl Into<Vec<u8>>, suffix: impl Into<Vec<u8>>) -> Self {
-        Self { prefix: prefix.into(), suffix: suffix.into(), has_star: true }
+        Self {
+            prefix: prefix.into(),
+            suffix: suffix.into(),
+            has_star: true,
+        }
     }
 
     /// Parse a single-segment glob from its textual form. Exactly zero or one
@@ -71,9 +83,10 @@ impl SegGlob {
         let mut stars = bytes.iter().enumerate().filter(|(_, &b)| b == b'*');
         match (stars.next(), stars.next()) {
             (None, _) => Some(Self::literal(bytes.to_vec())),
-            (Some((star, _)), None) => {
-                Some(Self::infix(bytes[..star].to_vec(), bytes[star + 1..].to_vec()))
-            }
+            (Some((star, _)), None) => Some(Self::infix(
+                bytes[..star].to_vec(),
+                bytes[star + 1..].to_vec(),
+            )),
             (Some(_), Some(_)) => None, // more than one `*` is illegal
         }
     }
@@ -187,9 +200,10 @@ pub fn intersect_seg(a: &SegGlob, b: &SegGlob) -> BTreeSet<SegGlob> {
         // of the other; take the longer as s, else ∅), AND is long enough to
         // satisfy both length floors: |w| ≥ max(|pa|+|sa|, |pb|+|sb|).
         (true, true) => {
-            let (Some(p), Some(s)) =
-                (longer_prefix(&a.prefix, &b.prefix), longer_suffix(&a.suffix, &b.suffix))
-            else {
+            let (Some(p), Some(s)) = (
+                longer_prefix(&a.prefix, &b.prefix),
+                longer_suffix(&a.suffix, &b.suffix),
+            ) else {
                 return out; // ∅: prefixes or suffixes contradict
             };
             let floor = (a.prefix.len() + a.suffix.len()).max(b.prefix.len() + b.suffix.len());
@@ -352,7 +366,11 @@ mod tests {
     #[test]
     fn covers_star_over_literal() {
         assert!(SegGlob::star().covers(&SegGlob::literal(b"abc".to_vec())));
-        assert!(SegGlob::infix(b"a".to_vec(), Vec::new()).covers(&SegGlob::literal(b"abc".to_vec())));
-        assert!(!SegGlob::infix(b"b".to_vec(), Vec::new()).covers(&SegGlob::literal(b"abc".to_vec())));
+        assert!(
+            SegGlob::infix(b"a".to_vec(), Vec::new()).covers(&SegGlob::literal(b"abc".to_vec()))
+        );
+        assert!(
+            !SegGlob::infix(b"b".to_vec(), Vec::new()).covers(&SegGlob::literal(b"abc".to_vec()))
+        );
     }
 }

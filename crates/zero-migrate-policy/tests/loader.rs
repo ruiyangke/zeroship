@@ -5,7 +5,7 @@
 
 use zero_migrate_policy::{
     Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError, LoadWarning,
-    ObjectModel, PolicyDoc, PolicyRegistry, Polarity, RuleKind, Scope, ValidatePredicate,
+    ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RuleKind, Scope, ValidatePredicate,
 };
 
 // ── registry fixtures ────────────────────────────────────────────────────────────
@@ -35,11 +35,46 @@ fn def(
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true),
-            def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
-            def("schema.create_table", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false),
-            def("schema.create_schema", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false),
-            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false),
+            def(
+                "code.extension",
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+                ObjectModel::Global,
+                true,
+            ),
+            def(
+                "sql.raw",
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+                ObjectModel::PerTable,
+                false,
+            ),
+            def(
+                "schema.create_table",
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+                ObjectModel::PerTable,
+                false,
+            ),
+            def(
+                "schema.create_schema",
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+                ObjectModel::PerSchema,
+                false,
+            ),
+            def(
+                "safety.require_rls",
+                KnobKind::Bool,
+                Polarity::Require,
+                KnobValue::Bool(false),
+                ObjectModel::PerTable,
+                false,
+            ),
             def(
                 "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
@@ -102,7 +137,12 @@ scope = "all"
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::UnknownKnobKey { key: "acme.unregistered".into() });
+    assert_eq!(
+        e,
+        LoadError::UnknownKnobKey {
+            key: "acme.unregistered".into()
+        }
+    );
 }
 
 #[test]
@@ -116,7 +156,12 @@ scope = "all"
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::MalformedKnobKey { key: "nodotkey".into() });
+    assert_eq!(
+        e,
+        LoadError::MalformedKnobKey {
+            key: "nodotkey".into()
+        }
+    );
 }
 
 // ── gate: section ↔ polarity ─────────────────────────────────────────────────────
@@ -167,7 +212,11 @@ scope = { include = ["app_*"] }
     .unwrap_err();
     assert!(matches!(
         e,
-        LoadError::SectionPolarityMismatch { expected: Polarity::Require, found: Polarity::Grant, .. }
+        LoadError::SectionPolarityMismatch {
+            expected: Polarity::Require,
+            found: Polarity::Grant,
+            ..
+        }
     ));
 }
 
@@ -197,7 +246,9 @@ scope = { include = ["app_*"] }
 "#,
     )
     .unwrap_err();
-    assert!(matches!(e, LoadError::InvalidKnobValue { ref key, .. } if key == "runtime.lock_timeout_ms"));
+    assert!(
+        matches!(e, LoadError::InvalidKnobValue { ref key, .. } if key == "runtime.lock_timeout_ms")
+    );
 }
 
 #[test]
@@ -244,7 +295,12 @@ scope = { include = ["app_*"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
+    assert_eq!(
+        e,
+        LoadError::ScopeIllegalForGlobalKnob {
+            key: "code.extension".into()
+        }
+    );
 }
 
 #[test]
@@ -260,7 +316,12 @@ scope = { include = ["*"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
+    assert_eq!(
+        e,
+        LoadError::ScopeIllegalForGlobalKnob {
+            key: "code.extension".into()
+        }
+    );
 }
 
 #[test]
@@ -276,7 +337,12 @@ value = true
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeIllegalForGlobalKnob { key: "code.extension".into() });
+    assert_eq!(
+        e,
+        LoadError::ScopeIllegalForGlobalKnob {
+            key: "code.extension".into()
+        }
+    );
 }
 
 #[test]
@@ -294,7 +360,11 @@ scope = "all"
 "#,
     )
     .unwrap();
-    let g = doc.rules.iter().find(|r| matches!(&r.kind, RuleKind::Grant { .. })).unwrap();
+    let g = doc
+        .rules
+        .iter()
+        .find(|r| matches!(&r.kind, RuleKind::Grant { .. }))
+        .unwrap();
     assert_eq!(g.scope, Scope::All);
 }
 
@@ -324,7 +394,12 @@ scope = { include = ["app_main.events"] }
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::ScopeTooGranularForKnob { key: "schema.create_schema".into() });
+    assert_eq!(
+        e,
+        LoadError::ScopeTooGranularForKnob {
+            key: "schema.create_schema".into()
+        }
+    );
 }
 
 // ── gate: grant scope unbounded (A3) ─────────────────────────────────────────────
@@ -357,7 +432,12 @@ value = true
 "#,
     )
     .unwrap_err();
-    assert_eq!(e, LoadError::GrantScopeUnbounded { key: "sql.raw".into() });
+    assert_eq!(
+        e,
+        LoadError::GrantScopeUnbounded {
+            key: "sql.raw".into()
+        }
+    );
 }
 
 // ── gate: mandatory inject on non-root layer ─────────────────────────────────────
@@ -432,7 +512,10 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
 "#,
     )
     .unwrap_err();
-    assert!(matches!(e, LoadError::SelfContradictoryInjectValidate { .. }));
+    assert!(matches!(
+        e,
+        LoadError::SelfContradictoryInjectValidate { .. }
+    ));
 }
 
 #[test]
@@ -465,7 +548,10 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
 "#,
     )
     .unwrap_err();
-    assert!(matches!(e, LoadError::SelfContradictoryInjectValidate { .. }));
+    assert!(matches!(
+        e,
+        LoadError::SelfContradictoryInjectValidate { .. }
+    ));
 }
 
 // ── gate: malformed scope / empty include ────────────────────────────────────────
@@ -540,10 +626,33 @@ scope = { include = ["staging"] }
 
 #[test]
 fn registry_digest_is_shuffle_stable() {
-    let a = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
-    let b = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
-    let c = def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false), ObjectModel::PerTable, false);
-    let r1 = PolicyRegistry::empty().with([a.clone(), b.clone(), c.clone()]).unwrap();
+    let a = def(
+        "sql.raw",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::PerTable,
+        false,
+    );
+    let b = def(
+        "code.extension",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::Global,
+        true,
+    );
+    let c = def(
+        "safety.require_rls",
+        KnobKind::Bool,
+        Polarity::Require,
+        KnobValue::Bool(false),
+        ObjectModel::PerTable,
+        false,
+    );
+    let r1 = PolicyRegistry::empty()
+        .with([a.clone(), b.clone(), c.clone()])
+        .unwrap();
     let r2 = PolicyRegistry::empty().with([c, b, a]).unwrap();
     assert_eq!(r1.digest(), r2.digest());
     assert_eq!(r1.digest_hex(), r2.digest_hex());
@@ -551,8 +660,22 @@ fn registry_digest_is_shuffle_stable() {
 
 #[test]
 fn registry_digest_changes_on_requires_db_privilege() {
-    let d1 = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, true);
-    let d2 = def("code.extension", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::Global, false);
+    let d1 = def(
+        "code.extension",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::Global,
+        true,
+    );
+    let d2 = def(
+        "code.extension",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::Global,
+        false,
+    );
     let r1 = PolicyRegistry::empty().with([d1]).unwrap();
     let r2 = PolicyRegistry::empty().with([d2]).unwrap();
     assert_ne!(r1.digest(), r2.digest());
@@ -560,8 +683,22 @@ fn registry_digest_changes_on_requires_db_privilege() {
 
 #[test]
 fn registry_digest_changes_on_object_model() {
-    let d1 = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerTable, false);
-    let d2 = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false), ObjectModel::PerSchema, false);
+    let d1 = def(
+        "sql.raw",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::PerTable,
+        false,
+    );
+    let d2 = def(
+        "sql.raw",
+        KnobKind::Bool,
+        Polarity::Grant,
+        KnobValue::Bool(false),
+        ObjectModel::PerSchema,
+        false,
+    );
     let r1 = PolicyRegistry::empty().with([d1]).unwrap();
     let r2 = PolicyRegistry::empty().with([d2]).unwrap();
     assert_ne!(r1.digest(), r2.digest());
@@ -617,7 +754,9 @@ predicate = { kind = "has_primary_key" }
     let pg = doc
         .rules
         .iter()
-        .find(|r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "code.extension"))
+        .find(
+            |r| matches!(&r.kind, RuleKind::Grant { key, .. } if key.as_str() == "code.extension"),
+        )
         .unwrap();
     assert_eq!(pg.scope, Scope::All);
 
@@ -635,7 +774,9 @@ predicate = { kind = "has_primary_key" }
     // The has_primary_key validate is present.
     assert!(doc.rules.iter().any(|r| matches!(
         &r.kind,
-        RuleKind::Validate { pred: ValidatePredicate::HasPrimaryKey }
+        RuleKind::Validate {
+            pred: ValidatePredicate::HasPrimaryKey
+        }
     )));
 }
 
@@ -691,7 +832,9 @@ scope = { include = ["\"App_x\""] }
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
             assert!(include[0].matches(&zero_migrate_policy::ObjectName::schema(b"App_x".to_vec())));
-            assert!(!include[0].matches(&zero_migrate_policy::ObjectName::schema(b"app_x".to_vec())));
+            assert!(
+                !include[0].matches(&zero_migrate_policy::ObjectName::schema(b"app_x".to_vec()))
+            );
         }
         other => panic!("expected Of, got {other:?}"),
     }
@@ -736,7 +879,12 @@ impl zero_migrate_policy::ProfileCatalog for MapCatalog {
 }
 
 fn catalog(entries: &[(&str, &str)]) -> MapCatalog {
-    MapCatalog(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    MapCatalog(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
 }
 
 #[test]
@@ -785,8 +933,14 @@ scope = { include = ["app_*"] }
             _ => None,
         })
         .collect();
-    assert!(keys.contains(&"sql.raw"), "base rule not inherited: {keys:?}");
-    assert!(keys.contains(&"runtime.lock_timeout_ms"), "own rule missing: {keys:?}");
+    assert!(
+        keys.contains(&"sql.raw"),
+        "base rule not inherited: {keys:?}"
+    );
+    assert!(
+        keys.contains(&"runtime.lock_timeout_ms"),
+        "own rule missing: {keys:?}"
+    );
 }
 
 #[test]
@@ -799,7 +953,12 @@ fn extends_unknown_base_is_error() {
         &cat,
     )
     .unwrap_err();
-    assert_eq!(err, LoadError::ExtendsUnknownBase { base: "nope".into() });
+    assert_eq!(
+        err,
+        LoadError::ExtendsUnknownBase {
+            base: "nope".into()
+        }
+    );
 }
 
 #[test]
@@ -816,7 +975,10 @@ fn extends_cycle_is_detected() {
         &cat,
     )
     .unwrap_err();
-    assert!(matches!(err, LoadError::ExtendsCycle { .. }), "expected cycle, got {err:?}");
+    assert!(
+        matches!(err, LoadError::ExtendsCycle { .. }),
+        "expected cycle, got {err:?}"
+    );
 }
 
 #[test]
@@ -828,5 +990,8 @@ fn extends_without_catalog_is_unknown_base() {
         LoadContext::RootCeiling,
     )
     .unwrap_err();
-    assert!(matches!(err, LoadError::ExtendsUnknownBase { .. }), "expected unknown base, got {err:?}");
+    assert!(
+        matches!(err, LoadError::ExtendsUnknownBase { .. }),
+        "expected unknown base, got {err:?}"
+    );
 }

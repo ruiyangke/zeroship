@@ -10,7 +10,7 @@
 
 use zero_migrate_policy::{
     admit, finalize_ceiling, overlay, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue,
-    PolicyDoc, PolicyRegistry, Polarity, RootCeiling, SealError, TrustedDoc,
+    Polarity, PolicyDoc, PolicyRegistry, RootCeiling, SealError, TrustedDoc,
 };
 
 const MAC_KEY: &[u8] = b"a-shared-fleet-mac-key-32-bytes!!";
@@ -35,14 +35,24 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def(
+                "sql.raw",
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+            ),
             def(
                 "runtime.lock_timeout_ms",
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def(
+                "safety.require_rls",
+                KnobKind::Bool,
+                Polarity::Require,
+                KnobValue::Bool(false),
+            ),
         ])
         .unwrap()
 }
@@ -53,7 +63,12 @@ fn registry_flipped_privilege() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
             {
-                let mut d = def("sql.raw", KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false));
+                let mut d = def(
+                    "sql.raw",
+                    KnobKind::Bool,
+                    Polarity::Grant,
+                    KnobValue::Bool(false),
+                );
                 d.requires_db_privilege = true;
                 d
             },
@@ -63,7 +78,12 @@ fn registry_flipped_privilege() -> PolicyRegistry {
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false)),
+            def(
+                "safety.require_rls",
+                KnobKind::Bool,
+                Polarity::Require,
+                KnobValue::Bool(false),
+            ),
         ])
         .unwrap()
 }
@@ -115,7 +135,14 @@ fn good_seal_round_trips() {
     // A freshly-composed identical policy verifies.
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(MAC_KEY, &fresh, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &fresh,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Ok(())
     );
 }
@@ -127,7 +154,14 @@ fn wrong_mac_key_fails() {
     let sealed = seal(&policy, MAC_KEY, [7u8; 16], DIALECT, MATCHER, CEILING_VER);
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(b"a-different-mac-key-of-length-32!", &fresh, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            b"a-different-mac-key-of-length-32!",
+            &fresh,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::TagMismatch)
     );
 }
@@ -156,7 +190,14 @@ scope = { include = ["app_*"] }
     )
     .unwrap();
     let policy_600 = admit(&root, &draft_600, &reg).unwrap();
-    let sealed = seal(&policy_600, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &policy_600,
+        MAC_KEY,
+        [1u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
 
     // A tightened tamper: draft 60 @ app_* — a DIFFERENT effective grant map.
     let draft_60 = PolicyDoc::parse_toml(
@@ -173,7 +214,14 @@ scope = { include = ["app_*"] }
     let tampered = admit(&root, &draft_60, &reg).unwrap();
 
     assert_eq!(
-        sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &tampered,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::TagMismatch)
     );
 }
@@ -183,7 +231,14 @@ fn tampered_scope_fails() {
     // Tamper a UNION-UP (ceiling-sourced) rule's scope: the inject scope. It flows
     // into the sealed rule set verbatim, so narrowing it changes the canonical bytes.
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [2u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [2u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
 
     // Narrow ONLY the inject scope (app_* → app_main). The [[inject]] block is the
     // only one whose `include` we rewrite here.
@@ -191,7 +246,10 @@ fn tampered_scope_fails() {
         "[[inject]]\nscope = { include = [\"app_*\"] }",
         "[[inject]]\nscope = { include = [\"app_main\"] }",
     );
-    assert_ne!(tampered_root, ROOT_TOML, "the inject-scope rewrite must land");
+    assert_ne!(
+        tampered_root, ROOT_TOML,
+        "the inject-scope rewrite must land"
+    );
     let root = RootCeiling::parse_toml(&tampered_root, &reg).unwrap();
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
@@ -202,7 +260,14 @@ fn tampered_scope_fails() {
     let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
-        sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &tampered,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::TagMismatch)
     );
 }
@@ -210,7 +275,14 @@ fn tampered_scope_fails() {
 #[test]
 fn tampered_inject_column_fails() {
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [3u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [3u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
 
     // Inject a differently-typed column — a different rule set.
     let tampered_root = ROOT_TOML.replace("timestamptz", "text");
@@ -224,7 +296,14 @@ fn tampered_inject_column_fails() {
     let tampered = admit(&root, &draft, &reg).unwrap();
 
     assert_eq!(
-        sealed.verify(MAC_KEY, &tampered, &reg.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &tampered,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::TagMismatch)
     );
 }
@@ -236,14 +315,28 @@ fn tampered_inject_column_fails() {
 #[test]
 fn wrong_registry_digest_fails() {
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [4u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [4u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
 
     // Verify presenting a DIFFERENT registry digest (a flipped requires_db_privilege
     // — same keys, different enforcement semantics) → hard fail (II.2.1).
     let flipped = registry_flipped_privilege();
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(MAC_KEY, &fresh, &flipped.digest(), DIALECT, MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &fresh,
+            &flipped.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::RegistryDigestMismatch)
     );
     // And the digests genuinely differ.
@@ -253,10 +346,24 @@ fn wrong_registry_digest_fails() {
 #[test]
 fn wrong_dialect_fails() {
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [5u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [5u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(MAC_KEY, &fresh, &reg.digest(), "mysql", MATCHER, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &fresh,
+            &reg.digest(),
+            "mysql",
+            MATCHER,
+            CEILING_VER
+        ),
         Err(SealError::DialectMismatch)
     );
 }
@@ -264,10 +371,24 @@ fn wrong_dialect_fails() {
 #[test]
 fn wrong_matcher_version_fails() {
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [6u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [6u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(MAC_KEY, &fresh, &reg.digest(), DIALECT, MATCHER + 1, CEILING_VER),
+        sealed.verify(
+            MAC_KEY,
+            &fresh,
+            &reg.digest(),
+            DIALECT,
+            MATCHER + 1,
+            CEILING_VER
+        ),
         Err(SealError::MatcherVersionMismatch)
     );
 }
@@ -275,10 +396,24 @@ fn wrong_matcher_version_fails() {
 #[test]
 fn wrong_ceiling_version_fails() {
     let reg = registry();
-    let sealed = seal(&reference_policy(&reg), MAC_KEY, [8u8; 16], DIALECT, MATCHER, CEILING_VER);
+    let sealed = seal(
+        &reference_policy(&reg),
+        MAC_KEY,
+        [8u8; 16],
+        DIALECT,
+        MATCHER,
+        CEILING_VER,
+    );
     let fresh = reference_policy(&reg);
     assert_eq!(
-        sealed.verify(MAC_KEY, &fresh, &reg.digest(), DIALECT, MATCHER, CEILING_VER + 1),
+        sealed.verify(
+            MAC_KEY,
+            &fresh,
+            &reg.digest(),
+            DIALECT,
+            MATCHER,
+            CEILING_VER + 1
+        ),
         Err(SealError::CeilingVersionMismatch)
     );
 }
@@ -325,8 +460,18 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
 
-    let pa = admit(&RootCeiling::parse_toml(a_toml, &reg).unwrap(), &empty, &reg).unwrap();
-    let pb = admit(&RootCeiling::parse_toml(b_toml, &reg).unwrap(), &empty, &reg).unwrap();
+    let pa = admit(
+        &RootCeiling::parse_toml(a_toml, &reg).unwrap(),
+        &empty,
+        &reg,
+    )
+    .unwrap();
+    let pb = admit(
+        &RootCeiling::parse_toml(b_toml, &reg).unwrap(),
+        &empty,
+        &reg,
+    )
+    .unwrap();
 
     let sa = seal(&pa, MAC_KEY, [9u8; 16], DIALECT, MATCHER, CEILING_VER);
     // The seal minted over order-A must NOT verify against order-B's policy.

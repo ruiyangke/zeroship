@@ -140,8 +140,12 @@ fn people_ops_generated() -> Vec<Op> {
 #[test]
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let generated = render_artifacts(&people_ops_generated(), SCHEMA).expect("generated render");
-    let manual =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("manual render");
+    let manual = render_artifacts_from_descriptors(
+        &[people_descriptor()],
+        SCHEMA,
+        &zeroship_confined_ceiling(),
+    )
+    .expect("manual render");
 
     assert_eq!(
         generated.runtime_json, manual.runtime_json,
@@ -158,8 +162,12 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 
 #[test]
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
-    let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
+    let artifacts = render_artifacts_from_descriptors(
+        &[people_descriptor()],
+        SCHEMA,
+        &zeroship_confined_ceiling(),
+    )
+    .expect("render");
     let v: Value = serde_json::from_str(&artifacts.runtime_json).expect("runtime json parses");
 
     // version == 1
@@ -197,24 +205,28 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     for idx in indexes {
         assert!(idx["name"].is_string(), "index name is a string: {idx}");
         assert!(
-            idx["fields"].as_array().is_some_and(|a| a.iter().all(Value::is_string)),
+            idx["fields"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(Value::is_string)),
             "index fields is a string array: {idx}"
         );
     }
     // Wall-2: the author-declared index survives into the descriptor alongside the
     // injected system indexes (it is NOT dropped by the producer).
     assert!(
-        indexes
-            .iter()
-            .any(|idx| idx["name"] == "people_name_idx"),
+        indexes.iter().any(|idx| idx["name"] == "people_name_idx"),
         "the author-declared index is emitted, not dropped: {indexes:?}"
     );
 }
 
 #[test]
 fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
-    let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
+    let artifacts = render_artifacts_from_descriptors(
+        &[people_descriptor()],
+        SCHEMA,
+        &zeroship_confined_ceiling(),
+    )
+    .expect("render");
     let ts = &artifacts.env_db_ts;
 
     // A real `.ts` module: the `@zeroship/db` import, a `const schema = { … }`
@@ -223,7 +235,10 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
         ts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";"),
         "env.db.ts imports the @zeroship/db surface:\n{ts}"
     );
-    assert!(ts.contains("const schema = {"), "has the schema const:\n{ts}");
+    assert!(
+        ts.contains("const schema = {"),
+        "has the schema const:\n{ts}"
+    );
     assert!(ts.contains("t."), "emits t.*() builder calls:\n{ts}");
     assert!(
         ts.contains("email: t.string().required(),"),
@@ -238,7 +253,10 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
         ts.contains("db: Db<typeof schema>;"),
         "augments Env.db to Db<typeof schema>:\n{ts}"
     );
-    assert!(ts.contains("export {};"), "is a module (export {{}}):\n{ts}");
+    assert!(
+        ts.contains("export {};"),
+        "is a module (export {{}}):\n{ts}"
+    );
 
     // It is NOT a `.d.ts` ambient context — the builder-call value expressions
     // above would be illegal there. (Pinned by the presence of `const schema = {`
@@ -255,8 +273,12 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
 
 #[test]
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
-    let artifacts =
-        render_artifacts_from_descriptors(&[people_descriptor()], SCHEMA, &zeroship_confined_ceiling()).expect("render");
+    let artifacts = render_artifacts_from_descriptors(
+        &[people_descriptor()],
+        SCHEMA,
+        &zeroship_confined_ceiling(),
+    )
+    .expect("render");
 
     // Clean: committed == freshly generated → Ok.
     zero_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)
@@ -264,7 +286,10 @@ fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
 
     // Drift in runtime_json → the runtime file is reported.
     let stale_runtime = artifacts.runtime_json.replace("\"strict\"", "\"lenient\"");
-    assert_ne!(stale_runtime, artifacts.runtime_json, "the mutation actually changed bytes");
+    assert_ne!(
+        stale_runtime, artifacts.runtime_json,
+        "the mutation actually changed bytes"
+    );
     let err = zero_migrate::check_artifacts(&artifacts, &stale_runtime, &artifacts.env_db_ts)
         .expect_err("a differing committed runtime.json is drift");
     match err {

@@ -77,7 +77,8 @@ pub fn admit(
     }
 
     // ── require/inject/validate collision blame (draft vs ceiling) ──────────────
-    let ceiling_injects = flatten_ceiling(&ceiling_layers, |k| matches!(k, RuleKind::Inject { .. }));
+    let ceiling_injects =
+        flatten_ceiling(&ceiling_layers, |k| matches!(k, RuleKind::Inject { .. }));
     let draft_injects = rules_of(&draft.rules, |k| matches!(k, RuleKind::Inject { .. }));
     check_inject_collisions(&ceiling_injects, &draft_injects)?;
     let draft_validates = rules_of(&draft.rules, |k| matches!(k, RuleKind::Validate { .. }));
@@ -132,7 +133,9 @@ fn check_grant_key(
 
     let def = registry
         .get(key)
-        .ok_or_else(|| ComposeError::RegistryOrValueMismatch { detail: format!("unknown knob {key}") })?;
+        .ok_or_else(|| ComposeError::RegistryOrValueMismatch {
+            detail: format!("unknown knob {key}"),
+        })?;
 
     // (1) UNCOVERED region: R := grantedScope(draft,k); for each ceiling grant rule r
     //     on k (across layers), R := R ∖ r.effective_scope — ITERATED, per rule, so

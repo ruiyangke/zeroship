@@ -199,8 +199,8 @@ fn mac_tag(
     ceiling_version: u64,
     nonce: &[u8; 16],
 ) -> [u8; 32] {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(mac_key)
-        .expect("HMAC accepts a key of any length");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(mac_key).expect("HMAC accepts a key of any length");
     mac.update(SEAL_DOMAIN);
 
     // (1) canonical resolved rule set (grants + requires + injects + validates), each
@@ -441,7 +441,11 @@ fn write_predicate(b: &mut Vec<u8>, pred: &ValidatePredicate) {
             b.push(0x02);
             write_str_vec(b, names);
         }
-        ValidatePredicate::TypeNullability { column, ty, nullable } => {
+        ValidatePredicate::TypeNullability {
+            column,
+            ty,
+            nullable,
+        } => {
             b.push(0x03);
             write_str(b, column);
             match ty {

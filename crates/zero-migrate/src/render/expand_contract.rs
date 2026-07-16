@@ -220,10 +220,7 @@ const EC_STEP_ABORT_C2: u8 = 7;
 /// The pending version is the durable identity of an online rename, while the
 /// ordinal distinguishes the ordered cleanup statements. Keeping this in one
 /// helper lets execution and status recognize the same resolver-owned entries.
-pub(crate) fn resolve_pending_abort_version(
-    pending_version: &str,
-    ordinal: usize,
-) -> MigrationId {
+pub(crate) fn resolve_pending_abort_version(pending_version: &str, ordinal: usize) -> MigrationId {
     let mut seed = pending_version.as_bytes().to_vec();
     seed.extend_from_slice(&(ordinal as u64).to_be_bytes());
     MigrationId::derive("resolve_pending_abort", &seed)

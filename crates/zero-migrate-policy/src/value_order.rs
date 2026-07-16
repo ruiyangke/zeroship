@@ -120,7 +120,9 @@ pub fn meet_value(
         KnobKind::Bool => Ok(KnobValue::Bool(as_bool(a)? && as_bool(b)?)),
         KnobKind::StrSet => {
             let (x, y) = (as_strset(a)?, as_strset(b)?);
-            Ok(KnobValue::StrSet(sorted(x.intersection(&y).cloned().collect())))
+            Ok(KnobValue::StrSet(sorted(
+                x.intersection(&y).cloned().collect(),
+            )))
         }
         KnobKind::UintCeiling { .. } => Ok(KnobValue::Uint(as_uint(a)?.min(as_uint(b)?))),
         KnobKind::OrderedEnum { variants } => {
@@ -236,8 +238,14 @@ mod tests {
         let k = KnobKind::StrSet;
         assert!(leq_value(&k, &bset(&["a"]), &bset(&["a", "b"])).unwrap());
         assert!(!leq_value(&k, &bset(&["a", "c"]), &bset(&["a", "b"])).unwrap());
-        assert_eq!(join_value(&k, &bset(&["a"]), &bset(&["b"])).unwrap(), bset(&["a", "b"]));
-        assert_eq!(meet_value(&k, &bset(&["a", "b"]), &bset(&["b", "c"])).unwrap(), bset(&["b"]));
+        assert_eq!(
+            join_value(&k, &bset(&["a"]), &bset(&["b"])).unwrap(),
+            bset(&["a", "b"])
+        );
+        assert_eq!(
+            meet_value(&k, &bset(&["a", "b"]), &bset(&["b", "c"])).unwrap(),
+            bset(&["b"])
+        );
     }
 
     #[test]
@@ -254,7 +262,10 @@ mod tests {
         assert_eq!(join_value(&k, &forbid, &warn).unwrap(), warn); // rank-max
         assert_eq!(meet_value(&k, &allow, &warn).unwrap(), warn); // rank-min
         assert_eq!(
-            rank(&["forbid".into(), "warn".into()], &KnobValue::Str("nope".into())),
+            rank(
+                &["forbid".into(), "warn".into()],
+                &KnobValue::Str("nope".into())
+            ),
             Err(ValueOrderError::UnknownVariant)
         );
     }
@@ -288,6 +299,9 @@ mod tests {
     #[test]
     fn shape_mismatch_is_error_not_panic() {
         let k = KnobKind::Bool;
-        assert_eq!(leq_value(&k, &KnobValue::Uint(1), &KnobValue::Bool(true)), Err(ValueOrderError::ShapeMismatch));
+        assert_eq!(
+            leq_value(&k, &KnobValue::Uint(1), &KnobValue::Bool(true)),
+            Err(ValueOrderError::ShapeMismatch)
+        );
     }
 }

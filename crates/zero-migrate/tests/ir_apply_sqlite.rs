@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
-    Approval, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LoadAndLowerError, MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
-    apply::executor::LockMode, resolve_create_table_policy,
+    apply::executor::LockMode, resolve_create_table_policy, Approval, DeclarativeApplyError,
+    EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
+    MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -252,19 +252,22 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
         .expect("read function results");
     assert_eq!(
         rows,
-        vec![vec![
-            Some("13".into()),
-            Some("12".into()),
-            Some("13".into()),
-            Some("z-b-z".into()),
-            Some("2026".into()),
-        ], vec![
-            Some("-12".into()),
-            Some("-13".into()),
-            Some("-12".into()),
-            Some("z-b-z".into()),
-            Some("2026".into()),
-        ]]
+        vec![
+            vec![
+                Some("13".into()),
+                Some("12".into()),
+                Some("13".into()),
+                Some("z-b-z".into()),
+                Some("2026".into()),
+            ],
+            vec![
+                Some("-12".into()),
+                Some("-13".into()),
+                Some("-12".into()),
+                Some("z-b-z".into()),
+                Some("2026".into()),
+            ]
+        ]
     );
 
     let large_rows = be
@@ -437,13 +440,7 @@ async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
     );
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite)
-        .load_and_lower_guarded(
-            &ir,
-            APP,
-            &registry(&[]),
-            &LiveSchema::default(),
-            &guard_cfg,
-        )
+        .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
         .expect("a fixed decimal create plus insert lowers on SQLite");
 
     MigrationEngine::new()

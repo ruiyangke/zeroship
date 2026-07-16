@@ -281,7 +281,7 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
         &ir(grouped_order_totals_view()),
         Dialect::Postgres,
         &[],
-        Some(&trusted)
+        Some(&trusted),
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
 }
@@ -300,7 +300,7 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
             &[],
-            Some(&trusted)
+            Some(&trusted),
         )
         .unwrap_err();
         assert_eq!(
@@ -324,13 +324,7 @@ fn structured_select_rejects_aggregate_group_by_item() {
     select.group_by = vec![count(Expr::col("id"))];
 
     let trusted = SchemaScope::Unconfined;
-    let err = validate_ir_scoped(
-        &ir(op),
-        Dialect::Postgres,
-        &[],
-        Some(&trusted)
-    )
-    .unwrap_err();
+    let err = validate_ir_scoped(&ir(op), Dialect::Postgres, &[], Some(&trusted)).unwrap_err();
     assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
     assert!(
         err.reason.contains("GROUP BY") && err.reason.contains("count"),
@@ -392,7 +386,7 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
         &ir(create_structured_view(None, Some(true))),
         Dialect::Sqlite,
         &[],
-        Some(&trusted)
+        Some(&trusted),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -410,7 +404,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
         &ir(create_structured_view(Some(true), Some(true))),
         Dialect::Postgres,
         &[],
-        Some(&trusted)
+        Some(&trusted),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -433,13 +427,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
 fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
-    validate_ir_scoped(
-        &structured,
-        Dialect::Postgres,
-        &[],
-        Some(&confined)
-    )
-    .unwrap();
+    validate_ir_scoped(&structured, Dialect::Postgres, &[], Some(&confined)).unwrap();
 
     let guard_cfg = GuardConfig::confined(SCHEMA);
     IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
@@ -447,13 +435,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
-    let err = validate_ir_scoped(
-        &raw,
-        Dialect::Postgres,
-        &[],
-        Some(&confined)
-    )
-    .unwrap_err();
+    let err = validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&confined)).unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
@@ -468,13 +450,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
-    validate_ir_scoped(
-        &raw,
-        Dialect::Postgres,
-        &[],
-        Some(&operator)
-    )
-    .unwrap();
+    validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&operator)).unwrap();
     IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
         .with_schema_scope(operator)
         .lower(&raw, &LiveSchema::default())
@@ -489,7 +465,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
             &ir(raw_view(sql, None)),
             Dialect::Postgres,
             &[],
-            Some(&operator)
+            Some(&operator),
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -508,7 +484,7 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
         Dialect::Postgres,
         &[],
-        Some(&operator)
+        Some(&operator),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);

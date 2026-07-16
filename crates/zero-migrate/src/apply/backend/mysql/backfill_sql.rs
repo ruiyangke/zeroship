@@ -1091,13 +1091,7 @@ mod tests {
     use crate::driver::{DbError, Value};
     use std::cell::{Cell, RefCell};
 
-    type ProgressRow = (
-        Option<String>,
-        Option<String>,
-        bool,
-        bool,
-        Option<String>,
-    );
+    type ProgressRow = (Option<String>, Option<String>, bool, bool, Option<String>);
 
     struct RecordingSession {
         log: RefCell<Vec<String>>,

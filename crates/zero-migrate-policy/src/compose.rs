@@ -85,11 +85,12 @@ impl TrustedDoc {
     /// `RootCeiling`-only, M-5). The caller MUST supply a host-authored source; a
     /// creator-editable document wired here would launder untrusted content into the
     /// trusted combinators (H-1 guidance).
-    pub fn register_catalog_entry(
-        src: &str,
-        registry: &PolicyRegistry,
-    ) -> Result<Self, LoadError> {
-        Ok(Self(PolicyDoc::parse_toml(src, registry, LoadContext::TrustedCatalogEntry)?))
+    pub fn register_catalog_entry(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
+        Ok(Self(PolicyDoc::parse_toml(
+            src,
+            registry,
+            LoadContext::TrustedCatalogEntry,
+        )?))
     }
 
     /// Mint a catalog-entry `TrustedDoc` from a host-authored JSON document.
@@ -97,7 +98,11 @@ impl TrustedDoc {
         src: &str,
         registry: &PolicyRegistry,
     ) -> Result<Self, LoadError> {
-        Ok(Self(PolicyDoc::parse_json(src, registry, LoadContext::TrustedCatalogEntry)?))
+        Ok(Self(PolicyDoc::parse_json(
+            src,
+            registry,
+            LoadContext::TrustedCatalogEntry,
+        )?))
     }
 
     /// Mint a catalog-entry `TrustedDoc` that may `extends` a base, resolving it
@@ -151,13 +156,17 @@ impl RootCeiling {
     /// — the only context under which a `mandatory` inject rule loads.
     pub fn parse_toml(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
         let doc = PolicyDoc::parse_toml(src, registry, LoadContext::RootCeiling)?;
-        Ok(Self { doc: TrustedDoc::from_validated(doc) })
+        Ok(Self {
+            doc: TrustedDoc::from_validated(doc),
+        })
     }
 
     /// Parse + validate a root-ceiling policy document from JSON.
     pub fn parse_json(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
         let doc = PolicyDoc::parse_json(src, registry, LoadContext::RootCeiling)?;
-        Ok(Self { doc: TrustedDoc::from_validated(doc) })
+        Ok(Self {
+            doc: TrustedDoc::from_validated(doc),
+        })
     }
 
     /// Parse + validate a root ceiling that may `extends` a trusted catalog base
@@ -167,13 +176,11 @@ impl RootCeiling {
         registry: &PolicyRegistry,
         catalog: &dyn crate::document::ProfileCatalog,
     ) -> Result<Self, LoadError> {
-        let doc = PolicyDoc::parse_toml_with_catalog(
-            src,
-            registry,
-            LoadContext::RootCeiling,
-            catalog,
-        )?;
-        Ok(Self { doc: TrustedDoc::from_validated(doc) })
+        let doc =
+            PolicyDoc::parse_toml_with_catalog(src, registry, LoadContext::RootCeiling, catalog)?;
+        Ok(Self {
+            doc: TrustedDoc::from_validated(doc),
+        })
     }
 
     /// The underlying validated document (for the composer).
@@ -254,7 +261,9 @@ pub enum ComposeError {
 
 impl From<ValueOrderError> for ComposeError {
     fn from(e: ValueOrderError) -> Self {
-        ComposeError::RegistryOrValueMismatch { detail: format!("{e:?}") }
+        ComposeError::RegistryOrValueMismatch {
+            detail: format!("{e:?}"),
+        }
     }
 }
 
@@ -346,14 +355,19 @@ impl GrantModel {
     pub(crate) fn build(rules: &[Rule], registry: &PolicyRegistry) -> Result<Self, ComposeError> {
         let mut keys: BTreeMap<KnobKey, GrantKeyMap> = BTreeMap::new();
         for rule in rules {
-            let RuleKind::Grant { key, value } = &rule.kind else { continue };
+            let RuleKind::Grant { key, value } = &rule.kind else {
+                continue;
+            };
             let def = lookup(registry, key)?;
             let entry = keys.entry(key.clone()).or_insert_with(|| GrantKeyMap {
                 kind: def.kind.clone(),
                 default: def.default.clone(),
                 rules: Vec::new(),
             });
-            entry.rules.push(GrantRule { scope: rule.scope.clone(), value: value.clone() });
+            entry.rules.push(GrantRule {
+                scope: rule.scope.clone(),
+                value: value.clone(),
+            });
         }
         Ok(Self { keys })
     }
@@ -448,12 +462,19 @@ pub(crate) fn pin_layer_key_to_default(
     kind: &KnobKind,
     default: &KnobValue,
 ) {
-    let entry = layer.grants.keys.entry(key.clone()).or_insert_with(|| GrantKeyMap {
-        kind: kind.clone(),
-        default: default.clone(),
-        rules: Vec::new(),
+    let entry = layer
+        .grants
+        .keys
+        .entry(key.clone())
+        .or_insert_with(|| GrantKeyMap {
+            kind: kind.clone(),
+            default: default.clone(),
+            rules: Vec::new(),
+        });
+    entry.rules.push(GrantRule {
+        scope: Scope::All,
+        value: default.clone(),
     });
-    entry.rules.push(GrantRule { scope: Scope::All, value: default.clone() });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -494,7 +515,10 @@ impl EffectivePolicy {
     /// an all-default policy, never an escalated one).
     #[must_use]
     pub fn deny_all(registry: &PolicyRegistry) -> Self {
-        Self { registry: registry.clone(), layers: Vec::new() }
+        Self {
+            registry: registry.clone(),
+            layers: Vec::new(),
+        }
     }
 
     /// Crate-internal constructor from a LAYER STACK (top-first). Used by the
@@ -610,7 +634,9 @@ impl EffectivePolicy {
         let mut out = BTreeSet::new();
         let mut seen_key = false;
         for layer in &self.layers {
-            let Some(km) = layer.grants.keys.get(key) else { continue };
+            let Some(km) = layer.grants.keys.get(key) else {
+                continue;
+            };
             seen_key = true;
             for r in &km.rules {
                 if leq_value(&km.kind, &r.value, &km.default).ok()? {
@@ -1013,9 +1039,13 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
 
     // (1) overlapping-scope inject/inject conflicts (column shape, PK pin, index name).
     for (i, a) in injects.iter().enumerate() {
-        let RuleKind::Inject { spec: sa } = &a.kind else { continue };
+        let RuleKind::Inject { spec: sa } = &a.kind else {
+            continue;
+        };
         for b in injects.iter().skip(i + 1) {
-            let RuleKind::Inject { spec: sb } = &b.kind else { continue };
+            let RuleKind::Inject { spec: sb } = &b.kind else {
+                continue;
+            };
             if matches!(a.scope.meet(&b.scope), Scope::Nothing) {
                 continue;
             }
@@ -1033,9 +1063,13 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
 
     // (2) inject-vs-validate contradiction across the merged layers.
     for inj in &injects {
-        let RuleKind::Inject { spec } = &inj.kind else { continue };
+        let RuleKind::Inject { spec } = &inj.kind else {
+            continue;
+        };
         for val in &validates {
-            let RuleKind::Validate { pred } = &val.kind else { continue };
+            let RuleKind::Validate { pred } = &val.kind else {
+                continue;
+            };
             if matches!(inj.scope.meet(&val.scope), Scope::Nothing) {
                 continue;
             }
@@ -1062,23 +1096,30 @@ pub fn finalize_ceiling(assembled: AssembledCeiling) -> Result<Ceiling, Finalize
     //     side bound transitively bounds every admitted draft's creatable region.
     check_ceiling_creatable_lint(&assembled)?;
 
-    Ok(Ceiling { registry: assembled.registry, layers: assembled.layers })
+    Ok(Ceiling {
+        registry: assembled.registry,
+        layers: assembled.layers,
+    })
 }
 
 /// The ceiling-side creatable-escape lint (II.2.6a, run at finalize). The ceiling's
 /// EFFECTIVE `core.create_table` granted scope (across its layers) must be `⊑` every
 /// mandatory ceiling inject's scope.
 fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), FinalizeError> {
-    let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else { return Ok(()) };
+    let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else {
+        return Ok(());
+    };
     // The ceiling's effective creatable scope: the ⊒-conservative join of each layer's
     // granted create_table scope (over-approx is the fail-closed direction for a ⊑
     // containment check — it can only turn a pass into a reject).
     let mut creatable = Scope::Nothing;
     for layer in &assembled.layers {
         if let Some(km) = layer.grants.keys.get(&create_key) {
-            let g = km.granted_scope().map_err(|_| FinalizeError::CreatableEscapesMandatoryInject {
-                inject_scope: "<unrepresentable creatable scope>".to_string(),
-            })?;
+            let g =
+                km.granted_scope()
+                    .map_err(|_| FinalizeError::CreatableEscapesMandatoryInject {
+                        inject_scope: "<unrepresentable creatable scope>".to_string(),
+                    })?;
             creatable = creatable.join(&g);
         }
     }
@@ -1087,7 +1128,9 @@ fn check_ceiling_creatable_lint(assembled: &AssembledCeiling) -> Result<(), Fina
     }
     for layer in &assembled.layers {
         for rule in &layer.injects {
-            let RuleKind::Inject { spec } = &rule.kind else { continue };
+            let RuleKind::Inject { spec } = &rule.kind else {
+                continue;
+            };
             if !spec.mandatory {
                 continue;
             }
@@ -1160,7 +1203,9 @@ pub fn restrict(
     let ig = GrantModel::build(&inner.doc().rules, registry)?;
 
     // ── grants: pointwise meet, represented as rule-scope ⊓ products ───────────
-    let mut clamped_grants = GrantModel { keys: BTreeMap::new() };
+    let mut clamped_grants = GrantModel {
+        keys: BTreeMap::new(),
+    };
     for key in og.key_union(&ig) {
         let km = clamp_grant_key(key, &og, &ig, registry)?;
         if !km.rules.is_empty() {
@@ -1170,15 +1215,34 @@ pub fn restrict(
 
     // ── require/inject/validate: UNION, each at its own scope (outer first) ──────
     let mut injects = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Inject { .. }));
-    injects.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Inject { .. })));
-    let mut requires = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Require { .. }));
-    requires.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Require { .. })));
-    let mut validates = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Validate { .. }));
-    validates.extend(rules_of(&inner.doc().rules, |k| matches!(k, RuleKind::Validate { .. })));
+    injects.extend(rules_of(&inner.doc().rules, |k| {
+        matches!(k, RuleKind::Inject { .. })
+    }));
+    let mut requires = rules_of(&outer.doc().rules, |k| {
+        matches!(k, RuleKind::Require { .. })
+    });
+    requires.extend(rules_of(&inner.doc().rules, |k| {
+        matches!(k, RuleKind::Require { .. })
+    }));
+    let mut validates = rules_of(&outer.doc().rules, |k| {
+        matches!(k, RuleKind::Validate { .. })
+    });
+    validates.extend(rules_of(&inner.doc().rules, |k| {
+        matches!(k, RuleKind::Validate { .. })
+    }));
 
     // A single flattened `Base` layer (the meet is one meet-layer, H-4).
-    let layer = Layer { tag: LayerTag::Base, grants: clamped_grants, requires, injects, validates };
-    Ok(AssembledCeiling { registry: registry.clone(), layers: vec![layer] })
+    let layer = Layer {
+        tag: LayerTag::Base,
+        grants: clamped_grants,
+        requires,
+        injects,
+        validates,
+    };
+    Ok(AssembledCeiling {
+        registry: registry.clone(),
+        layers: vec![layer],
+    })
 }
 
 /// Per-key grant clamp (II.3.2): the pointwise meet, materialized as the finite set of
@@ -1196,7 +1260,11 @@ fn clamp_grant_key(
     registry: &PolicyRegistry,
 ) -> Result<GrantKeyMap, ComposeError> {
     let def = lookup(registry, key)?;
-    let empty = GrantKeyMap { kind: def.kind.clone(), default: def.default.clone(), rules: Vec::new() };
+    let empty = GrantKeyMap {
+        kind: def.kind.clone(),
+        default: def.default.clone(),
+        rules: Vec::new(),
+    };
     let (Some(ok), Some(ik)) = (outer.keys.get(key), inner.keys.get(key)) else {
         // One-sided: meet with the other side's default (deny) ⇒ empty grant.
         return Ok(empty);
@@ -1212,7 +1280,11 @@ fn clamp_grant_key(
             rules.push(GrantRule { scope, value });
         }
     }
-    Ok(GrantKeyMap { kind: def.kind.clone(), default: def.default.clone(), rules })
+    Ok(GrantKeyMap {
+        kind: def.kind.clone(),
+        default: def.default.clone(),
+        rules,
+    })
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1230,9 +1302,13 @@ pub(crate) fn check_inject_collisions(
     draft_injects: &[Rule],
 ) -> Result<(), ComposeError> {
     for l in ceiling_injects {
-        let RuleKind::Inject { spec: ls } = &l.kind else { continue };
+        let RuleKind::Inject { spec: ls } = &l.kind else {
+            continue;
+        };
         for r in draft_injects {
-            let RuleKind::Inject { spec: rs } = &r.kind else { continue };
+            let RuleKind::Inject { spec: rs } = &r.kind else {
+                continue;
+            };
             // Only overlapping scopes can collide.
             if matches!(l.scope.meet(&r.scope), Scope::Nothing) {
                 continue;
@@ -1263,7 +1339,10 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
             if names_match(&ca.name, &cb.name)
                 && (ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default)
             {
-                return Some(format!("column `{}` injected with divergent shape", ca.name));
+                return Some(format!(
+                    "column `{}` injected with divergent shape",
+                    ca.name
+                ));
             }
         }
     }
@@ -1271,14 +1350,19 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     for ia in &a.indexes {
         for ib in &b.indexes {
             if names_match(&ia.name, &ib.name) && ia.columns != ib.columns {
-                return Some(format!("index `{}` injected with divergent columns", ia.name));
+                return Some(format!(
+                    "index `{}` injected with divergent columns",
+                    ia.name
+                ));
             }
         }
     }
     // Conflicting PK pins.
     if let (Some(pa), Some(pb)) = (&a.primary_key, &b.primary_key) {
         if pa != pb {
-            return Some(format!("primary key pinned to divergent columns {pa:?} vs {pb:?}"));
+            return Some(format!(
+                "primary key pinned to divergent columns {pa:?} vs {pb:?}"
+            ));
         }
         // Both pin the SAME PK but disagree on author-PK policy → conflict.
         if a.author_primary_key != b.author_primary_key {
@@ -1298,7 +1382,10 @@ fn inject_column_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
             if names_match(&ca.name, &cb.name)
                 && (ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default)
             {
-                return Some(format!("column `{}` injected with divergent shape", ca.name));
+                return Some(format!(
+                    "column `{}` injected with divergent shape",
+                    ca.name
+                ));
             }
         }
     }
@@ -1310,7 +1397,9 @@ fn inject_column_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
 fn inject_pk_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     if let (Some(pa), Some(pb)) = (&a.primary_key, &b.primary_key) {
         if pa != pb {
-            return Some(format!("primary key pinned to divergent columns {pa:?} vs {pb:?}"));
+            return Some(format!(
+                "primary key pinned to divergent columns {pa:?} vs {pb:?}"
+            ));
         }
         if a.author_primary_key != b.author_primary_key {
             return Some("primary key pinned with divergent author_primary_key policy".to_string());
@@ -1324,7 +1413,10 @@ fn inject_index_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     for ia in &a.indexes {
         for ib in &b.indexes {
             if names_match(&ia.name, &ib.name) && ia.columns != ib.columns {
-                return Some(format!("index `{}` injected with divergent columns", ia.name));
+                return Some(format!(
+                    "index `{}` injected with divergent columns",
+                    ia.name
+                ));
             }
         }
     }
@@ -1342,9 +1434,13 @@ pub(crate) fn check_validate_vs_inject(
     draft_validates: &[Rule],
 ) -> Result<(), ComposeError> {
     for inj in ceiling_injects {
-        let RuleKind::Inject { spec } = &inj.kind else { continue };
+        let RuleKind::Inject { spec } = &inj.kind else {
+            continue;
+        };
         for val in draft_validates {
-            let RuleKind::Validate { pred } = &val.kind else { continue };
+            let RuleKind::Validate { pred } = &val.kind else {
+                continue;
+            };
             if matches!(inj.scope.meet(&val.scope), Scope::Nothing) {
                 continue;
             }
@@ -1372,10 +1468,15 @@ pub(crate) fn check_validate_vs_inject(
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Look up a knob def, mapping a miss to a fail-closed compose error.
-pub(crate) fn lookup<'r>(registry: &'r PolicyRegistry, key: &KnobKey) -> Result<&'r KnobDef, ComposeError> {
+pub(crate) fn lookup<'r>(
+    registry: &'r PolicyRegistry,
+    key: &KnobKey,
+) -> Result<&'r KnobDef, ComposeError> {
     registry
         .get(key)
-        .ok_or_else(|| ComposeError::RegistryOrValueMismatch { detail: format!("unknown knob {key}") })
+        .ok_or_else(|| ComposeError::RegistryOrValueMismatch {
+            detail: format!("unknown knob {key}"),
+        })
 }
 
 /// Clone the rules matching a kind predicate, preserving document order.

@@ -37,7 +37,10 @@ impl KnobKey {
         if ns.is_empty() || name.is_empty() {
             return Err(KnobKeyError::Malformed);
         }
-        let ok = |seg: &str| seg.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        let ok = |seg: &str| {
+            seg.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
         if !ok(ns) || !ok(name) {
             return Err(KnobKeyError::IllegalChar);
         }
@@ -109,7 +112,10 @@ impl KnobValue {
             (KnobKind::StrSet, KnobValue::StrSet(_)) => Ok(()),
             (KnobKind::UintCeiling { hard_floor }, KnobValue::Uint(v)) => {
                 if v < hard_floor {
-                    Err(KnobValueError::BelowHardFloor { value: *v, hard_floor: *hard_floor })
+                    Err(KnobValueError::BelowHardFloor {
+                        value: *v,
+                        hard_floor: *hard_floor,
+                    })
                 } else {
                     Ok(())
                 }
@@ -367,12 +373,22 @@ mod tests {
         assert!(KnobValue::Uint(5).validate_for(&KnobKind::Bool).is_err());
         assert_eq!(
             KnobValue::Uint(0).validate_for(&KnobKind::UintCeiling { hard_floor: 1 }),
-            Err(KnobValueError::BelowHardFloor { value: 0, hard_floor: 1 })
+            Err(KnobValueError::BelowHardFloor {
+                value: 0,
+                hard_floor: 1
+            })
         );
-        assert!(KnobValue::Uint(1).validate_for(&KnobKind::UintCeiling { hard_floor: 1 }).is_ok());
-        let oe = KnobKind::OrderedEnum { variants: vec!["forbid".into(), "allow".into()] };
+        assert!(KnobValue::Uint(1)
+            .validate_for(&KnobKind::UintCeiling { hard_floor: 1 })
+            .is_ok());
+        let oe = KnobKind::OrderedEnum {
+            variants: vec!["forbid".into(), "allow".into()],
+        };
         assert!(KnobValue::Str("allow".into()).validate_for(&oe).is_ok());
-        assert_eq!(KnobValue::Str("nope".into()).validate_for(&oe), Err(KnobValueError::UnknownVariant));
+        assert_eq!(
+            KnobValue::Str("nope".into()).validate_for(&oe),
+            Err(KnobValueError::UnknownVariant)
+        );
     }
 
     #[test]
@@ -385,7 +401,9 @@ mod tests {
         // HostEnforced has a distinct canonical encoding → a distinct registry digest.
         let base = KnobDef {
             key: KnobKey::parse("sec.require_approval").unwrap(),
-            kind: KnobKind::OrderedEnum { variants: vec!["never".into(), "always".into()] },
+            kind: KnobKind::OrderedEnum {
+                variants: vec!["never".into(), "always".into()],
+            },
             polarity: Polarity::Require,
             default: KnobValue::Str("never".into()),
             enforcement: Enforcement::DeclaredOnly,

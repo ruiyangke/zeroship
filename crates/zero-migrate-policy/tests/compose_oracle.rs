@@ -21,7 +21,7 @@
 
 use zero_migrate_policy::{
     admit, finalize_ceiling, overlay, restrict, ComposeError, Enforcement, KnobDef, KnobKey,
-    KnobKind, KnobValue, ObjectName, PolicyDoc, PolicyRegistry, Polarity, RootCeiling, RuleKind,
+    KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCeiling, RuleKind,
     TrustedDoc,
 };
 
@@ -50,14 +50,24 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
 fn registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            def(BOOL_KEY, KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def(
+                BOOL_KEY,
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+            ),
             def(
                 UINT_KEY,
                 KnobKind::UintCeiling { hard_floor: 1 },
                 Polarity::Grant,
                 KnobValue::Uint(1),
             ),
-            def(CREATE_KEY, KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def(
+                CREATE_KEY,
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+            ),
         ])
         .unwrap()
 }
@@ -90,7 +100,13 @@ fn universe() -> Vec<ObjectName> {
 /// grant rules on `k` whose scope covers `o`, else the knob default. Computed here
 /// from `doc.rules` using ONLY the public scope-membership + a hand-rolled value
 /// join — deliberately NOT the composer, so this is an independent oracle.
-fn value_gt(doc: &PolicyDoc, kind: &KnobKind, default: &KnobValue, key: &str, o: &ObjectName) -> KnobValue {
+fn value_gt(
+    doc: &PolicyDoc,
+    kind: &KnobKind,
+    default: &KnobValue,
+    key: &str,
+    o: &ObjectName,
+) -> KnobValue {
     let mut acc = default.clone();
     for rule in &doc.rules {
         if let RuleKind::Grant { key: rk, value } = &rule.kind {
@@ -145,7 +161,11 @@ fn meet_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
 fn materialized_keys() -> Vec<(&'static str, KnobKind, KnobValue)> {
     vec![
         (BOOL_KEY, KnobKind::Bool, KnobValue::Bool(false)),
-        (UINT_KEY, KnobKind::UintCeiling { hard_floor: 1 }, KnobValue::Uint(1)),
+        (
+            UINT_KEY,
+            KnobKind::UintCeiling { hard_floor: 1 },
+            KnobValue::Uint(1),
+        ),
     ]
 }
 
@@ -243,8 +263,12 @@ fn doc_toml(gens: &[Gen]) -> String {
 
 /// Parse a generated doc as a plain (non-root) UNTRUSTED draft layer.
 fn parse_draft(gens: &[Gen]) -> PolicyDoc {
-    PolicyDoc::parse_toml(&doc_toml(gens), &registry(), zero_migrate_policy::LoadContext::NonRootLayer)
-        .unwrap_or_else(|e| panic!("draft parse failed: {e:?}\n{}", doc_toml(gens)))
+    PolicyDoc::parse_toml(
+        &doc_toml(gens),
+        &registry(),
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap_or_else(|e| panic!("draft parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
 /// Parse a generated doc as a root ceiling.
@@ -281,8 +305,16 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
             for cbool in bool_vals {
                 for cuint in uint_vals {
                     let ceiling_gens = vec![
-                        Gen { key: BOOL_KEY, pat: cpat, value: cbool },
-                        Gen { key: UINT_KEY, pat: cpat2, value: cuint },
+                        Gen {
+                            key: BOOL_KEY,
+                            pat: cpat,
+                            value: cbool,
+                        },
+                        Gen {
+                            key: UINT_KEY,
+                            pat: cpat2,
+                            value: cuint,
+                        },
                     ];
                     let ceiling_doc = parse_draft(&ceiling_gens);
                     let root = parse_root(&ceiling_gens);
@@ -296,8 +328,16 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
                             for dbool in bool_vals {
                                 for duint in uint_vals {
                                     let draft_gens = vec![
-                                        Gen { key: BOOL_KEY, pat: dpat, value: dbool },
-                                        Gen { key: UINT_KEY, pat: dpat2, value: duint },
+                                        Gen {
+                                            key: BOOL_KEY,
+                                            pat: dpat,
+                                            value: dbool,
+                                        },
+                                        Gen {
+                                            key: UINT_KEY,
+                                            pat: dpat2,
+                                            value: duint,
+                                        },
                                     ];
                                     let draft = parse_draft(&draft_gens);
 
@@ -352,7 +392,10 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_ceiling() {
     }
 
     assert!(total >= 1000, "sweep too small: {total}");
-    assert!(accepted > 0 && rejected > 0, "sweep degenerate: acc={accepted} rej={rejected}");
+    assert!(
+        accepted > 0 && rejected > 0,
+        "sweep degenerate: acc={accepted} rej={rejected}"
+    );
     eprintln!("admit oracle: total={total} accepted={accepted} rejected={rejected}");
 }
 
@@ -373,10 +416,22 @@ fn pinned_value_blind_escalation_rejects() {
     // At app_main.t: value(ceiling)=60, value(draft)=600 → REJECT.
     let reg = registry();
     let root = parse_root(&[
-        Gen { key: UINT_KEY, pat: Pat::AppStar, value: "60" },
-        Gen { key: UINT_KEY, pat: Pat::Staging, value: "600" },
+        Gen {
+            key: UINT_KEY,
+            pat: Pat::AppStar,
+            value: "60",
+        },
+        Gen {
+            key: UINT_KEY,
+            pat: Pat::Staging,
+            value: "600",
+        },
     ]);
-    let draft = parse_draft(&[Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" }]);
+    let draft = parse_draft(&[Gen {
+        key: UINT_KEY,
+        pat: Pat::AppStar,
+        value: "600",
+    }]);
     let got = admit(&root, &draft, &reg);
     assert!(
         matches!(got, Err(ComposeError::GrantExceedsCeiling { .. })),
@@ -389,8 +444,16 @@ fn pinned_exclude_escalation_rejects() {
     // Ceiling grant @ { app_* exclude app_tmp_* } = true. Draft grant @ { app_* } = true.
     // The draft grants at app_tmp_x, which the ceiling excludes → REJECT.
     let reg = registry();
-    let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStarNoTmp, value: "true" }]);
-    let draft = parse_draft(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let root = parse_root(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStarNoTmp,
+        value: "true",
+    }]);
+    let draft = parse_draft(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
     let got = admit(&root, &draft, &reg);
     assert!(
         matches!(
@@ -407,14 +470,33 @@ fn pinned_strictly_inside_accepts() {
     // Ceiling grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 → ACCEPT.
     let reg = registry();
     let root = parse_root(&[
-        Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" },
-        Gen { key: UINT_KEY, pat: Pat::AppStar, value: "600" },
+        Gen {
+            key: BOOL_KEY,
+            pat: Pat::AppStar,
+            value: "true",
+        },
+        Gen {
+            key: UINT_KEY,
+            pat: Pat::AppStar,
+            value: "600",
+        },
     ]);
     let draft = parse_draft(&[
-        Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" },
-        Gen { key: UINT_KEY, pat: Pat::AppStar, value: "60" },
+        Gen {
+            key: BOOL_KEY,
+            pat: Pat::AppStar,
+            value: "true",
+        },
+        Gen {
+            key: UINT_KEY,
+            pat: Pat::AppStar,
+            value: "60",
+        },
     ]);
-    assert!(admit(&root, &draft, &reg).is_ok(), "strictly-inside draft must ACCEPT");
+    assert!(
+        admit(&root, &draft, &reg).is_ok(),
+        "strictly-inside draft must ACCEPT"
+    );
 }
 
 /// **THE C-1 COUNTEREXAMPLE.** Ceiling grants `raw_sql` on `Of{[app_*],
@@ -469,8 +551,18 @@ scope = { include = ["app_secret"] }
     // disjoint), while the draft raises it to TRUE → true ⋢ false → escalation.
     let secret = ObjectName::table(b"app_secret".to_vec(), b"t".to_vec());
     let ceiling_doc = root.doc();
-    let cv = value_gt(ceiling_doc, &KnobKind::Bool, &KnobValue::Bool(false), BOOL_KEY, &secret);
-    assert_eq!(cv, KnobValue::Bool(false), "ceiling denies app_secret (exclude honored)");
+    let cv = value_gt(
+        ceiling_doc,
+        &KnobKind::Bool,
+        &KnobValue::Bool(false),
+        BOOL_KEY,
+        &secret,
+    );
+    assert_eq!(
+        cv,
+        KnobValue::Bool(false),
+        "ceiling denies app_secret (exclude honored)"
+    );
 }
 
 /// **PIN the layered override.** Draft `timeout=10000@app_*` over ceiling
@@ -569,10 +661,18 @@ scope = { include = ["app_*"] }
 #[test]
 fn pinned_silent_draft_inherits_ceiling_grant() {
     let reg = registry();
-    let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let root = parse_root(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
     // Draft says nothing about raw_sql.
-    let draft = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
-        .unwrap();
+    let draft = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
     let pk = KnobKey::parse(BOOL_KEY).unwrap();
     let app_main_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
@@ -601,8 +701,16 @@ fn oracle_restrict_is_exact_pointwise_meet() {
         for av in uint_vals {
             for &bp in &pats {
                 for bv in bool_vals {
-                    let a_gens = vec![Gen { key: UINT_KEY, pat: ap, value: av }];
-                    let b_gens = vec![Gen { key: BOOL_KEY, pat: bp, value: bv }];
+                    let a_gens = vec![Gen {
+                        key: UINT_KEY,
+                        pat: ap,
+                        value: av,
+                    }];
+                    let b_gens = vec![Gen {
+                        key: BOOL_KEY,
+                        pat: bp,
+                        value: bv,
+                    }];
                     let a = parse_trusted(&a_gens);
                     let b = parse_trusted(&b_gens);
                     let a_doc = parse_draft(&a_gens);
@@ -661,8 +769,16 @@ fn oracle_restrict_commutative() {
         for val_a in uint_vals {
             for &pat_b in &pats {
                 for val_b in uint_vals {
-                    let doc_a = parse_trusted(&[Gen { key: UINT_KEY, pat: pat_a, value: val_a }]);
-                    let doc_b = parse_trusted(&[Gen { key: UINT_KEY, pat: pat_b, value: val_b }]);
+                    let doc_a = parse_trusted(&[Gen {
+                        key: UINT_KEY,
+                        pat: pat_a,
+                        value: val_a,
+                    }]);
+                    let doc_b = parse_trusted(&[Gen {
+                        key: UINT_KEY,
+                        pat: pat_b,
+                        value: val_b,
+                    }]);
 
                     let ab = finalize_ceiling(restrict(&doc_a, &doc_b, &reg).unwrap()).unwrap();
                     let ba = finalize_ceiling(restrict(&doc_b, &doc_a, &reg).unwrap()).unwrap();
@@ -682,7 +798,10 @@ fn oracle_restrict_commutative() {
             }
         }
     }
-    assert!(checked >= 30, "restrict-commutativity sweep too small: {checked}");
+    assert!(
+        checked >= 30,
+        "restrict-commutativity sweep too small: {checked}"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -704,8 +823,16 @@ fn oracle_overlay_is_presence_last_wins() {
                 for ov in uint_vals {
                     // base sets UINT@bp=bv; over sets UINT@op=ov. Where `over` covers,
                     // over wins (presence, last-wins); else base.
-                    let base_gens = vec![Gen { key: UINT_KEY, pat: bp, value: bv }];
-                    let over_gens = vec![Gen { key: UINT_KEY, pat: op, value: ov }];
+                    let base_gens = vec![Gen {
+                        key: UINT_KEY,
+                        pat: bp,
+                        value: bv,
+                    }];
+                    let over_gens = vec![Gen {
+                        key: UINT_KEY,
+                        pat: op,
+                        value: ov,
+                    }];
                     let base = parse_trusted(&base_gens);
                     let over = parse_trusted(&over_gens);
                     let base_doc = parse_draft(&base_gens);
@@ -775,25 +902,47 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
     .unwrap();
 
     let ceiling = finalize_ceiling(overlay(&base, &over, &reg).unwrap()).unwrap();
-    let empty = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
-        .unwrap();
+    let empty = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
     let ep = admit(&ceiling, &empty, &reg).unwrap();
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let staging_t = ObjectName::table(b"staging".to_vec(), b"t".to_vec());
 
     // Both require rules survive (accumulate).
-    assert!(ep.obligations(&app_t).iter().any(|(k, _)| k.as_str() == "safety.require_rls"));
-    assert!(ep.obligations(&staging_t).iter().any(|(k, _)| k.as_str() == "safety.require_rls"));
+    assert!(ep
+        .obligations(&app_t)
+        .iter()
+        .any(|(k, _)| k.as_str() == "safety.require_rls"));
+    assert!(ep
+        .obligations(&staging_t)
+        .iter()
+        .any(|(k, _)| k.as_str() == "safety.require_rls"));
     // Both injects survive on app_* (base created_at + over updated_at).
     let injs = ep.injects_for(&app_t);
-    let names: Vec<&str> = injs.iter().flat_map(|s| s.columns.iter().map(|c| c.name.as_str())).collect();
-    assert!(names.contains(&"created_at"), "base inject dropped: {names:?}");
-    assert!(names.contains(&"updated_at"), "over inject dropped: {names:?}");
+    let names: Vec<&str> = injs
+        .iter()
+        .flat_map(|s| s.columns.iter().map(|c| c.name.as_str()))
+        .collect();
+    assert!(
+        names.contains(&"created_at"),
+        "base inject dropped: {names:?}"
+    );
+    assert!(
+        names.contains(&"updated_at"),
+        "over inject dropped: {names:?}"
+    );
     // Base-then-over order (M-3): created_at (base) precedes updated_at (over).
     let ci = names.iter().position(|n| *n == "created_at").unwrap();
     let ui = names.iter().position(|n| *n == "updated_at").unwrap();
-    assert!(ci < ui, "overlay inject order must be base-then-over: {names:?}");
+    assert!(
+        ci < ui,
+        "overlay inject order must be base-then-over: {names:?}"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -802,7 +951,12 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
 
 fn registry_with_require() -> PolicyRegistry {
     registry()
-        .with([def("safety.require_rls", KnobKind::Bool, Polarity::Require, KnobValue::Bool(false))])
+        .with([def(
+            "safety.require_rls",
+            KnobKind::Bool,
+            Polarity::Require,
+            KnobValue::Bool(false),
+        )])
         .unwrap()
 }
 
@@ -849,7 +1003,8 @@ scope = { include = ["staging"] }
 
     let obs = ep.obligations(&app_t);
     assert!(
-        obs.iter().any(|(k, v)| k.as_str() == "safety.require_rls" && *v == KnobValue::Bool(true)),
+        obs.iter()
+            .any(|(k, v)| k.as_str() == "safety.require_rls" && *v == KnobValue::Bool(true)),
         "ceiling require dropped: {obs:?}"
     );
     let injs = ep.injects_for(&app_t);
@@ -904,8 +1059,9 @@ scope = { include = ["app_*"] }
     let obs = ep.obligations(&app_t);
 
     assert!(
-        obs.iter().any(|(k, v)| k.as_str() == "sec.require_approval"
-            && *v == KnobValue::Str("always".into())),
+        obs.iter()
+            .any(|(k, v)| k.as_str() == "sec.require_approval"
+                && *v == KnobValue::Str("always".into())),
         "operator `always` obligation dropped by creator draft: {obs:?}"
     );
     let loosest = obs
@@ -921,7 +1077,11 @@ scope = { include = ["app_*"] }
             "always" => 2,
             _ => 3,
         });
-    assert_eq!(loosest.as_deref(), Some("always"), "creator `never` must not lower `always`");
+    assert_eq!(
+        loosest.as_deref(),
+        Some("always"),
+        "creator `never` must not lower `always`"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -981,7 +1141,10 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
     .unwrap();
     let got = admit(&root, &draft, &reg);
     assert!(
-        matches!(got, Err(ComposeError::DraftValidateContradictsCeilingInject { .. })),
+        matches!(
+            got,
+            Err(ComposeError::DraftValidateContradictsCeilingInject { .. })
+        ),
         "draft validate contradicting ceiling inject must REJECT, got {got:?}"
     );
 }
@@ -1057,7 +1220,10 @@ scope = "all"
     let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
     let got = finalize_ceiling(assembled);
     assert!(
-        matches!(got, Err(FinalizeError::CreatableEscapesMandatoryInject { .. })),
+        matches!(
+            got,
+            Err(FinalizeError::CreatableEscapesMandatoryInject { .. })
+        ),
         "creatable escaping mandatory inject must REJECT at finalize, got {got:?}"
     );
 }
@@ -1080,7 +1246,10 @@ scope = { include = ["app_*"] }
     )
     .unwrap();
     let assembled = restrict(root.as_trusted(), root.as_trusted(), &reg).unwrap();
-    assert!(finalize_ceiling(assembled).is_ok(), "creatable within mandatory inject must finalize");
+    assert!(
+        finalize_ceiling(assembled).is_ok(),
+        "creatable within mandatory inject must finalize"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1102,8 +1271,12 @@ primary_key = ["id"]
         &reg,
     )
     .unwrap();
-    let draft = PolicyDoc::parse_toml("policy_version = 1\n", &reg, zero_migrate_policy::LoadContext::NonRootLayer)
-        .unwrap();
+    let draft = PolicyDoc::parse_toml(
+        "policy_version = 1\n",
+        &reg,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
@@ -1128,16 +1301,38 @@ fn effective_policy_only_via_admit_or_deny_all() {
 
     let floor = zero_migrate_policy::EffectivePolicy::deny_all(&reg);
     let o = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
-    assert_eq!(floor.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(false)));
+    assert_eq!(
+        floor.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o),
+        Some(KnobValue::Bool(false))
+    );
 
-    let root = parse_root(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let draft = parse_draft(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let root = parse_root(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
+    let draft = parse_draft(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
     let ep = admit(&root, &draft, &reg).unwrap();
-    assert_eq!(ep.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o), Some(KnobValue::Bool(true)));
+    assert_eq!(
+        ep.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o),
+        Some(KnobValue::Bool(true))
+    );
 
     // A finalized restrict ceiling, then admitted.
-    let a = parse_trusted(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
-    let b = parse_trusted(&[Gen { key: BOOL_KEY, pat: Pat::AppStar, value: "true" }]);
+    let a = parse_trusted(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
+    let b = parse_trusted(&[Gen {
+        key: BOOL_KEY,
+        pat: Pat::AppStar,
+        value: "true",
+    }]);
     let ceiling = finalize_ceiling(restrict(&a, &b, &reg).unwrap()).unwrap();
     let _ep2 = admit(&ceiling, &draft, &reg).unwrap();
 
@@ -1167,7 +1362,12 @@ fn registry_with_noninherit() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
             power,
-            def(BOOL_KEY, KnobKind::Bool, Polarity::Grant, KnobValue::Bool(false)),
+            def(
+                BOOL_KEY,
+                KnobKind::Bool,
+                Polarity::Grant,
+                KnobValue::Bool(false),
+            ),
         ])
         .unwrap()
 }
@@ -1255,10 +1455,16 @@ scope = { include = ["app_main"] }
     let app_other_t = ObjectName::table(b"app_tmp_x".to_vec(), b"t".to_vec());
 
     // Where the draft EXPLICITLY asked (app_main), it earns the grant.
-    assert_eq!(ep.grants(&power_key, &app_main_t), Some(KnobValue::Bool(true)));
+    assert_eq!(
+        ep.grants(&power_key, &app_main_t),
+        Some(KnobValue::Bool(true))
+    );
     // Where it stayed silent (app_tmp_x, still under the ceiling's app_*), it does
     // NOT inherit — default deny.
-    assert_eq!(ep.grants(&power_key, &app_other_t), Some(KnobValue::Bool(false)));
+    assert_eq!(
+        ep.grants(&power_key, &app_other_t),
+        Some(KnobValue::Bool(false))
+    );
 }
 
 // Pat needs Debug for the panic messages.

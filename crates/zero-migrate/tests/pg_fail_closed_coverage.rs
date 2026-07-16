@@ -439,13 +439,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         assert!(seen.insert(kind), "{kind} sampled twice");
 
         let ir = ir_with(op.clone());
-        validate_ir_scoped(
-            &ir,
-            Dialect::Postgres,
-            &[],
-            Some(&platform_scope)
-        )
-        .unwrap_or_else(|err| panic!("{kind} must validate on PG under platform scope: {err:?}"));
+        validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&platform_scope)).unwrap_or_else(
+            |err| panic!("{kind} must validate on PG under platform scope: {err:?}"),
+        );
 
         let migrations = IrAuthor::new("app", "app_test", SqlDialect::Postgres)
             .with_schema_scope(platform_scope.clone())
@@ -458,26 +454,16 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG lower produced no SQL"
         );
 
-        let confined_err = validate_ir_scoped(
-            &ir,
-            Dialect::Postgres,
-            &[],
-            Some(&confined_scope)
-        )
-        .expect_err("confined PG scope must refuse vendor ops by capability");
+        let confined_err = validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&confined_scope))
+            .expect_err("confined PG scope must refuse vendor ops by capability");
         assert_eq!(
             confined_err.code, CODE_VENDOR_OP_DENIED,
             "{kind} under confined PG must fail as VENDOR_OP_DENIED, got {confined_err:?}"
         );
 
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-            let err = validate_ir_scoped(
-                &ir,
-                dialect,
-                &[],
-                Some(&platform_scope)
-            )
-            .expect_err("PG vendor op must refuse off Postgres");
+            let err = validate_ir_scoped(&ir, dialect, &[], Some(&platform_scope))
+                .expect_err("PG vendor op must refuse off Postgres");
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
                 "{kind} on {dialect:?} must fail closed as UNSUPPORTED, got {err:?}"

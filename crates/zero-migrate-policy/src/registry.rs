@@ -35,7 +35,9 @@ impl PolicyRegistry {
     /// content — only the mechanism.
     #[must_use]
     pub fn empty() -> Self {
-        Self { defs: BTreeMap::new() }
+        Self {
+            defs: BTreeMap::new(),
+        }
     }
 
     /// Extend the registry with additional knob defs (engine builtins or consumer
@@ -169,6 +171,9 @@ mod tests {
 
     #[test]
     fn empty_registry_has_stable_digest() {
-        assert_eq!(PolicyRegistry::empty().digest(), PolicyRegistry::empty().digest());
+        assert_eq!(
+            PolicyRegistry::empty().digest(),
+            PolicyRegistry::empty().digest()
+        );
     }
 }

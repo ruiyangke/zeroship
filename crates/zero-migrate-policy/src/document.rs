@@ -47,7 +47,10 @@ impl LoadContext {
     /// Whether this context is trusted (may use `extends`).
     #[must_use]
     fn is_trusted(self) -> bool {
-        matches!(self, LoadContext::RootCeiling | LoadContext::TrustedCatalogEntry)
+        matches!(
+            self,
+            LoadContext::RootCeiling | LoadContext::TrustedCatalogEntry
+        )
     }
 }
 
@@ -95,7 +98,11 @@ pub enum LoadError {
     UnknownKnobKey { key: String },
     /// A `[[grant]]` names a non-Grant-polarity knob, or a `[[require]]` a
     /// non-Require-polarity knob (section↔polarity lint, II.3).
-    SectionPolarityMismatch { key: String, expected: Polarity, found: Polarity },
+    SectionPolarityMismatch {
+        key: String,
+        expected: Polarity,
+        found: Polarity,
+    },
     /// A knob value is invalid for its knob's kind (or below a `UintCeiling`
     /// hard floor) (II.2.1).
     InvalidKnobValue { key: String, detail: String },
@@ -257,7 +264,9 @@ enum WirePredicate {
         #[serde(default)]
         forbid: Vec<String>,
     },
-    ForbiddenColumns { names: Vec<String> },
+    ForbiddenColumns {
+        names: Vec<String>,
+    },
     TypeNullability {
         column: String,
         #[serde(default)]
@@ -266,8 +275,12 @@ enum WirePredicate {
         #[serde(default)]
         nullable: Option<bool>,
     },
-    RequireIndex { columns: Vec<String> },
-    TableNameForbidden { patterns: Vec<String> },
+    RequireIndex {
+        columns: Vec<String>,
+    },
+    TableNameForbidden {
+        patterns: Vec<String>,
+    },
 }
 
 /// A knob value on the wire, matching the four `KnobValue` shapes.
@@ -302,8 +315,9 @@ impl PolicyDoc {
         registry: &PolicyRegistry,
         ctx: LoadContext,
     ) -> Result<PolicyDoc, LoadError> {
-        let wire: WireDoc =
-            toml::from_str(src).map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+        let wire: WireDoc = toml::from_str(src).map_err(|e| LoadError::Parse {
+            detail: e.to_string(),
+        })?;
         Self::resolve(wire, registry, ctx)
     }
 
@@ -313,8 +327,9 @@ impl PolicyDoc {
         registry: &PolicyRegistry,
         ctx: LoadContext,
     ) -> Result<PolicyDoc, LoadError> {
-        let wire: WireDoc =
-            serde_json::from_str(src).map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+        let wire: WireDoc = serde_json::from_str(src).map_err(|e| LoadError::Parse {
+            detail: e.to_string(),
+        })?;
         Self::resolve(wire, registry, ctx)
     }
 
@@ -331,8 +346,9 @@ impl PolicyDoc {
         ctx: LoadContext,
         catalog: &dyn ProfileCatalog,
     ) -> Result<PolicyDoc, LoadError> {
-        let wire: WireDoc =
-            toml::from_str(src).map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+        let wire: WireDoc = toml::from_str(src).map_err(|e| LoadError::Parse {
+            detail: e.to_string(),
+        })?;
         Self::resolve_with_catalog(wire, registry, ctx, Some(catalog), &mut Vec::new())
     }
 
@@ -356,7 +372,9 @@ impl PolicyDoc {
     ) -> Result<PolicyDoc, LoadError> {
         // Gate: policy_version major.
         if wire.policy_version != SUPPORTED_POLICY_VERSION {
-            return Err(LoadError::UnknownPolicyVersion { found: wire.policy_version });
+            return Err(LoadError::UnknownPolicyVersion {
+                found: wire.policy_version,
+            });
         }
 
         // Gate: `extends` provenance (H-1, II.7).
@@ -387,7 +405,10 @@ impl PolicyDoc {
             let value = g.value.into_knob_value();
             validate_value(&g.key, &value, &def.kind)?;
             let scope = resolve_rule_scope(g.scope, def, &default_scope, RuleClass::Grant, &g.key)?;
-            rules.push(Rule { scope, kind: RuleKind::Grant { key, value } });
+            rules.push(Rule {
+                scope,
+                kind: RuleKind::Grant { key, value },
+            });
         }
 
         // ── requires ─────────────────────────────────────────────────────────────
@@ -407,7 +428,10 @@ impl PolicyDoc {
             // A3 grant-unbounded gate (that is Grant-kind only).
             let scope =
                 resolve_rule_scope(r.scope, def, &default_scope, RuleClass::Require, &r.key)?;
-            rules.push(Rule { scope, kind: RuleKind::Require { key, value } });
+            rules.push(Rule {
+                scope,
+                kind: RuleKind::Require { key, value },
+            });
         }
 
         // ── injects ──────────────────────────────────────────────────────────────
@@ -418,14 +442,20 @@ impl PolicyDoc {
             }
             let scope = resolve_content_scope(inj.scope.take(), &default_scope)?;
             let spec = resolve_inject(inj)?;
-            rules.push(Rule { scope, kind: RuleKind::Inject { spec } });
+            rules.push(Rule {
+                scope,
+                kind: RuleKind::Inject { spec },
+            });
         }
 
         // ── validates ─────────────────────────────────────────────────────────────
         for val in wire.validate {
             let scope = resolve_content_scope(val.scope, &default_scope)?;
             let pred = resolve_predicate(val.predicate)?;
-            rules.push(Rule { scope, kind: RuleKind::Validate { pred } });
+            rules.push(Rule {
+                scope,
+                kind: RuleKind::Validate { pred },
+            });
         }
 
         // Cross-rule single-doc legality: self-contradictory inject vs validate.
@@ -451,12 +481,16 @@ impl PolicyDoc {
                 return Err(LoadError::ExtendsCycle { base: base_name });
             }
             seen.push(base_name.clone());
-            let base_src = catalog
-                .get_source(&base_name)
-                .ok_or_else(|| LoadError::ExtendsUnknownBase { base: base_name.clone() })?;
+            let base_src =
+                catalog
+                    .get_source(&base_name)
+                    .ok_or_else(|| LoadError::ExtendsUnknownBase {
+                        base: base_name.clone(),
+                    })?;
             // Resolve the base as a TRUSTED catalog entry (it may itself `extends`).
-            let base_wire: WireDoc = toml::from_str(&base_src)
-                .map_err(|e| LoadError::Parse { detail: e.to_string() })?;
+            let base_wire: WireDoc = toml::from_str(&base_src).map_err(|e| LoadError::Parse {
+                detail: e.to_string(),
+            })?;
             let base = Self::resolve_with_catalog(
                 base_wire,
                 registry,
@@ -522,11 +556,14 @@ fn lookup_knob<'r>(
     registry: &'r PolicyRegistry,
     key: &str,
 ) -> Result<(KnobKey, &'r KnobDef), LoadError> {
-    let parsed =
-        KnobKey::parse(key).map_err(|_| LoadError::MalformedKnobKey { key: key.to_string() })?;
+    let parsed = KnobKey::parse(key).map_err(|_| LoadError::MalformedKnobKey {
+        key: key.to_string(),
+    })?;
     let def = registry
         .get(&parsed)
-        .ok_or_else(|| LoadError::UnknownKnobKey { key: key.to_string() })?;
+        .ok_or_else(|| LoadError::UnknownKnobKey {
+            key: key.to_string(),
+        })?;
     Ok((parsed, def))
 }
 
@@ -534,7 +571,10 @@ fn lookup_knob<'r>(
 fn validate_value(key: &str, value: &KnobValue, kind: &KnobKind) -> Result<(), LoadError> {
     value
         .validate_for(kind)
-        .map_err(|e| LoadError::InvalidKnobValue { key: key.to_string(), detail: format!("{e:?}") })
+        .map_err(|e| LoadError::InvalidKnobValue {
+            key: key.to_string(),
+            detail: format!("{e:?}"),
+        })
 }
 
 /// Resolve a `Grant`/`Require` rule's effective scope, applying the II.2.5 object
@@ -557,12 +597,16 @@ fn resolve_rule_scope(
                     if scope == Scope::All {
                         Ok(Scope::All)
                     } else {
-                        Err(LoadError::ScopeIllegalForGlobalKnob { key: key.to_string() })
+                        Err(LoadError::ScopeIllegalForGlobalKnob {
+                            key: key.to_string(),
+                        })
                     }
                 }
                 // Omission would inherit the (possibly narrow) default — illegal for
                 // a Global knob, which must be spelled `All` loudly.
-                None => Err(LoadError::ScopeIllegalForGlobalKnob { key: key.to_string() }),
+                None => Err(LoadError::ScopeIllegalForGlobalKnob {
+                    key: key.to_string(),
+                }),
             }
         }
         ObjectModel::PerSchema | ObjectModel::PerTable => {
@@ -575,7 +619,9 @@ fn resolve_rule_scope(
             if matches!(def.object_model, ObjectModel::PerSchema) {
                 if let Some(s) = &own {
                     if scope_has_table_granular_pattern(s) {
-                        return Err(LoadError::ScopeTooGranularForKnob { key: key.to_string() });
+                        return Err(LoadError::ScopeTooGranularForKnob {
+                            key: key.to_string(),
+                        });
                     }
                 }
             }
@@ -583,7 +629,9 @@ fn resolve_rule_scope(
             // A3: a Grant-kind rule with neither its own scope nor a default_scope
             // would acquire ⊤ by omission → hard error.
             if class == RuleClass::Grant && own.is_none() && default_scope.is_none() {
-                return Err(LoadError::GrantScopeUnbounded { key: key.to_string() });
+                return Err(LoadError::GrantScopeUnbounded {
+                    key: key.to_string(),
+                });
             }
 
             Ok(effective_meet(own, default_scope))
@@ -624,9 +672,10 @@ fn effective_meet(own: Option<Scope>, default_scope: &Option<Scope>) -> Scope {
 fn scope_has_table_granular_pattern(scope: &Scope) -> bool {
     match scope {
         Scope::Nothing | Scope::All => false,
-        Scope::Of { include, exclude } => {
-            include.iter().chain(exclude.iter()).any(pattern_is_table_granular)
-        }
+        Scope::Of { include, exclude } => include
+            .iter()
+            .chain(exclude.iter())
+            .any(pattern_is_table_granular),
     }
 }
 
@@ -653,7 +702,9 @@ fn resolve_scope(ws: WireScope) -> Result<Scope, LoadError> {
             (None, Some(true)) => Ok(Scope::Nothing),
             // `all = false` / `nothing = false` / both-set are not a valid extreme
             // spelling — reject fail-closed rather than guess an intended scope.
-            _ => Err(LoadError::MalformedScope { pattern: "ambiguous all/nothing".into() }),
+            _ => Err(LoadError::MalformedScope {
+                pattern: "ambiguous all/nothing".into(),
+            }),
         },
         WireScope::Of { include, exclude } => {
             let inc = normalize_patterns(&include)?;
@@ -668,8 +719,9 @@ fn resolve_scope(ws: WireScope) -> Result<Scope, LoadError> {
 fn normalize_patterns(lits: &[String]) -> Result<Vec<Pattern>, LoadError> {
     lits.iter()
         .map(|lit| {
-            Pattern::parse_normalized(lit)
-                .ok_or_else(|| LoadError::MalformedScope { pattern: lit.clone() })
+            Pattern::parse_normalized(lit).ok_or_else(|| LoadError::MalformedScope {
+                pattern: lit.clone(),
+            })
         })
         .collect()
 }
@@ -681,12 +733,20 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
     let columns = inj
         .columns
         .into_iter()
-        .map(|c| InjectColumn { name: c.name, ty: c.ty, nullable: c.nullable, default: c.default })
+        .map(|c| InjectColumn {
+            name: c.name,
+            ty: c.ty,
+            nullable: c.nullable,
+            default: c.default,
+        })
         .collect();
     let indexes = inj
         .indexes
         .into_iter()
-        .map(|i| InjectIndex { name: i.name, columns: i.columns })
+        .map(|i| InjectIndex {
+            name: i.name,
+            columns: i.columns,
+        })
         .collect();
     let author_primary_key = match inj.author_primary_key {
         WireAuthorPk::Allow => AuthorPkPolicy::Allow,
@@ -705,18 +765,28 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
 fn resolve_predicate(wp: WirePredicate) -> Result<ValidatePredicate, LoadError> {
     Ok(match wp {
         WirePredicate::HasPrimaryKey => ValidatePredicate::HasPrimaryKey,
-        WirePredicate::ColumnNamePattern { require, forbid } => ValidatePredicate::ColumnNamePattern {
-            require: name_globs(&require)?,
-            forbid: name_globs(&forbid)?,
-        },
-        WirePredicate::ForbiddenColumns { names } => ValidatePredicate::ForbiddenColumns { names },
-        WirePredicate::TypeNullability { column, ty, nullable } => {
-            ValidatePredicate::TypeNullability { column, ty, nullable }
+        WirePredicate::ColumnNamePattern { require, forbid } => {
+            ValidatePredicate::ColumnNamePattern {
+                require: name_globs(&require)?,
+                forbid: name_globs(&forbid)?,
+            }
         }
+        WirePredicate::ForbiddenColumns { names } => ValidatePredicate::ForbiddenColumns { names },
+        WirePredicate::TypeNullability {
+            column,
+            ty,
+            nullable,
+        } => ValidatePredicate::TypeNullability {
+            column,
+            ty,
+            nullable,
+        },
         WirePredicate::RequireIndex { columns } => ValidatePredicate::RequireIndex { columns },
         WirePredicate::TableNameForbidden { patterns } => {
             // Table-name patterns are full schema.table scope patterns.
-            ValidatePredicate::TableNameForbidden { patterns: normalize_patterns(&patterns)? }
+            ValidatePredicate::TableNameForbidden {
+                patterns: normalize_patterns(&patterns)?,
+            }
         }
     })
 }
@@ -730,12 +800,15 @@ fn name_globs(lits: &[String]) -> Result<Vec<NameGlob>, LoadError> {
             // Reuse the pattern normalizer, then require a schema-only (single-seg)
             // result whose schema glob is the folded name. A dotted name-glob is
             // rejected — a column/table-name predicate matches ONE identifier.
-            let pat = Pattern::parse_normalized(lit)
-                .ok_or_else(|| LoadError::MalformedScope { pattern: lit.clone() })?;
+            let pat = Pattern::parse_normalized(lit).ok_or_else(|| LoadError::MalformedScope {
+                pattern: lit.clone(),
+            })?;
             // A single-segment pattern is `schema.*`; its schema glob is the name.
             // A two-segment (table-granular) pattern is not a valid name glob.
             if !pat.table.is_star() {
-                return Err(LoadError::MalformedScope { pattern: lit.clone() });
+                return Err(LoadError::MalformedScope {
+                    pattern: lit.clone(),
+                });
             }
             Ok(NameGlob { glob: pat.schema })
         })
@@ -753,9 +826,13 @@ fn name_globs(lits: &[String]) -> Result<Vec<NameGlob>, LoadError> {
 /// normalizer for the comparison.
 fn check_self_contradiction(rules: &[Rule]) -> Result<(), LoadError> {
     for inj in rules {
-        let RuleKind::Inject { spec } = &inj.kind else { continue };
+        let RuleKind::Inject { spec } = &inj.kind else {
+            continue;
+        };
         for val in rules {
-            let RuleKind::Validate { pred } = &val.kind else { continue };
+            let RuleKind::Validate { pred } = &val.kind else {
+                continue;
+            };
             // Only meaningful when the two scopes overlap.
             if matches!(inj.scope.meet(&val.scope), Scope::Nothing) {
                 continue;

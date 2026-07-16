@@ -51,7 +51,7 @@ fn validate_platform(
         ir,
         dialect,
         &[],
-        Some(&SchemaScope::Unconfined)
+        Some(&SchemaScope::Unconfined),
     )
 }
 

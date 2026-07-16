@@ -18,8 +18,7 @@ use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, IrScalar, Migratio
 use zero_migrate::model::support::Dialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, SqlDialect,
-    CURRENT_IR_VERSION,
+    IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, SqlDialect, CURRENT_IR_VERSION,
 };
 
 fn ir(op: Op) -> MigrationIr {
@@ -46,13 +45,7 @@ fn pg_sql(op: Op) -> Vec<String> {
 }
 
 fn validates(op: Op, dialect: Dialect) -> bool {
-    validate_ir_scoped(
-        &ir(op),
-        dialect,
-        &[],
-        Some(&SchemaScope::Unconfined)
-    )
-    .is_ok()
+    validate_ir_scoped(&ir(op), dialect, &[], Some(&SchemaScope::Unconfined)).is_ok()
 }
 
 fn fk_not_valid(not_valid: Option<bool>) -> Op {

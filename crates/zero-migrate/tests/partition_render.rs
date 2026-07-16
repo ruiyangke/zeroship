@@ -174,10 +174,7 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
     // each call site its own durable name so stable plan identities do not turn
     // unrelated setup and teardown plans into checksum drift.
     let mut migration = ir_ops(ops);
-    migration.name = format!(
-        "partition_render_{}",
-        std::panic::Location::caller().line()
-    );
+    migration.name = format!("partition_render_{}", std::panic::Location::caller().line());
     IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
         .lower_steps(&migration, live)
         .expect("lower partition ops to SQLite")
@@ -299,17 +296,11 @@ fn render_partitioned_parent_create_table_pg() {
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     use zero_migrate::apply::backend::sqlite::Mode;
     use zero_migrate::model::validate::{validate_ir_scoped, Dialect};
-    
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(
-        &migration_ir,
-        Dialect::Sqlite,
-        &[],
-        None
-    )
-    .expect("collapse-affirmed partition recording validates on SQLite");
+    validate_ir_scoped(&migration_ir, Dialect::Sqlite, &[], None)
+        .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
         .lower_steps(&migration_ir, &LiveSchema::default())

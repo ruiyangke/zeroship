@@ -58,9 +58,9 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
             ]}}"#
         );
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let err = load_ir_document(&ir, APP, dialect, &registry(), None).expect_err(
-                &format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"),
-            );
+            let err = load_ir_document(&ir, APP, dialect, &registry(), None).expect_err(&format!(
+                "raw `{raw_fn}` must be rejected at load on {dialect:?}"
+            ));
             // The closed ScalarFn enum has no such variant → a deserialize/contract
             // rejection. (Never a silent acceptance that would later mis-apply.)
             let msg = err.to_string();

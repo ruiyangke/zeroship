@@ -207,7 +207,12 @@ pub fn capability_knob_key(cap: VendorCapability) -> KnobKey {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// A Global/PerSchema/PerTable `Grant`-polarity Bool knob (deny-by-default).
-fn bool_grant(key: &str, object_model: ObjectModel, requires_db_privilege: bool, docs: &str) -> KnobDef {
+fn bool_grant(
+    key: &str,
+    object_model: ObjectModel,
+    requires_db_privilege: bool,
+    docs: &str,
+) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
         kind: KnobKind::Bool,
@@ -287,7 +292,10 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
         kind: KnobKind::OrderedEnum {
-            variants: REQUIRE_APPROVAL_VARIANTS.iter().map(|s| (*s).to_string()).collect(),
+            variants: REQUIRE_APPROVAL_VARIANTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         },
         polarity: Polarity::Require,
         default: KnobValue::Str("never".to_string()),
@@ -448,8 +456,13 @@ mod tests {
         // `schema.alter_injected` is a POWER GRANT: `inherit = false`, so a silent
         // creator draft never inherits "override the platform's injected columns".
         let reg = builtin_registry();
-        let def = reg.get(&KnobKey::parse(KEY_SCHEMA_ALTER_INJECTED).unwrap()).unwrap();
-        assert!(!def.inherit, "schema.alter_injected must be inherit = false");
+        let def = reg
+            .get(&KnobKey::parse(KEY_SCHEMA_ALTER_INJECTED).unwrap())
+            .unwrap();
+        assert!(
+            !def.inherit,
+            "schema.alter_injected must be inherit = false"
+        );
         // Every OTHER builtin knob inherits by default (only this one opts out).
         for def in reg.iter() {
             if def.key.as_str() == KEY_SCHEMA_ALTER_INJECTED {
@@ -462,7 +475,10 @@ mod tests {
     #[test]
     fn timeout_ceilings_forbid_the_indefinite_lock_value() {
         let reg = builtin_registry();
-        for k in [KEY_RUNTIME_LOCK_TIMEOUT_MS, KEY_RUNTIME_STATEMENT_TIMEOUT_MS] {
+        for k in [
+            KEY_RUNTIME_LOCK_TIMEOUT_MS,
+            KEY_RUNTIME_STATEMENT_TIMEOUT_MS,
+        ] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.kind, KnobKind::UintCeiling { hard_floor: 1 });
             // The default is itself legal for the kind.
@@ -474,7 +490,11 @@ mod tests {
     fn posture_and_obligation_defaults_are_the_tightest_value() {
         let reg = builtin_registry();
         // OrderedEnum postures default to the tightest variant, `forbid`.
-        for k in [KEY_RUNTIME_INDEX_CREATION, KEY_RUNTIME_TABLE_REWRITE, KEY_SAFETY_DESTRUCTIVE_OPS] {
+        for k in [
+            KEY_RUNTIME_INDEX_CREATION,
+            KEY_RUNTIME_TABLE_REWRITE,
+            KEY_SAFETY_DESTRUCTIVE_OPS,
+        ] {
             let def = reg.get(&KnobKey::parse(k).unwrap()).unwrap();
             assert_eq!(def.default, KnobValue::Str("forbid".to_string()));
         }

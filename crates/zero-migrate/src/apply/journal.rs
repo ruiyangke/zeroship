@@ -1321,9 +1321,7 @@ pub async fn pending_contract_shape<D: SqlSession>(
             None => formatted_type_matches,
             Some(_) => false,
         };
-        first_oid == second_oid
-            && first_modifier == second_modifier
-            && authored_type_matches
+        first_oid == second_oid && first_modifier == second_modifier && authored_type_matches
     } else {
         false
     };
