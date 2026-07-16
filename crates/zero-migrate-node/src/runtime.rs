@@ -39,7 +39,7 @@ where
     C: FnOnce(T) + Send + 'static,
 {
     thread::Builder::new()
-        .name("zero-migrate-engine".into())
+        .name("zero-migrate-cli".into())
         .spawn(move || {
             // The ONE future, driven with NO reactor. Every suspension inside it is
             // a channel receiver woken out-of-thread by the host `done` callback

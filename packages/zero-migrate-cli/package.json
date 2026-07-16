@@ -1,0 +1,78 @@
+{
+  "name": "zero-migrate-cli",
+  "version": "0.1.0",
+  "description": "The zero-migrate host runtime + CLI: loads the native addon, ships pg/mysql2 driver adapters, and exposes apply/plan/status/history/validate/resolvePending over the driver seam. Includes the `zero-migrate` command-line tool.",
+  "keywords": [
+    "database",
+    "migration",
+    "migrations",
+    "schema",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "cli",
+    "ddl",
+    "typescript"
+  ],
+  "author": "Ruiyang Ke <me@ry.ke>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruiyangke/zero-migrate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiyangke/zero-migrate.git",
+    "directory": "packages/zero-migrate-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/ruiyangke/zero-migrate/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "zero-migrate": "./dist/cli-bin.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "test:docs": "NODE_ENV=test node --import tsx --test tests/doc-examples.test.ts",
+    "test:host": "NODE_ENV=test node --import tsx --test tests/host/*.test.ts"
+  },
+  "dependencies": {
+    "zero-migrate": "workspace:*",
+    "zero-migrate-node": "workspace:*"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.0",
+    "mysql2": "^3.11.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

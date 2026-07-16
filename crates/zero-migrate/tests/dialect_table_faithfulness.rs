@@ -2,7 +2,7 @@
 //!
 //! The generated single-source dialect table
 //! (`src/model/dialect_table.rs`, emitted from `dialect-support.toml` by
-//! `sdks/migrate/scripts/gen-dialect-table.mjs`) is the single source of the
+//! `packages/zero-migrate/scripts/gen-dialect-table.mjs`) is the single source of the
 //! per-op dialect-support decisions, and `Op::support` READS the
 //! table (via [`Op::op_variant`]). This file pins the invariants that stay
 //! meaningful once the table is authoritative —

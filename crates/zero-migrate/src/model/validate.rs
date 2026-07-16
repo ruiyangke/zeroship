@@ -6525,7 +6525,7 @@ mod tests {
     // ── the names-stay-strings BINDING corollary ───────────────────────────
     //
     // This is the apply-time HALF of the guarantee. The OTHER half lives in
-    // the JS type-level suite (`sdks/migrate/tests/types/type-tests.ts`): a
+    // the JS type-level suite (`packages/zero-migrate/tests/types/type-tests.ts`): a
     // migration whose table/column NAMES are plain strings type-checks cleanly
     // EVEN WHEN those names are not in the current generated db schema (the
     // anti-rot guarantee — names are NOT live-schema-bound, so an immutable

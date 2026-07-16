@@ -3,10 +3,10 @@
 #
 # WHAT: one hand-authored row per (op-kind, variant) recording that token's
 # DISPOSITION on each of the three dialects (postgres / sqlite / mysql). The
-# generator (`sdks/migrate/scripts/gen-dialect-table.mjs`) reads this file and
+# generator (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
 # emits BOTH:
 #   - crates/zero-migrate/src/model/dialect_table.rs (const lookup table)
-#   - sdks/migrate/src/generated/dialect-table.ts        (the TS mirror)
+#   - packages/zero-migrate/src/generated/dialect-table.ts        (the TS mirror)
 # Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
 # commit both generated artifacts.
 #

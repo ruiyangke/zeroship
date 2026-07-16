@@ -515,7 +515,7 @@ fn malformed_ir_is_error() {
 // / `render_set_sql` / `render_plan_sql` + the `-- [runtime-resolved]` labeling — is
 // still fully covered DB-free by the library tests above (goldens, faithfulness,
 // no-fabrication, `render_succeeds_without_a_dsn`). The command-line entry point is
-// now the `zero-migrate-engine` TS CLI (`sdks/engine/src/cli.ts`).
+// now the `zero-migrate-cli` TS CLI (`packages/zero-migrate-cli/src/cli.ts`).
 
 /// `render_set_sql` — the multi-plan renderer. Lower a DB-independent IR to an
 /// `AppliedPlan` in-memory and render it as a one-element set, asserting the summary

@@ -12,7 +12,7 @@
 //! None)`), and the resulting `Migration.checksum` is `Checksum::of_ir` folded by
 //! Rust over the canonical op list + the server-stamped `owner_app`. The JS side emits
 //! ops; Rust owns the checksum — exactly the invariant the pure-JS recorder
-//! (`sdks/migrate/src/internal/recorder.ts`) preserves.
+//! (`packages/zero-migrate/src/internal/recorder.ts`) preserves.
 //!
 //! ## Live catalog input
 //! Host apply and plan-aware status read the selected database catalog first and

@@ -336,7 +336,7 @@ orchestration. Prefer a reviewed forward-fix migration.
 
 ## JavaScript boundary
 
-The public `zero-migrate-engine` API is the supported JavaScript integration.
+The public `zero-migrate-cli` API is the supported JavaScript integration.
 It exposes `apply`, `resolvePending`, `plan`, `validate`, `status`, `history`, and
 `currentIrVersion`.
 

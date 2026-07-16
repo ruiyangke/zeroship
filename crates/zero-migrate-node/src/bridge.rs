@@ -943,7 +943,7 @@ async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
 /// drive the complete ordered plan over the host driver. The envelope must NOT carry
 /// `owner_app`; it is stamped from `req.owner_app` (provenance).
 ///
-/// This is the entry the `zero-migrate-engine` facade's `apply` calls: the pure-JS
+/// This is the entry the `zero-migrate-cli` facade's `apply` calls: the pure-JS
 /// recorder produces the envelope, this addon owns the checksum.
 /// Resolves to a typed [`ApplyReply`].
 #[napi(ts_return_type = "Promise<ApplyReply>")]

@@ -15,7 +15,7 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # the Rust build graph. The engine's PG/MySQL path is the dialect-neutral
 # `driver::SqlSession` seam (host-callback / napi bridge); a native Rust network
 # driver is intentionally absent. SQLite runs in-process on a sync rusqlite actor.
-# The command-line surface is the `zero-migrate-engine` TS CLI (`sdks/engine/
+# The command-line surface is the `zero-migrate-cli` TS CLI (`packages/zero-migrate-cli/
 # src/cli.ts`); this crate ships NO Rust bin, so the shipped library links neither
 # tokio nor compio (compio is now a dev-dependency, used only by the async-apply
 # test harness's `#[compio::test]` sites).
@@ -98,7 +98,7 @@ zero-migrate-policy = { workspace = true }
 # `&uuid::Uuid`.
 uuid = { workspace = true }
 # NOTE: `compio` is NOT a runtime dependency. The Rust CLI that
-# used `#[compio::main]` was retired into the `zero-migrate-engine` TS CLI, and no
+# used `#[compio::main]` was retired into the `zero-migrate-cli` TS CLI, and no
 # shipped engine code drives an executor: the network (PG/MySQL) apply flow always
 # runs host-side through the dialect-neutral `driver::SqlSession` seam (fed by the
 # napi/Node host in production, or the in-crate recording driver in tests), and the
