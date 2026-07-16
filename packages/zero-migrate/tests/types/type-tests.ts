@@ -31,6 +31,7 @@ import {
   view,
   check,
   lit,
+  int64,
   decimal,
   byteValue,
   now,
@@ -45,6 +46,7 @@ import {
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
+  type Int64Value,
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
@@ -140,7 +142,7 @@ export function badOpShapes(): void {
   // @ts-expect-error — `delete` requires a `where` predicate (mandatory).
   table("users").delete({});
 
-  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  // @ts-expect-error — raw bigint is not an authored scalar; use int64(...).
   table("users").update({ set: { name: 1n } });
 
   table("users").update({
@@ -656,6 +658,31 @@ export function insertValueShapes(): void {
   table("users").create({ columns: { bad: t.json().default(() => ({ nope: true })) } });
 }
 
+export function int64ValueShapes(): void {
+  const exact: Int64Value = int64(9_007_199_254_740_993n);
+  const max: Int64Value = int64("9223372036854775807");
+
+  table("ledger").insert({ rows: { amount: exact } });
+  table("ledger").update({ set: { amount: max } });
+  table("ledger").backfill({ set: { amount: int64("-9223372036854775808") } });
+  table("ledger").create({
+    columns: { amount: t.bigInt().default(int64("-9223372036854775808")) },
+  });
+  table("ledger").insert({
+    rows: { id: 1, amount: exact },
+    onConflict: { columns: ["id"], doUpdate: { amount: max } },
+  });
+  lit(exact);
+
+  // @ts-expect-error — int64() accepts only bigint or decimal-string input.
+  int64(42);
+
+  table("ledger").update({
+    // @ts-expect-error — Int64Value does not widen the pinned `.in()` Scalar set.
+    set: { amount: (col) => col("amount").in([exact]) },
+  });
+}
+
 export function decimalValueShapes(): void {
   const cents: DecimalValue = decimal("9007199254740993");
   table("ledger").insert({ rows: { amount: cents } });
@@ -674,10 +701,10 @@ export function decimalValueShapes(): void {
   });
   lit(decimal("0.00"));
 
-  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  // @ts-expect-error — raw bigint is not an authored scalar; use int64(...).
   table("ledger").insert({ rows: { amount: 9007199254740993n } });
 
-  // @ts-expect-error — bigint defaults are refused by the authored value union.
+  // @ts-expect-error — raw bigint defaults are refused; wrap the value with int64(...).
   table("ledger").create({ columns: { amount: t.numeric({ precision: 38, scale: 0 }).default(9007199254740993n) } });
 
   table("ledger").insert({
@@ -685,13 +712,13 @@ export function decimalValueShapes(): void {
     onConflict: {
       columns: ["id"],
       doUpdate: {
-        // @ts-expect-error — bigint is not valid in onConflict.doUpdate values.
+        // @ts-expect-error — raw bigint is not valid in onConflict.doUpdate values.
         amount: 9007199254740993n,
       },
     },
   });
 
-  // @ts-expect-error — bigint is not valid in expression literals.
+  // @ts-expect-error — raw bigint is not valid in expression literals.
   lit(9007199254740993n);
 }
 

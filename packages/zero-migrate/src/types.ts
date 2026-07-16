@@ -432,6 +432,7 @@ export interface SequenceHandle {
 
 declare const decimalValueBrand: unique symbol;
 declare const bytesValueBrand: unique symbol;
+declare const int64ValueBrand: unique symbol;
 
 /** A branded decimal value produced by the top-level `decimal("...")`
  *  constructor. The recorder normalizes it to the IR `{ decimal: "..." }`
@@ -449,17 +450,25 @@ export interface BytesValue {
   readonly bytes: string;
 }
 
+/** An exact signed 64-bit integer produced by the top-level `int64(...)`
+ *  constructor. The recorder normalizes it to the IR `{ int64: "..." }`
+ *  scalar carrier; raw JavaScript `bigint` values remain rejected. */
+export interface Int64Value {
+  readonly [int64ValueBrand]: "int64";
+  readonly int64: string;
+}
+
 /** The pinned scalar set accepted by value-list predicates such as
  *  `.in([...])` / `.notIn([...])`. */
 export type Scalar = string | number | boolean | null;
 
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (numeric / bytes domain). The builder normalizes a branded
- *  `decimal(...)` into the `{ decimal }` IR carrier, a branded `byteValue(...)`
- *  into the `{ bytes }` carrier, and a `Uint8Array` into the `{ bytes: base64 }`
- *  carrier before recording. */
+ *  carry (numeric / bytes domain). The builder normalizes branded `int64(...)`,
+ *  `decimal(...)`, and `byteValue(...)` values into their tagged IR carriers,
+ *  and a `Uint8Array` into the `{ bytes: base64 }` carrier before recording. */
 export type ScalarValue =
   | Scalar
+  | Int64Value
   | DecimalValue
   | BytesValue
   | Uint8Array;
@@ -531,6 +540,7 @@ export type DefaultValue =
   | EmptyContainerDefault
   | JsonDefaultValue;
 
+export declare function int64(value: bigint | string): Int64Value;
 export declare function now(): ExprChain;
 /** Database-evaluated RFC 9562 UUIDv4 expression. */
 export declare function uuidV4(): ExprChain;

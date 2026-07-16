@@ -3217,6 +3217,20 @@
         {
           "type": "object",
           "properties": {
+            "int64": {
+              "description": "A canonical base-10 signed 64-bit integer string; the loader enforces the i64 range.",
+              "type": "string",
+              "pattern": "^(0|-?[1-9][0-9]*)$"
+            }
+          },
+          "required": [
+            "int64"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
             "decimal": {
               "type": "string"
             }

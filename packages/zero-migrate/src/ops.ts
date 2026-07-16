@@ -84,6 +84,7 @@ import type {
   GroupByItem,
   IdOptions,
   IdentityOptions,
+  Int64Value,
   IndexExprBuilder,
   IndexExprFn,
   IndexRef,
@@ -231,14 +232,44 @@ const nativeCryptoRandomUUID =
     ? globalThis.crypto.randomUUID
     : undefined;
 const NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
+const INT64_VALUE_BRAND = Symbol.for("zero-migrate.int64/v1");
 const DECIMAL_VALUE_BRAND = Symbol.for("zero-migrate.decimal/v1");
 const BYTES_VALUE_BRAND = Symbol.for("zero-migrate.bytes/v1");
+const INT64_STRING_RE = /^(?:0|-?[1-9][0-9]*)$/;
+const INT64_MIN = -(1n << 63n);
+const INT64_MAX = (1n << 63n) - 1n;
 const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
 const BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+const INT64_VALUE_ERROR =
+  'int64(value) requires a canonical signed integer bigint or decimal string (for example int64(42n) or int64("42"))';
+const INT64_RANGE_ERROR =
+  "int64(value) must be between -9223372036854775808 and 9223372036854775807";
 const DECIMAL_VALUE_ERROR =
   'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
 const BYTES_VALUE_ERROR =
   'byteValue(bytes) requires a Uint8Array or well-formed base64 string; use byteValue(new Uint8Array([...])) or byteValue("<base64>")';
+
+function requireInt64String(value: unknown): string {
+  if (typeof value !== "bigint" && typeof value !== "string") {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const rendered = typeof value === "bigint" ? String(value) : value;
+  if (!INT64_STRING_RE.test(rendered)) {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const parsed = BigInt(rendered);
+  if (parsed < INT64_MIN || parsed > INT64_MAX) {
+    throw structuredError("OP_INVALID", `${INT64_RANGE_ERROR}; got ${rendered}`);
+  }
+  return rendered;
+}
+
+export function int64(value: bigint | string): Int64Value {
+  return Object.freeze({
+    [INT64_VALUE_BRAND]: true,
+    int64: requireInt64String(value),
+  }) as unknown as Int64Value;
+}
 
 function requireDecimalString(value: unknown): string {
   if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
@@ -928,6 +959,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function isInt64Value(value: unknown): value is Int64Value {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[INT64_VALUE_BRAND] === true &&
+    typeof (value as { int64?: unknown }).int64 === "string"
+  );
+}
+
 function isDecimalValue(value: unknown): value is DecimalValue {
   return (
     value !== null &&
@@ -950,6 +990,12 @@ function isRemovedDecimalCarrier(value: unknown): boolean {
   if (!isPlainObject(value) || isDecimalValue(value)) return false;
   const keys = Object.keys(value);
   return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
+}
+
+function isRemovedInt64Carrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isInt64Value(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "int64" && typeof value.int64 === "string";
 }
 
 function isRemovedBytesCarrier(value: unknown): boolean {
@@ -999,6 +1045,7 @@ function finiteNumberDecimalString(value: number): string {
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts:
+ *  - a branded `int64(...)` value → `{ int64: "<v>" }`;
  *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
  *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
@@ -1007,10 +1054,14 @@ function finiteNumberDecimalString(value: number): string {
  */
 function toIrScalar(value: unknown): unknown {
   rejectNestedFunctionValues(value);
+  if (isInt64Value(value)) return { int64: requireInt64String(value.int64) };
   if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
   if (isBytesValue(value)) return { bytes: requireBase64String(value.bytes) };
   if (typeof value === "bigint") {
-    throw structuredError("OP_INVALID", 'bigint is not a value — use decimal("<n>")');
+    throw structuredError("OP_INVALID", "raw bigint is not a migration scalar — use int64(...) instead");
+  }
+  if (isRemovedInt64Carrier(value)) {
+    throw structuredError("OP_INVALID", "the { int64 } carrier is not an authored value — use int64(...)");
   }
   if (isRemovedDecimalCarrier(value)) {
     throw structuredError("OP_INVALID", 'the { decimal } carrier is removed — use decimal("<n>")');
@@ -1026,7 +1077,7 @@ function toIrScalar(value: unknown): unknown {
       if (!Number.isSafeInteger(value)) {
         throw structuredError(
           "OP_INVALID",
-          'integer scalar must be a JS safe integer; use decimal("<n>") for exact large values',
+          "integer scalar must be a JS safe integer; use int64(...) for exact signed 64-bit values",
         );
       }
     } else {
@@ -1053,7 +1104,7 @@ function toIrScalar(value: unknown): unknown {
   }
   throw structuredError(
     "OP_INVALID",
-    "scalar value must be null, a string, boolean, finite number, decimal(...), byteValue(...), or Uint8Array",
+    "scalar value must be null, a string, boolean, finite number, int64(...), decimal(...), byteValue(...), or Uint8Array",
   );
 }
 
@@ -1296,10 +1347,12 @@ function toIrDefault(value: DefaultValue | DefaultExprFn | ExprChainType | Node)
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
+  if (isInt64Value(value)) return { literal: { value: toIrScalar(value) } };
   if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isBytesValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
+    if (isRemovedInt64Carrier(value)) return { literal: { value: toIrScalar(value) } };
     if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
     if (isRemovedBytesCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);

@@ -1245,7 +1245,9 @@ impl Ctx<'_> {
                     self.check_pg_text_literal(s, "inList element")?;
                     ElemKind::Text
                 }
-                crate::ir::IrScalar::Int(_) | crate::ir::IrScalar::Decimal(_) => ElemKind::Number,
+                crate::ir::IrScalar::Int(_)
+                | crate::ir::IrScalar::Int64(_)
+                | crate::ir::IrScalar::Decimal(_) => ElemKind::Number,
                 crate::ir::IrScalar::Bool(_) => ElemKind::Bool,
                 crate::ir::IrScalar::Null => ElemKind::Null,
                 crate::ir::IrScalar::Bytes(_) => {

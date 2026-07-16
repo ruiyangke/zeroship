@@ -366,15 +366,15 @@ fn qualify_table(
 }
 
 /// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
-/// one-shot DML path. The IR numeric domain (`Int` `|v| < 2^53` / decimal-string)
-/// carries through verbatim. Binary values stay binary on SQLite; PostgreSQL and
-/// MySQL wrap a base64 text bind in a dialect decoder at the placeholder site.
-/// Values are never inlined.
+/// one-shot DML path. Safe `Int` and tagged `Int64` values become exact i64
+/// binds; decimal strings carry through verbatim. Binary values stay binary on
+/// SQLite; PostgreSQL and MySQL wrap a base64 text bind in a dialect decoder at
+/// the placeholder site. Values are never inlined.
 fn scalar_to_bind(s: &IrScalar) -> BindValue {
     match s {
         IrScalar::Null => BindValue::Null,
         IrScalar::Bool(b) => BindValue::Bool(*b),
-        IrScalar::Int(i) => BindValue::Int(*i),
+        IrScalar::Int(i) | IrScalar::Int64(i) => BindValue::Int(*i),
         IrScalar::Decimal(d) => BindValue::Decimal(d.clone()),
         IrScalar::Str(s) => BindValue::Text(s.clone()),
         IrScalar::Bytes(bytes) => BindValue::Bytes(bytes.clone()),
@@ -450,7 +450,7 @@ pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String
                 "FALSE".to_string()
             }
         }
-        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
         IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Str(s) => inline_string_literal(s, dialect),
@@ -511,7 +511,7 @@ enum InListScalarKind {
 fn in_list_scalar_kind(elem: &IrScalar) -> Result<InListScalarKind, DmlError> {
     Ok(match elem {
         IrScalar::Str(_) => InListScalarKind::Text,
-        IrScalar::Int(_) | IrScalar::Decimal(_) => InListScalarKind::Number,
+        IrScalar::Int(_) | IrScalar::Int64(_) | IrScalar::Decimal(_) => InListScalarKind::Number,
         IrScalar::Bool(_) => InListScalarKind::Bool,
         IrScalar::Null => InListScalarKind::Null,
         IrScalar::Bytes(_) => {
@@ -543,7 +543,7 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
     Ok(match elem {
         IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
-        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Bool(b) => {
             if *b {
@@ -565,7 +565,7 @@ fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
 fn render_in_list_elem_portable(elem: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
     Ok(match elem {
         IrScalar::Str(s) => in_list_text_literal(s, "inList element", dialect)?,
-        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
         IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
         IrScalar::Decimal(d) => d.clone(),
         IrScalar::Bool(b) => {
@@ -3336,6 +3336,29 @@ mod tests {
             a.binds,
             vec![BindValue::Int(200), BindValue::Text("ok".into())]
         );
+    }
+
+    #[test]
+    fn int64_above_js_safe_range_binds_and_renders_without_precision_loss() {
+        let exact = 9_007_199_254_740_993_i64;
+        let scalar = IrScalar::Int64(exact);
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+            assert_eq!(
+                inline_literal(&scalar, dialect).unwrap(),
+                "9007199254740993"
+            );
+            let assembled = assemble_insert(
+                SCHEMA,
+                dialect,
+                "events",
+                &["id".into()],
+                &[vec![val(scalar.clone())]],
+                None,
+            )
+            .unwrap();
+            assert_eq!(assembled.binds, vec![BindValue::Int(exact)]);
+        }
     }
 
     #[test]

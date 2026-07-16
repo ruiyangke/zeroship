@@ -74,7 +74,7 @@ fn deny_unknown_fields() {}
 /// 2^53 — the boundary of exact integer representation in an IEEE-754 double
 /// (the JS `number` type). An integer with magnitude ≥ this can be silently
 /// rounded by a JS author, so the IR rejects it at deserialize and demands an
-/// explicit `bigint`/decimal-string instead.
+/// explicit tagged `int64` decimal string instead.
 const MAX_EXACT_INT: i64 = 1 << 53; // 9_007_199_254_740_992
 
 /// The structured error code surfaced when [`IrScalar`] rejects an
@@ -3957,7 +3957,9 @@ impl MigrationIr {
 /// REJECTS a fractional / exponential JSON number and any integer with magnitude
 /// ≥ 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
 /// loader. Exact integers `|v| < 2^53` become [`IrScalar::Int`]; arbitrary-
-/// precision numbers must be sent as `{ "decimal": "…" }` strings.
+/// precision decimal numbers must be sent as `{ "decimal": "…" }` strings.
+/// Exact signed 64-bit integers outside the JavaScript safe-integer range use
+/// the distinct `{ "int64": "…" }` carrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrScalar {
     /// JSON `null`.
@@ -3966,6 +3968,9 @@ pub enum IrScalar {
     Bool(bool),
     /// An exact 64-bit integer (`|v| < 2^53` on deserialize).
     Int(i64),
+    /// An exact signed 64-bit integer carried on the wire as its canonical
+    /// decimal string (`{"int64":"…"}`).
+    Int64(i64),
     /// An arbitrary-precision decimal carried as its canonical string.
     Decimal(String),
     /// A UTF-8 string.
@@ -3986,8 +3991,13 @@ impl Serialize for IrScalar {
             Self::Bool(b) => ser.serialize_bool(*b),
             Self::Int(i) => ser.serialize_i64(*i),
             Self::Str(s) => ser.serialize_str(s),
-            // Tagged objects so the deserializer can distinguish a decimal/bytes
-            // value from a plain string. Single-key maps.
+            // Tagged objects so the deserializer can distinguish exact int64,
+            // decimal, and bytes values from plain strings. Single-key maps.
+            Self::Int64(i) => {
+                let mut m = ser.serialize_map(Some(1))?;
+                m.serialize_entry("int64", &i.to_string())?;
+                m.end()
+            }
             Self::Decimal(d) => {
                 let mut m = ser.serialize_map(Some(1))?;
                 m.serialize_entry("decimal", d)?;
@@ -4046,7 +4056,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                     if i.unsigned_abs() >= MAX_EXACT_INT as u64 {
                         return Err(D::Error::custom(format!(
                             "{EXPR_INVALID_NUMERIC}: integer {i} has magnitude >= 2^53; \
-                             use a bigint/decimal string ({{\"decimal\":\"…\"}}) instead"
+                             use the exact int64 carrier ({{\"int64\":\"…\"}}) instead"
                         )));
                     }
                     Ok(Self::Int(i))
@@ -4054,7 +4064,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                     if u >= MAX_EXACT_INT as u64 {
                         return Err(D::Error::custom(format!(
                             "{EXPR_INVALID_NUMERIC}: integer {u} has magnitude >= 2^53; \
-                             use a bigint/decimal string ({{\"decimal\":\"…\"}}) instead"
+                             use the exact int64 carrier ({{\"int64\":\"…\"}}) instead"
                         )));
                     }
                     // u < 2^53 < i64::MAX, so the cast is exact.
@@ -4070,10 +4080,27 @@ impl<'de> Deserialize<'de> for IrScalar {
             serde_json::Value::Object(map) => {
                 if map.len() != 1 {
                     return Err(D::Error::custom(
-                        "IrScalar object must be exactly one of {\"decimal\":…} or {\"bytes\":…}",
+                        "IrScalar object must be exactly one of {\"int64\":…}, {\"decimal\":…}, or {\"bytes\":…}",
                     ));
                 }
-                if let Some(d) = map.get("decimal") {
+                if let Some(i) = map.get("int64") {
+                    let s = i
+                        .as_str()
+                        .ok_or_else(|| D::Error::custom("IrScalar int64 must be a string"))?;
+                    let parsed = s.parse::<i64>().map_err(|_| {
+                        D::Error::custom(format!(
+                            "{EXPR_INVALID_NUMERIC}: int64 string {s:?} is not a canonical \
+                             signed 64-bit integer in range"
+                        ))
+                    })?;
+                    if parsed.to_string() != s {
+                        return Err(D::Error::custom(format!(
+                            "{EXPR_INVALID_NUMERIC}: int64 string {s:?} is not canonical; \
+                             use the base-10 spelling without a plus sign or leading zeros"
+                        )));
+                    }
+                    Ok(Self::Int64(parsed))
+                } else if let Some(d) = map.get("decimal") {
                     let s = d
                         .as_str()
                         .ok_or_else(|| D::Error::custom("IrScalar decimal must be a string"))?;
@@ -4098,7 +4125,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                     Ok(Self::Bytes(decoded))
                 } else {
                     Err(D::Error::custom(
-                        "IrScalar object key must be \"decimal\" or \"bytes\"",
+                        "IrScalar object key must be \"int64\", \"decimal\", or \"bytes\"",
                     ))
                 }
             }
@@ -4114,9 +4141,9 @@ impl JsonSchema for IrScalar {
 
     fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         // A union: null | bool | integer (|v|<2^53) | string |
-        // {"decimal": string} | {"bytes": string}. Hand-written because the
-        // numeric-domain constraint is enforced at deserialize, not by serde's
-        // structure.
+        // {"int64": canonical signed-i64 string} | {"decimal": string} |
+        // {"bytes": string}. Hand-written because the numeric-domain constraints
+        // are enforced at deserialize, not by serde's structure.
         schemars::json_schema!({
             "oneOf": [
                 { "type": "null" },
@@ -4127,6 +4154,18 @@ impl JsonSchema for IrScalar {
                     "maximum": MAX_EXACT_INT - 1
                 },
                 { "type": "string" },
+                {
+                    "type": "object",
+                    "properties": {
+                        "int64": {
+                            "description": "A canonical base-10 signed 64-bit integer string; the loader enforces the i64 range.",
+                            "type": "string",
+                            "pattern": "^(0|-?[1-9][0-9]*)$"
+                        }
+                    },
+                    "required": ["int64"],
+                    "additionalProperties": false
+                },
                 {
                     "type": "object",
                     "properties": { "decimal": { "type": "string" } },
@@ -4211,9 +4250,9 @@ impl CanonicalOpList<'_> {
 /// RFC 8785 (JSON Canonicalization Scheme) encoder for a [`serde_json::Value`].
 ///
 /// Scope here is the IR op-list region only. The numeric domain is already
-/// constrained ([`IrScalar`] is i64 / decimal-string), so no float formatting is
-/// needed — integers print without exponent and decimal strings are carried
-/// inside `{"decimal": "…"}` objects as ordinary strings. The two rules that
+/// constrained ([`IrScalar`] is safe integer / tagged i64 / decimal-string), so
+/// no float formatting is needed — integers print without exponent and tagged
+/// numeric strings stay inside their single-key objects. The two rules that
 /// matter for canonicality:
 ///
 /// 1. **Object keys are sorted** (by UTF-16 code unit per the RFC; for the
@@ -4357,6 +4396,51 @@ mod tests {
         assert_eq!(small, IrScalar::Int(42));
         let neg: IrScalar = serde_json::from_str("-7").unwrap();
         assert_eq!(neg, IrScalar::Int(-7));
+    }
+
+    #[test]
+    fn ir_scalar_int64_boundaries_round_trip_as_canonical_decimal_strings() {
+        for (wire, expected) in [
+            (r#"{"int64":"-9223372036854775808"}"#, i64::MIN),
+            (r#"{"int64":"9223372036854775807"}"#, i64::MAX),
+            (r#"{"int64":"9007199254740993"}"#, 9_007_199_254_740_993),
+            (r#"{"int64":"0"}"#, 0),
+        ] {
+            let scalar: IrScalar = serde_json::from_str(wire).unwrap();
+            assert_eq!(scalar, IrScalar::Int64(expected));
+            assert_eq!(serde_json::to_string(&scalar).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn ir_scalar_int64_rejects_malformed_or_noncanonical_strings() {
+        for value in [
+            "", "+1", "-0", "00", "01", "-01", " 1", "1 ", "1.0", "1e3", "--1",
+        ] {
+            let wire = serde_json::json!({ "int64": value }).to_string();
+            let err = serde_json::from_str::<IrScalar>(&wire).unwrap_err();
+            assert!(
+                err.to_string().contains(EXPR_INVALID_NUMERIC),
+                "malformed int64 {value:?} must carry {EXPR_INVALID_NUMERIC}, got: {err}"
+            );
+        }
+
+        let wrong_type = serde_json::from_str::<IrScalar>(r#"{"int64":1}"#).unwrap_err();
+        assert!(wrong_type.to_string().contains("int64 must be a string"));
+    }
+
+    #[test]
+    fn ir_scalar_int64_rejects_values_outside_signed_64_bit_range() {
+        for value in ["9223372036854775808", "-9223372036854775809"] {
+            let wire = serde_json::json!({ "int64": value }).to_string();
+            let err = serde_json::from_str::<IrScalar>(&wire).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(EXPR_INVALID_NUMERIC), "got: {message}");
+            assert!(
+                message.contains("signed 64-bit integer in range"),
+                "got: {message}"
+            );
+        }
     }
 
     fn json_object(entries: impl IntoIterator<Item = (&'static str, IrJsonValue)>) -> IrJsonValue {
@@ -4526,6 +4610,8 @@ mod tests {
             IrScalar::Null,
             IrScalar::Bool(false),
             IrScalar::Int(-9_007_199_254_740_991),
+            IrScalar::Int64(i64::MIN),
+            IrScalar::Int64(i64::MAX),
             IrScalar::Decimal("0.001".to_string()),
             IrScalar::Str("x".to_string()),
             IrScalar::Bytes(vec![0x00, 0x01, 0x02]),
@@ -4571,6 +4657,20 @@ mod tests {
                 );
             }
             _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn tagged_int64_round_trips_in_dml_and_literal_default_slots() {
+        for wire in [
+            r#"{"op":"insert","table":"t","columns":["id"],"rows":[[{"int64":"9007199254740993"}]]}"#,
+            r#"{"op":"update","table":"t","set":{"id":{"int64":"9007199254740993"}}}"#,
+            r#"{"op":"backfill","table":"t","cursorColumn":"id","batchSize":100,"set":{"id":{"int64":"9007199254740993"}},"name":"exact_ids"}"#,
+            r#"{"op":"setColumnDefault","table":"t","column":"id","value":{"literal":{"value":{"int64":"9007199254740993"}}}}"#,
+        ] {
+            let expected: serde_json::Value = serde_json::from_str(wire).unwrap();
+            let op: Op = serde_json::from_str(wire).unwrap();
+            assert_eq!(serde_json::to_value(op).unwrap(), expected, "wire: {wire}");
         }
     }
 

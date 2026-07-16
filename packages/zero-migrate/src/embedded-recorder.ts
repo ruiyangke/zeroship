@@ -30,6 +30,7 @@ export {
   comment,
   check,
   lit,
+  int64,
   decimal,
   byteValue,
   now,

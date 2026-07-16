@@ -23,12 +23,38 @@ var nativeDateNow = typeof Date !== "undefined" ? Date.now : void 0;
 var nativeMathRandom = typeof Math !== "undefined" ? Math.random : void 0;
 var nativeCryptoRandomUUID = typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function" ? globalThis.crypto.randomUUID : void 0;
 var NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
+var INT64_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.int64/v1");
 var DECIMAL_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.decimal/v1");
 var BYTES_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.bytes/v1");
+var INT64_STRING_RE = /^(?:0|-?[1-9][0-9]*)$/;
+var INT64_MIN = -(1n << 63n);
+var INT64_MAX = (1n << 63n) - 1n;
 var DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
 var BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+var INT64_VALUE_ERROR = 'int64(value) requires a canonical signed integer bigint or decimal string (for example int64(42n) or int64("42"))';
+var INT64_RANGE_ERROR = "int64(value) must be between -9223372036854775808 and 9223372036854775807";
 var DECIMAL_VALUE_ERROR = 'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
 var BYTES_VALUE_ERROR = 'byteValue(bytes) requires a Uint8Array or well-formed base64 string; use byteValue(new Uint8Array([...])) or byteValue("<base64>")';
+function requireInt64String(value) {
+  if (typeof value !== "bigint" && typeof value !== "string") {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const rendered = typeof value === "bigint" ? String(value) : value;
+  if (!INT64_STRING_RE.test(rendered)) {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const parsed = BigInt(rendered);
+  if (parsed < INT64_MIN || parsed > INT64_MAX) {
+    throw structuredError("OP_INVALID", `${INT64_RANGE_ERROR}; got ${rendered}`);
+  }
+  return rendered;
+}
+function int64(value) {
+  return Object.freeze({
+    [INT64_VALUE_BRAND]: true,
+    int64: requireInt64String(value)
+  });
+}
 function requireDecimalString(value) {
   if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
     throw structuredError("OP_INVALID", DECIMAL_VALUE_ERROR);
@@ -542,6 +568,9 @@ function isPlainObject(value) {
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
+function isInt64Value(value) {
+  return value !== null && typeof value === "object" && value[INT64_VALUE_BRAND] === true && typeof value.int64 === "string";
+}
 function isDecimalValue(value) {
   return value !== null && typeof value === "object" && value[DECIMAL_VALUE_BRAND] === true && typeof value.decimal === "string";
 }
@@ -552,6 +581,11 @@ function isRemovedDecimalCarrier(value) {
   if (!isPlainObject(value) || isDecimalValue(value)) return false;
   const keys = Object.keys(value);
   return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
+}
+function isRemovedInt64Carrier(value) {
+  if (!isPlainObject(value) || isInt64Value(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "int64" && typeof value.int64 === "string";
 }
 function isRemovedBytesCarrier(value) {
   if (!isPlainObject(value) || isBytesValue(value)) return false;
@@ -591,10 +625,14 @@ function finiteNumberDecimalString(value) {
 }
 function toIrScalar(value) {
   rejectNestedFunctionValues(value);
+  if (isInt64Value(value)) return { int64: requireInt64String(value.int64) };
   if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
   if (isBytesValue(value)) return { bytes: requireBase64String(value.bytes) };
   if (typeof value === "bigint") {
-    throw structuredError("OP_INVALID", 'bigint is not a value \u2014 use decimal("<n>")');
+    throw structuredError("OP_INVALID", "raw bigint is not a migration scalar \u2014 use int64(...) instead");
+  }
+  if (isRemovedInt64Carrier(value)) {
+    throw structuredError("OP_INVALID", "the { int64 } carrier is not an authored value \u2014 use int64(...)");
   }
   if (isRemovedDecimalCarrier(value)) {
     throw structuredError("OP_INVALID", 'the { decimal } carrier is removed \u2014 use decimal("<n>")');
@@ -610,7 +648,7 @@ function toIrScalar(value) {
       if (!Number.isSafeInteger(value)) {
         throw structuredError(
           "OP_INVALID",
-          'integer scalar must be a JS safe integer; use decimal("<n>") for exact large values'
+          "integer scalar must be a JS safe integer; use int64(...) for exact signed 64-bit values"
         );
       }
     } else {
@@ -632,7 +670,7 @@ function toIrScalar(value) {
   }
   throw structuredError(
     "OP_INVALID",
-    "scalar value must be null, a string, boolean, finite number, decimal(...), byteValue(...), or Uint8Array"
+    "scalar value must be null, a string, boolean, finite number, int64(...), decimal(...), byteValue(...), or Uint8Array"
   );
 }
 function toIrValue(value) {
@@ -847,10 +885,12 @@ function toIrDefault(value) {
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
+  if (isInt64Value(value)) return { literal: { value: toIrScalar(value) } };
   if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isBytesValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
+    if (isRemovedInt64Carrier(value)) return { literal: { value: toIrScalar(value) } };
     if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
     if (isRemovedBytesCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);
@@ -3457,6 +3497,6 @@ function splitPartGrammarLint(delim, n) {
   if (n < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }
 
-export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
+export { __begin, __drain, __pgDomain, __pgSequence, byteValue, cCase, check, comment, concatWs, countStar, createFunction, currentSetting, currentUser, decimal, dialect, domain, dropFunction, dropOwnedBy, enumType, extension, genRandomUuid, grant, int64, interval, lintDeterminism, lit, maxValue, minValue, nextval, now, opProducerRegistry, opProducers, raw, revoke, role, schema, sequence, t, table, uuidV4, uuidV7, view };
 //# sourceMappingURL=embedded-recorder.js.map
 //# sourceMappingURL=embedded-recorder.js.map

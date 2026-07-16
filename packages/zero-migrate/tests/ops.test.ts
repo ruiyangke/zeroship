@@ -23,6 +23,7 @@ import {
   enumType,
   check,
   lit,
+  int64,
   decimal,
   byteValue,
   dialect,
@@ -51,6 +52,7 @@ import {
   t as engT,
   table as engTable,
   nextval as engNextval,
+  int64 as engInt64,
   decimal as engDecimal,
   byteValue as engByteValue,
   uuidV4 as engUuidV4,
@@ -77,6 +79,7 @@ function recordEngine(up: (api: {
   table: any;
   t: any;
   nextval: any;
+  int64: any;
   decimal: any;
   byteValue: any;
   uuidV4: any;
@@ -88,6 +91,7 @@ function recordEngine(up: (api: {
     table: engTable,
     t: engT,
     nextval: engNextval,
+    int64: engInt64,
     decimal: engDecimal,
     byteValue: engByteValue,
     uuidV4: engUuidV4,
@@ -101,6 +105,7 @@ test("zero-migrate core exports enumType, pg vendor names, and omits old names",
   const imported = await import("zero-migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
+  assert.equal(typeof imported.int64, "function");
   assert.equal(typeof imported.now, "function");
   assert.equal(typeof imported.uuidV4, "function");
   assert.equal(typeof imported.uuidV7, "function");
@@ -664,7 +669,7 @@ test("DML number scalars reject non-finite and unsafe integer values before seri
     (e: any) =>
       e.code === "OP_INVALID" &&
       /safe integer/.test(e.message) &&
-      /decimal/.test(e.message),
+      /int64/.test(e.message),
   );
   assert.throws(
     () =>
@@ -756,6 +761,99 @@ test("update set records scalar RHS as IrValue scalar and callback RHS as IrValu
   });
 });
 
+test("int64() records bigint and string inputs exactly in every migration scalar slot", () => {
+  const aboveSafeInteger = "9007199254740993";
+  const min = "-9223372036854775808";
+  const max = "9223372036854775807";
+  const ops = record(() => {
+    table("t").insert({
+      rows: [{ fromBigint: int64(9_007_199_254_740_993n), fromString: int64(aboveSafeInteger) }],
+    });
+    table("t").update({ set: { exactMin: int64(-9_223_372_036_854_775_808n) } });
+    table("t").backfill({
+      set: { exactMax: int64(max) },
+      cursorColumn: "id",
+      batchSize: 1,
+      name: "backfill_exact_max",
+    });
+    table("defaults").create({
+      columns: { exactMin: t.bigInt().default(int64(min)) },
+    });
+  });
+
+  assert.deepEqual(ops[0].rows, [
+    [{ int64: aboveSafeInteger }, { int64: aboveSafeInteger }],
+  ]);
+  assert.deepEqual(ops[1].set.exactMin, { int64: min });
+  assert.deepEqual(ops[2].set.exactMax, { int64: max });
+  assert.deepEqual(ops[3].columns[0].default, {
+    literal: { value: { int64: min } },
+  });
+  assert.doesNotThrow(() => JSON.stringify(ops));
+});
+
+test("int64() enforces canonical signed-64 strings and range boundaries", () => {
+  for (const malformed of ["", "+1", "01", "-0", " 1", "1 ", "1.0", "1e3", "--1"]) {
+    assert.throws(
+      () => int64(malformed),
+      (e: any) => e.code === "OP_INVALID" && /canonical signed integer/.test(e.message),
+      malformed,
+    );
+  }
+
+  for (const outOfRange of [
+    -9_223_372_036_854_775_809n,
+    9_223_372_036_854_775_808n,
+    "-9223372036854775809",
+    "9223372036854775808",
+  ]) {
+    assert.throws(
+      () => int64(outOfRange),
+      (e: any) => e.code === "OP_INVALID" && /must be between/.test(e.message),
+      String(outOfRange),
+    );
+  }
+
+  assert.throws(
+    () => int64(1 as any),
+    (e: any) => e.code === "OP_INVALID" && /canonical signed integer/.test(e.message),
+  );
+});
+
+test("safe integer numbers stay plain JSON numbers while unsafe numbers require int64()", () => {
+  const ops = record(() =>
+    table("t").insert({ rows: { minSafe: Number.MIN_SAFE_INTEGER, maxSafe: Number.MAX_SAFE_INTEGER } }),
+  );
+  assert.deepEqual(ops[0].rows, [[Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]]);
+  assert.equal(typeof ops[0].rows[0][0], "number");
+  assert.equal(typeof ops[0].rows[0][1], "number");
+
+  assert.throws(
+    () => record(() => table("t").insert({ rows: { value: Number.MAX_SAFE_INTEGER + 1 } })),
+    (e: any) => e.code === "OP_INVALID" && /safe integer/.test(e.message) && /int64/.test(e.message),
+  );
+});
+
+test("public and engine recorders match for exact int64() scalar values", () => {
+  const author = (api: { table: any; t: any; int64: any }): void => {
+    api.table("t").insert({ rows: { value: api.int64(9_007_199_254_740_993n) } });
+    api.table("t").update({ set: { value: api.int64("9223372036854775807") } });
+    api.table("t").backfill({
+      set: { value: api.int64("-9223372036854775808") },
+      cursorColumn: "id",
+      batchSize: 1,
+      name: "backfill_int64",
+    });
+    api.table("t").create({
+      columns: { value: api.t.bigInt().default(api.int64("-9223372036854775808")) },
+    });
+  };
+
+  const pub = record(() => author({ table, t, int64 }));
+  const eng = recordEngine(author);
+  assert.deepEqual(eng, pub);
+});
+
 test("decimal() validates decimal strings and records byte-identical IR", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
@@ -838,9 +936,11 @@ test("public and engine recorders match for byteValue() scalar values", () => {
   assert.deepEqual(pub, eng);
 });
 
-test("bigint and removed scalar carriers fail closed at record time", () => {
+test("raw bigint and in-band scalar carriers fail closed at record time", () => {
   const isBigintRefusal = (e: any) =>
-    e.code === "OP_INVALID" && e.message.includes('bigint is not a value — use decimal("<n>")');
+    e.code === "OP_INVALID" && /raw bigint/.test(e.message) && /int64/.test(e.message);
+  const isInt64CarrierRefusal = (e: any) =>
+    e.code === "OP_INVALID" && e.message.includes("the { int64 } carrier is not an authored value — use int64(...)");
   const isDecimalCarrierRefusal = (e: any) =>
     e.code === "OP_INVALID" && e.message.includes('the { decimal } carrier is removed — use decimal("<n>")');
   const isBytesCarrierRefusal = (e: any) =>
@@ -863,6 +963,14 @@ test("bigint and removed scalar carriers fail closed at record time", () => {
         }),
       ),
     isBigintRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ big: { int64: "9007199254740993" } }] } as any)),
+    isInt64CarrierRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { big: t.bigInt().default({ int64: "9007199254740993" } as any) } })),
+    isInt64CarrierRefusal,
   );
   assert.throws(
     () => record(() => table("t").insert({ rows: [{ price: { decimal: "0.00" } }] } as any)),

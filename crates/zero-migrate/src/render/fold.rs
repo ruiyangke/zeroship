@@ -1588,7 +1588,10 @@ fn apply_fold_structured_defaults_to_snapshot(
             IrDefault::Expr { .. }
             | IrDefault::Container { .. }
             | IrDefault::Json { .. }
-            | IrDefault::Nextval { .. },
+            | IrDefault::Nextval { .. }
+            | IrDefault::Literal {
+                value: crate::model::ir::IrScalar::Int64(_),
+            },
         ) = source.default.as_ref()
         else {
             continue;
@@ -1625,7 +1628,10 @@ fn apply_fold_structured_default_to_column(
         default @ (IrDefault::Expr { .. }
         | IrDefault::Container { .. }
         | IrDefault::Json { .. }
-        | IrDefault::Nextval { .. }),
+        | IrDefault::Nextval { .. }
+        | IrDefault::Literal {
+            value: crate::model::ir::IrScalar::Int64(_),
+        }),
     ) = default
     else {
         return Ok(());
@@ -2248,8 +2254,10 @@ fn ir_scalar_to_json(s: &crate::model::ir::IrScalar) -> Option<serde_json::Value
             .ok()
             .and_then(serde_json::Number::from_f64)
             .map(serde_json::Value::Number),
-        // `Null` / `Bytes` are not enum-member shapes the facet models.
-        IrScalar::Null | IrScalar::Bytes(_) => None,
+        // `Null` / `Bytes` are not enum-member shapes the facet models. The
+        // descriptor facet vocabulary also has no tagged int64 carrier: do not
+        // project one to a JSON number and silently erase its exact-value tag.
+        IrScalar::Null | IrScalar::Int64(_) | IrScalar::Bytes(_) => None,
     }
 }
 

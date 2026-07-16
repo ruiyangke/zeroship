@@ -6751,6 +6751,9 @@ fn apply_structured_defaults_to_snapshot(
                 | IrDefault::Container { .. }
                 | IrDefault::Json { .. }
                 | IrDefault::Nextval { .. }
+                | IrDefault::Literal {
+                    value: crate::model::ir::IrScalar::Int64(_),
+                }
         ) || matches!(
             (&source.ty, default),
             (ColType::Bytes, IrDefault::Literal { .. })
@@ -6792,6 +6795,9 @@ fn apply_structured_default_to_column(
             | IrDefault::Container { .. }
             | IrDefault::Json { .. }
             | IrDefault::Nextval { .. }
+            | IrDefault::Literal {
+                value: crate::model::ir::IrScalar::Int64(_),
+            }
     ) || matches!((ty, default), (ColType::Bytes, IrDefault::Literal { .. }));
     if !needs_overlay {
         return Ok(());
@@ -6814,10 +6820,18 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::model::ir::IrScalar;
     use serde_json::Value;
     match d {
+        IrDefault::Literal {
+            value: IrScalar::Int64(_),
+        } => None,
         IrDefault::Literal { value } => Some(match value {
             IrScalar::Null => Value::Null,
             IrScalar::Bool(b) => Value::Bool(*b),
             IrScalar::Int(i) => Value::from(*i),
+            // Exact int64 defaults are handled by the structured-default overlay
+            // above. The descriptor's JSON value vocabulary has no tagged-int64
+            // carrier, so projecting one here would either emit an unsafe JS number
+            // or silently turn it into a string default.
+            IrScalar::Int64(_) => unreachable!("int64 literal matched above"),
             // A decimal is carried as its canonical string; the descriptor's
             // `default` is rendered as a literal by the shared builder.
             IrScalar::Decimal(s) => Value::String(s.clone()),
@@ -7508,6 +7522,48 @@ mod tests {
     }
 
     #[test]
+    fn int64_column_default_above_js_safe_range_renders_exactly_on_every_dialect() {
+        let ir = create_table_ir(
+            "events",
+            vec![TIrColumn {
+                name: "external_id".into(),
+                ty: ColType::BigInt,
+                nullable: Some(false),
+                default: Some(IrDefault::Literal {
+                    value: crate::model::ir::IrScalar::Int64(9_007_199_254_740_993),
+                }),
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+        );
+
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .unwrap_or_else(|err| panic!("{dialect:?} int64 default should lower: {err}"));
+            let create = migrations
+                .iter()
+                .find(|migration| migration.up.contains("CREATE TABLE"))
+                .expect("create migration");
+            assert!(
+                create.up.contains("DEFAULT 9007199254740993"),
+                "{dialect:?} must preserve the tagged int64 default exactly; got:\n{}",
+                create.up
+            );
+            assert!(
+                !create.up.contains("DEFAULT '9007199254740993'"),
+                "{dialect:?} must render int64 as a numeric literal; got:\n{}",
+                create.up
+            );
+        }
+    }
+
+    #[test]
     fn fixed_precision_decimal_columns_do_not_lower_as_floats() {
         let ir = create_table_ir(
             "ledger",
@@ -7939,9 +7995,8 @@ mod tests {
     ///   - an `int`-token column (`t.int()`/`t.bigInt()`) fell through to
     ///     `None` → its `DEFAULT` was silently dropped;
     ///   - a decimal default is carried as a validated numeric STRING by
-    ///     `IrScalar::Decimal` (and a bigint default ≥ 2^53 likewise, since a
-    ///     fractional/large JSON number is rejected at parse) — `as_f64()`
-    ///     returns `None` for a JSON string, so those fell through too.
+    ///     `IrScalar::Decimal`; an exact bigint default ≥ 2^53 is carried by
+    ///     `IrScalar::Int64`. Neither may be narrowed through `as_f64()`.
     ///
     /// So `render_create_table` emitted NO `DEFAULT` clause for any of them (a
     /// real apply bug, losing the creator's default). RED before the unified
@@ -7982,15 +8037,14 @@ mod tests {
                     generated: None,
                     identity: None,
                 },
-                // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
-                // rejects a fractional/oversized JSON number), and `as_f64` would
-                // corrupt it; the verbatim string keeps it exact.
+                // A bigint default beyond 2^53 — carried by the tagged exact-int64
+                // scalar so it never passes through a JavaScript number or `as_f64`.
                 TIrColumn {
                     name: "big".into(),
                     ty: ColType::BigInt,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal {
-                        value: IrScalar::Decimal("9007199254740993".into()),
+                        value: IrScalar::Int64(9_007_199_254_740_993),
                     }),
                     unique: None,
                     id_prefix: None,
@@ -8065,7 +8119,7 @@ mod tests {
         );
         assert!(
             create.up.contains("DEFAULT 9007199254740993"),
-            "a >2^53 bigint DEFAULT (decimal-string carrier) must render exactly; up = {:?}",
+            "a >2^53 bigint DEFAULT (int64 carrier) must render exactly; up = {:?}",
             create.up
         );
         assert!(

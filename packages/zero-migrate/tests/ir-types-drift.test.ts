@@ -280,6 +280,24 @@ test("safe integer schema bounds match the hand-authored IR mirror", () => {
   );
 });
 
+test("the exact int64 scalar carrier matches the schema and hand-authored IR mirror", () => {
+  const int64Carrier = schema.$defs.IrScalar.oneOf.find(
+    (branch: any) => branch.type === "object" && branch.required?.length === 1 && branch.required[0] === "int64",
+  );
+  assert.ok(int64Carrier, "IrScalar schema must include the single-key { int64: string } carrier");
+  assert.deepEqual(Object.keys(int64Carrier.properties), ["int64"]);
+  assert.equal(int64Carrier.properties.int64.type, "string");
+  assert.equal(int64Carrier.properties.int64.pattern, "^(0|-?[1-9][0-9]*)$");
+  assert.equal(int64Carrier.additionalProperties, false);
+
+  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+  assert.match(
+    irTs,
+    /\|\s*\{\s*int64:\s*string\s*\}/,
+    "src/generated/ir.ts IrScalar must carry the exact { int64: string } arm",
+  );
+});
+
 test("closed string-enum tokens match the schema", () => {
   for (const name of [
     "BinaryOp",

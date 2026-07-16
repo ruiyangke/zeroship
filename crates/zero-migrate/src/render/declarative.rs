@@ -1535,11 +1535,13 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 ///   - a JSON integer (`IrScalar::Int` ⇒ `as_i64`) — exact, no float rounding;
 ///   - a JSON float (the differ's wire `FieldDef`, ⇒ `as_f64`);
 ///   - a validated numeric STRING — `IrScalar::Decimal` carries arbitrary-
-///     precision decimals AND bigints ≥ 2^53 as a string (the IR rejects an
-///     oversized/fractional JSON number at parse). `as_f64` returns `None` for a
-///     JSON string and would corrupt a >2^53 bigint anyway, so we emit the string
-///     verbatim — re-validated as a plain numeric literal ([`crate::model::ir::
-///     is_decimal_string`]) so nothing else can inject raw text into the DDL.
+///     precision decimals. `as_f64` returns `None` for a JSON string, so we emit
+///     the string verbatim — re-validated as a plain numeric literal
+///     ([`crate::model::ir::is_decimal_string`]) so nothing else can inject raw
+///     text into the DDL.
+///
+/// Tagged `IrScalar::Int64` defaults bypass this descriptor-value helper and use
+/// the structured-default overlay, preserving their exact i64 tag and spelling.
 fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     if let Some(i) = v.as_i64() {
         Some(i.to_string())

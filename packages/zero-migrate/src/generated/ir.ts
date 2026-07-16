@@ -90,12 +90,13 @@ export type SafeI64 = number;
 export type SafeU64 = number;
 
 /** A typed scalar (the numeric domain): null / bool / safe-int / string /
- *  decimal-string / base64-bytes. */
+ *  exact signed-int64 string / decimal-string / base64-bytes. */
 export type IrScalar =
   | null
   | boolean
   | number
   | string
+  | { int64: string }
   | { decimal: string }
   | { bytes: string };
 
