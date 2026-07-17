@@ -44,6 +44,12 @@ export type HostDriver = (
 const OID_INT8 = 20;
 const OID_NUMERIC = 1700;
 const OID_INT8_ARRAY = 1016;
+// `name[]` (array_agg(attname)/array_agg(rolname) in catalog introspection) and
+// `text[]`. node-pg parses `text[]` into a JS array by default but NOT `name[]`,
+// which would otherwise arrive as raw `{a,b}` text and fail the seam's
+// `Vec<String>` (TextArray) decode. See `connectionScopedTypes`.
+const OID_NAME_ARRAY = 1003;
+const OID_TEXT_ARRAY = 1009;
 
 /**
  * Build a connection-scoped `types` object whose `getTypeParser(oid, format)`
@@ -77,6 +83,16 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
         // string-preserving by construction and immune to the scalar int8 override
         // because array parsing is registered separately.
         return arrayParser as (value: string) => unknown;
+      }
+      if (oid === OID_NAME_ARRAY) {
+        // `name[]` is not in node-pg's default array-parser set, so catalog
+        // introspection columns like `array_agg(attname)` would cross as raw
+        // `{a,b}` text and fail the seam's `Vec<String>` (TextArray) decode. Reuse
+        // the `text[]` array parser — identical array-literal syntax — so the value
+        // crosses as a JS string array → `driver::Value::TextArray`.
+        return defaults.getTypeParser(OID_TEXT_ARRAY as never, format as never) as (
+          value: string,
+        ) => unknown;
       }
       return defaults.getTypeParser(oid, format as never) as (value: string) => unknown;
     },
