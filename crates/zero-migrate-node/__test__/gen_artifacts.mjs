@@ -134,16 +134,20 @@ assert(widgets.fields.count.required === true, 'count field required');
 assert(widgets.options.softDelete === false && widgets.options.strictness === 'strict', 'options block v1');
 assert(Array.isArray(widgets.indexes), 'indexes is an array');
 
-// (3) env.db.ts is a real .ts module of builder calls.
-assert(gen.envDbTs.includes('import { t, schema as defineSchema, type Db } from "@zeroship/db";'), 'imports @zeroship/db');
+// (3) env.db.ts is a passive schema map using the current authoring API.
+assert(gen.envDbTs.includes('from "zero-migrate";'), 'imports zero-migrate');
 assert(gen.envDbTs.includes('const schema = {'), 'has the schema const');
-assert(gen.envDbTs.includes('label: t.string(),'), 'renders label builder chain');
-assert(gen.envDbTs.includes('count: t.number().required(),'), 'renders count builder chain');
-assert(gen.envDbTs.includes('declare module "zeroship" {'), 'carries the module augmentation');
-assert(gen.envDbTs.includes('db: Db<typeof schema>;'), 'augments Env.db');
+assert(gen.envDbTs.includes('label: t.text(),'), 'renders label builder chain');
+assert(gen.envDbTs.includes('count: t.int().notNull(),'), 'renders count builder chain');
+assert(gen.envDbTs.includes('satisfies Record<string, CreateTableArgs>'), 'checks table payloads against CreateTableArgs');
+assert(gen.envDbTs.includes('export { schema };'), 'exports the passive schema map');
 for (const s of SYS) {
-  assert(!gen.envDbTs.includes(`${s}: t.`), `env.db.ts omits system field ${s}`);
+  assert(gen.envDbTs.includes(`${s}:`), `env.db.ts renders resolved system field ${s}`);
 }
+assert(!gen.envDbTs.includes('t.id('), 'never emits removed t.id');
+assert(!gen.envDbTs.includes('t["id"]'), 'never emits removed t[id]');
+assert(!gen.envDbTs.includes('t.ref('), 'never emits removed t.ref');
+assert(!gen.envDbTs.includes('.create('), 'never executes a lifecycle operation');
 
 // (4) error arms fail soft (never throw).
 const both = addon.genArtifacts({ envelopes: [envelope], descriptors: [descriptor] });
@@ -155,4 +159,4 @@ assert(!neither.ok && typeof neither.error === 'string', 'no-arm is a soft error
 const malformed = addon.genArtifacts({ envelopes: [{ ir_version: addon.irVersion(), ops: 'nope' }] });
 assert(!malformed.ok && typeof malformed.error === 'string', 'malformed envelope is a soft error');
 
-console.log('PASS: genArtifacts byte-identical + v1-shape + .ts-module + soft-error arms (through the real .node)');
+console.log('PASS: genArtifacts byte-identical + v1-shape + current authoring schema + soft-error arms (through the real .node)');

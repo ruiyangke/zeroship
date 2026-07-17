@@ -29,8 +29,8 @@
 //!   2. the emitted `schema.runtime.json` parses + satisfies the v1 contract the
 //!      runtime validates (version==1, snake_case fields incl. the 7 system fields,
 //!      options, indexes);
-//!   3. the emitted `env.db.ts` is a real `.ts` module of `t.*()` builder calls +
-//!      the `declare module "zeroship"` augmentation.
+//!   3. the emitted `env.db.ts` is a passive schema map whose current
+//!      `zero-migrate` builder calls satisfy `CreateTableArgs`.
 
 use serde_json::Value;
 
@@ -220,7 +220,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 }
 
 #[test]
-fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
+fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
         SCHEMA,
@@ -229,11 +229,11 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
     .expect("render");
     let ts = &artifacts.env_db_ts;
 
-    // A real `.ts` module: the `@zeroship/db` import, a `const schema = { … }`
-    // value expression, `t.*()` builder calls, and the module augmentation.
+    // A real `.ts` module: imports the current authoring package and constrains
+    // the passive schema map with the package's real CreateTableArgs type.
     assert!(
-        ts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";"),
-        "env.db.ts imports the @zeroship/db surface:\n{ts}"
+        ts.contains("type CreateTableArgs") && ts.contains("from \"zero-migrate\";"),
+        "env.db.ts imports the current zero-migrate surface:\n{ts}"
     );
     assert!(
         ts.contains("const schema = {"),
@@ -241,34 +241,38 @@ fn emitted_env_db_ts_is_a_real_ts_module_of_builder_calls() {
     );
     assert!(ts.contains("t."), "emits t.*() builder calls:\n{ts}");
     assert!(
-        ts.contains("email: t.string().required(),"),
+        ts.contains("email: t.text().notNull(),"),
         "the required email column renders its builder chain:\n{ts}"
     );
-    assert!(ts.contains("} as const;"), "closes with `as const`:\n{ts}");
     assert!(
-        ts.contains("declare module \"zeroship\" {"),
-        "carries the zeroship module augmentation:\n{ts}"
+        ts.contains("} satisfies Record<string, CreateTableArgs>;"),
+        "the real authoring type checks every table payload:\n{ts}"
     );
     assert!(
-        ts.contains("db: Db<typeof schema>;"),
-        "augments Env.db to Db<typeof schema>:\n{ts}"
-    );
-    assert!(
-        ts.contains("export {};"),
-        "is a module (export {{}}):\n{ts}"
+        ts.contains("export { schema };"),
+        "exports the passive schema map:\n{ts}"
     );
 
-    // It is NOT a `.d.ts` ambient context — the builder-call value expressions
-    // above would be illegal there. (Pinned by the presence of `const schema = {`
-    // with a runtime initializer, which a `.d.ts` forbids.)
-    // System fields are OMITTED from the builder schema (the runtime descriptor
-    // carries them; the author-facing schema must not).
+    // The resolved IR is the source, including policy-injected system fields.
     for sys in zero_migrate::schema::query::SYSTEM_FIELD_NAMES {
         assert!(
-            !ts.contains(&format!("{sys}: t.")),
-            "env.db.ts builder schema must omit platform system field {sys}:\n{ts}"
+            ts.contains(&format!("{sys}:")),
+            "env.db.ts must render the resolved system field {sys}:\n{ts}"
         );
     }
+    assert!(
+        !ts.contains("t.id("),
+        "removed t.id must never render:\n{ts}"
+    );
+    assert!(
+        !ts.contains("t[\"id\"]"),
+        "removed t[id] must never render:\n{ts}"
+    );
+    assert!(
+        !ts.contains("t.ref("),
+        "removed t.ref must never render:\n{ts}"
+    );
+    assert!(!ts.contains(".create("), "the artifact is passive:\n{ts}");
 }
 
 #[test]

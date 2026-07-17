@@ -420,8 +420,9 @@ pub struct HistoryReply {
 pub struct GenArtifactsReply {
     /// `true` iff both artifacts rendered cleanly.
     pub ok: bool,
-    /// The generated `env.db.ts` source (a real `.ts` module of `t.*()` builder
-    /// calls + the `declare module "zeroship"` augmentation). `None` on failure.
+    /// The generated `env.db.ts` source: a passive schema map built with the
+    /// current `zero-migrate` authoring API and checked as `CreateTableArgs`.
+    /// `None` on failure.
     pub env_db_ts: Option<String>,
     /// The `schema.runtime.json` bytes (the v1 `RuntimeSchemaDescriptor`, pretty +
     /// trailing newline). `None` on failure.

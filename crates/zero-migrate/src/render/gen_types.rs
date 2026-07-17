@@ -1,6 +1,9 @@
-//! **`gen-types` — the schema-artifact emitter.** Emit the typed `env.db` surface
-//! FROM the schema source (op.* migrations OR a declared `CollectionDescriptor`
-//! set), the consumer of the fold-and-recover seam ([`crate::fold_to_field_defs`]).
+//! **`gen-types` — the schema-artifact emitter.** Emit a typed authoring-schema
+//! artifact FROM the schema source (op.* migrations OR a declared
+//! `CollectionDescriptor` set). The runtime projection consumes the
+//! fold-and-recover seam ([`crate::fold_to_field_defs`]); the TypeScript projection
+//! replays the richer IR so physical types, defaults, value formats, and keys are
+//! not collapsed by the runtime `FieldDef` vocabulary.
 //!
 //! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
 //!
@@ -10,14 +13,10 @@
 //!   fields (`id`/`created_at`/`updated_at`/`created_by`/`updated_by`/`version`/
 //!   `deleted_at`), exactly as the fold recovers them. The runtime validates this
 //!   shape.
-//! - **`env.db.ts`** — a GENERATED module reconstructing a
-//!   `const schema = { … } as const` of `@zeroship/db` `t.*()` builder calls (the
-//!   SDK type inference keys ONLY off `TypeBuilder`, so the emitter MUST emit
-//!   builder calls, never a hand-rolled interface), wrapping collections in
-//!   `schema(...)` when folded options/indexes exist, then `declare module
-//!   "zeroship" { interface Env { db: Db<typeof schema> } }` + `export {}`. It is a
-//!   real `.ts` MODULE, NOT a `.d.ts`: the `t.*()` value expressions are illegal in
-//!   a `.d.ts` ambient context (`TS1046`/`TS1254`).
+//! - **`env.db.ts`** — a GENERATED, passive `CreateTableArgs` schema map using the
+//!   current `zero-migrate` authoring builders. It contains no lifecycle calls;
+//!   `satisfies Record<string, CreateTableArgs>` makes `tsc` validate every emitted
+//!   column/constraint against the real public package.
 //!
 //! **Byte-identical-by-construction.** Both sources funnel through ONE renderer:
 //! op.* migrations fold directly; a declared `CollectionDescriptor` set is turned
@@ -28,12 +27,18 @@
 //! [`check_artifacts`] regenerates in memory and diffs against committed artifacts —
 //! the CI drift gate, no DB write.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::ir::Op;
+use crate::model::expr::{Expr, SynthFn};
+use crate::model::ir::{
+    ColType, ColumnOrExpr, ColumnReference, EmptyContainerKind, ExclusionMethod, IndexElement,
+    IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
+    IrScalar, Op, PartitionSpec, RefAction, ValueFormat,
+};
 use crate::SqlDialect;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
@@ -41,14 +46,8 @@ use crate::SqlDialect;
 pub const RUNTIME_DESCRIPTOR_FILE: &str = "schema.runtime.json";
 /// The generated `env.db` typings file.
 ///
-/// This is a real `.ts` MODULE, NOT a `.d.ts`. The emit strategy reconstructs
-/// `const schema = { … t.string() … } as const` — i.e. RUNTIME `t.*()` builder-call
-/// value expressions, the only thing the `@zeroship/db` type inference keys off
-/// (`InferFieldDef<T extends TypeBuilder<…>>`). tsc treats ANY `*.d.ts` as an
-/// AMBIENT declaration context where `const x = <expr>` is illegal
-/// (`TS1046`/`TS1254` — a `.d.ts` const initializer must be a literal). So the file
-/// MUST be a normal module. The `declare module "zeroship" { … }` augmentation +
-/// `export {}` are valid module-level constructs in a `.ts` file.
+/// This is a real `.ts` module, not a `.d.ts`: it contains `t.*()` builder value
+/// expressions and exports a passive, typed schema map.
 pub const ENV_DTS_FILE: &str = "env.db.ts";
 
 /// A `gen-types` emitter error (fold / IO / drift).
@@ -384,6 +383,7 @@ pub fn render_artifacts(
     let defs = crate::fold_to_field_defs(ops, SqlDialect::Postgres, project_schema)
         .map_err(GenTypesError::Fold)?;
     let metadata = runtime_metadata_from_ops(ops);
+    let authoring_tables = authoring_tables_from_ops(ops).map_err(GenTypesError::Fold)?;
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
@@ -392,8 +392,8 @@ pub fn render_artifacts(
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
 
-    // (b) env.db.ts — reconstructed `t.*()` builder schema.
-    let env_db_ts = render_env_db_ts(&defs, &metadata);
+    // (b) env.db.ts — reconstructed current-authoring-API schema.
+    let env_db_ts = render_env_db_ts(&authoring_tables, &metadata);
 
     Ok(GeneratedArtifacts {
         runtime_json,
@@ -429,351 +429,1238 @@ pub fn render_artifacts_from_descriptors(
     render_artifacts(&ops, project_schema)
 }
 
-fn collection_needs_schema_builder(meta: &RuntimeCollectionMetadata) -> bool {
-    meta.options.soft_delete
-        || meta.options.versioning
-        || !matches!(meta.options.strictness, crate::TableStrictness::Strict)
-        || !meta.indexes.is_empty()
+#[derive(Debug, Clone)]
+struct AuthoringTable {
+    columns: IndexMap<String, IrColumn>,
+    primary_key: Option<Vec<String>>,
+    constraints: Vec<IrConstraint>,
+    indexes: Vec<IrIndex>,
+    partition_by: Option<PartitionSpec>,
+    schema: Option<String>,
 }
 
-fn render_index_fields(fields: &[String]) -> String {
-    serde_json::to_string(fields).expect("index fields serialize")
+/// Replay the IR carriers that the runtime `FieldDef` projection intentionally
+/// cannot represent. Structural coherence has already been checked by
+/// `fold_to_field_defs`; this replay preserves declaration order and the exact
+/// public-authoring facets needed by the TypeScript emitter.
+fn authoring_tables_from_ops(
+    ops: &[Op],
+) -> Result<BTreeMap<String, AuthoringTable>, crate::FoldError> {
+    let mut tables = BTreeMap::new();
+    for op in crate::render::fold::flatten_dialectal_ops(ops, SqlDialect::Postgres)? {
+        match op {
+            Op::CreateTable {
+                name,
+                columns,
+                primary_key,
+                constraints,
+                indexes,
+                partition_by,
+                schema,
+                ..
+            } => {
+                tables.insert(
+                    name.clone(),
+                    AuthoringTable {
+                        columns: columns
+                            .iter()
+                            .cloned()
+                            .map(|column| (column.name.clone(), column))
+                            .collect(),
+                        primary_key: primary_key.clone(),
+                        constraints: constraints
+                            .iter()
+                            .map(|constraint| named_constraint(name, constraint))
+                            .collect(),
+                        indexes: indexes
+                            .iter()
+                            .map(|index| named_index(name, index))
+                            .collect(),
+                        partition_by: partition_by.clone(),
+                        schema: schema.clone(),
+                    },
+                );
+            }
+            Op::DropTable { table, .. } => {
+                tables.remove(table);
+            }
+            Op::RenameTable { table, to, .. } => {
+                if let Some(state) = tables.remove(table) {
+                    tables.insert(to.clone(), state);
+                }
+                for state in tables.values_mut() {
+                    for column in state.columns.values_mut() {
+                        if let Some(reference) = &mut column.references {
+                            if reference.table == *table {
+                                reference.table.clone_from(to);
+                            }
+                        }
+                        if let ColType::Ref { references } = &mut column.ty {
+                            if references == table {
+                                references.clone_from(to);
+                            }
+                        }
+                    }
+                    for constraint in &mut state.constraints {
+                        if let IrConstraintKind::Fk {
+                            references_table, ..
+                        } = &mut constraint.kind
+                        {
+                            if references_table == table {
+                                references_table.clone_from(to);
+                            }
+                        }
+                    }
+                    for_each_expr_mut(state, |expr| rename_expr_table(expr, table, to));
+                }
+            }
+            Op::AddColumn {
+                table,
+                column,
+                ty,
+                nullable,
+                default,
+                value_format,
+                vector_metric,
+                case_sensitive,
+                mask,
+                generated,
+                identity,
+                ..
+            } => {
+                if let Some(state) = tables.get_mut(table) {
+                    state.columns.insert(
+                        column.clone(),
+                        IrColumn {
+                            name: column.clone(),
+                            ty: ty.clone(),
+                            nullable: *nullable,
+                            default: default.clone(),
+                            unique: None,
+                            value_format: value_format.clone(),
+                            references: None,
+                            id_prefix: None,
+                            vector_metric: *vector_metric,
+                            case_sensitive: *case_sensitive,
+                            mask: *mask,
+                            generated: generated.clone(),
+                            identity: *identity,
+                        },
+                    );
+                }
+            }
+            Op::DropColumn { table, column, .. } => {
+                if let Some(state) = tables.get_mut(table) {
+                    state.columns.shift_remove(column);
+                    if state
+                        .primary_key
+                        .as_ref()
+                        .is_some_and(|columns| columns.iter().any(|name| name == column))
+                    {
+                        state.primary_key = None;
+                    }
+                    state.constraints.retain(|constraint| {
+                        !constraint_uses_local_column(constraint, table, column)
+                    });
+                    state
+                        .indexes
+                        .retain(|index| !index_uses_column(index, table, column));
+                }
+            }
+            Op::RenameColumn {
+                table, from, to, ..
+            } => {
+                if let Some(state) = tables.get_mut(table) {
+                    if let Some(index) = state.columns.get_index_of(from) {
+                        if let Some((_, mut column)) = state.columns.shift_remove_index(index) {
+                            column.name.clone_from(to);
+                            state.columns.shift_insert(index, to.clone(), column);
+                        }
+                    }
+                    if let Some(primary_key) = &mut state.primary_key {
+                        replace_name(primary_key, from, to);
+                    }
+                    for constraint in &mut state.constraints {
+                        rename_constraint_local_column(constraint, from, to);
+                    }
+                    for index in &mut state.indexes {
+                        rename_index_column(index, from, to);
+                    }
+                }
+                // Database foreign keys follow the referenced column rename too.
+                for state in tables.values_mut() {
+                    for column in state.columns.values_mut() {
+                        if let Some(reference) = &mut column.references {
+                            if reference.table == *table && reference.column == *from {
+                                reference.column.clone_from(to);
+                            }
+                        }
+                    }
+                    for constraint in &mut state.constraints {
+                        if let IrConstraintKind::Fk {
+                            references_table,
+                            references_columns,
+                            ..
+                        } = &mut constraint.kind
+                        {
+                            if references_table == table {
+                                replace_name(references_columns, from, to);
+                            }
+                        }
+                    }
+                }
+                for (owner_table, state) in &mut tables {
+                    let include_unqualified = owner_table == table;
+                    for_each_expr_mut(state, |expr| {
+                        rename_expr_column(expr, table, from, to, include_unqualified);
+                    });
+                }
+            }
+            Op::SetColumnType {
+                table,
+                column,
+                to_type,
+                ..
+            } => {
+                if let Some(column) = tables
+                    .get_mut(table)
+                    .and_then(|state| state.columns.get_mut(column))
+                {
+                    column.ty.clone_from(to_type);
+                    column.value_format = None;
+                    column.vector_metric = None;
+                    column.case_sensitive = None;
+                }
+            }
+            Op::SetColumnNotNull { table, column, .. } => {
+                if let Some(column) = tables
+                    .get_mut(table)
+                    .and_then(|state| state.columns.get_mut(column))
+                {
+                    column.nullable = Some(false);
+                }
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                if let Some(column) = tables
+                    .get_mut(table)
+                    .and_then(|state| state.columns.get_mut(column))
+                {
+                    column.nullable = Some(true);
+                }
+            }
+            Op::SetColumnDefault {
+                table,
+                column,
+                value,
+                ..
+            } => {
+                if let Some(column) = tables
+                    .get_mut(table)
+                    .and_then(|state| state.columns.get_mut(column))
+                {
+                    column.default = Some(value.clone());
+                }
+            }
+            Op::DropColumnDefault { table, column, .. } => {
+                if let Some(column) = tables
+                    .get_mut(table)
+                    .and_then(|state| state.columns.get_mut(column))
+                {
+                    column.default = None;
+                }
+            }
+            Op::AddConstraint {
+                table, constraint, ..
+            } => {
+                if let Some(state) = tables.get_mut(table) {
+                    state.constraints.push(named_constraint(table, constraint));
+                }
+            }
+            Op::DropConstraint { table, name, .. } => {
+                if let Some(state) = tables.get_mut(table) {
+                    state
+                        .constraints
+                        .retain(|constraint| effective_constraint_name(table, constraint) != *name);
+                }
+            }
+            Op::CreateIndex {
+                table,
+                columns,
+                name,
+                unique,
+                using,
+                r#where,
+                include,
+                with,
+                only,
+                nulls_not_distinct,
+                ..
+            } => {
+                if let Some(state) = tables.get_mut(table) {
+                    let index = IrIndex {
+                        name: name.clone(),
+                        columns: columns.clone(),
+                        unique: *unique,
+                        using: *using,
+                        r#where: r#where.clone(),
+                        include: include.clone(),
+                        with: with.clone(),
+                        only: *only,
+                        nulls_not_distinct: *nulls_not_distinct,
+                    };
+                    state.indexes.push(named_index(table, &index));
+                }
+            }
+            Op::DropIndex { table, name, .. } => {
+                if let Some(table) = table {
+                    if let Some(state) = tables.get_mut(table) {
+                        state
+                            .indexes
+                            .retain(|index| effective_index_name(table, index) != *name);
+                    }
+                } else {
+                    for (table, state) in &mut tables {
+                        state
+                            .indexes
+                            .retain(|index| effective_index_name(table, index) != *name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(tables)
 }
 
-fn render_collection_chains(meta: &RuntimeCollectionMetadata) -> String {
-    let mut out = String::new();
-    if meta.options.soft_delete {
-        out.push_str(".softDelete()");
+fn replace_name(names: &mut [String], from: &str, to: &str) {
+    for name in names {
+        if name == from {
+            to.clone_into(name);
+        }
     }
-    if meta.options.versioning {
-        out.push_str(".withVersioning()");
-    }
-    match meta.options.strictness {
-        crate::TableStrictness::Strict => {}
-        crate::TableStrictness::Lenient => out.push_str(".strictness(\"lenient\")"),
-        crate::TableStrictness::Off => out.push_str(".strictness(\"off\")"),
-    }
-    for idx in &meta.indexes {
-        let method = if idx.unique { "uniqueIndex" } else { "index" };
-        let name = serde_json::to_string(&idx.name).expect("index name serializes");
-        out.push('.');
-        out.push_str(method);
-        out.push('(');
-        out.push_str(&name);
-        out.push_str(", ");
-        out.push_str(&render_index_fields(&idx.fields));
-        out.push(')');
-    }
-    out
 }
 
-fn is_system_field_name(name: &str) -> bool {
-    crate::schema::query::SYSTEM_FIELD_NAMES.contains(&name)
+fn constraint_uses_local_column(constraint: &IrConstraint, table: &str, column: &str) -> bool {
+    match &constraint.kind {
+        IrConstraintKind::Fk { columns, .. } | IrConstraintKind::Unique { columns } => {
+            columns.iter().any(|name| name == column)
+        }
+        IrConstraintKind::Check { expr, .. } => expr_references_column(expr, table, column, true),
+        IrConstraintKind::Exclusion {
+            elements,
+            where_predicate,
+            ..
+        } => {
+            elements.iter().any(|element| match &element.target {
+                ColumnOrExpr::Column { name } => name == column,
+                ColumnOrExpr::Expr { expr } => expr_references_column(expr, table, column, true),
+            }) || where_predicate
+                .as_ref()
+                .is_some_and(|expr| expr_references_column(expr, table, column, true))
+        }
+    }
 }
 
-/// Render the generated `env.db.ts`: a `const schema = { … } as const` of
-/// `@zeroship/db` `t.*()` builder calls, wrapping a collection in the SDK
-/// `schema(...)` builder when the fold carries runtime metadata, then the
-/// `zeroship` module augmentation `interface Env { db: Db<typeof schema> }`.
-/// Emitted as a real `.ts` MODULE (not a `.d.ts`) — the `t.*()` value expressions
-/// are illegal in a `.d.ts` ambient context (see [`ENV_DTS_FILE`]).
+fn rename_constraint_local_column(constraint: &mut IrConstraint, from: &str, to: &str) {
+    match &mut constraint.kind {
+        IrConstraintKind::Fk { columns, .. } | IrConstraintKind::Unique { columns } => {
+            replace_name(columns, from, to);
+        }
+        IrConstraintKind::Exclusion { elements, .. } => {
+            for element in elements {
+                if let ColumnOrExpr::Column { name } = &mut element.target {
+                    if name == from {
+                        to.clone_into(name);
+                    }
+                }
+            }
+        }
+        IrConstraintKind::Check { .. } => {}
+    }
+}
+
+fn index_uses_column(index: &IrIndex, table: &str, column: &str) -> bool {
+    index.columns.iter().any(|element| match element {
+        IndexElement::Column { name, .. } => name == column,
+        IndexElement::Expr { expr } => expr_references_column(expr, table, column, true),
+    }) || index.include.iter().any(|name| name == column)
+        || index
+            .r#where
+            .as_ref()
+            .is_some_and(|expr| expr_references_column(expr, table, column, true))
+}
+
+fn rename_index_column(index: &mut IrIndex, from: &str, to: &str) {
+    for element in &mut index.columns {
+        if let IndexElement::Column { name, .. } = element {
+            if name == from {
+                to.clone_into(name);
+            }
+        }
+    }
+    replace_name(&mut index.include, from, to);
+}
+
+fn for_each_expr_mut(table: &mut AuthoringTable, mut f: impl FnMut(&mut Expr)) {
+    for column in table.columns.values_mut() {
+        if let Some(generated) = &mut column.generated {
+            f(&mut generated.expr);
+        }
+    }
+    for constraint in &mut table.constraints {
+        match &mut constraint.kind {
+            IrConstraintKind::Check { expr, .. } => f(expr),
+            IrConstraintKind::Exclusion {
+                elements,
+                where_predicate,
+                ..
+            } => {
+                for element in elements {
+                    if let ColumnOrExpr::Expr { expr } = &mut element.target {
+                        f(expr);
+                    }
+                }
+                if let Some(expr) = where_predicate {
+                    f(expr);
+                }
+            }
+            IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {}
+        }
+    }
+    for index in &mut table.indexes {
+        for element in &mut index.columns {
+            if let IndexElement::Expr { expr } = element {
+                f(expr);
+            }
+        }
+        if let Some(expr) = &mut index.r#where {
+            f(expr);
+        }
+    }
+}
+
+fn rename_expr_table(expr: &mut Expr, from: &str, to: &str) {
+    let mut value = serde_json::to_value(&*expr).expect("Expr serializes");
+    visit_expr_values_mut(&mut value, &mut |node| {
+        if node.get("node").and_then(Value::as_str) == Some("colRef")
+            && node.get("table").and_then(Value::as_str) == Some(from)
+        {
+            node.insert("table".to_string(), Value::String(to.to_string()));
+        }
+    });
+    *expr = serde_json::from_value(value).expect("an edited colRef remains a valid Expr");
+}
+
+fn rename_expr_column(
+    expr: &mut Expr,
+    table: &str,
+    from: &str,
+    to: &str,
+    include_unqualified: bool,
+) {
+    let mut value = serde_json::to_value(&*expr).expect("Expr serializes");
+    visit_expr_values_mut(&mut value, &mut |node| {
+        if node.get("node").and_then(Value::as_str) != Some("colRef")
+            || node.get("name").and_then(Value::as_str) != Some(from)
+        {
+            return;
+        }
+        let qualifier = node.get("table").and_then(Value::as_str);
+        if qualifier == Some(table) || (include_unqualified && qualifier.is_none()) {
+            node.insert("name".to_string(), Value::String(to.to_string()));
+        }
+    });
+    *expr = serde_json::from_value(value).expect("an edited colRef remains a valid Expr");
+}
+
+fn visit_expr_values_mut(
+    value: &mut Value,
+    visit: &mut impl FnMut(&mut serde_json::Map<String, Value>),
+) {
+    match value {
+        Value::Object(node) => {
+            visit(node);
+            for value in node.values_mut() {
+                visit_expr_values_mut(value, visit);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                visit_expr_values_mut(value, visit);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn expr_references_column(
+    expr: &Expr,
+    table: &str,
+    column: &str,
+    include_unqualified: bool,
+) -> bool {
+    fn contains(value: &Value, table: &str, column: &str, include_unqualified: bool) -> bool {
+        match value {
+            Value::Object(node) => {
+                let is_match = node.get("node").and_then(Value::as_str) == Some("colRef")
+                    && node.get("name").and_then(Value::as_str) == Some(column)
+                    && (node.get("table").and_then(Value::as_str) == Some(table)
+                        || (include_unqualified
+                            && node.get("table").and_then(Value::as_str).is_none()));
+                is_match
+                    || node
+                        .values()
+                        .any(|value| contains(value, table, column, include_unqualified))
+            }
+            Value::Array(values) => values
+                .iter()
+                .any(|value| contains(value, table, column, include_unqualified)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+        }
+    }
+
+    let value = serde_json::to_value(expr).expect("Expr serializes");
+    contains(&value, table, column, include_unqualified)
+}
+
+fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
+    if let Some(name) = &constraint.name {
+        return name.clone();
+    }
+    match &constraint.kind {
+        IrConstraintKind::Fk { columns, .. } => {
+            if columns.len() == 1 {
+                format!("{}_fkey", columns[0])
+            } else {
+                crate::plan::author::cap_ident_name(&format!("{}_fkey", columns.join("_")))
+            }
+        }
+        IrConstraintKind::Unique { columns } => {
+            crate::render::lower::derived_constraint_name(table, columns, "key")
+        }
+        IrConstraintKind::Check { expr, .. } => {
+            crate::render::lower::derived_check_constraint_name(table, expr)
+        }
+        IrConstraintKind::Exclusion { elements, .. } => {
+            crate::render::lower::derived_exclusion_constraint_name(table, elements)
+        }
+    }
+}
+
+fn named_constraint(table: &str, constraint: &IrConstraint) -> IrConstraint {
+    let mut constraint = constraint.clone();
+    if constraint.name.is_none() {
+        constraint.name = Some(effective_constraint_name(table, &constraint));
+    }
+    constraint
+}
+
+fn effective_index_name(table: &str, index: &IrIndex) -> String {
+    index.name.clone().unwrap_or_else(|| {
+        let parts = index
+            .columns
+            .iter()
+            .map(|element| match element {
+                IndexElement::Column { name, .. } => name.as_str(),
+                IndexElement::Expr { .. } => "expr",
+            })
+            .collect::<Vec<_>>();
+        crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", parts.join("_")))
+    })
+}
+
+fn named_index(table: &str, index: &IrIndex) -> IrIndex {
+    let mut index = index.clone();
+    if index.name.is_none() {
+        index.name = Some(effective_index_name(table, &index));
+    }
+    index
+}
+
 fn render_env_db_ts(
-    defs: &BTreeMap<String, Value>,
+    tables: &BTreeMap<String, AuthoringTable>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
 ) -> String {
     let mut body = String::new();
     body.push_str(
         "// GENERATED by the schema toolchain (gen-types) — DO NOT EDIT.\n\
          //\n\
-         // The typed `env.db` surface, reconstructed from the schema source (the\n\
-         // op.* migration set or a declared schema — the source is the ground truth,\n\
-         // types are generated from the fold). Re-run gen-types after schema changes;\n\
-         // the gen-types --check CI gate fails if this file drifts from the source.\n\
-         //\n\
-         // The schema below is a reconstruction of `@zeroship/db` `t.*()` builder\n\
-         // calls — NOT a hand-rolled interface — so it flows through the SAME\n\
-         // `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference\n\
-         // chain a declared schema would.\n\
-         import { t, schema as defineSchema, type Db } from \"@zeroship/db\";\n\n",
+         // This passive schema map reconstructs the current `zero-migrate` authoring\n\
+         // API from the folded migration IR. It records no lifecycle operation.\n\
+         import { byteValue, decimal, ids, int64, nextval, now, t, uuidV4, uuidV7, type CreateTableArgs, type Expr } from \"zero-migrate\";\n\n",
     );
-
     body.push_str("const schema = {\n");
-    for (collection, cols) in defs {
-        let meta = metadata.get(collection).cloned().unwrap_or_default();
-        let needs_builder = collection_needs_schema_builder(&meta);
-        body.push_str("  ");
-        body.push_str(&js_key(collection));
-        body.push_str(": ");
-        if needs_builder {
-            body.push_str("defineSchema({\n");
-        } else {
-            body.push_str("{\n");
-        }
-        if let Some(map) = cols.as_object() {
-            for (col, def) in map {
-                if is_system_field_name(col) {
-                    continue;
-                }
-                body.push_str("    ");
-                body.push_str(&js_key(col));
-                body.push_str(": ");
-                body.push_str(&render_builder_chain(def));
-                body.push_str(",\n");
-            }
-        }
-        if needs_builder {
-            body.push_str("  })");
-            body.push_str(&render_collection_chains(&meta));
-        } else {
-            body.push_str("  }");
-        }
-        body.push_str(",\n");
+    for (table_name, table) in tables {
+        render_table(&mut body, table_name, table, metadata.get(table_name));
     }
-    body.push_str("} as const;\n\n");
-
-    body.push_str(
-        "declare module \"zeroship\" {\n  interface Env {\n    db: Db<typeof schema>;\n  }\n}\n\n\
-         export {};\n",
-    );
+    body.push_str("} satisfies Record<string, CreateTableArgs>;\n\nexport { schema };\n");
     body
 }
 
-/// Reconstruct ONE column's `@zeroship/db` `t.*()` builder-call chain from its wire
-/// `FieldDef` object. This is the inverse of `descriptor_to_sdk_schema` over the
-/// SDK's `t` surface (the `@zeroship/db` `t`, NOT the op.* recorder `t`).
-///
-/// The base call is chosen from `type` (+ `encrypted`/`ref`/`vector`/`id` facets);
-/// the modifiers (`.unique()`/`.required()`/`.enum()`/`.min()`/`.max()`/`.mask()`/
-/// `.fts()`/`.default()`) chain off it in a stable order.
-fn render_builder_chain(def: &Value) -> String {
-    let Some(obj) = def.as_object() else {
-        return "t.json()".to_string();
-    };
-    let type_token = obj.get("type").and_then(Value::as_str).unwrap_or("json");
-    let has_encrypted = obj.get("encrypted").is_some();
+fn render_table(
+    body: &mut String,
+    table_name: &str,
+    table: &AuthoringTable,
+    metadata: Option<&RuntimeCollectionMetadata>,
+) {
+    let single_primary_key = table
+        .primary_key
+        .as_ref()
+        .filter(|columns| columns.len() == 1)
+        .and_then(|columns| columns.first())
+        .map(String::as_str);
+    let (references, lifted_constraints) = lifted_column_references(table);
 
-    // --- the base `t.*()` call ---
-    let mut chain = if has_encrypted {
-        render_encrypted_base(obj)
-    } else {
-        match type_token {
-            "string" => "t.string()".to_string(),
-            // The op.* `int`/`number` (+ the differ's numeric collapse) both map to
-            // the SDK numeric builder `t.number()` (the SDK `t` has no `integer`).
-            "int" | "integer" | "smallInt" | "bigInt" | "number" | "float" | "real" => {
-                "t.number()".to_string()
-            }
-            "boolean" => "t.boolean()".to_string(),
-            "json" | "object" | "array" => "t.json()".to_string(),
-            "textArray" => "t.array(t.string())".to_string(),
-            "date" | "timestamp" => "t.timestamp()".to_string(),
-            "inet" => "t.string()".to_string(),
-            "bytes" => "t.bytes()".to_string(),
-            "geoPoint" => "t.geoPoint()".to_string(),
-            "calendarDate" => "t.calendarDate()".to_string(),
-            "id" => render_internal_platform_id_base(obj),
-            "ref" => render_ref_base(obj),
-            "vector" => render_vector_base(obj),
-            // An unknown token degrades to `t.json()` rather than a panic — the
-            // column still types (loosely). gen-types never silently DROPS a column.
-            _ => "t.json()".to_string(),
-        }
-    };
-
-    // --- chained modifiers (stable order) ---
-    // `.required()` — the FieldDef `required: true` (an explicit NOT NULL).
-    if obj.get("required").and_then(Value::as_bool) == Some(true) {
-        chain.push_str(".required()");
+    body.push_str("  ");
+    body.push_str(&js_key(table_name));
+    body.push_str(": {\n    columns: {\n");
+    for (column_name, column) in &table.columns {
+        body.push_str("      ");
+        body.push_str(&js_key(column_name));
+        body.push_str(": ");
+        body.push_str(&render_column(
+            column,
+            single_primary_key == Some(column_name.as_str()),
+            references.get(column_name),
+        ));
+        body.push_str(",\n");
     }
-    // `.unique()`.
-    if obj.get("unique").and_then(Value::as_bool) == Some(true) {
+    body.push_str("    },\n");
+
+    if let Some(meta) = metadata {
+        render_runtime_options(body, &meta.options);
+    }
+    match &table.primary_key {
+        None => body.push_str("    primaryKey: null,\n"),
+        Some(columns) if columns.len() > 1 => {
+            body.push_str("    primaryKey: ");
+            body.push_str(&render_string_array(columns));
+            body.push_str(",\n");
+        }
+        Some(_) => {}
+    }
+    render_table_constraints(body, table_name, table, &lifted_constraints);
+    render_indexes(body, table_name, &table.indexes);
+    if let Some(partition_by) = &table.partition_by {
+        body.push_str("    partitionBy: ");
+        body.push_str(&render_partition(partition_by));
+        body.push_str(",\n");
+    }
+    if let Some(schema) = &table.schema {
+        body.push_str("    schema: ");
+        body.push_str(&js_str(schema));
+        body.push_str(",\n");
+    }
+    body.push_str("  },\n");
+}
+
+fn render_runtime_options(body: &mut String, options: &crate::TableRuntimeOptions) {
+    let mut fields = Vec::new();
+    if options.soft_delete {
+        fields.push("softDelete: true".to_string());
+    }
+    if options.versioning {
+        fields.push("versioning: true".to_string());
+    }
+    match options.strictness {
+        crate::TableStrictness::Strict => {}
+        crate::TableStrictness::Lenient => fields.push("strictness: \"lenient\"".to_string()),
+        crate::TableStrictness::Off => fields.push("strictness: \"off\"".to_string()),
+    }
+    if !fields.is_empty() {
+        body.push_str("    options: { ");
+        body.push_str(&fields.join(", "));
+        body.push_str(" },\n");
+    }
+}
+
+/// Resolve the old `ColType::Ref` carrier and eligible single-column table FKs
+/// into the current typed-reference column modifier. Composite, explicitly
+/// named, or deferrable constraints remain in `foreignKeys` so no behavior is
+/// silently discarded.
+fn lifted_column_references(
+    table: &AuthoringTable,
+) -> (BTreeMap<String, ColumnReference>, BTreeSet<usize>) {
+    let mut references = BTreeMap::new();
+    let mut lifted = BTreeSet::new();
+    for (name, column) in &table.columns {
+        if let Some(reference) = &column.references {
+            references.insert(name.clone(), reference.clone());
+            continue;
+        }
+        if let ColType::Ref { references: target } = &column.ty {
+            let mut reference = ColumnReference {
+                table: target.clone(),
+                column: "id".to_string(),
+                on_delete: None,
+                on_update: None,
+            };
+            if let Some((index, constraint)) = table
+                .constraints
+                .iter()
+                .enumerate()
+                .find(|(_, constraint)| simple_fk_for_column(constraint, name, target))
+            {
+                if let IrConstraintKind::Fk {
+                    references_columns,
+                    on_delete,
+                    on_update,
+                    ..
+                } = &constraint.kind
+                {
+                    reference.column.clone_from(&references_columns[0]);
+                    reference.on_delete = *on_delete;
+                    reference.on_update = *on_update;
+                    lifted.insert(index);
+                }
+            }
+            references.insert(name.clone(), reference);
+        }
+    }
+    for (index, constraint) in table.constraints.iter().enumerate() {
+        if lifted.contains(&index) {
+            continue;
+        }
+        let IrConstraintKind::Fk {
+            columns,
+            references_table,
+            references_columns,
+            on_delete,
+            on_update,
+            deferrable,
+            initially_deferred,
+            not_valid,
+        } = &constraint.kind
+        else {
+            continue;
+        };
+        if columns.len() != 1
+            || references_columns.len() != 1
+            || deferrable == &Some(true)
+            || initially_deferred == &Some(true)
+            || not_valid == &Some(true)
+        {
+            continue;
+        }
+        // A local column may legally participate in more than one FK. The
+        // column modifier can carry exactly one; preserve every additional FK
+        // in the table-level array instead of overwriting an earlier reference.
+        if references.contains_key(&columns[0]) {
+            continue;
+        }
+        let derived_name = format!("{}_fkey", columns[0]);
+        if constraint
+            .name
+            .as_ref()
+            .is_some_and(|name| name != &derived_name)
+        {
+            continue;
+        }
+        if !table.columns.contains_key(&columns[0]) {
+            continue;
+        }
+        references.insert(
+            columns[0].clone(),
+            ColumnReference {
+                table: references_table.clone(),
+                column: references_columns[0].clone(),
+                on_delete: *on_delete,
+                on_update: *on_update,
+            },
+        );
+        lifted.insert(index);
+    }
+    (references, lifted)
+}
+
+fn simple_fk_for_column(constraint: &IrConstraint, column: &str, target: &str) -> bool {
+    matches!(
+        &constraint.kind,
+        IrConstraintKind::Fk {
+            columns,
+            references_table,
+            references_columns,
+            deferrable,
+            initially_deferred,
+            not_valid,
+            ..
+        } if columns.len() == 1
+            && columns[0] == column
+            && references_table == target
+            && references_columns.len() == 1
+            && *deferrable != Some(true)
+            && *initially_deferred != Some(true)
+            && *not_valid != Some(true)
+    )
+}
+
+fn render_column(
+    column: &IrColumn,
+    primary_key: bool,
+    reference: Option<&ColumnReference>,
+) -> String {
+    let mut chain = render_column_base(column);
+    if column.nullable == Some(false) && !primary_key {
+        chain.push_str(".notNull()");
+    }
+    if primary_key {
+        chain.push_str(".primaryKey()");
+    }
+    if column.unique == Some(true) && !primary_key {
         chain.push_str(".unique()");
     }
-    // `.min()` / `.max()` numeric bounds (lifted from CHECKs).
-    if let Some(min) = obj.get("min").and_then(Value::as_f64) {
-        chain.push_str(&format!(".min({})", render_number(min)));
+    if let Some(default) = &column.default {
+        chain.push_str(".default(");
+        chain.push_str(&render_ir_default(default));
+        chain.push(')');
     }
-    if let Some(max) = obj.get("max").and_then(Value::as_f64) {
-        chain.push_str(&format!(".max({})", render_number(max)));
+    if let Some(mask) = column.mask {
+        chain.push_str(&format!(
+            ".mask({{ kind: {}, classification: {} }})",
+            js_str(mask.kind.as_token()),
+            js_str(mask.classification.as_token())
+        ));
     }
-    // `.enum(...)` membership (lifted from a CHECK) — the spread of the values; the
-    // `as const` at the schema root narrows these to a literal union in `Row<S>`.
-    if let Some(values) = obj.get("enum").and_then(Value::as_array) {
-        // Only string/number members are SDK-admissible; a non-scalar member is
-        // dropped rather than rendered as an un-typecheckable `.enum(true)`. If no
-        // admissible member survives, the `.enum(...)` is omitted entirely (the
-        // column types as its base scalar).
-        let rendered: Vec<String> = values.iter().filter_map(render_enum_member).collect();
-        if !rendered.is_empty() {
-            chain.push_str(&format!(".enum({})", rendered.join(", ")));
+    if let Some(generated) = &column.generated {
+        chain.push_str(".generated(");
+        chain.push_str(&render_expr(&generated.expr));
+        if generated.stored {
+            chain.push(')');
+        } else {
+            chain.push_str(", { virtual: true })");
         }
     }
-    // `.mask({ kind, classification })`. An ENCRYPTED column already carries the
-    // fail-safe auto-mask `{ full, pii }` IMPLICITLY via `t.encrypted()` (the SDK
-    // stamps it at builder time), so re-emitting `.mask({ full, pii })` would be
-    // redundant noise — skip it for that exact default. A NON-default mask on an
-    // encrypted column (an explicit `.mask({ kind: "last4" })` overriding the
-    // auto-mask) IS rendered. A mask on a non-encrypted column is always rendered.
-    if let Some(mask) = obj.get("mask").and_then(Value::as_object) {
-        let kind = mask.get("kind").and_then(Value::as_str).unwrap_or("full");
-        let classification = mask
-            .get("classification")
-            .and_then(Value::as_str)
-            .unwrap_or("pii");
-        let is_encrypted_automask = has_encrypted && kind == "full" && classification == "pii";
-        if !is_encrypted_automask {
-            chain.push_str(&format!(
-                ".mask({{ kind: {}, classification: {} }})",
-                js_str(kind),
-                js_str(classification)
-            ));
+    if let Some(identity) = column.identity {
+        if identity.always {
+            chain.push_str(".identity({ always: true })");
+        } else {
+            chain.push_str(".autoIncrement()");
         }
     }
-    // `.fts(language?)`.
-    if obj.get("fts").and_then(Value::as_bool) == Some(true) {
-        match obj.get("ftsLanguage").and_then(Value::as_str) {
-            Some(lang) => chain.push_str(&format!(".fts({})", js_str(lang))),
-            None => chain.push_str(".fts()"),
+    if let Some(reference) = reference {
+        chain.push_str(".references(");
+        chain.push_str(&js_str(&reference.table));
+        chain.push_str(", ");
+        chain.push_str(&js_str(&reference.column));
+        let options = render_reference_options(reference.on_delete, reference.on_update);
+        if !options.is_empty() {
+            chain.push_str(", { ");
+            chain.push_str(&options);
+            chain.push_str(" }");
         }
+        chain.push(')');
     }
-    // `.default(...)` — a typed scalar default.
-    if let Some(d) = obj.get("default") {
-        chain.push_str(&format!(".default({})", render_default_value(d)));
-    }
-
     chain
 }
 
-/// `t.encrypted({ mode?, keyId?, wraps? })` — render the encrypted base from the
-/// `encrypted` facet sub-object.
-///
-/// The KERNEL-DEFAULT triple (`mode:"randomised"`, `keyId:"default"`,
-/// `wraps:"string"`) — what the SDK's bare `t.encrypted()` stamps, and what the
-/// op.* default-mode recovery restores — collapses to a bare `t.encrypted()`: the
-/// two spellings are TYPE-EQUIVALENT (same `TypeBuilder<…>`), and the bare form is
-/// the clean generated output. Only a NON-default facet renders the explicit
-/// `{ … }` opts. The FULL facet is always preserved in `schema.runtime.json`; this
-/// collapse is a readability choice, not a loss.
-fn render_encrypted_base(obj: &serde_json::Map<String, Value>) -> String {
-    let Some(enc) = obj.get("encrypted").and_then(Value::as_object) else {
-        return "t.encrypted()".to_string();
-    };
-    let mode = enc.get("mode").and_then(Value::as_str);
-    let key_id = enc.get("keyId").and_then(Value::as_str);
-    let wraps = enc.get("wraps").and_then(Value::as_str);
-    // Kernel default (or absent) on every sub-field ⇒ bare `t.encrypted()`.
-    let mode_default = matches!(mode, None | Some("randomised"));
-    let key_default = matches!(key_id, None | Some("default"));
-    let wraps_default = matches!(wraps, None | Some("string"));
-    if mode_default && key_default && wraps_default {
-        return "t.encrypted()".to_string();
+fn render_column_base(column: &IrColumn) -> String {
+    if let Some(ValueFormat::TypeId { prefix }) = &column.value_format {
+        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
     }
-    let mut opts = Vec::new();
-    if let Some(mode) = mode {
-        opts.push(format!("mode: {}", js_str(mode)));
+    if matches!(column.value_format, Some(ValueFormat::Ulid)) {
+        return "ids.ulid()".to_string();
     }
-    if let Some(key_id) = key_id {
-        opts.push(format!("keyId: {}", js_str(key_id)));
+    if let Some(prefix) = &column.id_prefix {
+        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
     }
-    if let Some(wraps) = wraps {
-        // `wraps` is a TypeBuilder argument in the SDK (`t.string()`/`t.number()`/
-        // `t.bytes()`), reconstructed from the inner-type token.
-        let wraps_builder = match wraps {
-            "number" => "t.number()",
-            "bytes" => "t.bytes()",
-            _ => "t.string()",
+    render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
+}
+
+fn render_col_type(
+    ty: &ColType,
+    case_sensitive: Option<bool>,
+    vector_metric: Option<crate::VectorMetric>,
+) -> String {
+    match ty {
+        ColType::String | ColType::Text => match case_sensitive {
+            Some(false) => "t.text({ caseSensitive: false })".to_string(),
+            _ => "t.text()".to_string(),
+        },
+        ColType::Int => "t.int()".to_string(),
+        ColType::SmallInt => "t.smallInt()".to_string(),
+        ColType::BigInt => "t.bigInt()".to_string(),
+        ColType::Double => "t.double()".to_string(),
+        ColType::Real => "t.real()".to_string(),
+        ColType::Boolean => "t.boolean()".to_string(),
+        ColType::Json => "t.json()".to_string(),
+        ColType::Timestamp => "t.timestamp()".to_string(),
+        ColType::Date => "t.date()".to_string(),
+        ColType::Uuid => "t.uuid()".to_string(),
+        ColType::Inet => "t.inet()".to_string(),
+        ColType::TextArray => "t.textArray()".to_string(),
+        ColType::Bytes => "t.bytes()".to_string(),
+        ColType::Char { length } => format!("t.char({{ length: {length} }})"),
+        ColType::Ref { .. } => "t.text()".to_string(),
+        ColType::Vector { vector } => match vector_metric {
+            Some(metric) => format!(
+                "t.vector({{ dimensions: {vector}, metric: {} }})",
+                js_str(metric.as_token())
+            ),
+            None => format!("t.vector({{ dimensions: {vector} }})"),
+        },
+        ColType::GeoPoint => "t.geoPoint()".to_string(),
+        ColType::Decimal { precision, scale } => {
+            format!("t.numeric({{ precision: {precision}, scale: {scale} }})")
+        }
+        ColType::Enum { name, .. } => format!("t.enum({})", js_str(name)),
+        ColType::Domain { name, .. } => format!("t.domain({})", js_str(name)),
+        ColType::Encrypted { of } => {
+            format!("t.encrypted({{ of: {} }})", render_col_type(of, None, None))
+        }
+    }
+}
+
+fn render_ir_default(default: &IrDefault) -> String {
+    match default {
+        IrDefault::Literal { value } => render_scalar(value),
+        IrDefault::Expr { expr } => match expr {
+            Expr::UuidV4 => "uuidV4()".to_string(),
+            Expr::UuidV7 => "uuidV7()".to_string(),
+            Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args,
+            } if args.is_empty() => "now()".to_string(),
+            _ => render_expr(expr),
+        },
+        IrDefault::Container {
+            kind: EmptyContainerKind::Object,
+        } => "{}".to_string(),
+        IrDefault::Container {
+            kind: EmptyContainerKind::Array,
+        } => "[]".to_string(),
+        IrDefault::Json { value } => render_json_value(value),
+        IrDefault::Nextval { sequence } => match &sequence.schema {
+            Some(schema) => format!(
+                "nextval({}, {{ schema: {} }})",
+                js_str(&sequence.name),
+                js_str(schema)
+            ),
+            None => format!("nextval({})", js_str(&sequence.name)),
+        },
+    }
+}
+
+fn render_scalar(value: &IrScalar) -> String {
+    match value {
+        IrScalar::Null => "null".to_string(),
+        IrScalar::Bool(value) => value.to_string(),
+        IrScalar::Int(value) => value.to_string(),
+        IrScalar::Int64(value) => format!("int64({})", js_str(&value.to_string())),
+        IrScalar::Decimal(value) => format!("decimal({})", js_str(value)),
+        IrScalar::Str(value) => js_str(value),
+        IrScalar::Bytes(_) => {
+            let wire = serde_json::to_value(value).expect("IrScalar serializes");
+            let encoded = wire
+                .get("bytes")
+                .and_then(Value::as_str)
+                .expect("bytes scalar has the tagged wire shape");
+            format!("byteValue({})", js_str(encoded))
+        }
+    }
+}
+
+fn render_json_value(value: &IrJsonValue) -> String {
+    serde_json::to_string(value).expect("IrJsonValue serializes")
+}
+
+fn render_expr(expr: &Expr) -> String {
+    let json = serde_json::to_string(expr).expect("Expr serializes");
+    format!("({json} as Expr)")
+}
+
+fn render_reference_options(on_delete: Option<RefAction>, on_update: Option<RefAction>) -> String {
+    let mut options = Vec::new();
+    if let Some(action) = on_delete {
+        options.push(format!("onDelete: {}", js_str(action.as_token())));
+    }
+    if let Some(action) = on_update {
+        options.push(format!("onUpdate: {}", js_str(action.as_token())));
+    }
+    options.join(", ")
+}
+
+fn render_table_constraints(
+    body: &mut String,
+    table_name: &str,
+    table: &AuthoringTable,
+    lifted: &BTreeSet<usize>,
+) {
+    let uniques = table
+        .constraints
+        .iter()
+        .filter_map(|constraint| match &constraint.kind {
+            IrConstraintKind::Unique { columns } => Some((constraint, columns)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !uniques.is_empty() {
+        body.push_str("    uniques: [\n");
+        for (constraint, columns) in uniques {
+            body.push_str("      { name: ");
+            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(", columns: ");
+            body.push_str(&render_string_array(columns));
+            body.push_str(" },\n");
+        }
+        body.push_str("    ],\n");
+    }
+
+    let checks = table
+        .constraints
+        .iter()
+        .filter_map(|constraint| match &constraint.kind {
+            IrConstraintKind::Check { expr, .. } => Some((constraint, expr)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !checks.is_empty() {
+        body.push_str("    checks: [\n");
+        for (constraint, expr) in checks {
+            body.push_str("      { name: ");
+            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(", expr: () => ");
+            body.push_str(&render_expr(expr));
+            body.push_str(" },\n");
+        }
+        body.push_str("    ],\n");
+    }
+
+    let foreign_keys = table
+        .constraints
+        .iter()
+        .enumerate()
+        .filter(|(index, constraint)| {
+            !lifted.contains(index) && matches!(constraint.kind, IrConstraintKind::Fk { .. })
+        })
+        .collect::<Vec<_>>();
+    if !foreign_keys.is_empty() {
+        body.push_str("    foreignKeys: [\n");
+        for (_, constraint) in foreign_keys {
+            let IrConstraintKind::Fk {
+                columns,
+                references_table,
+                references_columns,
+                on_delete,
+                on_update,
+                deferrable,
+                initially_deferred,
+                ..
+            } = &constraint.kind
+            else {
+                unreachable!("filtered to FK constraints")
+            };
+            body.push_str("      { name: ");
+            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(", columns: ");
+            body.push_str(&render_string_array(columns));
+            body.push_str(", references: { table: ");
+            body.push_str(&js_str(references_table));
+            body.push_str(", columns: ");
+            body.push_str(&render_string_array(references_columns));
+            body.push_str(" }");
+            if let Some(action) = on_delete {
+                body.push_str(", onDelete: ");
+                body.push_str(&js_str(action.as_token()));
+            }
+            if let Some(action) = on_update {
+                body.push_str(", onUpdate: ");
+                body.push_str(&js_str(action.as_token()));
+            }
+            if let Some(value) = deferrable {
+                body.push_str(&format!(", deferrable: {value}"));
+            }
+            if let Some(value) = initially_deferred {
+                body.push_str(&format!(", initiallyDeferred: {value}"));
+            }
+            body.push_str(" },\n");
+        }
+        body.push_str("    ],\n");
+    }
+
+    render_exclusions(body, table_name, &table.constraints);
+}
+
+fn render_exclusions(body: &mut String, table_name: &str, constraints: &[IrConstraint]) {
+    let exclusions = constraints
+        .iter()
+        .filter(|constraint| matches!(constraint.kind, IrConstraintKind::Exclusion { .. }))
+        .collect::<Vec<_>>();
+    if exclusions.is_empty() {
+        return;
+    }
+    body.push_str("    exclusions: [\n");
+    for constraint in exclusions {
+        let IrConstraintKind::Exclusion {
+            using_method,
+            elements,
+            where_predicate,
+            deferrable,
+            initially_deferred,
+        } = &constraint.kind
+        else {
+            unreachable!("filtered to exclusion constraints")
         };
-        opts.push(format!("wraps: {wraps_builder}"));
+        body.push_str("      { name: ");
+        body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+        if *using_method != ExclusionMethod::Gist {
+            body.push_str(", using: ");
+            body.push_str(&js_str(&serde_token(using_method)));
+        }
+        body.push_str(", elements: [");
+        for (index, element) in elements.iter().enumerate() {
+            if index > 0 {
+                body.push_str(", ");
+            }
+            body.push_str("{ target: ");
+            match &element.target {
+                ColumnOrExpr::Column { name } => body.push_str(&js_str(name)),
+                ColumnOrExpr::Expr { expr } => body.push_str(&render_expr(expr)),
+            }
+            body.push_str(", operator: ");
+            body.push_str(&js_str(&serde_token(&element.operator)));
+            body.push_str(" }");
+        }
+        body.push(']');
+        if let Some(predicate) = where_predicate {
+            body.push_str(", where: () => ");
+            body.push_str(&render_expr(predicate));
+        }
+        if let Some(value) = deferrable {
+            body.push_str(&format!(", deferrable: {value}"));
+        }
+        if let Some(value) = initially_deferred {
+            body.push_str(&format!(", initiallyDeferred: {value}"));
+        }
+        body.push_str(" },\n");
     }
-    if opts.is_empty() {
-        "t.encrypted()".to_string()
-    } else {
-        format!("t.encrypted({{ {} }})", opts.join(", "))
+    body.push_str("    ],\n");
+}
+
+fn render_indexes(body: &mut String, table_name: &str, indexes: &[IrIndex]) {
+    if indexes.is_empty() {
+        return;
+    }
+    body.push_str("    indexes: [\n");
+    for index in indexes {
+        body.push_str("      { name: ");
+        body.push_str(&js_str(&effective_index_name(table_name, index)));
+        body.push_str(", on: [");
+        for (position, element) in index.columns.iter().enumerate() {
+            if position > 0 {
+                body.push_str(", ");
+            }
+            body.push_str(&render_index_element(element));
+        }
+        body.push(']');
+        if let Some(value) = index.unique {
+            body.push_str(&format!(", unique: {value}"));
+        }
+        if let Some(method) = index.using {
+            body.push_str(", using: ");
+            body.push_str(&js_str(&serde_token(&method)));
+        }
+        if let Some(predicate) = &index.r#where {
+            body.push_str(", where: () => ");
+            body.push_str(&render_expr(predicate));
+        }
+        if !index.include.is_empty() {
+            body.push_str(", include: ");
+            body.push_str(&render_string_array(&index.include));
+        }
+        if let Some(with) = &index.with {
+            let mut values = Vec::new();
+            if let Some(value) = with.pages_per_range {
+                values.push(format!("pagesPerRange: {value}"));
+            }
+            if let Some(value) = with.fillfactor {
+                values.push(format!("fillfactor: {value}"));
+            }
+            body.push_str(", with: { ");
+            body.push_str(&values.join(", "));
+            body.push_str(" }");
+        }
+        if let Some(value) = index.only {
+            body.push_str(&format!(", only: {value}"));
+        }
+        if let Some(value) = index.nulls_not_distinct {
+            body.push_str(&format!(", nullsNotDistinct: {value}"));
+        }
+        body.push_str(" },\n");
+    }
+    body.push_str("    ],\n");
+}
+
+fn render_index_element(element: &IndexElement) -> String {
+    match element {
+        IndexElement::Column {
+            name,
+            order: None | Some(IndexSortOrder::Asc),
+            opclass: None,
+            collation: None,
+        } => js_str(name),
+        IndexElement::Column {
+            name,
+            order,
+            opclass,
+            collation,
+        } => {
+            let mut fields = vec![format!("column: {}", js_str(name))];
+            if let Some(order) = order {
+                fields.push(format!("order: {}", js_str(&serde_token(order))));
+            }
+            if let Some(opclass) = opclass {
+                fields.push(format!("opclass: {}", js_str(opclass)));
+            }
+            if let Some(collation) = collation {
+                fields.push(format!("collation: {}", js_str(collation)));
+            }
+            format!("{{ {} }}", fields.join(", "))
+        }
+        IndexElement::Expr { expr } => {
+            format!("{{ expr: () => {} }}", render_expr(expr))
+        }
     }
 }
 
-/// Render the private `@zeroship/db` legacy platform-ID builder, threading the
-/// recovered `idPrefix`. Bracket access keeps this internal compatibility path
-/// visibly separate from zero-migrate's public `t.*` migration lexicon. The
-/// stored format is `<prefix>_<22 base62 UUIDv7>`, not TypeID.
-fn render_internal_platform_id_base(obj: &serde_json::Map<String, Value>) -> String {
-    match obj.get("idPrefix").and_then(Value::as_str) {
-        Some(prefix) => format!("t[\"id\"]({})", js_str(prefix)),
-        None => "t[\"id\"]()".to_string(),
+fn render_partition(partition: &PartitionSpec) -> String {
+    match partition {
+        PartitionSpec::Range { columns, collapse } => {
+            render_partition_kind("range", columns, *collapse)
+        }
+        PartitionSpec::List { columns, collapse } => {
+            render_partition_kind("list", columns, *collapse)
+        }
+        PartitionSpec::Hash { columns, collapse } => {
+            render_partition_kind("hash", columns, *collapse)
+        }
     }
 }
 
-/// `t.ref(target, { onDelete?, onUpdate?, deferrable? })` — render the FK base.
-fn render_ref_base(obj: &serde_json::Map<String, Value>) -> String {
-    let target = obj.get("refTarget").and_then(Value::as_str).unwrap_or("");
-    let mut opts = Vec::new();
-    if let Some(od) = obj.get("onDelete").and_then(Value::as_str) {
-        opts.push(format!("onDelete: {}", js_str(od)));
+fn render_partition_kind(kind: &str, columns: &[String], collapse: bool) -> String {
+    let mut value = format!("{{ {kind}: {}", render_string_array(columns));
+    if collapse {
+        value.push_str(", whenUnsupported: \"collapse\"");
     }
-    if let Some(ou) = obj.get("onUpdate").and_then(Value::as_str) {
-        opts.push(format!("onUpdate: {}", js_str(ou)));
-    }
-    if let Some(dfr) = obj.get("deferrable").and_then(Value::as_bool) {
-        opts.push(format!("deferrable: {dfr}"));
-    }
-    if opts.is_empty() {
-        format!("t.ref({})", js_str(target))
-    } else {
-        format!("t.ref({}, {{ {} }})", js_str(target), opts.join(", "))
-    }
+    value.push_str(" }");
+    value
 }
 
-/// `t.vector(dims, { metric? })` — render the vector base, threading dims + the
-/// recovered `vectorMetric`.
-fn render_vector_base(obj: &serde_json::Map<String, Value>) -> String {
-    let dims = obj.get("vectorDims").and_then(Value::as_i64).unwrap_or(0);
-    match obj.get("vectorMetric").and_then(Value::as_str) {
-        Some(metric) => format!("t.vector({dims}, {{ metric: {} }})", js_str(metric)),
-        None => format!("t.vector({dims})"),
-    }
+fn render_string_array(values: &[String]) -> String {
+    let values = values.iter().map(|value| js_str(value)).collect::<Vec<_>>();
+    format!("[{}]", values.join(", "))
 }
 
-/// Render a numeric JSON value as a TS number literal (integers without a trailing
-/// `.0`; the FieldDef `min`/`max` are `f64` but the SDK `.min(n)` takes a number).
-fn render_number(n: f64) -> String {
-    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
-        format!("{}", n as i64)
-    } else {
-        n.to_string()
-    }
-}
-
-/// Render an `enum` member as a TS literal — STRING or NUMBER only.
-///
-/// The SDK `.enum<Values extends readonly (T & (string | number))[]>` signature
-/// forbids boolean / non-scalar members, and on a `t.string()` column even a
-/// numeric member is rejected. Render FAIL-CLOSED (skip, returning `None`) rather
-/// than emit a `.enum(true)` the SDK would reject at tsc, so the renderer can never
-/// produce an un-typecheckable artifact even if a hand-crafted IR smuggled one in.
-fn render_enum_member(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(js_str(s)),
-        Value::Number(n) => Some(n.to_string()),
-        // Bool / null / array / object are NOT admissible SDK enum members.
-        _ => None,
-    }
-}
-
-/// Render a `default` JSON value as a TS literal for `.default(...)`.
-fn render_default_value(v: &Value) -> String {
-    match v {
-        Value::String(s) => js_str(s),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Null => "null".to_string(),
-        other => other.to_string(),
-    }
+fn serde_token<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .expect("closed token serializes")
+        .as_str()
+        .expect("closed token serializes as a string")
+        .to_string()
 }
 
 /// A double-quoted, minimally-escaped JS/TS string literal.
 fn js_str(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    serde_json::to_string(s).expect("a Rust string always serializes as a JSON/TS string literal")
 }
 
 /// An object key: a bare identifier when safe, else a quoted string literal.
@@ -871,122 +1758,159 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The `t.*()` reverse renderer over a single wire-FieldDef object.
-    fn chain(def: serde_json::Value) -> String {
-        render_builder_chain(&def)
+    fn column(name: &str, ty: ColType) -> IrColumn {
+        IrColumn {
+            name: name.to_string(),
+            ty,
+            nullable: None,
+            default: None,
+            unique: None,
+            value_format: None,
+            references: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
     }
 
     #[test]
-    fn renders_plain_and_modified_columns() {
-        assert_eq!(chain(json!({ "type": "string" })), "t.string()");
+    fn renders_current_physical_builders_and_modifiers() {
+        let mut text = column("label", ColType::Text);
+        text.nullable = Some(false);
+        text.unique = Some(true);
         assert_eq!(
-            chain(json!({ "type": "string", "required": true, "unique": true })),
-            "t.string().required().unique()"
+            render_column(&text, false, None),
+            "t.text().notNull().unique()"
         );
-        // int/number both render to the SDK numeric builder.
-        assert_eq!(chain(json!({ "type": "int" })), "t.number()");
-        assert_eq!(chain(json!({ "type": "number" })), "t.number()");
-        assert_eq!(chain(json!({ "type": "boolean" })), "t.boolean()");
-        assert_eq!(chain(json!({ "type": "date" })), "t.timestamp()");
-        assert_eq!(chain(json!({ "type": "json" })), "t.json()");
-        assert_eq!(chain(json!({ "type": "bytes" })), "t.bytes()");
-    }
-
-    #[test]
-    fn renders_id_ref_vector_facets() {
+        assert_eq!(render_column_base(&column("n", ColType::Int)), "t.int()");
         assert_eq!(
-            chain(json!({ "type": "id", "idPrefix": "post" })),
-            "t[\"id\"](\"post\")"
-        );
-        assert_eq!(chain(json!({ "type": "id" })), "t[\"id\"]()");
-        assert_eq!(
-            chain(
-                json!({ "type": "ref", "refTarget": "users", "onDelete": "cascade", "deferrable": true })
-            ),
-            "t.ref(\"users\", { onDelete: \"cascade\", deferrable: true })"
+            render_column_base(&column("n", ColType::BigInt)),
+            "t.bigInt()"
         );
         assert_eq!(
-            chain(json!({ "type": "ref", "refTarget": "orgs" })),
-            "t.ref(\"orgs\")"
+            render_column_base(&column("at", ColType::Timestamp)),
+            "t.timestamp()"
         );
         assert_eq!(
-            chain(json!({ "type": "vector", "vectorDims": 1536, "vectorMetric": "innerProduct" })),
-            "t.vector(1536, { metric: \"innerProduct\" })"
-        );
-        assert_eq!(
-            chain(json!({ "type": "vector", "vectorDims": 8 })),
-            "t.vector(8)"
+            render_column_base(&column("day", ColType::Date)),
+            "t.date()"
         );
     }
 
     #[test]
-    fn renders_check_borne_and_mask_facets() {
+    fn renders_explicit_id_compositions_and_exact_defaults() {
+        let mut uuid = column("id", ColType::Uuid);
+        uuid.default = Some(IrDefault::Expr { expr: Expr::UuidV4 });
         assert_eq!(
-            chain(json!({ "type": "number", "min": 0.0, "max": 120.0 })),
-            "t.number().min(0).max(120)"
+            render_column(&uuid, true, None),
+            "t.uuid().primaryKey().default(uuidV4())"
         );
+
+        let mut integer = column("id", ColType::BigInt);
+        integer.identity = Some(crate::IdentityCol { always: false });
         assert_eq!(
-            chain(json!({ "type": "string", "enum": ["a", "b", "c"] })),
-            "t.string().enum(\"a\", \"b\", \"c\")"
+            render_column(&integer, true, None),
+            "t.bigInt().primaryKey().autoIncrement()"
         );
+
+        let mut type_id = column("id", ColType::Text);
+        type_id.value_format = Some(ValueFormat::TypeId {
+            prefix: "usr".to_string(),
+        });
         assert_eq!(
-            chain(
-                json!({ "type": "string", "mask": { "kind": "last4", "classification": "pii" } })
-            ),
-            "t.string().mask({ kind: \"last4\", classification: \"pii\" })"
+            render_column(&type_id, true, None),
+            "ids.typeId({ prefix: \"usr\" }).primaryKey()"
         );
+
+        let mut ulid = column("trace_id", ColType::Text);
+        ulid.value_format = Some(ValueFormat::Ulid);
+        assert_eq!(render_column_base(&ulid), "ids.ulid()");
+
+        let mut prefixed = column("id", ColType::Text);
+        prefixed.id_prefix = Some("post".to_string());
         assert_eq!(
-            chain(json!({ "type": "string", "fts": true, "ftsLanguage": "english" })),
-            "t.string().fts(\"english\")"
+            render_column(&prefixed, true, None),
+            "ids.typeId({ prefix: \"post\" }).primaryKey()"
+        );
+
+        let mut counter = column("counter", ColType::BigInt);
+        counter.default = Some(IrDefault::Literal {
+            value: IrScalar::Int64(9_007_199_254_740_992),
+        });
+        assert_eq!(
+            render_column(&counter, false, None),
+            "t.bigInt().default(int64(\"9007199254740992\"))"
         );
     }
 
     #[test]
-    fn renders_encrypted_default_and_explicit() {
-        // op.* default-mode encrypted → a bare `t.encrypted()`.
+    fn renders_typed_reference_on_the_local_physical_column() {
+        let local = column("account_id", ColType::Uuid);
+        let reference = ColumnReference {
+            table: "accounts".to_string(),
+            column: "id".to_string(),
+            on_delete: Some(RefAction::Cascade),
+            on_update: Some(RefAction::Restrict),
+        };
         assert_eq!(
-            chain(json!({ "type": "string", "encrypted": {} })),
-            "t.encrypted()"
-        );
-        // The KERNEL-DEFAULT triple the recovery restores collapses to bare
-        // `t.encrypted()` (type-equivalent; the full facet lives in
-        // schema.runtime.json).
-        assert_eq!(
-            chain(
-                json!({ "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } })
-            ),
-            "t.encrypted()"
-        );
-        // An explicit-mode encrypted renders the opts.
-        assert_eq!(
-            chain(
-                json!({ "type": "string", "encrypted": { "mode": "deterministic", "keyId": "k1" } })
-            ),
-            "t.encrypted({ mode: \"deterministic\", keyId: \"k1\" })"
-        );
-        // A non-default keyId alone (mode/wraps default) still renders explicit.
-        assert_eq!(
-            chain(json!({ "type": "string", "encrypted": { "keyId": "pii_key" } })),
-            "t.encrypted({ keyId: \"pii_key\" })"
+            render_column(&local, false, Some(&reference)),
+            "t.uuid().references(\"accounts\", \"id\", { onDelete: \"cascade\", onUpdate: \"restrict\" })"
         );
     }
 
     #[test]
-    fn enum_members_fail_closed_on_non_scalar() {
-        assert_eq!(render_enum_member(&json!("a")), Some("\"a\"".to_string()));
-        assert_eq!(render_enum_member(&json!(3)), Some("3".to_string()));
-        assert_eq!(render_enum_member(&json!(true)), None);
-        assert_eq!(render_enum_member(&json!(null)), None);
-        assert_eq!(render_enum_member(&json!({"k": 1})), None);
-        // A column whose enum is ENTIRELY non-scalar emits NO `.enum(...)`.
+    fn a_second_fk_on_one_local_column_stays_table_level() {
+        let mut local = column("account_id", ColType::Uuid);
+        local.references = Some(ColumnReference {
+            table: "accounts".to_string(),
+            column: "id".to_string(),
+            on_delete: None,
+            on_update: None,
+        });
+        let table = AuthoringTable {
+            columns: [(local.name.clone(), local)].into_iter().collect(),
+            primary_key: None,
+            constraints: vec![IrConstraint {
+                name: Some("account_audit_fk".to_string()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["account_id".to_string()],
+                    references_table: "account_audit".to_string(),
+                    references_columns: vec!["account_id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
+                    not_valid: None,
+                },
+            }],
+            indexes: Vec::new(),
+            partition_by: None,
+            schema: None,
+        };
+        let (references, lifted) = lifted_column_references(&table);
+        assert_eq!(references["account_id"].table, "accounts");
+        assert!(lifted.is_empty(), "the second FK must remain table-level");
+    }
+
+    #[test]
+    fn renders_vector_and_encrypted_with_current_option_shapes() {
+        let mut vector = column("embedding", ColType::Vector { vector: 1536 });
+        vector.vector_metric = Some(crate::VectorMetric::InnerProduct);
         assert_eq!(
-            chain(json!({ "type": "string", "enum": [true, null] })),
-            "t.string()"
+            render_column_base(&vector),
+            "t.vector({ dimensions: 1536, metric: \"innerProduct\" })"
         );
-        // Mixed: only the admissible members survive.
         assert_eq!(
-            chain(json!({ "type": "string", "enum": ["ok", true] })),
-            "t.string().enum(\"ok\")"
+            render_column_base(&column(
+                "secret",
+                ColType::Encrypted {
+                    of: Box::new(ColType::Text),
+                },
+            )),
+            "t.encrypted({ of: t.text() })"
         );
     }
 
@@ -996,59 +1920,61 @@ mod tests {
         assert_eq!(js_key("_id"), "_id");
         assert_eq!(js_key("user-id"), "\"user-id\"");
         assert_eq!(js_key("2fa"), "\"2fa\"");
+        assert_eq!(
+            js_str("line one\nline two\r\t"),
+            "\"line one\\nline two\\r\\t\""
+        );
     }
 
     #[test]
-    fn env_db_ts_has_the_module_augmentation_scaffold() {
-        let mut defs = BTreeMap::new();
-        defs.insert(
-            "users".to_string(),
-            json!({ "email": { "type": "string", "required": true } }),
-        );
+    fn env_db_ts_is_a_passive_current_api_schema_with_composite_keys() {
+        let mut id = column("tenant_id", ColType::Uuid);
+        id.nullable = Some(false);
+        let sequence = column("sequence", ColType::BigInt);
+        let account = column("account_id", ColType::Uuid);
+        let tables = BTreeMap::from([(
+            "events".to_string(),
+            AuthoringTable {
+                columns: [id, sequence, account]
+                    .into_iter()
+                    .map(|column| (column.name.clone(), column))
+                    .collect(),
+                primary_key: Some(vec!["tenant_id".to_string(), "sequence".to_string()]),
+                constraints: vec![IrConstraint {
+                    name: Some("events_account_fk".to_string()),
+                    kind: IrConstraintKind::Fk {
+                        columns: vec!["tenant_id".to_string(), "account_id".to_string()],
+                        references_table: "accounts".to_string(),
+                        references_columns: vec!["tenant_id".to_string(), "id".to_string()],
+                        on_delete: Some(RefAction::Cascade),
+                        on_update: None,
+                        deferrable: None,
+                        initially_deferred: None,
+                        not_valid: None,
+                    },
+                }],
+                indexes: Vec::new(),
+                partition_by: None,
+                schema: None,
+            },
+        )]);
         let metadata = BTreeMap::new();
-        let dts = render_env_db_ts(&defs, &metadata);
-        assert!(
-            dts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";")
-        );
+        let dts = render_env_db_ts(&tables, &metadata);
+        assert!(dts.contains("from \"zero-migrate\";"));
         assert!(dts.contains("const schema = {"));
-        assert!(dts.contains("email: t.string().required(),"));
-        assert!(dts.contains("} as const;"));
-        assert!(dts.contains("db: Db<typeof schema>;"));
-        assert!(dts.contains("export {};"));
-    }
-
-    #[test]
-    fn env_db_ts_omits_platform_system_fields_from_builder_schema() {
-        let mut defs = BTreeMap::new();
-        defs.insert(
-            "hits".to_string(),
-            json!({
-                "id": { "type": "string", "required": true },
-                "created_at": { "type": "date", "required": true },
-                "updated_at": { "type": "date", "required": true },
-                "created_by": { "type": "string" },
-                "updated_by": { "type": "string" },
-                "version": { "type": "int", "required": true, "default": 1 },
-                "deleted_at": { "type": "date" },
-                "path": { "type": "string", "required": true },
-            }),
-        );
-        let metadata = BTreeMap::new();
-        let dts = render_env_db_ts(&defs, &metadata);
-
-        assert!(dts.contains("path: t.string().required(),"));
-        for name in crate::schema::query::SYSTEM_FIELD_NAMES {
-            assert!(
-                !dts.contains(&format!("{name}:")),
-                "env.db.ts builder schema must omit platform field {name}:\n{dts}"
-            );
-        }
+        assert!(dts.contains("primaryKey: [\"tenant_id\", \"sequence\"]"));
+        assert!(dts.contains("foreignKeys: ["));
+        assert!(dts.contains("columns: [\"tenant_id\", \"account_id\"]"));
+        assert!(dts.contains("satisfies Record<string, CreateTableArgs>"));
+        assert!(dts.contains("export { schema };"));
+        assert!(!dts.contains("t.ref("));
+        assert!(!dts.contains("t.id("));
+        assert!(!dts.contains("t[\"id\"]"));
+        assert!(!dts.contains(".create("));
     }
 
     #[test]
     fn runtime_json_carries_all_seven_system_fields() {
-        // The runtime descriptor INCLUDES the system fields (unlike env.db.ts's
-        // builder schema, which omits them) — the runtime needs their FieldDefs.
         let defs: BTreeMap<String, Value> = BTreeMap::from([(
             "hits".to_string(),
             json!({

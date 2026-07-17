@@ -54,7 +54,8 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node __test__/mock_apply.mjs && node __test__/status_ir.mjs && node __test__/gen_artifacts.mjs"
+    "test": "node __test__/mock_apply.mjs && node __test__/status_ir.mjs && node __test__/gen_artifacts.mjs",
+    "test:codegen": "node __test__/gen_artifacts_typecheck.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.3"

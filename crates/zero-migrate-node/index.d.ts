@@ -202,8 +202,9 @@ export interface GenArtifactsReply {
   /** `true` iff both artifacts rendered cleanly. */
   ok: boolean
   /**
-   * The generated `env.db.ts` source (a real `.ts` module of `t.*()` builder
-   * calls + the `declare module "zeroship"` augmentation). `None` on failure.
+   * The generated `env.db.ts` source: a passive schema map built with the
+   * current `zero-migrate` authoring API and checked as `CreateTableArgs`.
+   * `None` on failure.
    */
   envDbTs?: string
   /**

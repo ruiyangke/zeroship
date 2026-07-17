@@ -427,7 +427,10 @@ fn push_fold_op<'a>(
     }
 }
 
-fn flatten_dialectal_ops(ops: &[Op], dialect: SqlDialect) -> Result<Vec<&Op>, FoldError> {
+pub(crate) fn flatten_dialectal_ops(
+    ops: &[Op],
+    dialect: SqlDialect,
+) -> Result<Vec<&Op>, FoldError> {
     let mut out = Vec::new();
     for op in ops {
         push_fold_op(&mut out, op, dialect, false)?;

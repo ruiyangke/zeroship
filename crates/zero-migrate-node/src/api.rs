@@ -336,7 +336,7 @@ mod tests {
             "carries the table: {runtime}"
         );
         assert!(
-            ts.contains("label: t.string(),"),
+            ts.contains("label: t.text(),"),
             "env.db.ts renders the builder chain: {ts}"
         );
     }
@@ -441,7 +441,7 @@ mod tests {
         );
         assert!(reply.ok, "render ok: {:?}", reply.error);
         assert!(reply.runtime_json.unwrap().contains("\"version\": 1"));
-        assert!(reply.env_db_ts.unwrap().contains("label: t.string(),"));
+        assert!(reply.env_db_ts.unwrap().contains("label: t.text(),"));
     }
 
     #[test]
