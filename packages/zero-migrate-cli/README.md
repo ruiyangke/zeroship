@@ -27,12 +27,13 @@ zero-migrate preview               Print the structured operations a migration e
 zero-migrate apply                 Apply pending migrations over --database-url
 zero-migrate status                Reconcile the migration set against the journal
 zero-migrate history               Print the applied-migration audit trail (PostgreSQL)
-zero-migrate resolve-pending <id>  Finish or abort a PostgreSQL online column rename
+zero-migrate resolve-pending <pending-version>  Finish or abort a PostgreSQL online column rename
 zero-migrate --version
 ```
 
-`apply`, `status`, and `history` read `--database-url` or the `DATABASE_URL`
-environment variable. Destructive steps (deletes, backfills) require `--approve`.
+`apply`, `status`, `history`, and `resolve-pending` read `--database-url` or the
+`DATABASE_URL` environment variable. Destructive steps (deletes, backfills)
+require `--approve`.
 
 ```
 DATABASE_URL=postgres://... zero-migrate apply --approve
