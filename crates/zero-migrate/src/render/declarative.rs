@@ -342,7 +342,7 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// and both comment forms. A comma or parenthesis inside a generated expression,
 /// CHECK, quoted default, or comment therefore cannot be mistaken for table DDL
 /// structure.
-fn sqlite_create_body_bounds(sql: &str) -> Option<(usize, usize)> {
+pub(crate) fn sqlite_create_body_bounds(sql: &str) -> Option<(usize, usize)> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
@@ -435,7 +435,7 @@ fn sqlite_create_body_bounds(sql: &str) -> Option<(usize, usize)> {
 
 /// Split an outer SQLite table body into its column/constraint clauses while
 /// retaining each clause's bytes verbatim.
-fn sqlite_table_clauses(body: &str) -> Option<Vec<&str>> {
+pub(crate) fn sqlite_table_clauses(body: &str) -> Option<Vec<&str>> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
@@ -560,11 +560,14 @@ fn sqlite_skip_space_and_comments(sql: &str, cursor: &mut usize) {
 
 /// Consume one SQLite DDL word or quoted identifier. Quoted identifier escapes
 /// are decoded so catalog and desired constraint names can be compared by name.
-fn sqlite_ddl_word(sql: &str, cursor: &mut usize) -> Option<String> {
+pub(crate) fn sqlite_ddl_word(sql: &str, cursor: &mut usize) -> Option<String> {
     sqlite_skip_space_and_comments(sql, cursor);
     let bytes = sql.as_bytes();
     let first = *bytes.get(*cursor)?;
     let (close, doubled) = match first {
+        // SQLite accepts single-quoted identifiers in legacy schema text when
+        // the token appears in an identifier position (notably column names).
+        b'\'' => (b'\'', true),
         b'"' => (b'"', true),
         b'`' => (b'`', true),
         b'[' => (b']', true),
@@ -595,6 +598,14 @@ fn sqlite_ddl_word(sql: &str, cursor: &mut usize) -> Option<String> {
         *cursor += 1;
     }
     None
+}
+
+pub(crate) fn sqlite_first_ddl_word_is_quoted(sql: &str) -> bool {
+    let mut cursor = 0_usize;
+    sqlite_skip_space_and_comments(sql, &mut cursor);
+    sql.as_bytes()
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b'\'' | b'"' | b'`' | b'['))
 }
 
 fn sqlite_named_foreign_key_clause(clause: &str) -> Option<String> {
@@ -717,7 +728,7 @@ fn sqlite_has_unquoted_keyword(sql: &str, keyword: &str) -> bool {
 /// `PRAGMA table_info` omits generated columns on supported versions, but this
 /// extra filter makes the copy mapping safe if a catalog adapter ever exposes
 /// them (inserting into a generated column is illegal).
-fn sqlite_generated_columns(create_sql: &str) -> BTreeSet<String> {
+pub(crate) fn sqlite_generated_columns(create_sql: &str) -> BTreeSet<String> {
     let Some((open, close)) = sqlite_create_body_bounds(create_sql) else {
         return BTreeSet::new();
     };
@@ -728,16 +739,293 @@ fn sqlite_generated_columns(create_sql: &str) -> BTreeSet<String> {
         .into_iter()
         .filter_map(|clause| {
             let mut cursor = 0_usize;
+            let quoted_name = sqlite_first_ddl_word_is_quoted(clause);
             let name = sqlite_ddl_word(clause, &mut cursor)?;
-            if matches!(
-                name.to_ascii_uppercase().as_str(),
-                "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "CHECK" | "FOREIGN"
-            ) {
+            if !quoted_name
+                && matches!(
+                    name.to_ascii_uppercase().as_str(),
+                    "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "CHECK" | "FOREIGN"
+                )
+            {
                 return None;
             }
             sqlite_has_unquoted_keyword(&clause[cursor..], "GENERATED").then_some(name)
         })
         .collect()
+}
+
+/// Rewrite only the primary-key clauses in a catalog-stored SQLite `CREATE
+/// TABLE`, preserving every unrelated column facet, constraint, comment, and
+/// trailing table option verbatim. The caller has already verified the exact
+/// live key and all lifecycle prerequisites from the catalog.
+pub(crate) fn rewrite_sqlite_stored_primary_key(
+    table: &str,
+    stored: &str,
+    target_columns: Option<&[String]>,
+    materialize_not_null: Option<&str>,
+) -> Result<String, DeclarativeError> {
+    let (open, close) = sqlite_create_body_bounds(stored).ok_or_else(|| {
+        DeclarativeError::Invalid(format!(
+            "SQLite primary-key rebuild of '{table}' could not parse its stored CREATE TABLE body"
+        ))
+    })?;
+    let clauses = sqlite_table_clauses(&stored[open + 1..close]).ok_or_else(|| {
+        DeclarativeError::Invalid(format!(
+            "SQLite primary-key rebuild of '{table}' found malformed stored CREATE TABLE clauses"
+        ))
+    })?;
+
+    let mut rewritten = Vec::with_capacity(clauses.len() + usize::from(target_columns.is_some()));
+    for clause in clauses {
+        let mut cursor = 0_usize;
+        let quoted_name = sqlite_first_ddl_word_is_quoted(clause);
+        let Some(first) = sqlite_ddl_word(clause, &mut cursor) else {
+            return Err(DeclarativeError::Invalid(format!(
+                "SQLite primary-key rebuild of '{table}' found an empty table clause"
+            )));
+        };
+        let first_upper = first.to_ascii_uppercase();
+        if !quoted_name
+            && matches!(first_upper.as_str(), "PRIMARY" | "CONSTRAINT")
+            && sqlite_table_primary_key_clause(clause)
+        {
+            continue;
+        }
+        if !quoted_name && matches!(first_upper.as_str(), "UNIQUE" | "CHECK" | "FOREIGN") {
+            rewritten.push(clause.to_string());
+            continue;
+        }
+
+        if let Some((start, end)) = sqlite_inline_primary_key_span(clause) {
+            let mut ordinary = String::with_capacity(clause.len() + 9);
+            ordinary.push_str(&clause[..start]);
+            ordinary.push_str(&clause[end..]);
+            if materialize_not_null.is_some_and(|column| first.eq_ignore_ascii_case(column))
+                && !sqlite_column_clause_has_not_null(&ordinary)
+            {
+                ordinary.push_str(" NOT NULL");
+            }
+            rewritten.push(ordinary);
+        } else if materialize_not_null.is_some_and(|column| first.eq_ignore_ascii_case(column)) {
+            let mut ordinary = clause.to_string();
+            if !sqlite_column_clause_has_not_null(&ordinary) {
+                ordinary.push_str(" NOT NULL");
+            }
+            rewritten.push(ordinary);
+        } else {
+            rewritten.push(clause.to_string());
+        }
+    }
+
+    if let Some(columns) = target_columns {
+        let columns = columns
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rewritten.push(format!("PRIMARY KEY ({columns})"));
+    }
+
+    Ok(format!(
+        "{}({}){}",
+        &stored[..open],
+        rewritten.join(","),
+        &stored[close + 1..]
+    ))
+}
+
+fn sqlite_column_clause_has_not_null(clause: &str) -> bool {
+    sqlite_unquoted_top_level_words(clause)
+        .windows(2)
+        .any(|pair| pair[0].0.eq_ignore_ascii_case("NOT") && pair[1].0.eq_ignore_ascii_case("NULL"))
+}
+
+/// Whether the table-level suffix contains SQLite's `WITHOUT ROWID` option.
+/// Only the bytes after the parsed outer body are inspected, so a string,
+/// comment, default, or CHECK expression inside the body cannot spoof it.
+pub(crate) fn sqlite_create_is_without_rowid(create_sql: &str) -> bool {
+    let Some((_, close)) = sqlite_create_body_bounds(create_sql) else {
+        return false;
+    };
+    sqlite_unquoted_top_level_words(&create_sql[close + 1..])
+        .windows(2)
+        .any(|pair| {
+            pair[0].0.eq_ignore_ascii_case("WITHOUT") && pair[1].0.eq_ignore_ascii_case("ROWID")
+        })
+}
+
+/// SQLite's historical exception: an inline `INTEGER PRIMARY KEY DESC` is not
+/// a rowid alias. The table-constraint spelling does not have that exception.
+pub(crate) fn sqlite_inline_primary_key_is_desc(create_sql: &str, column: &str) -> bool {
+    let Some((open, close)) = sqlite_create_body_bounds(create_sql) else {
+        return false;
+    };
+    let Some(clauses) = sqlite_table_clauses(&create_sql[open + 1..close]) else {
+        return false;
+    };
+    clauses.into_iter().any(|clause| {
+        let mut cursor = 0_usize;
+        let Some(name) = sqlite_ddl_word(clause, &mut cursor) else {
+            return false;
+        };
+        if !name.eq_ignore_ascii_case(column) {
+            return false;
+        }
+        let words = sqlite_unquoted_top_level_words(&clause[cursor..]);
+        words.windows(3).any(|triple| {
+            triple[0].0.eq_ignore_ascii_case("PRIMARY")
+                && triple[1].0.eq_ignore_ascii_case("KEY")
+                && triple[2].0.eq_ignore_ascii_case("DESC")
+        })
+    })
+}
+
+fn sqlite_table_primary_key_clause(clause: &str) -> bool {
+    let words = sqlite_unquoted_top_level_words(clause);
+    words.windows(2).any(|pair| {
+        pair[0].0.eq_ignore_ascii_case("PRIMARY") && pair[1].0.eq_ignore_ascii_case("KEY")
+    })
+}
+
+/// Byte span of an inline `PRIMARY KEY ... [AUTOINCREMENT]` column constraint.
+fn sqlite_inline_primary_key_span(clause: &str) -> Option<(usize, usize)> {
+    let words = sqlite_unquoted_top_level_words(clause);
+    let primary = words.windows(2).position(|pair| {
+        pair[0].0.eq_ignore_ascii_case("PRIMARY") && pair[1].0.eq_ignore_ascii_case("KEY")
+    })?;
+    // A named column constraint may quote its name. Quoted identifiers are
+    // deliberately absent from `sqlite_unquoted_top_level_words`, so these two
+    // valid spellings have different preceding-word shapes:
+    //
+    //   CONSTRAINT pk_name PRIMARY KEY       => CONSTRAINT, pk_name, PRIMARY
+    //   CONSTRAINT "pk name" PRIMARY KEY     => CONSTRAINT, PRIMARY
+    //
+    // Consume the whole named constraint in both cases. Leaving a quoted
+    // `CONSTRAINT "name"` prefix behind would make the rebuilt CREATE TABLE
+    // invalid after removing its PRIMARY KEY body.
+    let start = if primary >= 2 && words[primary - 2].0.eq_ignore_ascii_case("CONSTRAINT") {
+        words[primary - 2].1
+    } else if primary >= 1 && words[primary - 1].0.eq_ignore_ascii_case("CONSTRAINT") {
+        words[primary - 1].1
+    } else {
+        words[primary].1
+    };
+    let mut next = primary + 2;
+    if words
+        .get(next)
+        .is_some_and(|word| matches!(word.0.to_ascii_uppercase().as_str(), "ASC" | "DESC"))
+    {
+        next += 1;
+    }
+    if words.get(next..next + 2).is_some_and(|pair| {
+        pair[0].0.eq_ignore_ascii_case("ON") && pair[1].0.eq_ignore_ascii_case("CONFLICT")
+    }) {
+        next += 2;
+        if words.get(next).is_some_and(|word| {
+            matches!(
+                word.0.to_ascii_uppercase().as_str(),
+                "ROLLBACK" | "ABORT" | "FAIL" | "IGNORE" | "REPLACE"
+            )
+        }) {
+            next += 1;
+        }
+    }
+    if words
+        .get(next)
+        .is_some_and(|word| word.0.eq_ignore_ascii_case("AUTOINCREMENT"))
+    {
+        next += 1;
+    }
+    let end = words.get(next.saturating_sub(1))?.2;
+    Some((start, end))
+}
+
+/// Unquoted SQL words at parenthesis depth zero, with byte spans. This is enough
+/// to recognize SQLite column/table constraint grammar without mistaking text in
+/// CHECK expressions, defaults, strings, identifiers, or comments for keywords.
+fn sqlite_unquoted_top_level_words(sql: &str) -> Vec<(String, usize, usize)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        Single,
+        Double,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+    let bytes = sql.as_bytes();
+    let mut state = State::Normal;
+    let mut depth = 0_usize;
+    let mut cursor = 0_usize;
+    let mut words = Vec::new();
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        let next = bytes.get(cursor + 1).copied();
+        match state {
+            State::Normal => match (byte, next) {
+                (b'-', Some(b'-')) => {
+                    state = State::LineComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    state = State::BlockComment;
+                    cursor += 2;
+                    continue;
+                }
+                (b'\'', _) => state = State::Single,
+                (b'"', _) => state = State::Double,
+                (b'`', _) => state = State::Backtick,
+                (b'[', _) => state = State::Bracket,
+                (b'(', _) => depth += 1,
+                (b')', _) => depth = depth.saturating_sub(1),
+                (_, _) if depth == 0 && (byte.is_ascii_alphabetic() || byte == b'_') => {
+                    let start = cursor;
+                    cursor += 1;
+                    while bytes.get(cursor).is_some_and(|value| {
+                        value.is_ascii_alphanumeric() || matches!(value, b'_' | b'$')
+                    }) {
+                        cursor += 1;
+                    }
+                    words.push((sql[start..cursor].to_string(), start, cursor));
+                    continue;
+                }
+                _ => {}
+            },
+            State::Single if byte == b'\'' => {
+                if next == Some(b'\'') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Double if byte == b'"' => {
+                if next == Some(b'"') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Backtick if byte == b'`' => {
+                if next == Some(b'`') {
+                    cursor += 2;
+                    continue;
+                }
+                state = State::Normal;
+            }
+            State::Bracket if byte == b']' => state = State::Normal,
+            State::LineComment if matches!(byte, b'\n' | b'\r') => state = State::Normal,
+            State::BlockComment if byte == b'*' && next == Some(b'/') => {
+                state = State::Normal;
+                cursor += 2;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    words
 }
 
 /// Reconcile only named table-level FOREIGN KEY clauses in SQLite's verbatim
@@ -5514,6 +5802,7 @@ impl DeclarativeAuthor {
             copy_columns,
             recreate_objects,
             dropped_columns,
+            sequence_policy: crate::render::plan::SqliteSequencePolicy::Preserve,
             reason,
         };
         let preview_up = std::iter::once(spec.new_table_create.as_str())
@@ -5629,6 +5918,7 @@ impl DeclarativeAuthor {
             copy_columns,
             recreate_objects,
             dropped_columns,
+            sequence_policy: crate::render::plan::SqliteSequencePolicy::Preserve,
             reason,
         };
 

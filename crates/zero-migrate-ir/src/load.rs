@@ -192,6 +192,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::SetColumnDefault { table, .. }
         | Op::DropColumnDefault { table, .. }
         | Op::RenameColumn { table, .. }
+        | Op::AlterPrimaryKey { table, .. }
         | Op::AddConstraint { table, .. }
         | Op::DropConstraint { table, .. }
         | Op::ValidateConstraint { table, .. }
@@ -442,4 +443,51 @@ pub fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str,
         return Some(("flags", format!("{:?}", ir.flags)));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{AlterPrimaryKeyAction, IrFlagsOverride, CURRENT_IR_VERSION};
+
+    fn alter_primary_key_ir() -> MigrationIr {
+        MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "replace orders primary key".to_string(),
+            owner_app: "untrusted-wire-hint".to_string(),
+            ops: vec![Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action: AlterPrimaryKeyAction::Replace {
+                    expected_columns: vec!["id".to_string()],
+                    columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                    drop_identity_from: Some(vec!["id".to_string()]),
+                },
+                schema: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_participates_in_table_ownership_gate() {
+        let ir = alter_primary_key_ir();
+        let owned = BTreeMap::from([("orders".to_string(), "orders-app".to_string())]);
+        enforce_ir_ownership(&ir, "orders-app", &owned)
+            .expect("the owning app may alter its table primary key");
+
+        let error = enforce_ir_ownership(&ir, "other-app", &owned).unwrap_err();
+        assert_eq!(
+            error,
+            IrLoadError::NotTableOwner {
+                op_index: 0,
+                table: "orders".to_string(),
+                owner: "orders-app".to_string(),
+                deploying_app: "other-app".to_string(),
+            }
+        );
+    }
 }

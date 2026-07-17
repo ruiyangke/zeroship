@@ -42,6 +42,7 @@
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
 use crate::expr::{AggFunc, CaseBranch, Duration, Expr, ScalarFn, SynthFn};
+use crate::ir::AlterPrimaryKeyAction;
 
 // ── Canonical authoring-time error codes ────────────────────────────────────
 // The taxonomy new validators add their code to. The op-vs-expr distinction is
@@ -119,8 +120,10 @@ pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
 /// A `pgRaw` op must carry a non-empty audit reason for using the raw SQL escape.
 pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
-/// A resolved `createTable.primaryKey` is structurally invalid: empty, duplicated,
-/// or naming a column absent from the resolved table.
+/// A primary-key tuple is structurally invalid. This covers both a resolved
+/// `createTable.primaryKey` and an explicit [`AlterPrimaryKeyAction`]: empty or
+/// duplicated ordered tuples, a no-op replacement, or an invalid declared
+/// identity-removal tuple.
 pub const CODE_PRIMARY_KEY_INVALID: &str = "PRIMARY_KEY_INVALID";
 /// A resolved `createTable` violates the active profile's table-shape policy.
 pub const CODE_TABLE_SHAPE_POLICY: &str = "TABLE_SHAPE_POLICY";
@@ -149,6 +152,195 @@ pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDE
 /// so the minted `<prefix>_<22 base62 UUIDv7>` value keeps the compact platform
 /// shape. This bound is unrelated to the public TypeID prefix grammar.
 pub const MAX_ID_PREFIX_LEN: usize = 4;
+
+/// Validate the dialect-neutral structural contract of an explicit primary-key
+/// lifecycle action.
+///
+/// Live-schema prerequisites (the exact current key, candidate uniqueness,
+/// identity facets, and inbound foreign keys) deliberately do not belong here;
+/// apply checks them while holding the target-specific lock. This helper only
+/// rejects malformed hand-authored IR that cannot represent the public
+/// `OrderedColumns` contract faithfully:
+///
+/// - every ordered tuple is non-empty, names only non-empty columns, and has no
+///   duplicate column;
+/// - replacement changes the ordered tuple (so it cannot be used as a disguised
+///   identity-only synchronization operation);
+/// - a present `dropIdentityFrom` tuple is itself ordered/non-empty/unique and is
+///   a subset of the exact expected current primary key.
+///
+/// # Errors
+/// Returns a stable human-readable reason suitable for wrapping in an
+/// [`AuthoringError`] carrying [`CODE_PRIMARY_KEY_INVALID`].
+pub fn validate_alter_primary_key_action(action: &AlterPrimaryKeyAction) -> Result<(), String> {
+    fn validate_ordered_columns(columns: &[String], field: &str) -> Result<(), String> {
+        if columns.is_empty() {
+            return Err(format!("{field} must be a non-empty ordered column tuple"));
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (position, column) in columns.iter().enumerate() {
+            if column.is_empty() {
+                return Err(format!(
+                    "{field}[{position}] must be a non-empty column name"
+                ));
+            }
+            if !seen.insert(column.as_str()) {
+                return Err(format!("{field} names column {column:?} more than once"));
+            }
+        }
+        Ok(())
+    }
+
+    let validate_drop_identity =
+        |columns: Option<&[String]>, expected_columns: &[String]| -> Result<(), String> {
+            let Some(columns) = columns else {
+                return Ok(());
+            };
+            validate_ordered_columns(columns, "dropIdentityFrom")?;
+            let expected = expected_columns
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            for column in columns {
+                if !expected.contains(column.as_str()) {
+                    return Err(format!(
+                        "dropIdentityFrom names column {column:?}, which is not in expectedColumns"
+                    ));
+                }
+            }
+            Ok(())
+        };
+
+    match action {
+        AlterPrimaryKeyAction::Add { columns } => validate_ordered_columns(columns, "columns"),
+        AlterPrimaryKeyAction::Replace {
+            expected_columns,
+            columns,
+            drop_identity_from,
+        } => {
+            validate_ordered_columns(expected_columns, "expectedColumns")?;
+            validate_ordered_columns(columns, "columns")?;
+            if expected_columns == columns {
+                return Err(
+                    "replace columns must differ from expectedColumns; use replace only to change the primary-key tuple"
+                        .to_string(),
+                );
+            }
+            validate_drop_identity(drop_identity_from.as_deref(), expected_columns)
+        }
+        AlterPrimaryKeyAction::Drop {
+            expected_columns,
+            drop_identity_from,
+        } => {
+            validate_ordered_columns(expected_columns, "expectedColumns")?;
+            validate_drop_identity(drop_identity_from.as_deref(), expected_columns)
+        }
+    }
+}
+
+#[cfg(test)]
+mod alter_primary_key_tests {
+    use super::*;
+
+    fn strings(columns: &[&str]) -> Vec<String> {
+        columns.iter().map(|column| (*column).to_string()).collect()
+    }
+
+    #[test]
+    fn lifecycle_action_accepts_exact_ordered_shapes() {
+        for action in [
+            AlterPrimaryKeyAction::Add {
+                columns: strings(&["tenant_id", "order_id"]),
+            },
+            AlterPrimaryKeyAction::Replace {
+                expected_columns: strings(&["id"]),
+                columns: strings(&["tenant_id", "order_id"]),
+                drop_identity_from: Some(strings(&["id"])),
+            },
+            AlterPrimaryKeyAction::Replace {
+                expected_columns: strings(&["tenant_id", "order_id"]),
+                columns: strings(&["id"]),
+                drop_identity_from: None,
+            },
+            AlterPrimaryKeyAction::Drop {
+                expected_columns: strings(&["id"]),
+                drop_identity_from: Some(strings(&["id"])),
+            },
+        ] {
+            validate_alter_primary_key_action(&action)
+                .unwrap_or_else(|error| panic!("valid action {action:?} was rejected: {error}"));
+        }
+    }
+
+    #[test]
+    fn lifecycle_action_rejects_malformed_ordered_tuples() {
+        for (action, expected_reason) in [
+            (
+                AlterPrimaryKeyAction::Add { columns: vec![] },
+                "columns must be a non-empty",
+            ),
+            (
+                AlterPrimaryKeyAction::Add {
+                    columns: strings(&["id", "id"]),
+                },
+                "more than once",
+            ),
+            (
+                AlterPrimaryKeyAction::Replace {
+                    expected_columns: strings(&["id"]),
+                    columns: strings(&[""]),
+                    drop_identity_from: None,
+                },
+                "must be a non-empty column name",
+            ),
+            (
+                AlterPrimaryKeyAction::Drop {
+                    expected_columns: strings(&["id"]),
+                    drop_identity_from: Some(vec![]),
+                },
+                "dropIdentityFrom must be a non-empty",
+            ),
+        ] {
+            let error = validate_alter_primary_key_action(&action).unwrap_err();
+            assert!(
+                error.contains(expected_reason),
+                "{action:?} returned unexpected reason {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replace_rejects_noop_and_identity_columns_outside_expected_key() {
+        let noop = AlterPrimaryKeyAction::Replace {
+            expected_columns: strings(&["tenant_id", "order_id"]),
+            columns: strings(&["tenant_id", "order_id"]),
+            drop_identity_from: None,
+        };
+        assert!(validate_alter_primary_key_action(&noop)
+            .unwrap_err()
+            .contains("must differ"));
+
+        for action in [
+            AlterPrimaryKeyAction::Replace {
+                expected_columns: strings(&["id"]),
+                columns: strings(&["tenant_id", "order_id"]),
+                drop_identity_from: Some(strings(&["other"])),
+            },
+            AlterPrimaryKeyAction::Drop {
+                expected_columns: strings(&["id"]),
+                drop_identity_from: Some(strings(&["other"])),
+            },
+        ] {
+            assert!(
+                validate_alter_primary_key_action(&action)
+                    .unwrap_err()
+                    .contains("not in expectedColumns"),
+                "{action:?} must reject an unrelated identity column"
+            );
+        }
+    }
+}
 
 /// The dialect a structured rejection pertains to (the `dialect` field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

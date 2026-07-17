@@ -658,6 +658,37 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         })?;
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
+    finalize_two_phase(conn, cfg, m, applied_by, exec_ms, supersedes, kind).await?;
+
+    Ok(false)
+}
+
+/// Finalize a structured primary-key ALTER whose started marker was armed while
+/// an explicit target-table lock was still held. The ALTER itself releases the
+/// MySQL table lock; completion then uses the ordinary atomic journal-finalize
+/// transaction.
+pub(crate) async fn finalize_started_primary_key<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+    exec_ms: i64,
+) -> Result<(), ApplyError> {
+    finalize_two_phase(conn, cfg, m, applied_by, exec_ms, &[], "apply").await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_two_phase<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    m: &Migration,
+    applied_by: &str,
+    exec_ms: i64,
+    supersedes: &[&str],
+    kind: &str,
+) -> Result<(), ApplyError> {
+    let version = m.version.as_str();
+
     // Finalize the immutable completed row, all fresh-squash edges, and marker
     // cleanup commit together. A crash or statement error cannot expose a squash
     // completion without its complete coverage set, or delete the recovery marker
@@ -703,7 +734,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         return Err(ApplyError::Db(error.into()));
     }
 
-    Ok(false)
+    Ok(())
 }
 
 /// Insert the `S → v_i` supersession edges for a fresh-path squash (the MySQL

@@ -1,0 +1,52 @@
+{
+  "ir_version": 1,
+  "name": "alter_primary_key",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "alterPrimaryKey",
+      "table": "orders",
+      "action": {
+        "kind": "add",
+        "columns": [
+          "legacy_id"
+        ]
+      },
+      "schema": "app"
+    },
+    {
+      "op": "alterPrimaryKey",
+      "table": "orders",
+      "action": {
+        "kind": "replace",
+        "expectedColumns": [
+          "legacy_id"
+        ],
+        "columns": [
+          "tenant_id",
+          "order_id"
+        ],
+        "dropIdentityFrom": [
+          "legacy_id"
+        ]
+      },
+      "schema": "app"
+    },
+    {
+      "op": "alterPrimaryKey",
+      "table": "orders",
+      "action": {
+        "kind": "drop",
+        "expectedColumns": [
+          "tenant_id",
+          "order_id"
+        ]
+      },
+      "schema": "app"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

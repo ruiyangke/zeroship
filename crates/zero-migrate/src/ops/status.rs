@@ -177,6 +177,9 @@ impl PlanStatusManifest {
                         cursor_stability_invariant: invariant,
                     });
                 }
+                PlanStep::AlterPrimaryKey(step) => {
+                    steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
+                }
                 PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
                     steps.extend(
                         rename

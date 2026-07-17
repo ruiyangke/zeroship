@@ -129,6 +129,7 @@ export type {
   // the fluent handle + selector sub-handles
   TableHandle,
   TableOptions,
+  PrimaryKeyOperations,
   ViewHandle,
   ViewOptions,
   ColumnRef,

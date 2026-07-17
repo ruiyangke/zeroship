@@ -74,7 +74,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::BindValue;
+use crate::render::step::{AlterPrimaryKeyStep, BindValue};
 use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
@@ -514,6 +514,26 @@ pub trait MigrationBackend {
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError>;
+
+    /// Apply one explicit primary-key add/replace/drop operation after checking
+    /// its exact live-catalog preconditions under the project lock.
+    ///
+    /// The structured step is intentionally not rendered into ordinary DDL at
+    /// lower time: each target must atomically combine the declared generation
+    /// transition with its constraint change and must refuse unsafe inbound
+    /// foreign-key dependencies.
+    async fn alter_primary_key(
+        &self,
+        _cfg: &ExecutorConfig,
+        _step: &AlterPrimaryKeyStep,
+        _approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
+        _applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        Err(ApplyError::Backend(
+            "this backend does not implement explicit primary-key lifecycle operations".to_string(),
+        ))
+    }
 
     /// Drive a single **batched data backfill** step (`op.*` DSL,
     /// [`PlanStep::Backfill`](crate::render::step::PlanStep::Backfill)) through the

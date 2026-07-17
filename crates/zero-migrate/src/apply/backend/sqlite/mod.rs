@@ -23,6 +23,7 @@ mod backfill_sql;
 mod drift_sql;
 mod dump_sql;
 mod journal_sql;
+mod primary_key_sql;
 pub mod rebuild_sql;
 mod rollback_sql;
 
@@ -744,6 +745,66 @@ impl MigrationBackend for SqliteBackend {
         rebuild_sql::rebuild_one(&self.actor, spec, m, applied_by)
             .await
             .map_err(|e| ApplyError::Backend(e.to_string()))
+    }
+
+    async fn alter_primary_key(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &crate::render::step::AlterPrimaryKeyStep,
+        approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        journal_sql::ensure_journal(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?;
+        if let Some(entry) = journal_sql::applied(&self.actor)
+            .await
+            .map_err(journal_err)
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .find(|entry| entry.version == step.migration.version.as_str())
+        {
+            if entry.checksum != step.migration.checksum.as_str() {
+                return Err(ApplyError::ChecksumDrift {
+                    version: step.migration.version.as_str().to_string(),
+                    recorded: entry.checksum,
+                    expected: step.migration.checksum.as_str().to_string(),
+                });
+            }
+            return Ok(false);
+        }
+        if step.migration.flags.destructive || step.migration.flags.requires_approval {
+            if approval != crate::approval::Approval::Approved {
+                return Err(ApplyError::ApprovalRequired);
+            }
+            if !scope.admits(step.migration.version.as_str()) {
+                return Err(ApplyError::ApprovalNotScoped {
+                    version: step.migration.version.as_str().to_string(),
+                });
+            }
+        }
+        if !step.schema.eq_ignore_ascii_case(&cfg.project_schema)
+            && !step.schema.eq_ignore_ascii_case("main")
+        {
+            return Err(ApplyError::Backend(format!(
+                "sqlite primary-key lifecycle schema {:?} is outside configured project schema {:?}",
+                step.schema, cfg.project_schema
+            )));
+        }
+        rebuild_sql::rebuild_primary_key(
+            &self.actor,
+            &step.schema,
+            &step.table,
+            &step.action,
+            &step.migration,
+            applied_by,
+        )
+        .await
+        .map_err(|error| ApplyError::Backend(error.to_string()))?;
+        Ok(true)
     }
 
     async fn run_backfill_step(

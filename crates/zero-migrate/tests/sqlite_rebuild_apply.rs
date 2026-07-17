@@ -27,7 +27,7 @@ use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
     IrAuthor, LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep,
-    SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec,
+    SchemaSnapshot, SqliteBackend, SqliteRebuild, SqliteRebuildSpec, SqliteSequencePolicy,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -236,6 +236,190 @@ async fn assert_child_sequence_at_least(be: &SqliteBackend, minimum: i64, stage:
         sequence >= minimum,
         "AUTOINCREMENT high-water mark survives {stage}: expected >= {minimum}, got {sequence}"
     );
+}
+
+// The explicit Remove policy is the one rebuild mode that intentionally does
+// NOT carry an AUTOINCREMENT high-water mark forward. It is used only after the
+// caller has validated an explicit identity-removal transition.
+#[compio::test]
+async fn sequence_remove_policy_turns_identity_into_ordinary_integer() {
+    let p = paths("rebuild_sequence_remove");
+    let be = backend(&p);
+
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)")
+        .await
+        .expect("create identity table");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    be.actor()
+        .exec("INSERT INTO t (id, value) VALUES (1, 'kept'), (100, 'deleted')")
+        .await
+        .expect("establish identity history");
+    be.actor()
+        .exec("DELETE FROM t WHERE id = 100")
+        .await
+        .expect("leave high-water above live rows");
+    let before = be
+        .actor()
+        .query("SELECT seq FROM main.sqlite_sequence WHERE name = 't'")
+        .await
+        .expect("read old sequence");
+    assert_eq!(before[0][0].as_deref(), Some("100"));
+
+    let spec = SqliteRebuildSpec {
+        table: "t".into(),
+        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\
+            \"id\" INTEGER NOT NULL, \"value\" TEXT)"
+            .into(),
+        copy_columns: vec![("id".into(), "id".into()), ("value".into(), "value".into())],
+        recreate_objects: vec![],
+        dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Remove,
+        reason: "explicit AUTOINCREMENT removal".into(),
+    };
+    let m = rebuild_migration("t", &spec);
+    be.rebuild_one(&spec, &m, "deployer")
+        .await
+        .expect("identity-removal rebuild applies");
+
+    let ddl = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = 't'")
+        .await
+        .expect("read rebuilt table DDL");
+    let ddl = ddl[0][0].as_deref().expect("stored table DDL");
+    assert!(!ddl.to_ascii_uppercase().contains("AUTOINCREMENT"));
+    assert!(!ddl.to_ascii_uppercase().contains("PRIMARY KEY"));
+    let sequence = be
+        .actor()
+        .query("SELECT seq FROM main.sqlite_sequence WHERE name = 't'")
+        .await
+        .expect("read removed sequence");
+    assert!(
+        sequence.is_empty(),
+        "identity removal clears sqlite_sequence"
+    );
+    let rows = be
+        .actor()
+        .query("SELECT id, value FROM t ORDER BY id")
+        .await
+        .expect("read carried row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_deref(), Some("1"));
+    assert_eq!(rows[0][1].as_deref(), Some("kept"));
+    assert!(foreign_keys_on(&be).await, "FK enforcement restored");
+}
+
+// Sequence removal belongs to the same transaction as the table swap and the
+// integrity gate. If that gate aborts, rollback must restore both the original
+// AUTOINCREMENT table definition and its historical high-water mark.
+#[compio::test]
+async fn sequence_remove_policy_rollback_restores_old_high_water() {
+    let p = paths("rebuild_sequence_remove_rollback");
+    let be = backend(&p);
+
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
+    be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
+    be.actor()
+        .exec("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        .await
+        .expect("create parent");
+    be.actor()
+        .exec(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             parent_id INTEGER REFERENCES parent (id))",
+        )
+        .await
+        .expect("create identity child");
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+    be.actor().exec("COMMIT").await.expect("commit");
+
+    be.actor()
+        .exec("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("fk off");
+    be.actor()
+        .exec("INSERT INTO child (id, parent_id) VALUES (1, 999), (100, NULL)")
+        .await
+        .expect("seed orphan and identity history");
+    be.actor()
+        .exec("DELETE FROM child WHERE id = 100")
+        .await
+        .expect("retain only historical high-water");
+    be.actor()
+        .exec("PRAGMA foreign_keys = ON")
+        .await
+        .expect("fk on");
+
+    let spec = SqliteRebuildSpec {
+        table: "child".into(),
+        tmp_table: SqliteRebuildSpec::tmp_name("child"),
+        new_table_create: "CREATE TABLE \"child__zero_migrate_rebuild\" (\
+            \"id\" INTEGER NOT NULL, \
+            \"parent_id\" INTEGER REFERENCES \"parent\" (\"id\"))"
+            .into(),
+        copy_columns: vec![
+            ("id".into(), "id".into()),
+            ("parent_id".into(), "parent_id".into()),
+        ],
+        recreate_objects: vec![],
+        dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Remove,
+        reason: "identity removal rollback".into(),
+    };
+    let m = rebuild_migration("child", &spec);
+    let err = be
+        .rebuild_one(&spec, &m, "deployer")
+        .await
+        .expect_err("orphan must abort rebuild after sequence removal");
+    assert!(matches!(err, RebuildError::ForeignKeyViolation { .. }));
+
+    let ddl = be
+        .actor()
+        .query("SELECT sql FROM main.sqlite_master WHERE type = 'table' AND name = 'child'")
+        .await
+        .expect("read rolled-back DDL");
+    assert!(
+        ddl[0][0]
+            .as_deref()
+            .is_some_and(|sql| sql.to_ascii_uppercase().contains("AUTOINCREMENT")),
+        "rollback restores the original identity table"
+    );
+    let sequence = be
+        .actor()
+        .query("SELECT seq FROM main.sqlite_sequence WHERE name = 'child'")
+        .await
+        .expect("read rolled-back sequence");
+    assert_eq!(sequence[0][0].as_deref(), Some("100"));
+    let tmp = be
+        .actor()
+        .query(
+            "SELECT name FROM main.sqlite_master \
+             WHERE type = 'table' AND name = 'child__zero_migrate_rebuild'",
+        )
+        .await
+        .expect("check temp table");
+    assert!(tmp.is_empty(), "rollback removes the replacement table");
+    assert!(foreign_keys_on(&be).await, "FK enforcement restored");
 }
 
 // A table-level composite FK lifecycle is routed through the production
@@ -1009,6 +1193,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
         ],
         recreate_objects: vec![],
         dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "fk integrity test rebuild".into(),
     };
     let m = rebuild_migration("child", &spec);
@@ -1183,6 +1368,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
         // A bogus index over a column that does not exist → CREATE INDEX errors.
         recreate_objects: vec!["CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into()],
         dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "wedge test".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -1397,6 +1583,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         // `dropped_columns` so the dependent is skipped — see the
         // `h1_drop_column_in_index_routes_to_rebuild` faithful test.
         dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "drop column drop_me".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -1505,6 +1692,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         copy_columns: vec![("id".into(), "id".into()), ("label".into(), "label".into())],
         recreate_objects: vec![],
         dropped_columns: vec![],
+        sequence_policy: SqliteSequencePolicy::Preserve,
         reason: "parent rebuild dropping referenced row".into(),
     };
     // Drop the referenced parent row BEFORE the rebuild (engine mode, FK is ON so we

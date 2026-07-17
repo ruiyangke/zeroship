@@ -1146,6 +1146,29 @@ export interface CreateTableArgs {
   schema?: string;
 }
 
+/** Explicit lifecycle operations for an existing table's primary-key
+ *  constraint. These operations perform only the final constraint change and
+ *  the optional, explicitly declared identity-generation transition; they do
+ *  not add or backfill columns, create candidate uniqueness, or migrate
+ *  foreign keys. */
+export interface PrimaryKeyOperations {
+  /** Add a primary key to a table that currently has none. */
+  add(args: { columns: OrderedColumns }): TableHandle;
+  /** Replace the exact current key named by `expectedColumns` with `columns`.
+   *  `expectedColumns` is an ordered drift precondition, not introspection. */
+  replace(args: {
+    expectedColumns: OrderedColumns;
+    columns: OrderedColumns;
+    dropIdentityFrom?: OrderedColumns;
+  }): TableHandle;
+  /** Drop the exact current key named by `expectedColumns`.
+   *  `expectedColumns` is an ordered drift precondition, not introspection. */
+  drop(args: {
+    expectedColumns: OrderedColumns;
+    dropIdentityFrom?: OrderedColumns;
+  }): TableHandle;
+}
+
 /** The `.column(name)` selector sub-handle. Each terminal records eagerly
  *  and returns the parent {@link TableHandle} (so chaining + var-reuse work). */
 export interface ColumnRef {
@@ -1270,6 +1293,9 @@ export interface TableHandle {
   setOptions(args: TableRuntimeOptions): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
   partition(name: string): PartitionRef;
+
+  /** Explicit add/replace/drop lifecycle for the table's primary key. */
+  primaryKey(): PrimaryKeyOperations;
 
   // Selectors for named sub-objects
   column(name: string): ColumnRef;

@@ -1282,7 +1282,7 @@ fn recover_column_collation(create_sql: &str, column: &str) -> Option<ColumnColl
     })
 }
 
-fn sqlite_column_collation_name(create_sql: &str, column: &str) -> Option<String> {
+pub(crate) fn sqlite_column_collation_name(create_sql: &str, column: &str) -> Option<String> {
     let clause = sqlite_column_clause(create_sql, column)?;
     let tokens = tokenize_sqlite_ddl(clause);
     let mut depth = 0_i32;
@@ -1303,70 +1303,28 @@ fn sqlite_column_collation_name(create_sql: &str, column: &str) -> Option<String
 }
 
 fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str> {
-    // The emitter quotes identifiers with double-quotes: `"<col>_masked" TEXT NOT
-    // NULL /* zero-migrate:mask:… */`. The masked SIBLING column carries the `zero-migrate:mask:`
-    // sentinel; an encrypted column carries `zero-migrate:enc:` on the column itself. We scan
-    // for the column token, then the next `/* … */` up to the next comma/`)` at
-    // depth 0.
-    let needle_quoted = format!("\"{column}\"");
-    let start = create_sql.find(&needle_quoted).or_else(|| {
-        // Bare (unquoted) fallback — match the column as a whole word.
-        find_bare_ident(create_sql, column)
-    })?;
-    let rest = &create_sql[start + needle_quoted_len(create_sql, start, column)..];
-
-    // Find the column-clause boundary: the next top-level comma or the closing `)`.
-    // Reuse the DDL scanner so commas/parens inside strings, quoted identifiers,
-    // and either comment form cannot terminate the clause early.
-    let mut depth = 0_usize;
-    let clause_end = scan_sqlite_ddl_outside(rest, 0, |_, ch| match ch {
-        '(' => {
-            depth += 1;
-            false
+    // Parse only the outer CREATE body, then compare each clause's decoded first
+    // identifier. A global substring search can confuse the table name with a
+    // same-named column and cannot correctly skip backtick/bracket quoting.
+    let (open, close) = crate::render::declarative::sqlite_create_body_bounds(create_sql)?;
+    let clauses = crate::render::declarative::sqlite_table_clauses(&create_sql[open + 1..close])?;
+    for clause in clauses {
+        let quoted = crate::render::declarative::sqlite_first_ddl_word_is_quoted(clause);
+        let mut cursor = 0_usize;
+        let first = crate::render::declarative::sqlite_ddl_word(clause, &mut cursor)?;
+        if !quoted
+            && matches!(
+                first.to_ascii_uppercase().as_str(),
+                "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "CHECK" | "FOREIGN"
+            )
+        {
+            continue;
         }
-        ')' if depth == 0 => true,
-        ')' => {
-            depth -= 1;
-            false
+        if first.eq_ignore_ascii_case(column) {
+            return Some(&clause[cursor..]);
         }
-        ',' if depth == 0 => true,
-        _ => false,
-    })
-    .unwrap_or(rest.len());
-    Some(&rest[..clause_end])
-}
-
-/// Length of the quoted or bare needle we matched at `start`, so the slice past it
-/// is correct for either spelling.
-fn needle_quoted_len(create_sql: &str, start: usize, column: &str) -> usize {
-    let quoted = format!("\"{column}\"");
-    if create_sql[start..].starts_with(&quoted) {
-        quoted.len()
-    } else {
-        column.len()
-    }
-}
-
-/// Find a bare (unquoted) identifier as a whole word (preceded + followed by a
-/// non-identifier char), so we don't match a substring of a longer name.
-fn find_bare_ident(haystack: &str, ident: &str) -> Option<usize> {
-    let bytes = haystack.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = haystack[from..].find(ident) {
-        let at = from + rel;
-        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
-        let after = at + ident.len();
-        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
-        if before_ok && after_ok {
-            return Some(at);
-        }
-        from = at + ident.len();
     }
     None
-}
-
-const fn is_ident_byte(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
 }
 
 /// Extract a required text cell, erroring on NULL / missing.
@@ -1406,13 +1364,13 @@ mod tests {
     }
 
     #[test]
-    fn bare_ident_is_whole_word() {
-        // `user` must not match inside `username`.
+    fn column_clause_matches_the_decoded_first_identifier_only() {
+        let sql = "CREATE TABLE t (username TEXT, user INTEGER)";
         assert_eq!(
-            find_bare_ident("CREATE TABLE t (username TEXT)", "user"),
-            None
+            sqlite_column_clause(sql, "user").map(str::trim),
+            Some("INTEGER")
         );
-        assert!(find_bare_ident("CREATE TABLE t (user TEXT)", "user").is_some());
+        assert_eq!(sqlite_column_clause(sql, "use"), None);
     }
 
     #[test]
@@ -1436,6 +1394,33 @@ mod tests {
         assert_eq!(recover_column_collation(sql, "nocase"), None);
         assert_eq!(recover_case_sensitive(sql, "nocase"), Some(false));
         assert_eq!(recover_case_sensitive(sql, "checked"), None);
+    }
+
+    #[test]
+    fn column_collation_parser_uses_body_clauses_and_all_identifier_quotes() {
+        let sql = r#"CREATE TABLE "items" (
+            "items" TEXT COLLATE NOCASE,
+            `tick` TEXT COLLATE RTRIM,
+            [bracket] TEXT COLLATE [custom.name],
+            'single' TEXT COLLATE NOCASE
+        )"#;
+
+        assert_eq!(
+            sqlite_column_collation_name(sql, "items").as_deref(),
+            Some("NOCASE")
+        );
+        assert_eq!(
+            sqlite_column_collation_name(sql, "tick").as_deref(),
+            Some("RTRIM")
+        );
+        assert_eq!(
+            sqlite_column_collation_name(sql, "bracket").as_deref(),
+            Some("custom.name")
+        );
+        assert_eq!(
+            sqlite_column_collation_name(sql, "single").as_deref(),
+            Some("NOCASE")
+        );
     }
 
     #[test]

@@ -847,6 +847,9 @@ fn step_has_journal_phase(
         zero_migrate::PlanStep::Ddl(migration) => has_version(migration.version.as_str()),
         zero_migrate::PlanStep::Dml { version, .. }
         | zero_migrate::PlanStep::Backfill { version, .. } => has_version(version.as_str()),
+        zero_migrate::PlanStep::AlterPrimaryKey(step) => {
+            has_version(step.migration.version.as_str())
+        }
         zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(
             rename,
         )) => rename
@@ -886,6 +889,32 @@ fn inflight_projection_already_reflected(
             .tables
             .values()
             .any(|snapshot| snapshot.indexes.iter().any(|item| item.name == name)),
+    };
+    let table_primary_key = |table: &str| {
+        let table = snapshot.tables.get(table)?;
+        let mut constraints = table
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.kind == "PRIMARY KEY");
+        let constraint = constraints.next()?;
+        if constraints.next().is_some() {
+            return None;
+        }
+        table
+            .indexes
+            .iter()
+            .find(|index| index.name == constraint.name && index.unique)
+            .map(|index| index.columns.clone())
+            .or_else(|| {
+                let open = constraint.definition.find('(')?;
+                let close = constraint.definition[open + 1..].find(')')? + open + 1;
+                let columns = constraint.definition[open + 1..close]
+                    .split(',')
+                    .map(|column| column.trim().trim_matches('"').to_string())
+                    .collect::<Vec<_>>();
+                (!columns.is_empty() && columns.iter().all(|column| !column.is_empty()))
+                    .then_some(columns)
+            })
     };
 
     match (op, error) {
@@ -994,6 +1023,23 @@ fn inflight_projection_already_reflected(
         (Op::DropIndex { table, name, .. }, FoldError::MissingIndex(actual)) => {
             name == actual && !has_index(table.as_deref(), name)
         }
+        (
+            Op::AlterPrimaryKey { table, action, .. },
+            FoldError::PrimaryKeyPrecondition {
+                table: actual_table,
+                ..
+            },
+        ) => {
+            table == actual_table
+                && snapshot.tables.contains_key(table)
+                && match action.target_columns() {
+                    Some(target) => table_primary_key(table).as_deref() == Some(target),
+                    None => snapshot.tables[table]
+                        .constraints
+                        .iter()
+                        .all(|constraint| constraint.kind != "PRIMARY KEY"),
+                }
+        }
         (Op::CreateView { name, .. }, FoldError::DuplicateView(actual)) => {
             name == actual && snapshot.views.contains_key(name)
         }
@@ -1068,8 +1114,10 @@ fn advance_ownership_registry(
 }
 
 /// Compatibility projection of [`lower_envelope_to_plan`] for callers that still
-/// consume a flat `Vec<Migration>`. This view intentionally cannot represent DML or
-/// backfill steps; execution callers must use the complete plan instead.
+/// consume a flat `Vec<Migration>`. This view intentionally cannot represent DML,
+/// backfill, or structured primary-key lifecycle steps; execution callers must use
+/// the complete plan instead. `AlterPrimaryKey` is refused rather than projected to
+/// its comment-only journal marker.
 ///
 /// # Errors
 /// Same as [`lower_envelope_to_plan`].
@@ -1081,15 +1129,26 @@ pub fn lower_envelope_to_migrations(
     registry_json: &str,
     policy_ceiling_toml: Option<&str>,
 ) -> Result<Vec<Migration>, String> {
-    lower_envelope_to_plan(
+    let artifact = lower_envelope_to_plan(
         envelope_json,
         owner_app,
         project_schema,
         dialect,
         registry_json,
         policy_ceiling_toml,
-    )
-    .map(|artifact| artifact.migrations())
+    )?;
+    if artifact
+        .plan
+        .steps
+        .iter()
+        .any(|step| matches!(step, zero_migrate::PlanStep::AlterPrimaryKey(_)))
+    {
+        return Err(
+            "alterPrimaryKey requires the complete ordered plan; the flat Migration projection would lose its structured apply operation"
+                .to_string(),
+        );
+    }
+    Ok(artifact.migrations())
 }
 
 /// [`lower_envelope_to_migrations`] returning a JSON `Vec<Migration>` string (the
@@ -1235,6 +1294,107 @@ mod tests {
 
     // The generic confined test ceiling the monorepo will supply in Phase 3.
     const CEILING: &str = zero_migrate::ZEROSHIP_CONFINED_CEILING_TOML;
+
+    fn primary_key_projection(columns: &[&str]) -> zero_migrate::model::snapshot::SchemaSnapshot {
+        let columns = columns
+            .iter()
+            .map(|column| (*column).to_string())
+            .collect::<Vec<_>>();
+        zero_migrate::model::snapshot::SchemaSnapshot {
+            tables: BTreeMap::from([(
+                "items".to_string(),
+                zero_migrate::model::snapshot::TableSnapshot {
+                    columns: columns
+                        .iter()
+                        .map(|name| zero_migrate::model::snapshot::ColumnSnapshot {
+                            name: name.clone(),
+                            data_type: "integer".to_string(),
+                            nullable: false,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    indexes: vec![zero_migrate::model::snapshot::IndexSnapshot::btree(
+                        "items_pkey",
+                        true,
+                        columns.clone(),
+                    )],
+                    constraints: vec![zero_migrate::model::snapshot::ConstraintSnapshot {
+                        name: "items_pkey".to_string(),
+                        kind: "PRIMARY KEY".to_string(),
+                        definition: format!("PRIMARY KEY ({})", columns.join(", ")),
+                        comment: None,
+                    }],
+                    runtime_options: Default::default(),
+                    partition_by: None,
+                    comment: None,
+                    stored_create_sql: None,
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inflight_primary_key_projection_recognizes_only_the_exact_postcondition() {
+        let replace = Op::AlterPrimaryKey {
+            table: "items".to_string(),
+            action: zero_migrate::model::ir::AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".to_string()],
+                columns: vec!["tenant_id".to_string(), "id".to_string()],
+                drop_identity_from: Some(vec!["id".to_string()]),
+            },
+            schema: None,
+        };
+        let precondition = FoldError::PrimaryKeyPrecondition {
+            table: "items".to_string(),
+            expected: Some(vec!["id".to_string()]),
+            actual: Some(vec!["tenant_id".to_string(), "id".to_string()]),
+        };
+        assert!(inflight_projection_already_reflected(
+            &primary_key_projection(&["tenant_id", "id"]),
+            &replace,
+            &precondition,
+        ));
+        assert!(!inflight_projection_already_reflected(
+            &primary_key_projection(&["id", "tenant_id"]),
+            &replace,
+            &precondition,
+        ));
+
+        let drop = Op::AlterPrimaryKey {
+            table: "items".to_string(),
+            action: zero_migrate::model::ir::AlterPrimaryKeyAction::Drop {
+                expected_columns: vec!["id".to_string()],
+                drop_identity_from: None,
+            },
+            schema: None,
+        };
+        let dropped = zero_migrate::model::snapshot::SchemaSnapshot {
+            tables: BTreeMap::from([(
+                "items".to_string(),
+                zero_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        ..Default::default()
+                    }],
+                    indexes: Vec::new(),
+                    constraints: Vec::new(),
+                    runtime_options: Default::default(),
+                    partition_by: None,
+                    comment: None,
+                    stored_create_sql: None,
+                },
+            )]),
+            ..Default::default()
+        };
+        assert!(inflight_projection_already_reflected(
+            &dropped,
+            &drop,
+            &precondition,
+        ));
+    }
 
     #[test]
     fn historical_chained_renames_reconstruct_the_original_column() {
@@ -1924,6 +2084,47 @@ mod tests {
         );
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("policy"));
+    }
+
+    #[test]
+    fn flat_migration_projection_refuses_structured_primary_key_operation() {
+        let envelope = serde_json::json!({
+            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "name": "add_items_primary_key",
+            "ops": [{
+                "op": "alterPrimaryKey",
+                "table": "items",
+                "action": { "kind": "add", "columns": ["id"] }
+            }]
+        })
+        .to_string();
+        let error = lower_envelope_to_migrations(
+            &envelope,
+            "app_x",
+            "app_x",
+            "postgres",
+            r#"{"items":"app_x"}"#,
+            Some(CEILING),
+        )
+        .expect_err("flat migration consumers must not receive a comment-only marker");
+        assert!(
+            error.contains("requires the complete ordered plan"),
+            "{error}"
+        );
+
+        let plan = lower_envelope_to_plan(
+            &envelope,
+            "app_x",
+            "app_x",
+            "postgres",
+            r#"{"items":"app_x"}"#,
+            Some(CEILING),
+        )
+        .expect("the complete plan retains the structured operation");
+        assert!(matches!(
+            plan.plan.steps.as_slice(),
+            [zero_migrate::PlanStep::AlterPrimaryKey(_)]
+        ));
     }
 
     #[test]

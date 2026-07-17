@@ -2139,6 +2139,24 @@ impl MigrationEngine {
                     }
                     i += 1;
                 }
+                PlanStep::AlterPrimaryKey(step) => {
+                    let version = step.migration.version.as_str();
+                    if completed_gated.contains(version) {
+                        applied.skipped.push(version.to_string());
+                        i += 1;
+                        continue;
+                    }
+                    let ran = backend
+                        .alter_primary_key(exec_cfg, step, approval, scope, applied_by)
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    if ran {
+                        applied.applied.push(version.to_string());
+                    } else {
+                        applied.skipped.push(version.to_string());
+                    }
+                    i += 1;
+                }
                 PlanStep::Backfill {
                     version,
                     checksum,
@@ -2325,6 +2343,12 @@ impl MigrationEngine {
                     &progress,
                     version.as_str(),
                     checksum.as_str(),
+                )?,
+                PlanStep::AlterPrimaryKey(step) => journal_completed_for_approval(
+                    &journal,
+                    step.migration.version.as_str(),
+                    step.migration.checksum.as_str(),
+                    false,
                 )?,
                 PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
                     journal_completed_for_approval(

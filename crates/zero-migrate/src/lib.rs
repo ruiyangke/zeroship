@@ -321,8 +321,11 @@ pub use model::backfill::{
 pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
 pub use render::plan::{
     AppliedPlan, DatabaseFeature, DatabaseRequirements, NotSingleStep, SqliteRebuildSpec,
+    SqliteSequencePolicy,
 };
-pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, RenameStep};
+pub use render::step::{
+    tables_touched_by, AlterPrimaryKeyStep, BindValue, DialectScope, PlanStep, RenameStep,
+};
 // The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never

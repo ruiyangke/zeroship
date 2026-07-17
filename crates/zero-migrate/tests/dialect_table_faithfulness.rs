@@ -17,7 +17,7 @@
 //!     branch-selection `Op::support` keys the table lookup on) must equal its
 //!     labelled variant — pinning the corpus and the engine against drift.
 //!   * EXHAUSTIVENESS over op-KINDS: the corpus's kinds equal the schema's `Op`
-//!     `oneOf` discriminants (the 54-op wire contract `op_support_matrix` pins).
+//!     `oneOf` discriminants (the 55-op wire contract `op_support_matrix` pins).
 //!   * EXHAUSTIVENESS over TABLE ROWS: the corpus's `(kind, variant)` set is a
 //!     BIJECTION with the generated `DIALECT_TABLE`'s rows.
 //!   * SIDECAR ⟷ TABLE: the generated `DIALECT_TABLE` matches the hand-authored,
@@ -34,10 +34,10 @@ use std::path::PathBuf;
 use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
 use zero_migrate::model::expr::Expr;
 use zero_migrate::model::ir::{
-    BackfillSetValue, ColType, EmptyContainerKind, ExclusionMethod, ForEach, GrantTarget,
-    IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
-    IrIndex, IrValue, Op, PartitionBounds, PartitionSpec, PolicyCmd, Privilege, RaiseLevel,
-    SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch, TriggerAction,
+    AlterPrimaryKeyAction, BackfillSetValue, ColType, EmptyContainerKind, ExclusionMethod, ForEach,
+    GrantTarget, IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind,
+    IrDefault, IrIndex, IrValue, Op, PartitionBounds, PartitionSpec, PolicyCmd, Privilege,
+    RaiseLevel, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch, TriggerAction,
     TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
 
@@ -131,7 +131,7 @@ fn schema_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
 }
 
-/// The `Op` discriminant tokens the schema declares (the 54-op wire contract).
+/// The `Op` discriminant tokens the schema declares (the 55-op wire contract).
 fn schema_op_tags() -> BTreeSet<String> {
     let schema: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(schema_path()).expect("read ir-envelope.schema.json"),
@@ -326,6 +326,17 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     let mut c: Vec<(&'static str, &'static str, Op)> = Vec::new();
 
     // ── Payload-independent, fully portable ──────────────────────────────────
+    c.push((
+        "alterPrimaryKey",
+        "base",
+        Op::AlterPrimaryKey {
+            table: "t".into(),
+            action: AlterPrimaryKeyAction::Add {
+                columns: vec!["id".into()],
+            },
+            schema: None,
+        },
+    ));
     c.push((
         "setTableOptions",
         "base",
@@ -1265,13 +1276,13 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     let corpus = corpus();
 
     // 1. Exhaustiveness over op-KINDS: the corpus covers exactly the schema's Op
-    //    discriminants (the 54-op wire contract). No op silently uncovered.
+    //    discriminants (the 55-op wire contract). No op silently uncovered.
     let corpus_kinds: BTreeSet<String> = corpus.iter().map(|(k, _, _)| (*k).to_string()).collect();
     let schema_kinds = schema_op_tags();
     assert_eq!(
         schema_kinds.len(),
-        54,
-        "the wire contract must still carry the closed 54-op discriminant set"
+        55,
+        "the wire contract must still carry the closed 55-op discriminant set"
     );
     assert_eq!(
         corpus_kinds, schema_kinds,

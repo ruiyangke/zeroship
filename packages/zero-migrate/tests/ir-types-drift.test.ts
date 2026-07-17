@@ -56,7 +56,7 @@ const TS = {
     "createTable", "createPartition", "attachPartition", "detachPartition", "dropPartition",
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
-    "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
+    "setColumnDefault", "dropColumnDefault", "renameColumn", "alterPrimaryKey", "addConstraint",
     "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "dialectal", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
@@ -158,6 +158,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropColumnDefault: ["column", "existenceGuard", "schema", "table"].sort(),
   renameColumn: ["existenceGuard", "from", "schema", "table", "to", "type"].sort(),
   setTableOptions: ["options", "schema", "table"].sort(),
+  alterPrimaryKey: ["action", "schema", "table"].sort(),
   addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
@@ -200,6 +201,12 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   pgRaw: ["reason", "sql"].sort(),
 };
 
+const TS_ALTER_PRIMARY_KEY_FIELDS: Record<string, string[]> = {
+  add: ["columns"],
+  replace: ["columns", "dropIdentityFrom", "expectedColumns"].sort(),
+  drop: ["dropIdentityFrom", "expectedColumns"].sort(),
+};
+
 test("Op variant tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.Op, "op"), TS.Op);
 });
@@ -214,6 +221,14 @@ test("ColType string tokens match the schema", () => {
 
 test("IrConstraintKind tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.IrConstraintKind, "kind"), TS.IrConstraintKind);
+});
+
+test("AlterPrimaryKeyAction variants and nested fields match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.AlterPrimaryKeyAction, "kind"), ["add", "drop", "replace"]);
+  assert.deepEqual(
+    opFieldsByTag(schema.$defs.AlterPrimaryKeyAction, "kind"),
+    TS_ALTER_PRIMARY_KEY_FIELDS,
+  );
 });
 
 test("trigger action/body tags match the schema", () => {

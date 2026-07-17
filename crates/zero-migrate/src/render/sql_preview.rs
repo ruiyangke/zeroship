@@ -480,6 +480,7 @@ fn render_step(op: &Op, guard: Option<ExistenceGuard>, step: &PlanStep, out: &mu
                 cursor_stability_label(&spec.cursor_stability)
             )));
         }
+        PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename(op, rename, out),
     }
 }
@@ -519,6 +520,7 @@ fn render_step_no_op(step: &PlanStep, out: &mut Vec<Rendered>) {
                 cursor_stability_label(&spec.cursor_stability)
             )));
         }
+        PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename_no_op(rename, out),
     }
 }
@@ -532,6 +534,40 @@ fn cursor_stability_label(stability: &CursorStability) -> String {
             "CURSOR STABILITY EXTERNAL INVARIANT {name:?} (explicit destructive approval required)"
         ),
     }
+}
+
+fn render_alter_primary_key(
+    step: &crate::render::step::AlterPrimaryKeyStep,
+    out: &mut Vec<Rendered>,
+) {
+    let (action, authored) = match &step.action {
+        crate::model::ir::AlterPrimaryKeyAction::Add { columns } => {
+            ("add", format!("columns={columns:?}"))
+        }
+        crate::model::ir::AlterPrimaryKeyAction::Replace {
+            expected_columns,
+            columns,
+            drop_identity_from,
+        } => (
+            "replace",
+            format!(
+                "expectedColumns={expected_columns:?}, columns={columns:?}, dropIdentityFrom={drop_identity_from:?}"
+            ),
+        ),
+        crate::model::ir::AlterPrimaryKeyAction::Drop {
+            expected_columns,
+            drop_identity_from,
+        } => (
+            "drop",
+            format!(
+                "expectedColumns={expected_columns:?}, dropIdentityFrom={drop_identity_from:?}"
+            ),
+        ),
+    };
+    out.push(Rendered::label(format!(
+        "{RUNTIME_RESOLVED} primary-key {action} {:?}.{:?} ({authored}): exact current-key, candidate-unique, identity, and inbound-foreign-key prerequisites are catalog-validated under the apply lock; target-specific SQL is generated only after validation",
+        step.schema, step.table,
+    )));
 }
 
 /// The PG expand-contract / SQLite rebuild online-rename render (with op context).
@@ -668,6 +704,7 @@ fn op_subject(op: &Op) -> String {
                 quote_dotted(&[table, to])
             )
         }
+        Op::AlterPrimaryKey { table, .. } => quote_dotted(&[table]),
         Op::RenameTable { table, to, .. } => {
             format!("{} → {}", quote_dotted(&[table]), quote_dotted(&[to]))
         }
@@ -1008,5 +1045,33 @@ mod tests {
         assert!(!postgres.iter().any(|s| s.contains("sql_mode")));
 
         assert!(wrap_mysql_statements(SqlDialect::Mysql, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn alter_primary_key_preview_carries_every_authored_review_fact() {
+        let ir = r#"{
+          "ir_version": 1,
+          "name": "review_key_swap",
+          "ops": [{
+            "op": "alterPrimaryKey",
+            "table": "orders",
+            "action": {
+              "kind": "replace",
+              "expectedColumns": ["id"],
+              "columns": ["tenant_id", "order_id"],
+              "dropIdentityFrom": ["id"]
+            }
+          }]
+        }"#;
+        let out = render_ir_envelope_sql(ir, SqlDialect::Postgres, &opts())
+            .expect("runtime-resolved lifecycle preview renders");
+        for fact in [
+            "expectedColumns=[\"id\"]",
+            "columns=[\"tenant_id\", \"order_id\"]",
+            "dropIdentityFrom=Some([\"id\"])",
+        ] {
+            assert!(out.contains(fact), "missing {fact:?} from preview:\n{out}");
+        }
+        assert!(out.contains(RUNTIME_RESOLVED), "{out}");
     }
 }

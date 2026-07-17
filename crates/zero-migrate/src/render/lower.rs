@@ -57,7 +57,7 @@ use crate::render::declarative::{
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::render::step::{BindValue, PlanStep, RenameStep};
+use crate::render::step::{AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep};
 use crate::render::value_format::{
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
@@ -96,6 +96,9 @@ enum LoweredOp {
     /// `RenameStep::PgExpandContract` is large (the full E1..C2 plan), so boxing it
     /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
     Rename(Box<RenameStep>),
+    /// An explicit primary-key lifecycle mutation. It remains structured until
+    /// apply so catalog preconditions are checked under the migration lock.
+    PrimaryKey(Box<AlterPrimaryKeyStep>),
     /// a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
     /// creator-DML assembler ([`crate::render::dml`]) into a [`PlanStep::Dml`]
     /// (parameterized one-shot) or [`PlanStep::Backfill`] (batched backfill). NOT
@@ -2010,6 +2013,7 @@ impl LoweredArtifact {
                 PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
                     out.push(rb.migration.clone());
                 }
+                PlanStep::AlterPrimaryKey(step) => out.push(step.migration.clone()),
                 PlanStep::Dml { .. } | PlanStep::Backfill { .. } => {}
             }
         }
@@ -2198,6 +2202,7 @@ fn collect_op_database_requirements(
         | Op::DropColumnNotNull { .. }
         | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
+        | Op::AlterPrimaryKey { .. }
         | Op::ValidateConstraint { .. }
         | Op::DropConstraint { .. }
         | Op::DropView { .. }
@@ -2878,14 +2883,19 @@ impl IrAuthor {
         ir: &MigrationIr,
         live: &LiveSchema,
     ) -> Result<Vec<Migration>, IrLowerError> {
-        Ok(self
-            .lower_steps(ir, live)?
-            .into_iter()
-            .filter_map(|s| match s {
-                PlanStep::Ddl(m) => Some(m),
-                _ => None,
-            })
-            .collect())
+        let mut migrations = Vec::new();
+        for step in self.lower_steps(ir, live)? {
+            match step {
+                PlanStep::Ddl(migration) => migrations.push(migration),
+                PlanStep::AlterPrimaryKey(_) => {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "alterPrimaryKey requires lower_plan",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(migrations)
     }
 
     /// Lower a validated [`MigrationIr`]'s ops to their ordered [`PlanStep`] list.
@@ -3751,6 +3761,7 @@ impl IrAuthor {
                 })?;
             }
             LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
+            LoweredOp::PrimaryKey(step) => out.push(PlanStep::AlterPrimaryKey(*step)),
             LoweredOp::Dml(step) => out.push(step),
         }
         Ok(())
@@ -4627,6 +4638,48 @@ impl IrAuthor {
                 }
                 let step = self.lower_rename(table, from, to, ty, live_schema)?;
                 return Ok(LoweredOp::Rename(Box::new(step)));
+            }
+            Op::AlterPrimaryKey { table, action, .. } => {
+                if guard.is_some() {
+                    return Err(IrLowerError::GuardProbeUnbuildable("alterPrimaryKey"));
+                }
+                let destructive =
+                    !matches!(action, crate::model::ir::AlterPrimaryKeyAction::Add { .. });
+                let up = format!("-- zero-migrate: alter primary key on {eff_schema}.{table}");
+                let owner_app = self.decl.owner_app().to_string();
+                let flags = MigrationFlags {
+                    transactional: self.dialect != SqlDialect::Mysql,
+                    destructive,
+                    requires_approval: destructive,
+                    ..MigrationFlags::default()
+                };
+                let migration = Migration {
+                    version: provisional_step_version(op_index, &owner_app, "alter_primary_key"),
+                    name: format!("alter_primary_key_{table}"),
+                    checksum: Checksum::of(&ChecksumInput {
+                        up: &up,
+                        down: None,
+                        flags: &flags,
+                        owner_app: &owner_app,
+                        depends_on: &[],
+                        supersedes: &[],
+                        preconditions: &[],
+                    }),
+                    up,
+                    down: None,
+                    flags,
+                    owner_app,
+                    depends_on: Vec::new(),
+                    supersedes: Vec::new(),
+                    preconditions: Vec::new(),
+                    existence_guard: None,
+                };
+                return Ok(LoweredOp::PrimaryKey(Box::new(AlterPrimaryKeyStep {
+                    migration,
+                    schema: eff_schema,
+                    table: table.clone(),
+                    action: action.clone(),
+                })));
             }
             Op::AddConstraint {
                 table, constraint, ..
@@ -5890,6 +5943,15 @@ impl IrAuthor {
                 // fragment-guarded (the producer is trusted; `apply_plan`
                 // re-guards at execution). It produces no `GuardedFragment` row.
                 steps.push(PlanStep::OnlineRename(*step));
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
+                });
+                return Ok(());
+            }
+            LoweredOp::PrimaryKey(step) => {
+                steps.push(PlanStep::AlterPrimaryKey(*step));
                 op_spans.push(LoweredOpSpan {
                     op: op.clone(),
                     step_range: step_start..steps.len(),
@@ -7963,6 +8025,7 @@ fn validate_repeatable_ir_steps(ir: &MigrationIr, steps: &[PlanStep]) -> Result<
             PlanStep::Ddl(_) => continue,
             PlanStep::Dml { .. } => "a DML step",
             PlanStep::Backfill { .. } => "a backfill step",
+            PlanStep::AlterPrimaryKey(_) => "an alter-primary-key step",
             PlanStep::OnlineRename(_) => "an online rename step",
         };
         return Err(IrLowerError::RepeatableStepUnsupported(kind));
@@ -7997,6 +8060,12 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
             PlanStep::Backfill { version, .. } => {
                 replacements.insert(
                     version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::AlterPrimaryKey(step) => {
+                replacements.insert(
+                    step.migration.version.as_str().to_string(),
                     ir_step_version(&plan_version, ordinal),
                 );
             }
@@ -8058,6 +8127,10 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 *version = ir_step_version(&plan_version, ordinal);
                 *checksum = anchor.clone();
             }
+            PlanStep::AlterPrimaryKey(step) => {
+                let next = ir_step_version(&plan_version, ordinal);
+                restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
+            }
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut rb.migration, next, &anchor, &replacements, &ir.flags);
@@ -8103,7 +8176,10 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 }
                 preceding_ddl = Some(migration.version.clone());
             }
-            PlanStep::Dml { .. } | PlanStep::Backfill { .. } | PlanStep::OnlineRename(_) => {
+            PlanStep::Dml { .. }
+            | PlanStep::Backfill { .. }
+            | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::OnlineRename(_) => {
                 preceding_ddl = None;
             }
         }
@@ -8251,6 +8327,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::SetColumnDefault { .. } => "setColumnDefault",
         Op::DropColumnDefault { .. } => "dropColumnDefault",
         Op::RenameColumn { .. } => "renameColumn",
+        Op::AlterPrimaryKey { .. } => "alterPrimaryKey",
         Op::AddConstraint { .. } => "addConstraint",
         Op::DropConstraint { .. } => "dropConstraint",
         Op::ValidateConstraint { .. } => "validateConstraint",
@@ -14057,6 +14134,40 @@ mod tests {
             rename.expand[0].version, plan.version,
             "logical plan identity must not be confused with the first journal substep"
         );
+    }
+
+    #[test]
+    fn flat_lower_refuses_instead_of_silently_discarding_alter_primary_key() {
+        let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+            "ir_version": 1,
+            "name": "replace_accounts_key",
+            "owner_app": "app_a",
+            "ops": [{
+                "op": "alterPrimaryKey",
+                "table": "accounts",
+                "action": {
+                    "kind": "replace",
+                    "expectedColumns": ["id"],
+                    "columns": ["tenant_id", "id"]
+                }
+            }]
+        }))
+        .expect("primary-key IR parses");
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let error = author
+            .lower(&ir, &LiveSchema::default())
+            .expect_err("the flat migration projection must not lose a rich step");
+        assert!(matches!(
+            error,
+            IrLowerError::UnsupportedOp("alterPrimaryKey requires lower_plan")
+        ));
+        let plan = author
+            .lower_plan(&ir, &LiveSchema::default())
+            .expect("the ordered plan carries the executable lifecycle step");
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [PlanStep::AlterPrimaryKey(_)]
+        ));
     }
 
     #[test]

@@ -193,15 +193,17 @@ pub struct LogicalColumnContract {
     /// artifacts without being inferred from physical catalog storage.
     pub candidate_keys: BTreeSet<Vec<String>>,
     /// Object-identity-preserving sources for `candidate_keys`. This lets ordered
-    /// artifacts replay a later `dropIndex` / `dropConstraint` by name without
-    /// erasing an equivalent tuple still backed by another UNIQUE object. Primary
-    /// keys and column-level UNIQUE declarations remain intrinsic: this slice does
-    /// not implement primary-key lifecycle operations.
+    /// artifacts replay a later `dropIndex` / `dropConstraint` / primary-key
+    /// lifecycle operation without erasing an equivalent tuple still backed by
+    /// another UNIQUE object. Column-level UNIQUE declarations remain intrinsic;
+    /// the primary key has its own source so explicit drop/replace can remove it
+    /// without weakening an equivalent UNIQUE source.
     candidate_key_sources: CandidateKeySources,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CandidateKeySources {
+    primary_key: Option<Vec<String>>,
     intrinsic: BTreeSet<Vec<String>>,
     indexes: BTreeMap<String, Vec<String>>,
     constraints: BTreeMap<String, Vec<String>>,
@@ -209,8 +211,9 @@ struct CandidateKeySources {
 
 impl CandidateKeySources {
     fn tuples(&self) -> BTreeSet<Vec<String>> {
-        self.intrinsic
+        self.primary_key
             .iter()
+            .chain(self.intrinsic.iter())
             .chain(self.indexes.values())
             .chain(self.constraints.values())
             .cloned()
@@ -332,10 +335,8 @@ fn create_table_candidate_key_sources(
             .collect::<BTreeSet<_>>(),
         ..CandidateKeySources::default()
     };
-    if let Some(primary_key) = primary_key {
-        if !primary_key.is_empty() {
-            sources.intrinsic.insert(primary_key.to_vec());
-        }
+    if let Some(primary_key) = primary_key.filter(|primary_key| !primary_key.is_empty()) {
+        sources.primary_key = Some(primary_key.to_vec());
     }
     for constraint in constraints {
         if let IrConstraintKind::Unique { columns } = &constraint.kind {
@@ -534,9 +535,72 @@ fn drop_constraint_candidate_key(
     name: &str,
 ) {
     mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
-        // PRIMARY KEY sources are intrinsic and deliberately cannot be removed by
-        // this lifecycle slice.
         sources.constraints.remove(name);
+    });
+}
+
+fn alter_primary_key_candidate_key(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    action: &crate::model::ir::AlterPrimaryKeyAction,
+) {
+    use crate::model::ir::AlterPrimaryKeyAction;
+
+    let known_columns = declared
+        .keys()
+        .filter(|candidate| {
+            candidate.table == table
+                && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        })
+        .map(|candidate| candidate.column.as_str())
+        .collect::<BTreeSet<_>>();
+    let target_is_known = action.target_columns().is_none_or(|columns| {
+        columns
+            .iter()
+            .all(|column| known_columns.contains(column.as_str()))
+    });
+    if !target_is_known {
+        // A lifecycle op never declares a column. If the authored graph cannot
+        // resolve every target component, keep its candidate-key state unchanged;
+        // the locked live preflight is authoritative and will reject an absent
+        // column rather than this replay inventing one.
+        return;
+    }
+
+    mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
+        let has_alternate = |columns: &[String]| {
+            sources.intrinsic.contains(columns)
+                || sources.indexes.values().any(|key| key == columns)
+                || sources.constraints.values().any(|key| key == columns)
+        };
+        match action {
+            AlterPrimaryKeyAction::Add { columns }
+                if sources.primary_key.is_none() && has_alternate(columns) =>
+            {
+                sources.primary_key = Some(columns.clone());
+            }
+            AlterPrimaryKeyAction::Replace {
+                expected_columns,
+                columns,
+                ..
+            } if sources.primary_key.as_ref() == Some(expected_columns)
+                && has_alternate(columns) =>
+            {
+                sources.primary_key = Some(columns.clone());
+            }
+            AlterPrimaryKeyAction::Drop {
+                expected_columns, ..
+            } if sources.primary_key.as_ref() == Some(expected_columns) => {
+                sources.primary_key = None;
+            }
+            _ => {
+                // Unknown/mismatched authored state remains unchanged. The op's
+                // expectedColumns is a locked apply precondition, never permission
+                // for an offline replay to discover or assume a different key.
+            }
+        }
     });
 }
 
@@ -1063,6 +1127,20 @@ fn validate_per_row_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             drop_constraint_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
+        }
+        Op::AlterPrimaryKey {
+            table,
+            action,
+            schema,
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            alter_primary_key_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                action,
+            );
         }
         Op::Backfill {
             table,
@@ -2255,6 +2333,20 @@ fn validate_table_foreign_keys_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             drop_constraint_candidate_key(declared, schema_mode, schema.as_deref(), table, name);
+        }
+        Op::AlterPrimaryKey {
+            table,
+            action,
+            schema,
+        } => {
+            let schema = schema_mode.resolve(schema.as_deref());
+            alter_primary_key_candidate_key(
+                declared,
+                schema_mode,
+                schema.as_deref(),
+                table,
+                action,
+            );
         }
         _ => {}
     }
@@ -3773,6 +3865,20 @@ pub fn validate_op_scoped(
             op_index,
             ts_location,
         ),
+        Op::AlterPrimaryKey { action, .. } => {
+            validate_alter_primary_key_action(action).map_err(|reason| AuthoringError {
+                code: CODE_PRIMARY_KEY_INVALID.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason,
+                suggested_fix: Some(
+                    "provide exact non-empty ordered columns; replace must change the tuple, and dropIdentityFrom must be a non-empty subset of expectedColumns"
+                        .to_string(),
+                ),
+            })
+        }
         Op::SetColumnDefault { value, .. } => {
             if let crate::model::ir::IrDefault::Expr { expr } = value {
                 validate_default_expr(
@@ -7913,6 +8019,132 @@ mod tests {
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
         assert!(validate_ir_scoped(&ok_create, Dialect::Postgres, &[], None).is_ok());
+    }
+
+    #[test]
+    fn alter_primary_key_structural_contract_is_portable_and_order_exact() {
+        use crate::model::ir::AlterPrimaryKeyAction;
+
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            for action in [
+                AlterPrimaryKeyAction::Add {
+                    columns: vec!["tenant_id".into(), "order_id".into()],
+                },
+                AlterPrimaryKeyAction::Replace {
+                    expected_columns: vec!["id".into()],
+                    columns: vec!["tenant_id".into(), "order_id".into()],
+                    drop_identity_from: Some(vec!["id".into()]),
+                },
+                AlterPrimaryKeyAction::Drop {
+                    expected_columns: vec!["tenant_id".into(), "order_id".into()],
+                    drop_identity_from: None,
+                },
+            ] {
+                validate_op(
+                    &Op::AlterPrimaryKey {
+                        table: "orders".into(),
+                        action,
+                        schema: None,
+                    },
+                    dialect,
+                    4,
+                    Some("migration.ts:10:3"),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{dialect:?} rejected a portable lifecycle action: {error}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_rejects_malformed_order_and_identity_transition_tuples() {
+        use crate::model::ir::AlterPrimaryKeyAction;
+
+        for action in [
+            AlterPrimaryKeyAction::Add {
+                columns: vec!["id".into(), "id".into()],
+            },
+            AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".into()],
+                columns: vec!["id".into()],
+                drop_identity_from: None,
+            },
+            AlterPrimaryKeyAction::Drop {
+                expected_columns: vec!["id".into()],
+                drop_identity_from: Some(vec!["other".into()]),
+            },
+        ] {
+            let error = validate_op(
+                &Op::AlterPrimaryKey {
+                    table: "orders".into(),
+                    action,
+                    schema: None,
+                },
+                Dialect::Postgres,
+                7,
+                Some("migration.ts:12:5"),
+            )
+            .expect_err("malformed lifecycle tuple must fail closed");
+            assert_eq!(error.code, CODE_PRIMARY_KEY_INVALID);
+            assert_eq!(error.op_index, 7);
+            assert_eq!(error.ts_location.as_deref(), Some("migration.ts:12:5"));
+        }
+    }
+
+    #[test]
+    fn logical_candidate_replay_removes_dropped_primary_key_but_preserves_exact_unique() {
+        let target = op_json(
+            r#"{
+              "op":"createTable", "name":"parents",
+              "columns":[{"name":"id","type":"bigInt","nullable":false}],
+              "primaryKey":["id"], "constraints":[], "indexes":[]
+            }"#,
+        );
+        let drop_pk = Op::AlterPrimaryKey {
+            table: "parents".into(),
+            action: crate::model::ir::AlterPrimaryKeyAction::Drop {
+                expected_columns: vec!["id".into()],
+                drop_identity_from: None,
+            },
+            schema: None,
+        };
+        let child = op_json(
+            r#"{
+              "op":"createTable", "name":"children",
+              "columns":[{"name":"parent_id","type":"bigInt","nullable":false}],
+              "primaryKey":null,
+              "constraints":[{
+                "kind":{
+                  "kind":"fk", "columns":["parent_id"],
+                  "referencesTable":"parents", "referencesColumns":["id"]
+                }
+              }],
+              "indexes":[]
+            }"#,
+        );
+
+        let error = validate_ir_platform(
+            &ir_with(vec![target.clone(), drop_pk.clone(), child.clone()]),
+            Dialect::Postgres,
+        )
+        .expect_err("drop removes the primary key as a logical FK candidate");
+        assert!(error
+            .reason
+            .contains("not backed by an exact PRIMARY KEY or UNIQUE"));
+
+        let alternate = op_json(
+            r#"{
+              "op":"createIndex", "table":"parents", "name":"parents_id_key",
+              "columns":[{"kind":"column","name":"id"}], "unique":true,
+              "include":[]
+            }"#,
+        );
+        validate_ir_platform(
+            &ir_with(vec![target, alternate, drop_pk, child]),
+            Dialect::Postgres,
+        )
+        .expect("an exact alternate unique key survives the primary-key drop");
     }
 
     #[test]

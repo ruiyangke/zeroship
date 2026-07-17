@@ -112,9 +112,11 @@ fn render_mode(
     use crate::model::support::{Dialect, RenderMode};
     let sqlite_live = matches!(dialect, Dialect::Sqlite);
     match op {
-        // Backfill and column-rename are live-rendered on every supported
-        // dialect (they need the resolved live schema).
-        Op::Backfill { .. } | Op::RenameColumn { .. } => RenderMode::LiveResolved,
+        // Backfill, column-rename, and primary-key lifecycle are live-rendered
+        // on every supported dialect (they need the resolved live schema).
+        Op::Backfill { .. } | Op::RenameColumn { .. } | Op::AlterPrimaryKey { .. } => {
+            RenderMode::LiveResolved
+        }
         // The wrapper itself is expanded before per-op lower; the selected
         // inner ops report their own render modes.
         Op::Dialectal { .. } => RenderMode::Offline,
@@ -209,6 +211,7 @@ fn unsupported_reason(
                 }
                 _ => "renameColumn is render-only for MySQL, not live-rendered",
             },
+            Op::AlterPrimaryKey { .. } => NEVER_REFUSED,
             Op::AddConstraint { .. } => match variant {
                 "check" => {
                     "addConstraint(check) expression rendering is PostgreSQL-only in the current engine"
@@ -505,6 +508,7 @@ fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
                 "base"
             },
         ),
+        Op::AlterPrimaryKey { .. } => ("alterPrimaryKey", "base"),
         Op::SetTableOptions { .. } => ("setTableOptions", "base"),
         Op::AddConstraint { constraint, .. } => {
             ("addConstraint", add_constraint_variant(&constraint.kind))
@@ -800,6 +804,7 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         | Op::SetColumnDefault { .. }
         | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
+        | Op::AlterPrimaryKey { .. }
         | Op::AddConstraint { .. }
         | Op::DropConstraint { .. }
         | Op::ValidateConstraint { .. }
@@ -857,5 +862,35 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
         Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
         Op::PgRaw { .. } => vec![C::RawSql],
+    }
+}
+
+#[cfg(test)]
+mod alter_primary_key_tests {
+    use super::*;
+    use crate::model::ir::AlterPrimaryKeyAction;
+    use crate::model::support::{Dialect, RenderMode};
+
+    #[test]
+    fn lifecycle_operation_is_portable_live_resolved_core() {
+        let op = Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".to_string()],
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                drop_identity_from: Some(vec!["id".to_string()]),
+            },
+            schema: None,
+        };
+
+        assert_eq!(op_variant(&op), "base");
+        assert!(!is_vendor(&op));
+        assert!(vendor_capabilities(&op).is_empty());
+        let support = support(&op);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let decision = support.decision(dialect);
+            assert!(decision.is_supported(), "{dialect:?}: {decision:?}");
+            assert_eq!(decision.render_mode(), Some(RenderMode::LiveResolved));
+        }
     }
 }

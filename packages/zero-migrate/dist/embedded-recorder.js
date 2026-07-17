@@ -191,6 +191,7 @@ var emitDropPartition = defineOp("dropPartition");
 var emitSetTableOptions = defineOp("setTableOptions");
 var emitDropTable = defineOp("dropTable");
 var emitRenameTable = defineOp("renameTable");
+var emitAlterPrimaryKey = defineOp("alterPrimaryKey");
 var emitAddColumn = defineOp("addColumn");
 var emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
 var emitDropColumn = defineOp("dropColumn");
@@ -283,6 +284,19 @@ function requireOrderedColumns(v, what) {
       );
     }
     seen.add(column);
+  }
+}
+function requireDropIdentitySubset(dropIdentityFrom, expectedColumns, what) {
+  if (dropIdentityFrom === void 0) return;
+  const expected = new Set(expectedColumns);
+  for (const column of dropIdentityFrom) {
+    if (!expected.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)}, which is not in expectedColumns`,
+        { column }
+      );
+    }
   }
 }
 function requireStrictness(v, what) {
@@ -3432,6 +3446,9 @@ function requireColumnDef(x, where) {
     throw structuredError("OP_INVALID", `${where} must be a t.* ColumnDef`);
   }
 }
+function recordAlterPrimaryKey(table2, action, schema2) {
+  emitAlterPrimaryKey({ table: table2, action: compact(action), schema: schema2 });
+}
 function comment(target, text) {
   recordComment(target, text);
 }
@@ -3505,6 +3522,80 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
             concurrently: args.concurrently,
             schema: pickSchema(args, dflt)
           });
+          return handle;
+        }
+      };
+    },
+    primaryKey() {
+      return {
+        add(args) {
+          requirePlainObject(args, ".primaryKey().add(args)");
+          requireOrderedColumns(args.columns, ".primaryKey().add({ columns })");
+          recordAlterPrimaryKey(name, { kind: "add", columns: args.columns }, dflt);
+          return handle;
+        },
+        replace(args) {
+          requirePlainObject(args, ".primaryKey().replace(args)");
+          requireOrderedColumns(
+            args.expectedColumns,
+            ".primaryKey().replace({ expectedColumns })"
+          );
+          requireOrderedColumns(args.columns, ".primaryKey().replace({ columns })");
+          if (args.dropIdentityFrom !== void 0) {
+            requireOrderedColumns(
+              args.dropIdentityFrom,
+              ".primaryKey().replace({ dropIdentityFrom })"
+            );
+          }
+          if (args.expectedColumns.length === args.columns.length && args.expectedColumns.every((column, index) => column === args.columns[index])) {
+            throw structuredError(
+              "OP_INVALID",
+              ".primaryKey().replace({ columns }) must change the ordered primary-key tuple"
+            );
+          }
+          requireDropIdentitySubset(
+            args.dropIdentityFrom,
+            args.expectedColumns,
+            ".primaryKey().replace({ dropIdentityFrom })"
+          );
+          recordAlterPrimaryKey(
+            name,
+            {
+              kind: "replace",
+              expectedColumns: args.expectedColumns,
+              columns: args.columns,
+              dropIdentityFrom: args.dropIdentityFrom
+            },
+            dflt
+          );
+          return handle;
+        },
+        drop(args) {
+          requirePlainObject(args, ".primaryKey().drop(args)");
+          requireOrderedColumns(
+            args.expectedColumns,
+            ".primaryKey().drop({ expectedColumns })"
+          );
+          if (args.dropIdentityFrom !== void 0) {
+            requireOrderedColumns(
+              args.dropIdentityFrom,
+              ".primaryKey().drop({ dropIdentityFrom })"
+            );
+          }
+          requireDropIdentitySubset(
+            args.dropIdentityFrom,
+            args.expectedColumns,
+            ".primaryKey().drop({ dropIdentityFrom })"
+          );
+          recordAlterPrimaryKey(
+            name,
+            {
+              kind: "drop",
+              expectedColumns: args.expectedColumns,
+              dropIdentityFrom: args.dropIdentityFrom
+            },
+            dflt
+          );
           return handle;
         }
       };

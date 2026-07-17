@@ -1169,6 +1169,92 @@ pub struct IdentityCol {
     pub always: bool,
 }
 
+/// The explicit lifecycle change for a table's primary-key constraint.
+///
+/// This is deliberately narrower than a general ID migration: it carries only
+/// the final constraint mutation and the one generation transition that may be
+/// coupled to it. Columns, values, candidate uniqueness, and foreign keys must
+/// already have been staged before this operation is applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum AlterPrimaryKeyAction {
+    /// Add a primary key to a table that currently has none.
+    Add {
+        /// Exact ordered primary-key tuple to install.
+        #[schemars(length(min = 1))]
+        columns: Vec<String>,
+    },
+    /// Replace the exact current primary key with another ordered tuple.
+    Replace {
+        /// Exact ordered live-key precondition. This is never a discovery hint.
+        #[schemars(length(min = 1))]
+        expected_columns: Vec<String>,
+        /// Exact ordered primary-key tuple to install.
+        #[schemars(length(min = 1))]
+        columns: Vec<String>,
+        /// Old generated-integer columns whose identity facet must be removed as
+        /// part of the same target-specific operation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(length(min = 1))]
+        drop_identity_from: Option<Vec<String>>,
+    },
+    /// Drop the exact current primary key.
+    Drop {
+        /// Exact ordered live-key precondition. This is never a discovery hint.
+        #[schemars(length(min = 1))]
+        expected_columns: Vec<String>,
+        /// Old generated-integer columns whose identity facet must be removed as
+        /// part of the same target-specific operation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(length(min = 1))]
+        drop_identity_from: Option<Vec<String>>,
+    },
+}
+
+impl AlterPrimaryKeyAction {
+    /// The exact ordered current-key precondition, if this is replace/drop.
+    #[must_use]
+    pub fn expected_columns(&self) -> Option<&[String]> {
+        match self {
+            Self::Add { .. } => None,
+            Self::Replace {
+                expected_columns, ..
+            }
+            | Self::Drop {
+                expected_columns, ..
+            } => Some(expected_columns),
+        }
+    }
+
+    /// The exact ordered target primary key, if this is add/replace.
+    #[must_use]
+    pub fn target_columns(&self) -> Option<&[String]> {
+        match self {
+            Self::Add { columns } | Self::Replace { columns, .. } => Some(columns),
+            Self::Drop { .. } => None,
+        }
+    }
+
+    /// Columns whose identity/auto-increment facet is explicitly removed.
+    #[must_use]
+    pub fn drop_identity_from(&self) -> &[String] {
+        match self {
+            Self::Replace {
+                drop_identity_from, ..
+            }
+            | Self::Drop {
+                drop_identity_from, ..
+            } => drop_identity_from.as_deref().unwrap_or_default(),
+            Self::Add { .. } => &[],
+        }
+    }
+}
+
 /// A column definition inside a `createTable` / `addColumn` op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -3015,6 +3101,18 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// Explicitly add, replace, or drop a table primary key after every staged
+    /// prerequisite is already in place. Apply verifies the live key exactly and
+    /// performs no column, data, uniqueness, or foreign-key migration.
+    AlterPrimaryKey {
+        /// Target table.
+        table: String,
+        /// Exact lifecycle action and optional generated-integer transition.
+        action: AlterPrimaryKeyAction,
+        /// The schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
     /// `ALTER TABLE … ADD CONSTRAINT …`.
     AddConstraint {
         /// Target table.
@@ -3655,6 +3753,7 @@ impl Op {
             | Self::SetColumnDefault { table, .. }
             | Self::DropColumnDefault { table, .. }
             | Self::RenameColumn { table, .. }
+            | Self::AlterPrimaryKey { table, .. }
             | Self::AddConstraint { table, .. }
             | Self::DropConstraint { table, .. }
             | Self::ValidateConstraint { table, .. }
@@ -3739,6 +3838,12 @@ impl Op {
             | Self::DropDomain { .. }
             | Self::DropFunction { .. }
             | Self::DropConstraint { .. }
+            | Self::AlterPrimaryKey {
+                action:
+                    AlterPrimaryKeyAction::Replace { .. }
+                    | AlterPrimaryKeyAction::Drop { .. },
+                ..
+            }
             | Self::DropOwnedBy { .. }
             // ── partition drop / detach ────────────────────────────────────────
             | Self::DropPartition { .. }
@@ -3781,6 +3886,10 @@ impl Op {
             | Self::SetColumnDefault { .. }
             | Self::DropColumnDefault { .. }
             | Self::RenameColumn { .. }
+            | Self::AlterPrimaryKey {
+                action: AlterPrimaryKeyAction::Add { .. },
+                ..
+            }
             | Self::AddConstraint { .. }
             | Self::ValidateConstraint { .. }
             | Self::Insert { .. }
@@ -3862,6 +3971,7 @@ impl Op {
             | Self::SetColumnDefault { schema, .. }
             | Self::DropColumnDefault { schema, .. }
             | Self::RenameColumn { schema, .. }
+            | Self::AlterPrimaryKey { schema, .. }
             | Self::AddConstraint { schema, .. }
             | Self::DropConstraint { schema, .. }
             | Self::ValidateConstraint { schema, .. }
@@ -3984,6 +4094,7 @@ impl Op {
             Self::AttachPartition { .. }
             | Self::DetachPartition { .. }
             | Self::SetTableOptions { .. }
+            | Self::AlterPrimaryKey { .. }
             | Self::Insert { .. }
             | Self::Update { .. }
             | Self::Delete { .. }
@@ -4052,6 +4163,7 @@ impl Op {
             Self::AttachPartition { .. }
             | Self::DetachPartition { .. }
             | Self::SetTableOptions { .. }
+            | Self::AlterPrimaryKey { .. }
             | Self::Insert { .. }
             | Self::Update { .. }
             | Self::Delete { .. }
@@ -4988,6 +5100,159 @@ mod tests {
         // Round-trips.
         let back: Op = serde_json::from_value(v).unwrap();
         assert_eq!(op, back);
+    }
+
+    #[test]
+    fn alter_primary_key_actions_round_trip_with_exact_ordered_wire_shape() {
+        for wire in [
+            serde_json::json!({
+                "op": "alterPrimaryKey",
+                "table": "orders",
+                "action": {
+                    "kind": "add",
+                    "columns": ["tenant_id", "order_id"]
+                }
+            }),
+            serde_json::json!({
+                "op": "alterPrimaryKey",
+                "table": "orders",
+                "action": {
+                    "kind": "replace",
+                    "expectedColumns": ["id"],
+                    "columns": ["tenant_id", "order_id"],
+                    "dropIdentityFrom": ["id"]
+                },
+                "schema": "app"
+            }),
+            serde_json::json!({
+                "op": "alterPrimaryKey",
+                "table": "orders",
+                "action": {
+                    "kind": "drop",
+                    "expectedColumns": ["tenant_id", "order_id"]
+                }
+            }),
+        ] {
+            let op: Op = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&op).unwrap(), wire);
+
+            let Op::AlterPrimaryKey { action, .. } = op else {
+                panic!("alterPrimaryKey wire decoded to the wrong op variant");
+            };
+            match action {
+                AlterPrimaryKeyAction::Add { .. } => {
+                    assert_eq!(action.expected_columns(), None);
+                    assert_eq!(
+                        action.target_columns().unwrap(),
+                        &["tenant_id".to_string(), "order_id".to_string()]
+                    );
+                    assert!(action.drop_identity_from().is_empty());
+                }
+                AlterPrimaryKeyAction::Replace { .. } => {
+                    assert_eq!(action.expected_columns().unwrap(), &["id".to_string()]);
+                    assert_eq!(
+                        action.target_columns().unwrap(),
+                        &["tenant_id".to_string(), "order_id".to_string()]
+                    );
+                    assert_eq!(action.drop_identity_from(), &["id".to_string()]);
+                }
+                AlterPrimaryKeyAction::Drop { .. } => {
+                    assert_eq!(
+                        action.expected_columns().unwrap(),
+                        &["tenant_id".to_string(), "order_id".to_string()]
+                    );
+                    assert_eq!(action.target_columns(), None);
+                    assert!(action.drop_identity_from().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_op_declares_table_schema_guards_and_destructiveness() {
+        let add = Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Add {
+                columns: vec!["id".to_string()],
+            },
+            schema: Some("app".to_string()),
+        };
+        assert_eq!(add.touched_table(), Some("orders"));
+        assert_eq!(add.schema(), Some("app"));
+        assert_eq!(add.existence_guard(), None);
+        assert_eq!(add.legal_existence_guard(), None);
+        assert!(!add.is_destructive());
+
+        for action in [
+            AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".to_string()],
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                drop_identity_from: Some(vec!["id".to_string()]),
+            },
+            AlterPrimaryKeyAction::Drop {
+                expected_columns: vec!["id".to_string()],
+                drop_identity_from: None,
+            },
+        ] {
+            let op = Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action,
+                schema: None,
+            };
+            assert!(op.is_destructive());
+            assert_eq!(op.touched_table(), Some("orders"));
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_action_rejects_unknown_wire_fields() {
+        for wire in [
+            serde_json::json!({
+                "op": "alterPrimaryKey",
+                "table": "orders",
+                "action": {
+                    "kind": "add",
+                    "columns": ["id"],
+                    "dropIdentityFrom": ["id"]
+                }
+            }),
+            serde_json::json!({
+                "op": "alterPrimaryKey",
+                "table": "orders",
+                "action": {
+                    "kind": "replace",
+                    "expectedColumns": ["id"],
+                    "columns": ["new_id"],
+                    "discoverCurrentKey": true
+                }
+            }),
+        ] {
+            serde_json::from_value::<Op>(wire)
+                .expect_err("unknown lifecycle fields must fail closed at deserialize");
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_order_is_part_of_canonical_ir() {
+        let op = |expected_columns: &[&str]| Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: expected_columns
+                    .iter()
+                    .map(|column| (*column).to_string())
+                    .collect(),
+                columns: vec!["id".to_string()],
+                drop_identity_from: None,
+            },
+            schema: None,
+        };
+        let tenant_order = op(&["tenant_id", "order_id"]);
+        let order_tenant = op(&["order_id", "tenant_id"]);
+        assert_ne!(
+            CanonicalOpList(std::slice::from_ref(&tenant_order)).canonical_bytes(),
+            CanonicalOpList(std::slice::from_ref(&order_tenant)).canonical_bytes(),
+            "expectedColumns order is a checksum-significant drift precondition"
+        );
     }
 
     // ---- JCS canonicality ----

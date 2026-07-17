@@ -1,6 +1,7 @@
 //! Low-level lowered-plan step values.
 
 use crate::model::backfill::BackfillSpec;
+use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::render::declarative::SqliteRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
@@ -45,6 +46,23 @@ pub enum BindValue {
     /// PostgreSQL and MySQL renderers use a text bind wrapped in the dialect's
     /// base64 decoder because their schema-blind host seams infer text values.
     Bytes(Vec<u8>),
+}
+
+/// One explicit primary-key lifecycle mutation.
+///
+/// Unlike ordinary rendered DDL, this remains structured until apply so the
+/// backend can verify the exact live primary key, identity facets, candidate
+/// uniqueness, and inbound foreign keys while it holds the migration lock.
+#[derive(Debug, Clone)]
+pub struct AlterPrimaryKeyStep {
+    /// Journal marker and approval metadata for this operation.
+    pub migration: Migration,
+    /// Effective target schema selected during lowering.
+    pub schema: String,
+    /// Bare target table name.
+    pub table: String,
+    /// Exact add/replace/drop contract authored in the IR.
+    pub action: AlterPrimaryKeyAction,
 }
 
 /// One ordered step of an [`AppliedPlan`](crate::render::plan::AppliedPlan).
@@ -104,6 +122,8 @@ pub enum PlanStep {
         /// The structured, resumable backfill operation.
         spec: BackfillSpec,
     },
+    /// A live-catalog-validated primary-key lifecycle mutation.
+    AlterPrimaryKey(AlterPrimaryKeyStep),
     /// A rename, lowered to ONE of two dialect-distinct executable shapes.
     OnlineRename(RenameStep),
 }
@@ -116,6 +136,7 @@ impl PlanStep {
             PlanStep::Ddl(m) => m.flags.destructive,
             PlanStep::Dml { destructive, .. } => *destructive,
             PlanStep::Backfill { .. } => true,
+            PlanStep::AlterPrimaryKey(step) => step.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::PgExpandContract(_)) => false,
         }
@@ -137,6 +158,11 @@ impl PlanStep {
                 ..
             } if *destructive || *requires_approval => Some(version.as_str()),
             PlanStep::Backfill { version, .. } => Some(version.as_str()),
+            PlanStep::AlterPrimaryKey(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb))
                 if rb.migration.flags.destructive || rb.migration.flags.requires_approval =>
             {
@@ -156,7 +182,10 @@ impl PlanStep {
     pub fn has_down(&self) -> bool {
         match self {
             PlanStep::Ddl(m) => m.down.is_some(),
-            PlanStep::Dml { .. } | PlanStep::Backfill { .. } | PlanStep::OnlineRename(_) => false,
+            PlanStep::Dml { .. }
+            | PlanStep::Backfill { .. }
+            | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::OnlineRename(_) => false,
         }
     }
 
@@ -170,6 +199,7 @@ impl PlanStep {
             },
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
             PlanStep::Backfill { spec, .. } => Some(spec.table.as_str()),
+            PlanStep::AlterPrimaryKey(step) => Some(step.table.as_str()),
             PlanStep::Dml { target_table, .. } => Some(target_table.as_str()),
             PlanStep::Ddl(_) => None,
         }

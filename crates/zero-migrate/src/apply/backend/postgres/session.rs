@@ -188,7 +188,7 @@ fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> u64 {
 /// INSERT — the migrator can no longer write the journal (its grant is revoked),
 /// so the journal write must run as the admin, atomically in the SAME
 /// transaction as the `up`.
-fn set_local_session_sql(
+pub(super) fn set_local_session_sql(
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<String, crate::render::dml::IdentQuoteError> {
@@ -210,7 +210,7 @@ fn set_local_session_sql(
 /// the ONE shared engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed
 /// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
 /// every real role.
-fn set_local_role_sql(
+pub(super) fn set_local_role_sql(
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, crate::render::dml::IdentQuoteError> {
     cfg.pg

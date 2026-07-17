@@ -8,6 +8,7 @@
 use crate::driver::SqlSession;
 
 mod backfill_sql;
+mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
 /// dialect-specific SQL lives in the shared executor.
@@ -23,6 +24,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
+use crate::render::step::AlterPrimaryKeyStep;
 use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
@@ -128,6 +130,17 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             session::apply_transactional(self.conn, cfg, m, applied_by, supersedes, kind).await?;
             Ok(false)
         }
+    }
+
+    async fn alter_primary_key(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &AlterPrimaryKeyStep,
+        approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        primary_key_sql::apply(self.conn, cfg, step, approval, scope, applied_by).await
     }
 
     async fn rollback_one_transactional(

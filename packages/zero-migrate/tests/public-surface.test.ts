@@ -69,6 +69,8 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   const coreExports = exportedNamesFromDts("index.d.ts");
   const migrationTypeMembers = interfaceMemberNamesFromDts("index.d.ts", "TypeLexicon");
   const columnDefMembers = interfaceMemberNamesFromDts("index.d.ts", "ColumnDef");
+  const tableHandleMembers = interfaceMemberNamesFromDts("index.d.ts", "TableHandle");
+  const primaryKeyMembers = interfaceMemberNamesFromDts("index.d.ts", "PrimaryKeyOperations");
 
   const rootedVendorExports = [
     "createFunction",
@@ -95,11 +97,19 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "PerRowGenerator",
     "PerRowGeneratorValue",
     "PerRowGenerators",
+    "PrimaryKeyOperations",
     "TypeIdOptions",
     "ValueFormat",
   ]) {
     assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
   }
+  assert.equal(tableHandleMembers.has("primaryKey"), true, "TableHandle must expose primaryKey()");
+  assert.equal(tableHandleMembers.has("changeIdType"), false, "TableHandle must not expose changeIdType()");
+  assert.deepEqual(
+    [...primaryKeyMembers].sort(),
+    ["add", "drop", "replace"],
+    "PrimaryKeyOperations must expose only explicit lifecycle actions",
+  );
   for (const name of rootedVendorExports) {
     assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
   }
@@ -149,6 +159,9 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
   assert.equal(typeof runtimeRoot.perRow.uuidV7, "function", "perRow.uuidV7 must be exported");
   assert.equal(typeof runtimeRoot.perRow.typeId, "function", "perRow.typeId must be exported");
   assert.equal(typeof runtimeRoot.perRow.ulid, "function", "perRow.ulid must be exported");
+  const tableHandle = runtimeRoot.table("public_surface_probe") as unknown as Record<string, unknown>;
+  assert.equal(typeof tableHandle.primaryKey, "function", "runtime TableHandle must expose primaryKey()");
+  assert.equal(tableHandle.changeIdType, undefined, "runtime TableHandle must not expose changeIdType()");
   for (const name of rootedVendorExports) {
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }

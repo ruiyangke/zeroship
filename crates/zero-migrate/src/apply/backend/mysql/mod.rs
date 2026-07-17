@@ -36,6 +36,7 @@
 pub(crate) mod backfill_sql;
 pub(crate) mod drift_sql;
 pub(crate) mod journal_sql;
+pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
@@ -49,7 +50,7 @@ use crate::driver::{Row, SqlSession};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseFeature, DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::BindValue;
+use crate::render::step::{AlterPrimaryKeyStep, BindValue};
 use crate::schema::query::SqlDialect;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
@@ -845,6 +846,17 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
              differ produces rebuilds (routing bug)",
             spec.table
         )))
+    }
+
+    async fn alter_primary_key(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &AlterPrimaryKeyStep,
+        approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        primary_key_sql::alter_primary_key(self.conn, cfg, step, approval, scope, applied_by).await
     }
 
     async fn run_backfill_step(

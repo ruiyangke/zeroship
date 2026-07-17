@@ -99,6 +99,7 @@ fn op_variant_names_from_schema() {
         "setColumnDefault",
         "dropColumnDefault",
         "renameColumn",
+        "alterPrimaryKey",
         "setTableOptions",
         "addConstraint",
         "dropConstraint",

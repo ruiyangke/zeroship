@@ -39,6 +39,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[row]]
+kind = "alterPrimaryKey"
+variant = "base"
+pg = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
 kind = "setTableOptions"
 variant = "base"
 pg = "portable"

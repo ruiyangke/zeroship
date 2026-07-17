@@ -235,6 +235,23 @@ test("ddl_rename_table fluent-recorded ops equal the committed golden", async ()
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
 });
 
+test("alter_primary_key fluent-recorded ops equal the committed golden", async () => {
+  const ops = record(() => {
+    const orders = table("orders", { schema: "app" });
+    orders.primaryKey().add({ columns: ["legacy_id"] });
+    orders.primaryKey().replace({
+      expectedColumns: ["legacy_id"],
+      columns: ["tenant_id", "order_id"],
+      dropIdentityFrom: ["legacy_id"],
+    });
+    orders.primaryKey().drop({
+      expectedColumns: ["tenant_id", "order_id"],
+    });
+  });
+  const g = await golden("alter_primary_key");
+  assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
+});
+
 test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
   const ops = record(() => {
     extension("citext").create({ ifNotExists: true });

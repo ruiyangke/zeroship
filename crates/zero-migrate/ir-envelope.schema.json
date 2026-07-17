@@ -1111,6 +1111,37 @@
           ]
         },
         {
+          "description": "Explicitly add, replace, or drop a table primary key after every staged\nprerequisite is already in place. Apply verifies the live key exactly and\nperforms no column, data, uniqueness, or foreign-key migration.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "action": {
+              "description": "Exact lifecycle action and optional generated-integer transition.",
+              "$ref": "#/$defs/AlterPrimaryKeyAction"
+            },
+            "schema": {
+              "description": "The schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "alterPrimaryKey"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "action"
+          ]
+        },
+        {
           "description": "`ALTER TABLE … ADD CONSTRAINT …`.",
           "type": "object",
           "properties": {
@@ -5782,6 +5813,111 @@
           "required": [
             "kind",
             "name"
+          ]
+        }
+      ]
+    },
+    "AlterPrimaryKeyAction": {
+      "description": "The explicit lifecycle change for a table's primary-key constraint.\n\nThis is deliberately narrower than a general ID migration: it carries only\nthe final constraint mutation and the one generation transition that may be\ncoupled to it. Columns, values, candidate uniqueness, and foreign keys must\nalready have been staged before this operation is applied.",
+      "oneOf": [
+        {
+          "description": "Add a primary key to a table that currently has none.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "Exact ordered primary-key tuple to install.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "add"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "Replace the exact current primary key with another ordered tuple.",
+          "type": "object",
+          "properties": {
+            "expectedColumns": {
+              "description": "Exact ordered live-key precondition. This is never a discovery hint.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "columns": {
+              "description": "Exact ordered primary-key tuple to install.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "dropIdentityFrom": {
+              "description": "Old generated-integer columns whose identity facet must be removed as\npart of the same target-specific operation.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "replace"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expectedColumns",
+            "columns"
+          ]
+        },
+        {
+          "description": "Drop the exact current primary key.",
+          "type": "object",
+          "properties": {
+            "expectedColumns": {
+              "description": "Exact ordered live-key precondition. This is never a discovery hint.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "dropIdentityFrom": {
+              "description": "Old generated-integer columns whose identity facet must be removed as\npart of the same target-specific operation.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "drop"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expectedColumns"
           ]
         }
       ]

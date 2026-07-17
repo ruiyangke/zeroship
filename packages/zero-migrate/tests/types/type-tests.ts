@@ -55,6 +55,7 @@ import {
   type PerRowGenerator,
   type PerRowGeneratorValue,
   type PerRowGenerators,
+  type PrimaryKeyOperations,
   type TypeLexicon,
   type TypeIdOptions,
   type TableForeignKey,
@@ -107,6 +108,35 @@ const emptyLocalCompositeForeignKey: TableForeignKey = {
   references: { table: "parents", columns: ["id"] },
 };
 void emptyLocalCompositeForeignKey;
+
+const primaryKeyOperations: PrimaryKeyOperations = table("accounts").primaryKey();
+primaryKeyOperations.add({ columns: ["id"] });
+primaryKeyOperations.replace({
+  expectedColumns: ["id"],
+  columns: ["tenant_id", "account_id"],
+  dropIdentityFrom: ["id"],
+});
+primaryKeyOperations.drop({
+  expectedColumns: ["tenant_id", "account_id"],
+  dropIdentityFrom: ["account_id"],
+});
+
+// @ts-expect-error — primary-key column tuples cannot be empty.
+primaryKeyOperations.add({ columns: [] });
+// @ts-expect-error — replace requires the exact current key as an ordered precondition.
+primaryKeyOperations.replace({ columns: ["id"] });
+// @ts-expect-error — replace requires the new primary-key columns.
+primaryKeyOperations.replace({ expectedColumns: ["id"] });
+// @ts-expect-error — drop requires the exact current key as an ordered precondition.
+primaryKeyOperations.drop({});
+// @ts-expect-error — dropIdentityFrom is also a non-empty ordered tuple when present.
+primaryKeyOperations.drop({ expectedColumns: ["id"], dropIdentityFrom: [] });
+// @ts-expect-error — lifecycle actions inherit schema from table(); they have no per-action schema.
+primaryKeyOperations.add({ columns: ["id"], schema: "app" });
+// @ts-expect-error — primaryKey() selects the table key and takes no identifier.
+table("accounts").primaryKey("accounts_pkey");
+// @ts-expect-error — changing an ID family is an explicit expand/cutover workflow, not one call.
+table("accounts").changeIdType({ from: t.bigInt(), to: t.uuid() });
 
 // ───────────────────────────────────────────────────────────────────────────
 // 1. NAMES STAY STRINGS — the anti-rot guarantee.

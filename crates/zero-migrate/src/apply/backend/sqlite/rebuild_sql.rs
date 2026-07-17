@@ -27,7 +27,7 @@
 //! (engine, EngineJournal) BEGIN IMMEDIATE
 //! (engine, EngineJournal) <capture verbatim sql FROM sqlite_master
 //! for <t>'s indexes + triggers> [main, read]
-//! (engine, EngineJournal) <capture sqlite_sequence high-water mark, if any>
+//! (engine, EngineJournal) <capture sqlite_sequence high-water mark, if preserving>
 //! (engine, EngineJournal) DROP TABLE IF EXISTS <tmp> -- clear pollution
 //! (engine→CreatorUp) CREATE TABLE <tmp> (...new shape...) [main]
 //! INSERT INTO <tmp> (cols) SELECT cols FROM <t>
@@ -35,7 +35,7 @@
 //! ALTER TABLE <tmp> RENAME TO <t>
 //! <replay each captured index / trigger
 //! VERBATIM + any explicit recreate_objects> [main]
-//! (engine, EngineJournal) <restore sqlite_sequence high-water mark, if any>
+//! (engine, EngineJournal) <restore sqlite_sequence high-water mark OR remove it>
 //! (engine, EngineJournal) PRAGMA foreign_key_check -- UNSCOPED
 //! (engine, EngineJournal) INSERT _mig journal (event_seq AUTOINCREMENT)
 //! (engine, EngineJournal) COMMIT
@@ -72,8 +72,9 @@
 
 use std::time::Instant;
 
+use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::Migration;
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::{SqliteRebuildSpec, SqliteSequencePolicy};
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -175,21 +176,52 @@ pub(crate) async fn rebuild_one(
         .await
         .map_err(|e| step_err(&spec.table, e))?;
 
-    // 1. PRAGMA foreign_keys=OFF — in AUTOCOMMIT, under engine mode. This MUST run
+    disable_foreign_keys(actor, &spec.table).await?;
+
+    // Run the txn body; whatever happens, restore foreign_keys=ON afterwards.
+    let outcome = run_rebuild_txn(actor, spec, m, applied_by).await;
+    restore_foreign_keys(actor, &spec.table, outcome).await
+}
+
+/// Resolve an explicit primary-key lifecycle operation only after
+/// `BEGIN IMMEDIATE` owns SQLite's write lock. This keeps `expectedColumns`,
+/// candidate uniqueness, inbound-FK facts, and stored DDL in the same protected
+/// interval as the rebuild they authorize.
+pub(crate) async fn rebuild_primary_key(
+    actor: &MigrationActor,
+    schema: &str,
+    table: &str,
+    action: &AlterPrimaryKeyAction,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<(), RebuildError> {
+    journal_sql::ensure_journal(actor)
+        .await
+        .map_err(|error| step_err(table, error))?;
+    disable_foreign_keys(actor, table).await?;
+    let outcome = run_primary_key_rebuild_txn(actor, schema, table, action, m, applied_by).await;
+    restore_foreign_keys(actor, table, outcome).await
+}
+
+async fn disable_foreign_keys(actor: &MigrationActor, table: &str) -> Result<(), RebuildError> {
+    // PRAGMA foreign_keys=OFF — in AUTOCOMMIT, under engine mode. This MUST run
     // outside any transaction (it is a no-op inside one), and only the engine may
     // issue a PRAGMA (CreatorUp denies it). No creator SQL runs in this window.
     actor
         .set_mode(Mode::EngineJournal)
         .await
-        .map_err(|e| step_err(&spec.table, e))?;
+        .map_err(|error| step_err(table, error))?;
     actor
         .exec("PRAGMA foreign_keys = OFF")
         .await
-        .map_err(|e| step_err(&spec.table, e))?;
+        .map_err(|error| step_err(table, error))
+}
 
-    // Run the txn body; whatever happens, restore foreign_keys=ON afterwards.
-    let outcome = run_rebuild_txn(actor, spec, m, applied_by).await;
-
+async fn restore_foreign_keys(
+    actor: &MigrationActor,
+    table: &str,
+    outcome: Result<(), RebuildError>,
+) -> Result<(), RebuildError> {
     // 2. Restore foreign_keys=ON — in AUTOCOMMIT, ALL PATHS (success / FK-abort /
     // error). The txn is already closed (committed by the body, or rolled back by
     // it). This is the FK-off-window safety backstop: the long-lived connection
@@ -210,7 +242,7 @@ pub(crate) async fn rebuild_one(
                 Err(e) => e.to_string(),
             };
             Err(RebuildError::Poisoned {
-                table: spec.table.clone(),
+                table: table.to_string(),
                 detail: format!(
                     "could not restore foreign_keys=ON to autocommit after rebuild \
                      (fk_on={fk:?}, autocommit={ac:?}); body: {body}"
@@ -248,6 +280,43 @@ async fn run_rebuild_txn(
 
     let result = run_rebuild_steps(actor, spec, m, applied_by, started).await;
 
+    finish_rebuild_txn(actor, table, result).await
+}
+
+async fn run_primary_key_rebuild_txn(
+    actor: &MigrationActor,
+    schema: &str,
+    table: &str,
+    action: &AlterPrimaryKeyAction,
+    m: &Migration,
+    applied_by: &str,
+) -> Result<(), RebuildError> {
+    let started = Instant::now();
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(|error| step_err(table, error))?;
+    actor
+        .exec("BEGIN IMMEDIATE")
+        .await
+        .map_err(|error| step_err(table, error))?;
+
+    let result = async {
+        let spec = super::primary_key_sql::resolve(actor, schema, table, action)
+            .await
+            .map_err(|error| step_err(table, error))?;
+        run_rebuild_steps(actor, &spec, m, applied_by, started).await
+    }
+    .await;
+
+    finish_rebuild_txn(actor, table, result).await
+}
+
+async fn finish_rebuild_txn(
+    actor: &MigrationActor,
+    table: &str,
+    result: Result<(), RebuildError>,
+) -> Result<(), RebuildError> {
     match result {
         Ok(()) => {
             actor
@@ -325,10 +394,16 @@ async fn run_rebuild_steps(
     let captured = capture_dependents(actor, &spec.table).await?;
     // AUTOINCREMENT's contract is stronger than "next value exceeds the largest
     // surviving row": SQLite must never reuse a ROWID that was previously handed
-    // out. Rebuilding from live rows alone loses that historical high-water mark
-    // when the largest allocated row was deleted, so capture sqlite_sequence before
-    // dropping the old table and restore it after the swap in this same transaction.
-    let autoincrement_high_water = capture_autoincrement_high_water(actor, &spec.table).await?;
+    // out. An ordinary rebuild therefore captures sqlite_sequence before dropping
+    // the old table and restores it after the swap in this same transaction. The
+    // explicit Remove policy intentionally skips that capture because the validated
+    // target contract no longer has AUTOINCREMENT generation.
+    let autoincrement_high_water = match spec.sequence_policy {
+        SqliteSequencePolicy::Preserve => {
+            capture_autoincrement_high_water(actor, &spec.table).await?
+        }
+        SqliteSequencePolicy::Remove => None,
+    };
 
     // --- The rebuild DDL runs under CreatorUp (engine-authored, on `main`). ---
     actor
@@ -437,8 +512,15 @@ async fn run_rebuild_steps(
         .await
         .map_err(|e| step_err(table, e))?;
 
-    if let Some(high_water) = autoincrement_high_water.as_deref() {
-        restore_autoincrement_high_water(actor, &spec.table, high_water).await?;
+    match spec.sequence_policy {
+        SqliteSequencePolicy::Preserve => {
+            if let Some(high_water) = autoincrement_high_water.as_deref() {
+                restore_autoincrement_high_water(actor, &spec.table, high_water).await?;
+            }
+        }
+        SqliteSequencePolicy::Remove => {
+            remove_autoincrement_high_water(actor, &spec.table).await?;
+        }
     }
 
     // (f) PRAGMA foreign_key_check, UNSCOPED (no table arg). This WORKS inside a
@@ -607,6 +689,37 @@ async fn restore_autoincrement_high_water(
     Ok(())
 }
 
+/// Remove the rebuilt table's `sqlite_sequence` row for an explicitly declared
+/// identity transition. `sqlite_sequence` is created lazily, so avoid naming it
+/// when it does not exist. This runs after the table swap but before
+/// `foreign_key_check` and the journal write; a later error rolls the deletion and
+/// the entire rebuild back atomically, restoring the old table and its old
+/// high-water mark.
+async fn remove_autoincrement_high_water(
+    actor: &MigrationActor,
+    table: &str,
+) -> Result<(), RebuildError> {
+    let sequence_table = actor
+        .query(
+            "SELECT 1 FROM main.sqlite_master \
+             WHERE type = 'table' AND name = 'sqlite_sequence'",
+        )
+        .await
+        .map_err(|error| step_err(table, error))?;
+    if sequence_table.is_empty() {
+        return Ok(());
+    }
+
+    let table_lit = journal_sql::sql_lit(table);
+    actor
+        .exec(&format!(
+            "DELETE FROM main.sqlite_sequence WHERE name = {table_lit}"
+        ))
+        .await
+        .map_err(|error| step_err(table, error))?;
+    Ok(())
+}
+
 /// True iff `ddl` references the column `col` as a whole word (case-insensitive).
 /// Used by the replay-skip: a captured dependent (index / trigger) whose DDL
 /// names a dropped column cannot be replayed after the swap. Whole-word so `id`
@@ -653,6 +766,14 @@ mod tests {
         assert_eq!(
             SqliteRebuildSpec::tmp_name("users"),
             "users__zero_migrate_rebuild"
+        );
+    }
+
+    #[test]
+    fn rebuild_sequence_policy_preserves_by_default() {
+        assert_eq!(
+            SqliteSequencePolicy::default(),
+            SqliteSequencePolicy::Preserve
         );
     }
 

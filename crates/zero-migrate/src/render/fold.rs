@@ -49,14 +49,14 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, ColumnReference, CommentTarget, IndexElement, IrColumn, IrConstraint,
-    IrConstraintKind, IrDefault, IrIndex, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy,
-    TableRuntimeOptions,
+    AlterPrimaryKeyAction, ColType, ColumnReference, CommentTarget, IndexElement, IrColumn,
+    IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction, SafeI64, SafeU64,
+    SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexSnapshot, NamedTypeSnapshot,
-    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
+    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::declarative::{
@@ -160,6 +160,36 @@ pub enum FoldError {
         /// The `to` name that already exists.
         to: String,
     },
+    /// `expectedColumns` (or add's expected absence) did not match the folded
+    /// current primary key exactly and in order.
+    PrimaryKeyPrecondition {
+        /// The table.
+        table: String,
+        /// Expected current key (`None` for add).
+        expected: Option<Vec<String>>,
+        /// Folded current key (`None` when absent).
+        actual: Option<Vec<String>>,
+    },
+    /// Add/replace named no exact pre-existing UNIQUE candidate key.
+    MissingPrimaryKeyCandidate {
+        /// The table.
+        table: String,
+        /// Exact ordered target key.
+        columns: Vec<String>,
+    },
+    /// A malformed lifecycle payload reached the fold without authoring
+    /// validation.
+    InvalidPrimaryKeyAction(String),
+    /// The declared identity transition is inconsistent with the folded column
+    /// facets or omits a required identity removal.
+    InvalidPrimaryKeyIdentityTransition {
+        /// The table.
+        table: String,
+        /// The identity-bearing (or incorrectly declared) column.
+        column: String,
+        /// Stable reason.
+        reason: &'static str,
+    },
     /// The shared snapshot-builder rejected the shape (unknown type token, a bad
     /// `ref` target, a malformed `id` prefix, …). Carries the builder's own error.
     Shape(DeclarativeError),
@@ -205,6 +235,29 @@ impl std::fmt::Display for FoldError {
             FoldError::RenameCollision { table, to } => {
                 write!(f, "fold: rename target `{table}.{to}` already exists")
             }
+            FoldError::PrimaryKeyPrecondition {
+                table,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "fold: primary key precondition failed on `{table}`: expected {expected:?}, found {actual:?}"
+            ),
+            FoldError::MissingPrimaryKeyCandidate { table, columns } => write!(
+                f,
+                "fold: `{table}` has no exact pre-existing UNIQUE candidate for primary key {columns:?}"
+            ),
+            FoldError::InvalidPrimaryKeyAction(reason) => {
+                write!(f, "fold: invalid primary-key lifecycle action: {reason}")
+            }
+            FoldError::InvalidPrimaryKeyIdentityTransition {
+                table,
+                column,
+                reason,
+            } => write!(
+                f,
+                "fold: invalid primary-key identity transition for `{table}.{column}`: {reason}"
+            ),
             FoldError::Shape(e) => write!(f, "fold: shape error: {e}"),
             FoldError::Unsupported(what) => write!(f, "fold: unsupported op: {what}"),
         }
@@ -436,6 +489,333 @@ pub(crate) fn flatten_dialectal_ops(
         push_fold_op(&mut out, op, dialect, false)?;
     }
     Ok(out)
+}
+
+fn constraint_ordered_columns(definition: &str) -> Option<Vec<String>> {
+    let open = definition.find('(')?;
+    let close = definition[open + 1..].find(')')? + open + 1;
+    let columns = definition[open + 1..close]
+        .split(',')
+        .map(|column| column.trim().trim_matches('"').to_string())
+        .collect::<Vec<_>>();
+    (!columns.is_empty() && columns.iter().all(|column| !column.is_empty())).then_some(columns)
+}
+
+fn folded_primary_key(snap: &TableSnapshot) -> Result<Option<(String, Vec<String>)>, FoldError> {
+    let mut primary_keys = snap
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.kind == "PRIMARY KEY");
+    let Some(constraint) = primary_keys.next() else {
+        return Ok(None);
+    };
+    if primary_keys.next().is_some() {
+        return Err(FoldError::Unsupported(
+            "table snapshot carries more than one PRIMARY KEY",
+        ));
+    }
+    let columns = snap
+        .indexes
+        .iter()
+        .find(|index| index.name == constraint.name && index.unique)
+        .map(|index| index.columns.clone())
+        .or_else(|| constraint_ordered_columns(&constraint.definition))
+        .ok_or(FoldError::Unsupported(
+            "PRIMARY KEY snapshot has no recoverable ordered columns",
+        ))?;
+    Ok(Some((constraint.name.clone(), columns)))
+}
+
+fn has_exact_unique_candidate(
+    snap: &TableSnapshot,
+    columns: &[String],
+    current_primary_key_name: Option<&str>,
+) -> bool {
+    let eligible_index = snap.indexes.iter().any(|index| {
+        index.name != current_primary_key_name.unwrap_or_default()
+            && index.unique
+            && index.columns == columns
+            && index.access_method == "btree"
+            && index.predicate.is_none()
+            && !index.only
+            && index.elements.len() == columns.len()
+            && index.elements.iter().zip(columns).all(|(element, column)| {
+                matches!(element, IndexElementSnapshot::Column { name, .. } if name == column)
+            })
+    });
+    eligible_index
+        || snap.constraints.iter().any(|constraint| {
+            constraint.kind == "UNIQUE"
+                && constraint_ordered_columns(&constraint.definition).as_deref() == Some(columns)
+        })
+}
+
+fn reusable_postgres_primary_index(
+    snap: &TableSnapshot,
+    columns: &[String],
+    current_primary_key_name: Option<&str>,
+) -> Option<String> {
+    snap.indexes
+        .iter()
+        .find(|index| {
+            let constraint_owned = snap.constraints.iter().any(|constraint| {
+                constraint.name == index.name
+                    && matches!(
+                        constraint.kind.as_str(),
+                        "PRIMARY KEY" | "UNIQUE" | "EXCLUDE"
+                    )
+            });
+            index.name != current_primary_key_name.unwrap_or_default()
+                && !constraint_owned
+                && index.unique
+                && index.columns == columns
+                && index.access_method == "btree"
+                && index.predicate.is_none()
+                && index.include.is_empty()
+                && !index.only
+                && index.elements.len() == columns.len()
+                && index.elements.iter().all(|element| {
+                    matches!(
+                        element,
+                        IndexElementSnapshot::Column {
+                            order: None | Some(crate::model::ir::IndexSortOrder::Asc),
+                            opclass: None,
+                            collation: None,
+                            ..
+                        }
+                    )
+                })
+        })
+        .map(|index| index.name.clone())
+}
+
+fn sqlite_integer_storage_for_rowid(snap: &TableSnapshot, data_type: &str) -> bool {
+    if snap.stored_create_sql.is_some() {
+        data_type.trim().eq_ignore_ascii_case("INTEGER")
+    } else {
+        matches!(
+            data_type.trim().to_ascii_lowercase().as_str(),
+            "integer" | "int" | "bigint" | "smallint"
+        )
+    }
+}
+
+fn sqlite_folded_rowid_generation(
+    snap: &TableSnapshot,
+    old_columns: &[String],
+    column: &str,
+) -> bool {
+    if old_columns != [column] {
+        return false;
+    }
+    let Some(folded) = snap
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+    else {
+        return false;
+    };
+    if !sqlite_integer_storage_for_rowid(snap, &folded.data_type) {
+        return false;
+    }
+    snap.stored_create_sql.as_deref().is_none_or(|stored| {
+        !crate::render::declarative::sqlite_create_is_without_rowid(stored)
+            && !crate::render::declarative::sqlite_inline_primary_key_is_desc(stored, column)
+    })
+}
+
+fn push_named_primary_key_snapshot(
+    table: &str,
+    snap: &mut TableSnapshot,
+    columns: &[String],
+    name: &str,
+) {
+    let default_name = format!("{table}_pkey");
+    push_primary_key_snapshot(table, snap, columns);
+    if name != default_name {
+        if let Some(constraint) =
+            snap.constraints.iter_mut().rev().find(|constraint| {
+                constraint.name == default_name && constraint.kind == "PRIMARY KEY"
+            })
+        {
+            constraint.name = name.to_string();
+        }
+        if let Some(index) = snap
+            .indexes
+            .iter_mut()
+            .rev()
+            .find(|index| index.name == default_name)
+        {
+            index.name = name.to_string();
+        }
+    }
+}
+
+fn apply_fold_alter_primary_key(
+    table: &str,
+    snap: &mut TableSnapshot,
+    action: &AlterPrimaryKeyAction,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    zero_migrate_ir::validate::validate_alter_primary_key_action(action)
+        .map_err(FoldError::InvalidPrimaryKeyAction)?;
+
+    let current = folded_primary_key(snap)?;
+    let actual = current.as_ref().map(|(_, columns)| columns.clone());
+    let expected = action.expected_columns().map(<[String]>::to_vec);
+    if actual != expected {
+        return Err(FoldError::PrimaryKeyPrecondition {
+            table: table.to_string(),
+            expected,
+            actual,
+        });
+    }
+
+    if let Some(target) = action.target_columns() {
+        if dialect == SqlDialect::Sqlite
+            && target.len() == 1
+            && snap
+                .columns
+                .iter()
+                .find(|column| column.name == target[0])
+                .is_some_and(|column| sqlite_integer_storage_for_rowid(snap, &column.data_type))
+            && snap.stored_create_sql.as_deref().is_none_or(|stored| {
+                !crate::render::declarative::sqlite_create_is_without_rowid(stored)
+            })
+        {
+            return Err(FoldError::Unsupported(
+                "alterPrimaryKey cannot introduce SQLite INTEGER PRIMARY KEY rowid generation",
+            ));
+        }
+        for column in target {
+            let target_column = snap
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == *column)
+                .ok_or_else(|| FoldError::MissingColumn {
+                    table: table.to_string(),
+                    column: column.clone(),
+                })?;
+            if target_column.nullable {
+                return Err(FoldError::Unsupported(
+                    "alterPrimaryKey target columns must already be NOT NULL",
+                ));
+            }
+        }
+        if !has_exact_unique_candidate(
+            snap,
+            target,
+            current.as_ref().map(|(name, _)| name.as_str()),
+        ) {
+            return Err(FoldError::MissingPrimaryKeyCandidate {
+                table: table.to_string(),
+                columns: target.to_vec(),
+            });
+        }
+    }
+
+    let drop_identity_from = action.drop_identity_from();
+    let old_columns = current
+        .as_ref()
+        .map(|(_, columns)| columns.as_slice())
+        .unwrap_or_default();
+    for column in drop_identity_from {
+        let folded = snap
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == *column)
+            .ok_or_else(|| FoldError::MissingColumn {
+                table: table.to_string(),
+                column: column.clone(),
+            })?;
+        let generated = folded.identity.is_some()
+            || (dialect == SqlDialect::Sqlite
+                && sqlite_folded_rowid_generation(snap, old_columns, column));
+        if !generated {
+            return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
+                table: table.to_string(),
+                column: column.clone(),
+                reason: "dropIdentityFrom names a column with no identity facet",
+            });
+        }
+    }
+    if let Some((_, old_columns)) = &current {
+        for column in old_columns {
+            let Some(folded) = snap
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == *column)
+            else {
+                return Err(FoldError::MissingColumn {
+                    table: table.to_string(),
+                    column: column.clone(),
+                });
+            };
+            let generated = folded.identity.is_some()
+                || (dialect == SqlDialect::Sqlite
+                    && sqlite_folded_rowid_generation(snap, old_columns, column));
+            let keeps_identity_contract = match dialect {
+                SqlDialect::Postgres => action
+                    .target_columns()
+                    .is_some_and(|target| target.contains(column)),
+                SqlDialect::Mysql | SqlDialect::Sqlite => action
+                    .target_columns()
+                    .is_some_and(|target| target == [column.as_str()]),
+            };
+            if generated && !keeps_identity_contract && !drop_identity_from.contains(column) {
+                return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
+                    table: table.to_string(),
+                    column: column.clone(),
+                    reason: "generated column would no longer satisfy the target primary-key contract; list it in dropIdentityFrom",
+                });
+            }
+        }
+    }
+
+    let reusable_candidate = (dialect == SqlDialect::Postgres)
+        .then(|| {
+            action.target_columns().and_then(|target| {
+                reusable_postgres_primary_index(
+                    snap,
+                    target,
+                    current.as_ref().map(|(name, _)| name.as_str()),
+                )
+            })
+        })
+        .flatten();
+    let replacement_constraint_name = current.as_ref().map_or_else(
+        || {
+            reusable_candidate
+                .clone()
+                .unwrap_or_else(|| format!("{table}_pkey"))
+        },
+        |(name, _)| name.clone(),
+    );
+    if let Some((name, _)) = &current {
+        snap.constraints
+            .retain(|constraint| constraint.name != *name || constraint.kind != "PRIMARY KEY");
+        snap.indexes.retain(|index| index.name != *name);
+    }
+    for column in drop_identity_from {
+        if let Some(folded) = snap
+            .columns
+            .iter_mut()
+            .find(|candidate| candidate.name == *column)
+        {
+            folded.identity = None;
+        }
+    }
+    if let Some(candidate) = reusable_candidate {
+        snap.indexes.retain(|index| index.name != candidate);
+    }
+    if let Some(target) = action.target_columns() {
+        push_named_primary_key_snapshot(table, snap, target, &replacement_constraint_name);
+    }
+    snap.constraints
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    snap.indexes
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(())
 }
 
 /// Replay an ordered [`Op`] list into the current logical [`SchemaSnapshot`].
@@ -1122,6 +1502,10 @@ pub fn fold_ops_onto(
                         column: column.clone(),
                     })?;
                 col.default = None;
+            }
+            Op::AlterPrimaryKey { table, action, .. } => {
+                let snap = table_mut(&mut tables, table)?;
+                apply_fold_alter_primary_key(table, snap, action, dialect)?;
             }
             Op::AddConstraint {
                 table, constraint, ..
@@ -2766,6 +3150,15 @@ pub fn fold_to_field_defs(
                         if let Some((_, mut field)) = cols.shift_remove_index(idx) {
                             field.name = to.clone();
                             cols.shift_insert(idx, to.clone(), field);
+                        }
+                    }
+                }
+            }
+            Op::AlterPrimaryKey { table, action, .. } => {
+                if let Some(columns) = tables.get_mut(table) {
+                    for column in action.drop_identity_from() {
+                        if let Some(field) = columns.get_mut(column) {
+                            field.identity = None;
                         }
                     }
                 }
@@ -4759,6 +5152,350 @@ mod tests {
             schema: None,
             existence_guard: None,
         }
+    }
+
+    fn lifecycle_table(primary_key: Option<&[&str]>, identity_id: bool) -> Op {
+        let mut id = col("id", ColType::BigInt, false);
+        id.identity = identity_id.then_some(crate::model::ir::IdentityCol { always: false });
+        Op::CreateTable {
+            name: "orders".to_string(),
+            columns: vec![
+                id,
+                col("tenant_id", ColType::BigInt, false),
+                col("order_id", ColType::BigInt, false),
+            ],
+            primary_key: primary_key
+                .map(|columns| columns.iter().map(|column| (*column).to_string()).collect()),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn alter_primary_key_fold_adds_replaces_and_drops_exact_ordered_keys() {
+        let add = Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Add {
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+            },
+            schema: None,
+        };
+        let added = fold(&[
+            lifecycle_table(None, false),
+            create_index(
+                "orders",
+                Some("orders_tenant_order_key"),
+                &["tenant_id", "order_id"],
+                true,
+            ),
+            add,
+        ])
+        .expect("an exact staged unique candidate permits add");
+        let table = &added.tables["orders"];
+        assert!(table.constraints.iter().any(|constraint| {
+            constraint.kind == "PRIMARY KEY"
+                && constraint.name == "orders_tenant_order_key"
+                && constraint.definition == "PRIMARY KEY (tenant_id, order_id)"
+        }));
+        assert!(
+            table
+                .indexes
+                .iter()
+                .any(|index| index.name == "orders_tenant_order_key"),
+            "PostgreSQL USING INDEX retains the standalone index name as the unnamed add's constraint/index name"
+        );
+        assert!(!table
+            .indexes
+            .iter()
+            .any(|index| index.name == "orders_pkey"));
+
+        let replace_composite = Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".to_string()],
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                drop_identity_from: Some(vec!["id".to_string()]),
+            },
+            schema: None,
+        };
+        let replace_single = Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                columns: vec!["id".to_string()],
+                drop_identity_from: None,
+            },
+            schema: None,
+        };
+        let dropped = fold(&[
+            lifecycle_table(Some(&["id"]), true),
+            create_index("orders", Some("orders_id_key"), &["id"], true),
+            create_index(
+                "orders",
+                Some("orders_tenant_order_key"),
+                &["tenant_id", "order_id"],
+                true,
+            ),
+            replace_composite,
+            replace_single,
+            Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action: AlterPrimaryKeyAction::Drop {
+                    expected_columns: vec!["id".to_string()],
+                    drop_identity_from: None,
+                },
+                schema: None,
+            },
+        ])
+        .expect("exact single/composite transitions fold in order");
+        let table = &dropped.tables["orders"];
+        assert!(!table
+            .constraints
+            .iter()
+            .any(|constraint| constraint.kind == "PRIMARY KEY"));
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "id")
+                .and_then(|column| column.identity),
+            None,
+            "dropIdentityFrom turns the old identity into an ordinary integer"
+        );
+        assert!(!table
+            .indexes
+            .iter()
+            .any(|index| index.name == "orders_id_key"));
+    }
+
+    #[test]
+    fn alter_primary_key_fold_preserves_constraint_owned_postgres_candidate() {
+        let candidate_name = "orders_tenant_order_uq";
+        let snapshot = fold(&[
+            lifecycle_table(None, false),
+            Op::AddConstraint {
+                table: "orders".to_string(),
+                constraint: IrConstraint {
+                    name: Some(candidate_name.to_string()),
+                    kind: IrConstraintKind::Unique {
+                        columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                    },
+                },
+                schema: None,
+                existence_guard: None,
+            },
+            Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action: AlterPrimaryKeyAction::Add {
+                    columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                },
+                schema: None,
+            },
+        ])
+        .expect("a UNIQUE constraint proves the candidate but cannot be adopted by USING INDEX");
+        let table = &snapshot.tables["orders"];
+        assert!(table
+            .constraints
+            .iter()
+            .any(|constraint| constraint.name == candidate_name && constraint.kind == "UNIQUE"));
+        assert!(table
+            .indexes
+            .iter()
+            .any(|index| index.name == candidate_name));
+        assert!(
+            table
+                .constraints
+                .iter()
+                .any(|constraint| constraint.name == "orders_pkey"
+                    && constraint.kind == "PRIMARY KEY")
+        );
+        assert!(table
+            .indexes
+            .iter()
+            .any(|index| index.name == "orders_pkey"));
+    }
+
+    #[test]
+    fn alter_primary_key_fold_matches_dialect_identity_and_candidate_adoption() {
+        let pg_composite = fold_ops(
+            &[
+                lifecycle_table(Some(&["id"]), true),
+                create_index(
+                    "orders",
+                    Some("orders_tenant_id_key"),
+                    &["tenant_id", "id"],
+                    true,
+                ),
+                Op::AlterPrimaryKey {
+                    table: "orders".to_string(),
+                    action: AlterPrimaryKeyAction::Replace {
+                        expected_columns: vec!["id".to_string()],
+                        columns: vec!["tenant_id".to_string(), "id".to_string()],
+                        drop_identity_from: None,
+                    },
+                    schema: None,
+                },
+            ],
+            SqlDialect::Postgres,
+            SCHEMA,
+        )
+        .expect("PostgreSQL identity remains valid inside a composite key");
+        assert!(pg_composite.tables["orders"]
+            .columns
+            .iter()
+            .find(|column| column.name == "id")
+            .and_then(|column| column.identity)
+            .is_some());
+
+        let sqlite_ops = [
+            lifecycle_table(Some(&["id"]), false),
+            create_index(
+                "orders",
+                Some("orders_tenant_order_key"),
+                &["tenant_id", "order_id"],
+                true,
+            ),
+            Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action: AlterPrimaryKeyAction::Replace {
+                    expected_columns: vec!["id".to_string()],
+                    columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                    drop_identity_from: Some(vec!["id".to_string()]),
+                },
+                schema: None,
+            },
+        ];
+        let sqlite = fold_ops(&sqlite_ops, SqlDialect::Sqlite, SCHEMA)
+            .expect("SQLite plain INTEGER PRIMARY KEY is a generated rowid contract");
+        assert!(sqlite.tables["orders"]
+            .constraints
+            .iter()
+            .any(|constraint| constraint.definition == "PRIMARY KEY (tenant_id, order_id)"));
+
+        let mut missing_drop = sqlite_ops.to_vec();
+        let Op::AlterPrimaryKey { action, .. } = missing_drop.last_mut().unwrap() else {
+            unreachable!()
+        };
+        let AlterPrimaryKeyAction::Replace {
+            drop_identity_from, ..
+        } = action
+        else {
+            unreachable!()
+        };
+        *drop_identity_from = None;
+        assert!(matches!(
+            fold_ops(&missing_drop, SqlDialect::Sqlite, SCHEMA),
+            Err(FoldError::InvalidPrimaryKeyIdentityTransition { .. })
+        ));
+
+        let desc_candidate = Op::CreateIndex {
+            table: "orders".to_string(),
+            columns: vec![
+                IndexElement::Column {
+                    name: "tenant_id".to_string(),
+                    order: Some(crate::model::ir::IndexSortOrder::Desc),
+                    opclass: None,
+                    collation: None,
+                },
+                IndexElement::Column {
+                    name: "order_id".to_string(),
+                    order: None,
+                    opclass: None,
+                    collation: None,
+                },
+            ],
+            name: Some("orders_desc_candidate".to_string()),
+            unique: Some(true),
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        };
+        let pg_desc = fold(&[
+            lifecycle_table(None, false),
+            desc_candidate,
+            Op::AlterPrimaryKey {
+                table: "orders".to_string(),
+                action: AlterPrimaryKeyAction::Add {
+                    columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                },
+                schema: None,
+            },
+        ])
+        .expect("DESC uniqueness proves the tuple but cannot be adopted as the PK index");
+        assert!(pg_desc.tables["orders"]
+            .indexes
+            .iter()
+            .any(|index| index.name == "orders_desc_candidate"));
+        assert!(pg_desc.tables["orders"]
+            .indexes
+            .iter()
+            .any(|index| index.name == "orders_pkey"));
+    }
+
+    #[test]
+    fn alter_primary_key_fold_refuses_drift_missing_candidates_and_implicit_identity_drop() {
+        let staged = vec![
+            lifecycle_table(Some(&["id"]), true),
+            create_index(
+                "orders",
+                Some("orders_tenant_order_key"),
+                &["tenant_id", "order_id"],
+                true,
+            ),
+        ];
+        let mut drift = staged.clone();
+        drift.push(Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["order_id".to_string(), "tenant_id".to_string()],
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                drop_identity_from: Some(vec!["order_id".to_string()]),
+            },
+            schema: None,
+        });
+        assert!(matches!(
+            fold(&drift),
+            Err(FoldError::PrimaryKeyPrecondition { .. })
+        ));
+
+        let mut implicit_drop = staged;
+        implicit_drop.push(Op::AlterPrimaryKey {
+            table: "orders".to_string(),
+            action: AlterPrimaryKeyAction::Replace {
+                expected_columns: vec!["id".to_string()],
+                columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                drop_identity_from: None,
+            },
+            schema: None,
+        });
+        assert!(matches!(
+            fold(&implicit_drop),
+            Err(FoldError::InvalidPrimaryKeyIdentityTransition { .. })
+        ));
+
+        assert!(matches!(
+            fold(&[
+                lifecycle_table(None, false),
+                Op::AlterPrimaryKey {
+                    table: "orders".to_string(),
+                    action: AlterPrimaryKeyAction::Add {
+                        columns: vec!["tenant_id".to_string(), "order_id".to_string()],
+                    },
+                    schema: None,
+                }
+            ]),
+            Err(FoldError::MissingPrimaryKeyCandidate { .. })
+        ));
     }
 
     #[test]

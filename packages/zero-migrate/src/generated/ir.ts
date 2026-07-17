@@ -508,6 +508,22 @@ export type GrantTarget =
   | { kind: "sequence"; in: string }
   | { kind: "database"; names: string[] };
 
+/** The explicit final primary-key constraint mutation. All columns, values,
+ * candidate uniqueness, and foreign keys must already be staged. */
+export type AlterPrimaryKeyAction =
+  | { kind: "add"; columns: [string, ...string[]] }
+  | {
+      kind: "replace";
+      expectedColumns: [string, ...string[]];
+      columns: [string, ...string[]];
+      dropIdentityFrom?: [string, ...string[]] | null;
+    }
+  | {
+      kind: "drop";
+      expectedColumns: [string, ...string[]];
+      dropIdentityFrom?: [string, ...string[]] | null;
+    };
+
 /** The CLOSED `op.*` operation enum, internally tagged on `op`,
  *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
  *
@@ -552,6 +568,7 @@ export type Op =
   | { op: "setColumnDefault"; table: string; column: string; value: IrDefault; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumnDefault"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "alterPrimaryKey"; table: string; action: AlterPrimaryKeyAction; schema?: string | null }
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
